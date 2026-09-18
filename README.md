@@ -10,27 +10,56 @@ Inference is a provider boundary. Lightagent speaks HTTP to an
 OpenAI-compatible endpoint; [Lightweight](https://github.com/dlroqa/Lightweight)
 is one supported local provider, not a library or workspace dependency.
 
-## Run it
+## Quick install and Web UI
 
-Build and start terminal chat:
+> [!NOTE]
+> Lightagent needs a running OpenAI-compatible inference provider. Its default
+> provider address is `http://127.0.0.1:11434`.
+
+### Install a prebuilt release
+
+Download and extract the archive for your platform from
+[Lightagent Releases](https://github.com/dlroqa/Lightagent/releases), then run
+these commands from the extracted directory:
 
 ```sh
-cargo build -p lightagent --bin lightagent
-./target/debug/lightagent
+./lightagent init
+./lightagent setup provider
+./lightagent doctor
+./lightagent serve --web-root ./web
 ```
 
-A fresh installation uses the built-in `default` profile and
-`http://127.0.0.1:11434`. Configure another provider interactively or directly:
+### Install from source
+
+Building from source requires Rust 1.98 or newer and Node.js:
 
 ```sh
+git clone https://github.com/dlroqa/Lightagent.git
+cd Lightagent
+
+cargo install --path crates/lightagent --locked
+
+npm ci --prefix frontend
+npm run build --prefix frontend
+
+lightagent init
 lightagent setup provider
-lightagent config set inference.base_url https://provider.example
 lightagent doctor
+lightagent serve --web-root "$PWD/frontend/dist"
 ```
+
+If the `lightagent` command is not found after installation, add
+`~/.cargo/bin` to your `PATH`.
+
+Once the server is running, open these local addresses:
+
+- Web UI: <http://127.0.0.1:8735/>
+- API: <http://127.0.0.1:8735/api/lightagent/v1>
+- Health check: <http://127.0.0.1:8735/health>
 
 API keys are stored as environment-variable references, not literal secrets.
 Use `lightagent setup`, `lightagent profile`, and `lightagent config --help` for
-runtime configuration.
+additional runtime configuration.
 
 ## Terminal harness
 
