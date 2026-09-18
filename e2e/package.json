@@ -1,0 +1,13 @@
+{
+  "name": "lightagent-e2e",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Headless render and smoke test of the Web UI against standalone Lightagent.",
+  "type": "module",
+  "scripts": {
+    "render": "node render.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.55.0"
+  }
+}

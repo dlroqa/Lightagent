@@ -1,0 +1,1084 @@
+@import "./tokens.css";
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+
+  /*
+   * The reference sits on a soft sky. Built from layered radial gradients
+   * rather than a photograph: it ships in the bundle for nothing, scales to any
+   * window, and has a dark counterpart. `fixed` so it does not scroll away.
+   */
+  background-color: var(--ground-2);
+  background-image:
+    radial-gradient(1200px 800px at 8% 4%, var(--ground-1) 0%, transparent 60%),
+    radial-gradient(900px 700px at 96% 90%, var(--ground-3) 0%, transparent 62%),
+    radial-gradient(1000px 900px at 78% 6%, var(--ground-4) 0%, transparent 58%);
+  background-attachment: fixed;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Digits that update once a second must not shift the layout under them. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ---------------------------------------------------------------- shell -- */
+
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail-width) minmax(0, 1fr);
+  height: 100%;
+  padding: var(--space-4);
+  gap: 0;
+}
+
+.shell.is-collapsed {
+  --rail-width: 76px;
+}
+
+.shell__frame {
+  position: absolute;
+  inset: var(--space-4);
+  border-radius: var(--radius-shell);
+  border: 1px solid var(--border);
+  background: var(--surface-shell);
+  pointer-events: none;
+}
+
+/* Tablet: the rail collapses to icons so the working surface keeps its room.
+ * Shell renders the compact rail at this width, so the labels are absent from
+ * the DOM rather than merely hidden. */
+@media (max-width: 1100px) and (min-width: 761px) {
+  .shell:not(.is-collapsed) {
+    --rail-width: 76px;
+  }
+}
+
+/* Mobile: the rail leaves the grid and returns as an off-canvas drawer, opened
+ * from the header strip. The page takes the whole width. */
+@media (max-width: 760px) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+    padding: var(--space-2);
+  }
+  .shell__frame {
+    inset: var(--space-2);
+    border-radius: var(--radius-lg);
+  }
+  /* `.shell .rail` rather than `.rail`: the base rail rules are declared later
+   * in this file, so an equal-specificity override here would lose the cascade
+   * and leave the rail in flow — reserving its full height at the top of the
+   * page and pushing the working surface down. The descendant selector outranks
+   * the base rule regardless of source order. */
+  .shell .rail {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(300px, 86vw);
+    border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
+    border-right: 1px solid var(--border);
+    /* Opaque, and no blur: a see-through drawer over the page is the same
+       readability defect the overlay rules forbid, and a blurred fixed surface
+       over the fixed page background is a needless compositing cost. */
+    background: var(--surface-solid);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    z-index: var(--z-drawer);
+    transform: translateX(-100%);
+    transition: transform 220ms ease-out;
+    box-shadow: var(--shadow-lg);
+  }
+  .shell .rail.is-open {
+    transform: translateX(0);
+  }
+  .main {
+    border-radius: var(--radius-lg);
+  }
+}
+
+.drawer-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-drawer-scrim);
+  background: var(--scrim);
+  border: none;
+  padding: 0;
+}
+
+/* The mobile-only header strip carrying the drawer button and brand. Present
+ * only where the rail has become a drawer. */
+.mobilebar {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .mobilebar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: 10px var(--space-4);
+    border-bottom: 1px solid var(--rule);
+    position: sticky;
+    top: 0;
+    z-index: var(--z-sticky);
+    /* Solid, not blurred: legible over any transcript beneath it, and free of
+       the headless-compositing ghosting a blurred sticky bar produces over the
+       page's fixed background. */
+    background: var(--surface-solid);
+  }
+  .mobilebar__name {
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+}
+
+/* ----------------------------------------------------------------- rail -- */
+
+.rail {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding: var(--space-5) var(--space-4);
+  border-radius: var(--radius-shell) 0 0 var(--radius-shell);
+  background: var(--surface-rail);
+  /* Blur lives on the rail, the header and modals only. See app.css note. */
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--border);
+  border-right: none;
+  overflow: hidden;
+}
+
+.rail__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-1) var(--space-2);
+  min-width: 0;
+}
+
+/*
+ * The brand chip: the application's icon, at rail size.
+ *
+ * The artwork is drawn on its own dark plate and keeps it here, so this is the
+ * one surface in the panel that looks identical in light and dark - a mark
+ * that changed colour with the theme would not be the same mark. The ring and
+ * the shadow are the panel's, and are all that ties it to the surface it sits
+ * on.
+ *
+ * The ring is an `outline` and not an inset `box-shadow`: an inset shadow is
+ * painted below the element's content, and the content of an `img` is an
+ * opaque image that covers the whole box, so the ring would be drawn and then
+ * hidden. A negative `outline-offset` puts it back inside the box, and an
+ * outline follows `border-radius`.
+ */
+.rail__mark {
+  display: block;
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  box-shadow: 0 4px 12px rgba(8, 15, 20, 0.3);
+  outline: 1px solid rgba(148, 163, 184, 0.22);
+  outline-offset: -1px;
+}
+
+.rail__name {
+  min-width: 0;
+}
+
+.rail__name strong {
+  display: block;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.rail__name span {
+  display: block;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rail__nav {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.navitem {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 11px var(--space-3);
+  border-radius: var(--radius);
+  color: var(--text-soft);
+  text-decoration: none;
+  font-weight: 500;
+  white-space: nowrap;
+  transition:
+    background 160ms ease-out,
+    color 160ms ease-out,
+    box-shadow 160ms ease-out;
+}
+
+.navitem:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.navitem.is-active {
+  background: var(--surface-raised);
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
+}
+
+.navitem svg {
+  flex: none;
+}
+
+.rail__spacer {
+  flex: 1;
+}
+
+.railcard {
+  flex: none;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-sm);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.railcard__label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.railcard__line {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.railcard hr {
+  border: none;
+  border-top: 1px solid var(--rule);
+  margin: var(--space-1) 0;
+}
+
+.rail__controls {
+  display: flex;
+  flex: none;
+  gap: var(--space-2);
+}
+
+/* Preserve the complete status card in shorter desktop windows. The nav gives
+ * up height first and remains scrollable if the window becomes smaller still. */
+@media (max-height: 900px) and (min-width: 901px) {
+  .rail {
+    gap: var(--space-3);
+    padding-block: var(--space-3);
+  }
+
+  .navitem {
+    padding-block: var(--space-2);
+  }
+
+  .railcard {
+    gap: var(--space-1);
+    padding: var(--space-3);
+  }
+}
+
+/* ---------------------------------------------------------------- main --- */
+
+.main {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 0 var(--radius-shell) var(--radius-shell) 0;
+  border: 1px solid var(--border);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.16) 0%,
+    transparent 220px
+  );
+  overflow: hidden;
+}
+
+@media (max-width: 900px) {
+  .main {
+    border-radius: var(--radius-shell);
+  }
+}
+
+.topbar {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-6) var(--space-6) var(--space-4);
+  flex-wrap: wrap;
+}
+
+.topbar__titles {
+  flex: 1;
+  min-width: 200px;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: clamp(24px, 2.6vw, 32px);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
+.topbar p {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 13.5px;
+}
+
+.topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--space-6) var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* ---------------------------------------------------------------- card --- */
+
+.card {
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: var(--space-5);
+  min-width: 0;
+}
+
+.card--flush {
+  padding: 0;
+  overflow: hidden;
+}
+
+.card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.card__title {
+  font-size: 15.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.card__note {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.grid {
+  display: grid;
+  gap: var(--space-4);
+}
+
+/* ----------------------------------------------------------- stat tile --- */
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: var(--space-4);
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.tile__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.tile__icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  flex: none;
+}
+
+.tile__label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-soft);
+}
+
+.tile__body {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.tile__value {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+}
+
+.tile__unit {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+
+.tile__sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+/* ---------------------------------------------------------------- bits --- */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.pill--ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+.pill--warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.pill--danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.pill--info {
+  background: var(--info-soft);
+  color: var(--info);
+}
+.pill--accent {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.pill--neutral {
+  background: var(--neutral-soft);
+  color: var(--text-muted);
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: currentColor;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 9px 15px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-quiet);
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background 150ms ease-out,
+    border-color 150ms ease-out,
+    color 150ms ease-out;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--accent);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.btn--danger {
+  background: var(--danger-soft);
+  border-color: transparent;
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.btn--icon {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border-radius: var(--radius);
+  color: var(--text-soft);
+}
+
+.btn--ghost {
+  background: transparent;
+  border-color: transparent;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.field__label {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-soft);
+}
+
+.input,
+.select {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-quiet);
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 13.5px;
+}
+
+.input::placeholder {
+  color: var(--text-faint);
+}
+
+.input:focus,
+.select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.range {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.range__ends {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.switch {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  flex: none;
+  border-radius: 999px;
+  border: none;
+  background: var(--neutral-soft);
+  cursor: pointer;
+  transition: background 160ms ease-out;
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(15, 42, 88, 0.3);
+  transition: transform 160ms ease-out;
+}
+
+.switch[aria-checked="true"] {
+  background: var(--accent);
+}
+
+.switch[aria-checked="true"]::after {
+  transform: translateX(18px);
+}
+
+.switch:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* -------------------------------------------------------------- overlay -- */
+
+/*
+ * Portal overlays: dropdowns, selects, popovers, command and context menus.
+ *
+ * They are rendered into `document.body` (see `Menu.tsx`), so no ancestor's
+ * `opacity`, `overflow`, `transform` or stacking context reaches them. Every
+ * readability property is asserted here rather than inherited: a solid
+ * `background`, a solid `color`, an explicit `opacity: 1`, a z-index above the
+ * composer, transcript, rail and sticky headers, and a border and shadow strong
+ * enough to separate the surface from a similarly coloured one behind it. No
+ * `backdrop-filter` is used as the only readable layer.
+ */
+.menu {
+  position: fixed;
+  z-index: var(--z-overlay);
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  min-width: 240px;
+  max-height: min(60vh, 420px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--popover-border);
+  background-color: var(--popover);
+  color: var(--popover-foreground);
+  opacity: 1;
+  box-shadow: var(--popover-shadow);
+}
+
+/* The invisible catch-all that closes an open menu on an outside press. It
+ * dims nothing — the overlay is readable on its own — it only captures the
+ * click, and sits just below the menu it guards. */
+.menu-shield {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-overlay) - 1);
+  background: transparent;
+  border: none;
+}
+
+.menu__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 11px;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--popover-foreground);
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu__item:hover:not(:disabled),
+.menu__item:focus-visible {
+  background: var(--popover-hover);
+}
+
+.menu__item:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.menu__item .menu__meta {
+  color: var(--popover-muted);
+  font-size: 11.5px;
+}
+
+.menu__heading {
+  padding: 8px 11px 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--popover-muted);
+}
+
+.menu__empty {
+  padding: 12px 11px;
+  color: var(--popover-muted);
+  font-size: 13px;
+}
+
+/* A tool row: the name and its risk badge on one line, the description wrapping
+ * beneath so a long name (exec_shell_command) never collides with either. */
+.menu__tool {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 11px;
+  border-radius: var(--radius);
+}
+
+.menu__tool:hover {
+  background: var(--popover-hover);
+}
+
+.menu__tool-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.menu__tool-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--popover-foreground);
+  overflow-wrap: anywhere;
+}
+
+.menu__tool-desc {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--popover-muted);
+}
+
+/* -------------------------------------------------------------- agent ---- */
+
+/* Two columns on desktop — session list beside the transcript — that stack on
+ * narrow viewports so there is never a fixed 300px column forcing sideways
+ * scroll on a phone. */
+.agent-layout {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: var(--space-4);
+}
+
+@media (max-width: 860px) {
+  .agent-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* Stacked, the session list flows with the page rather than scrolling inside
+   * a capped box. A capped flex child that will not shrink spills past the card
+   * and collides with the transcript below it, so on mobile the whole page is
+   * the scroll surface and the list takes the height it needs. */
+  .agent-sessions {
+    max-height: none;
+  }
+  .agent-sessions__list {
+    flex: none !important;
+    max-height: 50vh;
+  }
+}
+
+/*
+ * The approval card: high contrast, and never see-through. A decision this
+ * consequential must read clearly against whatever transcript sits behind it,
+ * so it is a solid card with a warning edge rather than a tinted notice.
+ */
+.approval {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  border: 1px solid var(--warn);
+  background: var(--card);
+  color: var(--card-foreground);
+  box-shadow: var(--shadow);
+}
+
+.approval > svg:first-child {
+  color: var(--warn);
+}
+
+/* The composer's fact strip: profile, model, policy, tool count and run state.
+ * Wraps rather than truncates, so it stays whole at narrow widths. */
+.composer-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.composer-fact {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--neutral-soft);
+  color: var(--text-soft);
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-meta__tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border-quiet);
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.composer-meta__tools:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.composer-meta__tools:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* --------------------------------------------------------------- table --- */
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.table th {
+  text-align: left;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  padding: 12px var(--space-4);
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+
+.table td {
+  padding: 12px var(--space-4);
+  border-bottom: 1px solid var(--rule);
+  vertical-align: middle;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.table tbody tr {
+  transition: background 140ms ease-out;
+}
+
+.table tbody tr:hover {
+  background: var(--surface-hover);
+}
+
+.table tbody tr.is-selected {
+  background: var(--accent-soft);
+}
+
+.scroll-x {
+  overflow-x: auto;
+}
+
+/* --------------------------------------------------------------- state --- */
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-8) var(--space-4);
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.empty strong {
+  color: var(--text);
+  font-size: 14.5px;
+  font-weight: 600;
+}
+
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.notice--warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.notice--danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.notice--info {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.skeleton {
+  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    90deg,
+    var(--neutral-soft) 25%,
+    var(--surface-hover) 37%,
+    var(--neutral-soft) 63%
+  );
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0 50%;
+  }
+}
+
+/* --------------------------------------------------------------- meter --- */
+
+.meter {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.meter__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 13px;
+}
+
+.meter__value {
+  color: var(--text-muted);
+}
+
+.meter__value strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.meter__track {
+  height: 7px;
+  border-radius: 999px;
+  background: var(--neutral-soft);
+  overflow: hidden;
+}
+
+.meter__fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 400ms ease-out;
+}
+
+.meter__foot {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-faint);
+}

@@ -1,0 +1,68 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, label: macos-arm64, triple: aarch64-apple-darwin }
+          - { os: windows-latest, label: windows-x64, triple: x86_64-pc-windows-msvc }
+          - { os: ubuntu-22.04, label: linux-x64, triple: x86_64-unknown-linux-gnu }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.label }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: bash ./scripts/check-versions.sh
+      - run: npm ci --prefix frontend
+      - run: npm run build --prefix frontend
+      - run: cargo build --release -p lightagent --target ${{ matrix.triple }}
+      - run: bash ./scripts/package-lightagent.sh ${{ matrix.triple }}
+      - run: bash ./scripts/smoke-lightagent-package.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lightagent-${{ matrix.label }}
+          if-no-files-found: error
+          path: dist-cli/lightagent-*
+
+  publish:
+    name: draft GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: lightagent-*
+          path: release-assets
+          merge-multiple: true
+      - name: Checksums
+        working-directory: release-assets
+        run: sha256sum lightagent-* > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: release-assets/*

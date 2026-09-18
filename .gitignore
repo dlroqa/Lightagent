@@ -1,0 +1,14 @@
+/target
+**/*.rs.bk
+/frontend/node_modules
+/frontend/dist
+/e2e/node_modules
+# Rendered panel screenshots, produced by scripts/render-panel.sh and uploaded
+# as a CI artifact rather than committed.
+/e2e/screens
+/runtime
+*.gguf
+.env
+
+# Staged for packaging, and produced by it
+/dist-cli

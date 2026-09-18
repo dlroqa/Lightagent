@@ -1,0 +1,23 @@
+# Build settings that suit every machine.
+#
+# Deliberately no `jobs` setting. Cargo defaults to the host's core count, which
+# is what a capable machine should use; pinning a low number here would throttle
+# every larger host to match the smallest one this was developed on.
+#
+# On a memory-constrained machine, cap it per-invocation instead — concurrent
+# rustc processes are the memory hog, and on a box with ~2 GB free, four of them
+# will swap and end up slower than three:
+#
+#     CARGO_BUILD_JOBS=3 cargo build
+
+# Statically link the MSVC runtime on Windows.
+#
+# Without this, `hermes.exe` needs the Visual C++ redistributable, which a
+# person who downloaded a CLI archive has no reason to have and no obvious way
+# to be told about - the failure is a dialog naming a missing DLL. Spec section
+# 25's "normal operation needs no administrator" is hard to honour when the
+# first run demands an installer from somewhere else.
+#
+# Verified in CI with `dumpbin /dependents`, not assumed.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

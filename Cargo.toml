@@ -1,0 +1,123 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/lightagent-core",
+    "crates/lightagent-provider-lightweight",
+    "crates/lightagent-tools",
+    "crates/lightagent-store",
+    "crates/lightagent-api",
+    "crates/lightagent-mcp",
+    "crates/lightagent-rag",
+    "crates/lightagent-memory",
+    "crates/lightagent-acp",
+    "crates/lightagent-extensions",
+    "crates/lightagent-runtime",
+    "crates/lightagent",
+    "crates/release-update",
+]
+
+[workspace.package]
+version = "0.4.0"
+edition = "2024"
+rust-version = "1.98"
+license = "Apache-2.0"
+repository = "https://github.com/dlroqa/Lightagent"
+
+# ---------------------------------------------------------------------------
+# DEPENDENCY POLICY - enforced, not advisory.
+#
+# This project must build on a machine with NO sudo, NO cmake, NO libssl-dev
+# and NO libclang. Violating any rule below makes the workspace unbuildable
+# there. `scripts/check-deps.sh` gates this in CI.
+#
+#   1. NO cmake.      rustls 0.23 defaults its crypto provider to `aws-lc-rs`,
+#                     whose build script REQUIRES cmake. We pin `ring` instead.
+#                     No `-sys` crate may shell out to cmake.
+#   2. NO OpenSSL.    `libssl-dev` is absent => `native-tls` / `openssl-sys`
+#                     are banned. rustls end to end.
+#   3. NO libclang.   => no `bindgen`; the harness talks to providers over
+#                     HTTP and never links an inference engine.
+#   4. Compile budget. Banned: polars, tonic, sqlx. Use rusqlite (bundled),
+#                     which builds with `cc` alone.
+# ---------------------------------------------------------------------------
+[workspace.dependencies]
+# --- core, no I/O ---
+thiserror = "2.0.20"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+smallvec = { version = "1.15.2", features = ["serde", "union"] }
+
+# --- platform ---
+directories = "6.0.0"
+rustix = { version = "1.1.4", default-features = false, features = ["fs", "std", "termios"] }
+
+# --- command line ---
+clap = { version = "4.6.6", features = ["derive"] }
+dialoguer = { version = "0.12.0", default-features = false }
+crossterm = { version = "0.29.0", default-features = false, features = ["events", "windows"] }
+
+# --- async runtime and process supervision ---
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "process", "net", "time", "io-util", "sync", "signal", "fs"] }
+tokio-util = "0.7.19"
+async-trait = "0.1.92"
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+
+# --- HTTP ---
+# `rustls-no-provider` is deliberate: the default `rustls` feature selects
+# aws-lc-rs, whose build requires cmake. We install the `ring` provider
+# ourselves instead. See the dependency policy above.
+# `axum` 0.8 brings hyper and tower; no build scripts, no cmake, no OpenSSL.
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "query", "matched-path", "original-uri", "tracing"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "http2", "charset", "json", "stream"] }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+
+# --- bytes ---
+# Already in the tree via reqwest/hyper; named explicitly because the upstream
+# SSE translator has to spell out the stream's item type.
+bytes = "1.12.1"
+
+# --- archives and digests ---
+sha2 = "0.11.0"
+hex = "0.4.3"
+tar = "0.4.46"
+flate2 = "1.1.9"          # defaults to the pure-Rust miniz_oxide backend
+zip = "8.6.0"
+
+getrandom = "0.4.3"   # OS entropy for run, call, session and API identifiers
+
+# --- internal ---
+# --- release support ---
+release-update = { path = "crates/release-update" }
+
+# --- lightagent harness ---
+lightagent-core = { path = "crates/lightagent-core" }
+lightagent-provider-lightweight = { path = "crates/lightagent-provider-lightweight" }
+lightagent-tools = { path = "crates/lightagent-tools" }
+lightagent-store = { path = "crates/lightagent-store" }
+lightagent-api = { path = "crates/lightagent-api" }
+lightagent-mcp = { path = "crates/lightagent-mcp" }
+lightagent-rag = { path = "crates/lightagent-rag" }
+lightagent-memory = { path = "crates/lightagent-memory" }
+lightagent-acp = { path = "crates/lightagent-acp" }
+lightagent-extensions = { path = "crates/lightagent-extensions" }
+lightagent-runtime = { path = "crates/lightagent-runtime" }
+
+# ---------------------------------------------------------------------------
+# Build profiles tuned for a 4-core 1.5 GHz CPU with ~2.3 GB free RAM.
+# Dependencies get opt-level 1 (built once, then cached, and fast at runtime);
+# our own crates stay at opt-level 0 so edit-compile cycles stay short.
+# ---------------------------------------------------------------------------
+[profile.dev]
+debug = "line-tables-only"
+codegen-units = 256
+incremental = true
+
+[profile.dev.package."*"]
+opt-level = 1
+debug = false
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "debuginfo"
+panic = "abort"
