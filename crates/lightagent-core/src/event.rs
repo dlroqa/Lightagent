@@ -8,6 +8,7 @@
 
 use crate::ids::RunId;
 use crate::invoker::{ToolCall, ToolOutcome};
+use crate::permissions::ApprovalId;
 use crate::provider::Usage;
 
 /// Why a run ended.
@@ -46,11 +47,15 @@ pub enum AgentEvent {
     ToolCallStarted { id: String, name: String },
     /// A tool finished, with its result.
     ToolCallCompleted { id: String, outcome: ToolOutcome },
-    /// A tool call is waiting on a human approval decision. `id` is the tool
-    /// call's id, so a later same-id [`ToolCallStarted`](Self::ToolCallStarted)
-    /// (on approve) or [`ToolCallCompleted`](Self::ToolCallCompleted) (on deny)
-    /// resolves it.
-    AwaitingApproval { id: String, name: String },
+    /// A tool call is waiting on a human approval decision. `approval_id` is
+    /// the security-decision id that must be returned in an
+    /// [`ApprovalDecision`](crate::permissions::ApprovalDecision); `tool_call_id`
+    /// stays the model-protocol id used by the later tool events.
+    AwaitingApproval {
+        approval_id: ApprovalId,
+        tool_call_id: String,
+        name: String,
+    },
     /// One model turn completed, with its token accounting when known.
     TurnCompleted { usage: Option<Usage> },
     /// The wall-clock budget ran out while tool results the model has not read

@@ -597,19 +597,27 @@ async fn respond_approval(
     if let Some(rejection) = deny(&state, &headers, Scope::ApprovalsWrite) {
         return rejection;
     }
-    use lightagent_core::{ApprovalDecision, ApprovalId};
+    use lightagent_core::ApprovalDecision;
     let Some(state_run) = state.manager.get(&run).await else {
         return not_found(&run);
     };
+    let Some(pending) = state_run.pending().await else {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "run is not awaiting approval" })),
+        )
+            .into_response();
+    };
     let decision = if body.approve {
         match body.remember_secs {
-            Some(secs) => {
-                ApprovalDecision::grant_for(ApprovalId::new(), std::time::Duration::from_secs(secs))
-            }
-            None => ApprovalDecision::grant(ApprovalId::new()),
+            Some(secs) => ApprovalDecision::grant_for(
+                pending.approval_id,
+                std::time::Duration::from_secs(secs),
+            ),
+            None => ApprovalDecision::grant(pending.approval_id),
         }
     } else {
-        ApprovalDecision::deny(ApprovalId::new())
+        ApprovalDecision::deny(pending.approval_id)
     };
     let delivered = state_run.decide(decision);
     Json(json!({ "run": state_run.id(), "delivered": delivered })).into_response()
