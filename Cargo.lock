@@ -1022,7 +1022,6 @@ dependencies = [
  "lightagent-memory",
  "lightagent-provider-lightweight",
  "lightagent-rag",
- "lightagent-runtime",
  "lightagent-store",
  "lightagent-tools",
  "release-update",

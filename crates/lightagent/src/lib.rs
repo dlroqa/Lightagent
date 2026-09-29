@@ -18,7 +18,6 @@ mod import;
 mod markdown;
 mod memory;
 mod rag;
-mod runtime;
 mod serve;
 mod setup;
 mod slash;
@@ -130,11 +129,7 @@ enum Command {
     },
     /// Serve the Agent Client Protocol (ACP) over stdio, for an editor to drive.
     Acp,
-    /// Report the engine's device and capabilities, or place a model on it.
-    Runtime {
-        #[command(subcommand)]
-        action: Option<RuntimeAction>,
-    },
+
     /// Report the environment, home, profile and provider.
     Doctor,
     /// Import profiles and skills from another agent's home.
@@ -233,20 +228,6 @@ enum ExtensionsAction {
         /// Remove the active profile's copy instead of the global one.
         #[arg(long)]
         profile: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum RuntimeAction {
-    /// Report the engine's device, capabilities, the machine and the catalog.
-    Show,
-    /// Load a model with the configured runtime parameters (changes the engine).
-    Place {
-        /// The catalog id of the model to make resident.
-        model: String,
-        /// Reload even if the model is already the resident one.
-        #[arg(long)]
-        force: bool,
     },
 }
 
@@ -417,10 +398,6 @@ async fn dispatch(cli: Cli) -> Result<(), String> {
             web_root,
         }) => serve::run(host, port, key_env, web_root).await,
         Some(Command::Acp) => acp::run().await,
-        Some(Command::Runtime { action }) => match action.unwrap_or(RuntimeAction::Show) {
-            RuntimeAction::Show => runtime::show(cli.json).await,
-            RuntimeAction::Place { model, force } => runtime::place(model, force, cli.json).await,
-        },
         Some(Command::Doctor) => doctor(cli.json).await,
         Some(Command::Import { source }) => match source {
             ImportSource::Hermes {
@@ -546,37 +523,6 @@ pub(crate) fn default_profile(config: &Config) -> Result<AgentProfile, String> {
 
 // --- doctor -----------------------------------------------------------------
 
-/// What a best-effort device probe found, when the gateway answered in time.
-struct DeviceProbe {
-    device: String,
-    resident_model: Option<String>,
-    backend: Option<String>,
-}
-
-/// Ask the gateway for its device, bounded so a down gateway cannot stall the
-/// report. Any failure — unreachable, slow, an error status — yields `None`, and
-/// the report simply omits the line.
-async fn probe_device(config: &Config) -> Option<DeviceProbe> {
-    use lightagent_runtime::{RuntimeClient, RuntimeEndpoint};
-
-    let mut endpoint = RuntimeEndpoint::new(config.inference.base_url.clone());
-    if let Some(secret) = &config.inference.api_key
-        && let Some(value) = secret.resolve()
-    {
-        endpoint = endpoint.with_api_key(value);
-    }
-    let client = RuntimeClient::new(endpoint).ok()?;
-    let gateway = tokio::time::timeout(std::time::Duration::from_secs(2), client.gateway())
-        .await
-        .ok()?
-        .ok()?;
-    Some(DeviceProbe {
-        device: gateway.engine_capabilities.device,
-        resident_model: gateway.model,
-        backend: gateway.backend,
-    })
-}
-
 async fn doctor(json: bool) -> Result<(), String> {
     let paths = paths()?;
     let config = load_config(&paths)?;
@@ -585,7 +531,6 @@ async fn doctor(json: bool) -> Result<(), String> {
     let profiles = store.list().map_err(|error| error.to_string())?;
     let tool_count = ToolRegistry::builtin().names().len();
     let home_exists = paths.root().exists();
-    let device = probe_device(&config).await;
 
     if json {
         let value = serde_json::json!({
@@ -599,10 +544,6 @@ async fn doctor(json: bool) -> Result<(), String> {
             "profiles": profiles.iter().map(|id| id.as_str().to_string()).collect::<Vec<_>>(),
             "tools": tool_count,
             "banner": std::io::stderr().is_terminal(),
-            "engine_reachable": device.is_some(),
-            "device": device.as_ref().map(|d| d.device.clone()),
-            "backend": device.as_ref().and_then(|d| d.backend.clone()),
-            "resident_model": device.as_ref().and_then(|d| d.resident_model.clone()),
         });
         println!("{value:#}");
         return Ok(());
@@ -644,24 +585,7 @@ async fn doctor(json: bool) -> Result<(), String> {
         }
     ));
     out.push_str(&format!("Tools:     {tool_count} built-in\n"));
-    match &device {
-        Some(probe) => {
-            out.push_str(&format!(
-                "Engine:    reachable ({}), running on {}\n",
-                probe.backend.as_deref().unwrap_or("unknown backend"),
-                probe.device
-            ));
-            out.push_str(&format!(
-                "Resident:  {}\n",
-                probe.resident_model.as_deref().unwrap_or("(none loaded)")
-            ));
-        }
-        None => {
-            out.push_str(
-                "Engine:    not reachable (start the gateway, or check inference.base_url)\n",
-            );
-        }
-    }
+    out.push_str("Provider:  configured (run a chat or serve request to verify it)\n");
     print!("{out}");
     Ok(())
 }
