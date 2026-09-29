@@ -79,6 +79,35 @@ jobs:
           name: lightagent-web-screens
           path: e2e/screens/
 
+  paired-lightweight-e2e:
+    name: paired Lightweight contract E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: dlroqa/Lightweight
+          ref: c380bddafedb27adc7044a5482bb91ddf04e4e33
+          path: lightweight-provider
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: paired-lightweight-e2e
+      - name: Build the independent Lightweight test provider
+        run: cargo build -p lightweight-gateway --features mock --bin hermes-mock-gateway
+        working-directory: lightweight-provider
+      - name: Build the independent Lightagent harness
+        run: cargo build -p lightagent --bin lightagent
+      - name: Prove the public HTTP/SSE agent contract
+        env:
+          LIGHTWEIGHT_MOCK_GATEWAY: ${{ github.workspace }}/lightweight-provider/target/debug/hermes-mock-gateway
+          LIGHTAGENT_BIN: ${{ github.workspace }}/target/debug/lightagent
+        run: python3 scripts/paired-e2e.py
+
   package:
     name: package smoke
     runs-on: ubuntu-latest
