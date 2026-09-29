@@ -9,8 +9,8 @@ use lightagent_acp::AcpServer;
 use lightagent_api::manager::{RunFactory, RunManager, RunStatus, StartRun};
 use lightagent_core::provider::ProviderMessage;
 use lightagent_core::{
-    AgentEvent, AgentEventSink, AgentProfile, ApprovalDecision, ProfileId, ProfileStore, RunId,
-    StopReason, ToolCall, ToolOutcome,
+    AgentEvent, AgentEventSink, AgentProfile, ApprovalDecision, ApprovalId, ProfileId,
+    ProfileStore, RunId, StopReason, ToolCall, ToolOutcome,
 };
 use lightagent_store::{SessionId, SessionStore};
 use serde_json::{Value, json};
@@ -46,13 +46,17 @@ impl RunFactory for MockFactory {
                 arguments: "{}".into(),
             },
         });
+        let approval_id = ApprovalId::new();
         let _ = sink.send(AgentEvent::AwaitingApproval {
-            id: "t1".into(),
+            approval_id: approval_id.clone(),
+            tool_call_id: "t1".into(),
             name: "fs.write".into(),
         });
         tokio::select! {
             decision = decisions.recv() => {
-                let granted = decision.map(|d| d.granted).unwrap_or(false);
+                let granted = decision
+                    .map(|decision| decision.id == approval_id && decision.granted)
+                    .unwrap_or(false);
                 if granted {
                     let _ = sink.send(AgentEvent::ToolCallStarted { id: "t1".into(), name: "fs.write".into() });
                     let _ = sink.send(AgentEvent::ToolCallCompleted { id: "t1".into(), outcome: ToolOutcome::ok("wrote") });

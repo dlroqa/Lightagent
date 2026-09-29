@@ -751,7 +751,8 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
                 }
                 ApprovalNeed::Require(request) => {
                     driver.emit(AgentEvent::AwaitingApproval {
-                        id: call.id.clone(),
+                        approval_id: request.id.clone(),
+                        tool_call_id: call.id.clone(),
                         name: call.name.clone(),
                     });
                     // Leave `next` pointing at this call so a resume acts on it.

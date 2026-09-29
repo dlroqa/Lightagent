@@ -15,8 +15,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use lightagent_core::provider::ProviderMessage;
 use lightagent_core::{
-    AgentEvent, AgentEventSink, AgentLoop, AgentProvider, ApprovalDecision, RunId, RunOutcome,
-    StopReason, ToolInvoker,
+    AgentEvent, AgentEventSink, AgentLoop, AgentProvider, ApprovalDecision, ApprovalId, RunId,
+    RunOutcome, StopReason, ToolInvoker,
 };
 use serde::Serialize;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
@@ -73,7 +73,8 @@ pub struct RunState {
 /// A pending approval, as the approvals endpoint reports it.
 #[derive(Clone, Debug, Serialize)]
 pub struct PendingApproval {
-    pub approval_id: String,
+    pub approval_id: ApprovalId,
+    pub tool_call_id: String,
     pub tool: String,
     pub risk: String,
 }
@@ -298,10 +299,15 @@ impl RunManager {
             let forwarder = tokio::spawn(async move {
                 while let Some(event) = sink_rx.recv().await {
                     match &event {
-                        AgentEvent::AwaitingApproval { id, name } => {
+                        AgentEvent::AwaitingApproval {
+                            approval_id,
+                            tool_call_id,
+                            name,
+                        } => {
                             forward_state
                                 .set_pending(Some(PendingApproval {
-                                    approval_id: id.clone(),
+                                    approval_id: approval_id.clone(),
+                                    tool_call_id: tool_call_id.clone(),
                                     tool: name.clone(),
                                     risk: "".to_owned(),
                                 }))

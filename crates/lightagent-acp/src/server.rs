@@ -24,9 +24,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use lightagent_api::manager::{RunManager, RunState, RunStatus, StartRun};
 use lightagent_core::provider::ProviderMessage;
-use lightagent_core::{
-    AgentEvent, ApprovalDecision, ApprovalId, ProfileId, ProfileStore, StopReason,
-};
+use lightagent_core::{AgentEvent, ApprovalDecision, ProfileId, ProfileStore, StopReason};
 use lightagent_store::{
     Session as StoredSession, SessionId, SessionStore, StoreError, StoredMessage,
 };
@@ -482,15 +480,15 @@ impl PromptTask {
             }
             if status == RunStatus::AwaitingApproval
                 && let Some(approval) = run.pending().await
-                && handled.insert(approval.approval_id.clone())
+                && handled.insert(approval.approval_id.to_string())
             {
                 let granted = self
                     .request_permission(&session_id, &approval, &cancel)
                     .await;
                 let decision = if granted {
-                    ApprovalDecision::grant(ApprovalId::new())
+                    ApprovalDecision::grant(approval.approval_id.clone())
                 } else {
-                    ApprovalDecision::deny(ApprovalId::new())
+                    ApprovalDecision::deny(approval.approval_id.clone())
                 };
                 run.decide(decision);
             }

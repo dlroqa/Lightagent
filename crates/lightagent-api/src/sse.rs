@@ -55,7 +55,15 @@ pub fn data(event: &AgentEvent) -> serde_json::Value {
             "is_error": outcome.is_error,
             "content": outcome.content,
         }),
-        AgentEvent::AwaitingApproval { id, name } => json!({ "id": id, "name": name }),
+        AgentEvent::AwaitingApproval {
+            approval_id,
+            tool_call_id,
+            name,
+        } => json!({
+            "approval_id": approval_id,
+            "tool_call_id": tool_call_id,
+            "name": name,
+        }),
         AgentEvent::TurnCompleted { usage: Some(usage) } => json!({
             "prompt_tokens": usage.prompt_tokens,
             "completion_tokens": usage.completion_tokens,
