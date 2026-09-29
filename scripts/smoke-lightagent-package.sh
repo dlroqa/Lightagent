@@ -62,14 +62,15 @@ chmod +x "$bin" 2>/dev/null || true
 "$bin" banner --preview 2>&1 | grep -q $'▀' && pass "banner renders" || fail "banner did not render"
 
 # `doctor` in a throwaway home, pointed at reserved port zero so a developer's
-# live gateway cannot change the assertion: it must report the engine as not
-# reachable, never hang or crash.
+# live gateway cannot affect the assertion. Doctor deliberately reports
+# configuration only: provider readiness belongs to the public `/v1` capability
+# contract, not the provider's private control plane.
 home="$(mktemp -d)"
 LIGHTAGENT_HOME="$home" "$bin" config set inference.base_url http://localhost:0 >/dev/null
-if LIGHTAGENT_HOME="$home" "$bin" doctor 2>&1 | grep -qi "not reachable"; then
-  pass "doctor runs and reports no gateway"
+if LIGHTAGENT_HOME="$home" "$bin" doctor 2>&1 | grep -qi "Provider:  configured"; then
+  pass "doctor runs without a private provider probe"
 else
-  fail "doctor did not run cleanly against no gateway"
+  fail "doctor did not report configured provider"
 fi
 rm -rf "$home" "$work"
 
