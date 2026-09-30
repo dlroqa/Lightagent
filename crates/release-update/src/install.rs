@@ -576,4 +576,10 @@ mod tests {
         assert!(transaction.roll_back().is_empty());
         assert_eq!(std::fs::read(&target).unwrap(), b"old");
     }
+
+    #[test]
+    fn cargo_fallback_uses_the_standalone_lightagent_repository() {
+        assert_eq!(REPOSITORY, "https://github.com/dlroqa/Lightagent.git");
+        assert!(!REPOSITORY.to_ascii_lowercase().contains("lightweight"));
+    }
 }

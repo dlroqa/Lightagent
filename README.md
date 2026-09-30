@@ -29,6 +29,22 @@ these commands from the extracted directory:
 ./lightagent serve --web-root ./web
 ```
 
+### Migrate from the former combined installer
+
+Older `lightweight update` installations predate the separation and try to
+install both binaries from the Lightweight repository. They cannot install the
+standalone `lightagent` package. Bootstrap Lightagent once from its own tagged
+repository; this does not modify Lightweight:
+
+```sh
+cargo install --git https://github.com/dlroqa/Lightagent.git --tag v0.4.1 --locked --force --root ~/.local lightagent
+~/.local/bin/lightagent --version
+```
+
+Use the `lightagent` command afterwards. Its `update` command uses Lightagent
+release archives when available and otherwise builds from the Lightagent
+repository.
+
 ### Install from source
 
 Building from source requires Rust 1.98 or newer and Node.js:
