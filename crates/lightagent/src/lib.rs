@@ -978,6 +978,16 @@ fn get_key(config: &Config, key: &str) -> Option<String> {
                 .unwrap_or_default(),
         ),
         "inference.device" => Some(config.inference.device.clone()),
+        key if key.starts_with("inference.model_catalog.") => config
+            .inference
+            .model_catalog
+            .get(&key["inference.model_catalog.".len()..])
+            .cloned(),
+        key if key.starts_with("inference.model_alias.") => config
+            .inference
+            .model_aliases
+            .get(&key["inference.model_alias.".len()..])
+            .cloned(),
         "agent.max_turns" => Some(config.agent.max_turns.to_string()),
         "agent.max_tool_calls" => Some(config.agent.max_tool_calls.to_string()),
         // Empty means no time limit.
@@ -1022,6 +1032,36 @@ fn set_key(config: &mut Config, key: &str, value: &str) -> Result<(), String> {
             config.inference.api_key = parse_opt_string(value).map(SecretRef::env);
         }
         "inference.device" => config.inference.device = value.to_string(),
+        key if key.starts_with("inference.model_catalog.") => {
+            let model_id = key["inference.model_catalog.".len()..].trim();
+            if model_id.is_empty() {
+                return Err("model catalog entry needs a model id".to_owned());
+            }
+            let label = value.trim();
+            if label.is_empty() {
+                config.inference.model_catalog.remove(model_id);
+            } else {
+                config
+                    .inference
+                    .model_catalog
+                    .insert(model_id.to_owned(), label.to_owned());
+            }
+        }
+        key if key.starts_with("inference.model_alias.") => {
+            let model_id = key["inference.model_alias.".len()..].trim();
+            if model_id.is_empty() {
+                return Err("model alias needs a model id".to_owned());
+            }
+            let label = value.trim();
+            if label.is_empty() {
+                config.inference.model_aliases.remove(model_id);
+            } else {
+                config
+                    .inference
+                    .model_aliases
+                    .insert(model_id.to_owned(), label.to_owned());
+            }
+        }
         "agent.max_turns" => {
             config.agent.max_turns = parse_u32(value, "agent.max_turns")?;
         }
@@ -1351,6 +1391,28 @@ mod tests {
         set_key(&mut config, "agent.max_turns", "12").unwrap();
         assert_eq!(get_key(&config, "agent.max_turns").as_deref(), Some("12"));
         assert!(set_key(&mut config, "agent.max_tool_calls", "many").is_err());
+    }
+
+    #[test]
+    fn model_aliases_round_trip() {
+        let mut config = Config::default();
+        let key = "inference.model_alias.qwen3-1.7b-q4_k_m";
+        set_key(&mut config, key, "Quinn").unwrap();
+        assert_eq!(get_key(&config, key).as_deref(), Some("Quinn"));
+        set_key(&mut config, key, "").unwrap();
+        assert!(get_key(&config, key).is_none());
+        assert!(set_key(&mut config, "inference.model_alias.", "x").is_err());
+    }
+
+    #[test]
+    fn model_catalog_entries_round_trip() {
+        let mut config = Config::default();
+        let key = "inference.model_catalog.qwen3-1.7b-q4_k_m";
+        set_key(&mut config, key, "Quinn").unwrap();
+        assert_eq!(get_key(&config, key).as_deref(), Some("Quinn"));
+        set_key(&mut config, key, "").unwrap();
+        assert!(get_key(&config, key).is_none());
+        assert!(set_key(&mut config, "inference.model_catalog.", "x").is_err());
     }
 
     #[test]

@@ -32,6 +32,43 @@ interface ToolCall {
   durationMs?: number;
 }
 
+function modelLabel(id: string, name?: string | null) {
+  if (name?.trim()) return name.trim();
+  return id
+    .replace(/@(\d+)k\b/i, (_match, context) => " · " + context + "K context")
+    .replace(/[._-]+/g, " ")
+    .replace(/\b[a-z]/g, (letter) => letter.toUpperCase())
+    .replace(/(\d)([a-z])/g, (_match, number, letter) => number + letter.toUpperCase());
+}
+
+function ModelOptions({ provider }: { provider?: import("../api/agent").ProviderCapabilities | null }) {
+  if (!provider) return null;
+  const byId = new Map(provider.runtime_models.map((model) => [model.id, model]));
+  const runtimeOnly = provider.runtime_models.filter((model) => !provider.models.includes(model.id));
+  const configuredOnly = Object.entries(provider.model_catalog)
+    .filter(([id]) => !provider.models.includes(id) && !byId.has(id));
+  return <>
+    {provider.models.map((model) => <option key={model} value={model}>{modelLabel(model, byId.get(model)?.name ?? provider.model_aliases[model])}</option>)}
+    {runtimeOnly.length > 0 && (
+      <optgroup label="Backend runtime catalog">
+        {runtimeOnly.map((model) => {
+          const unavailable = model.state !== "available" && model.state !== "loaded";
+          const unsupported = model.supported === false;
+          const reason = unsupported ? "unsupported" : unavailable ? model.state : "load it in Runtime";
+          return <option key={model.id} value={model.id} disabled>{modelLabel(model.id, model.name ?? provider.model_aliases[model.id]) + " — " + reason}</option>;
+        })}
+      </optgroup>
+    )}
+    {configuredOnly.length > 0 && (
+      <optgroup label="Configured models">
+        {configuredOnly.map(([id, name]) => (
+          <option key={id} value={id} disabled>{modelLabel(id, name) + " — unavailable in backend"}</option>
+        ))}
+      </optgroup>
+    )}
+  </>;
+}
+
 /** The lifecycle word for a tool call's state, as the timeline shows it. */
 const STATUS_LABEL: Record<ToolStatus, string> = {
   requested: "queued",
@@ -451,7 +488,7 @@ export function Agent() {
                   <Cpu size={14} />
                   <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} disabled={!provider.data || busy} aria-label="Model for this conversation">
                     <option value="">{provider.data?.configured_model ?? "Auto model"}</option>
-                    {provider.data?.models.map((model) => <option key={model} value={model}>{model}</option>)}
+                    <ModelOptions provider={provider.data} />
                   </select>
                 </label>
                 <button type="button" className="welcome-composer__send"
@@ -576,7 +613,7 @@ export function Agent() {
                   <Cpu size={13} />
                   <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} disabled={!provider.data || running} aria-label="Model for the next run">
                     <option value="">{provider.data?.configured_model ?? "Auto model"}</option>
-                    {provider.data?.models.map((model) => <option key={model} value={model}>{model}</option>)}
+                    <ModelOptions provider={provider.data} />
                   </select>
                 </label>
                 {provider.data && <span className="composer-fact"><Sparkles size={13} /> {provider.data.reasoning_content ? "Reasoning ready" : "Standard reasoning"}</span>}

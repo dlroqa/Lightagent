@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use lightagent_api::manager::{
-    self, ProviderCapabilities, RunFactory, RunManager, RunStatus, StartRun,
+    self, ProviderCapabilities, RunFactory, RunManager, RunStatus, RuntimeModel, StartRun,
 };
 use lightagent_api::{AppState, AuthConfig, Scope, router};
 use lightagent_core::{
@@ -19,6 +19,7 @@ use lightagent_core::{
     PolicyEngine, ProfileStore, RunId, StopReason,
 };
 use lightagent_provider_lightweight::{LightweightProvider, ProviderConfig};
+use lightagent_runtime::{RuntimeClient, RuntimeEndpoint};
 use lightagent_store::SessionStore;
 use lightagent_tools::{BoundedExecutor, Delegation, SkillContext, ToolDefinition, ToolRegistry};
 use tokio::net::TcpListener;
@@ -72,7 +73,7 @@ impl RunFactory for LightweightRunFactory {
             .as_ref()
             .and_then(|secret| secret.resolve());
         let mut provider_config = ProviderConfig::new(base_url.clone(), configured_model.clone());
-        if let Some(key) = api_key {
+        if let Some(key) = api_key.clone() {
             provider_config = provider_config.with_api_key(key);
         }
         let models = LightweightProvider::new(provider_config)
@@ -80,11 +81,45 @@ impl RunFactory for LightweightRunFactory {
             .models()
             .await
             .map_err(|error| error.to_string())?;
+        // The inference API generally exposes only the resident model. Some
+        // local gateways also provide a separate, read-only runtime catalog;
+        // surface it when available without making that optional control plane
+        // a requirement for ordinary model discovery.
+        let mut runtime_endpoint = RuntimeEndpoint::new(base_url.clone());
+        if let Some(key) = api_key {
+            runtime_endpoint = runtime_endpoint.with_api_key(key);
+        }
+        let runtime_models = match RuntimeClient::new(runtime_endpoint) {
+            Ok(runtime) => runtime
+                .catalog()
+                .await
+                .map(|catalog| {
+                    catalog
+                        .into_iter()
+                        .map(|model| RuntimeModel {
+                            id: model.id.clone(),
+                            name: config
+                                .inference
+                                .model_aliases
+                                .get(&model.id)
+                                .cloned()
+                                .or(model.name),
+                            state: model.state,
+                            supported: model.supported,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
         Ok(ProviderCapabilities {
             provider: config.inference.provider,
             base_url,
             configured_model: (!configured_model.eq("default")).then_some(configured_model),
             models,
+            model_aliases: config.inference.model_aliases.clone(),
+            model_catalog: config.inference.model_catalog.clone(),
+            runtime_models,
             streaming: true,
             tool_calls: true,
             reasoning_content: false,

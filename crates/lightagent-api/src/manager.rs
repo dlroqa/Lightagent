@@ -161,9 +161,26 @@ pub struct ProviderCapabilities {
     pub base_url: String,
     pub configured_model: Option<String>,
     pub models: Vec<String>,
+    /// Friendly labels configured for model IDs; inference continues to use IDs.
+    pub model_aliases: std::collections::BTreeMap<String, String>,
+    /// Extra configured IDs that the UI should show before provider discovery.
+    pub model_catalog: std::collections::BTreeMap<String, String>,
+    /// Models known to the provider's optional runtime control plane. Entries
+    /// that are not loaded are informational: a chat run never changes the
+    /// resident model as a side effect.
+    pub runtime_models: Vec<RuntimeModel>,
     pub streaming: bool,
     pub tool_calls: bool,
     pub reasoning_content: bool,
+}
+
+/// A non-sensitive runtime catalog entry suitable for a model picker.
+#[derive(Clone, Debug, Serialize)]
+pub struct RuntimeModel {
+    pub id: String,
+    pub name: Option<String>,
+    pub state: String,
+    pub supported: Option<bool>,
 }
 
 /// The manager is generic over how a run is executed: a test supplies a factory

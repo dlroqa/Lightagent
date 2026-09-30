@@ -98,6 +98,10 @@ pub struct InferenceConfig {
     pub api_key: Option<SecretRef>,
     /// Named custom endpoints offered by the interactive provider picker.
     pub saved_providers: Vec<SavedProvider>,
+    /// Friendly labels for model IDs; identifiers sent to the provider stay unchanged.
+    pub model_aliases: BTreeMap<String, String>,
+    /// Additional model IDs to surface in the UI before the backend reports them.
+    pub model_catalog: BTreeMap<String, String>,
 }
 
 impl Default for InferenceConfig {
@@ -110,6 +114,11 @@ impl Default for InferenceConfig {
             model: None,
             api_key: None,
             saved_providers: Vec::new(),
+            model_aliases: BTreeMap::from([(
+                "smollm2-135m-instruct-q4_k_m".to_owned(),
+                "Molly".to_owned(),
+            )]),
+            model_catalog: BTreeMap::new(),
         }
     }
 }

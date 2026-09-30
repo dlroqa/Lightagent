@@ -70,11 +70,22 @@ export interface ProviderCapabilities {
   base_url: string;
   configured_model: string | null;
   models: string[];
+  model_aliases: Record<string, string>;
+  model_catalog: Record<string, string>;
+  runtime_models: RuntimeModel[];
   streaming: boolean;
   tool_calls: boolean;
   reasoning_content: boolean;
 }
 
+
+/** A model registered with the optional backend runtime control plane. */
+export interface RuntimeModel {
+  id: string;
+  name: string | null;
+  state: string;
+  supported: boolean | null;
+}
 
 /** A non-sensitive saved CLI profile advertised by the active server. */
 export interface ProfileSummary {
