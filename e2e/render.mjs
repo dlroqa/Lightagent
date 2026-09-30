@@ -27,8 +27,8 @@ const FALLBACK_SIGNS = [
 // rendered real data; `agentBacked` marks screens served by the harness API,
 // which are checked for the fallback signs above.
 const ROUTES = [
-  { name: "agent", hash: "#/", agentBacked: true, mustContain: "Start an agent session" },
-  { name: "agent-alias", hash: "#/agent", agentBacked: true, mustContain: "Start an agent session" },
+  { name: "agent", hash: "#/", agentBacked: true, mustContain: "Where should we begin?" },
+  { name: "agent-alias", hash: "#/agent", agentBacked: true, mustContain: "Where should we begin?" },
   { name: "agent-tools", hash: "#/tools", agentBacked: true, mustContain: "datetime.now" },
   { name: "settings", hash: "#/settings", agentBacked: true, mustContain: "Agent runtime" },
 ];
