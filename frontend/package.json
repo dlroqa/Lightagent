@@ -1,7 +1,7 @@
 {
   "name": "lightagent-web",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "description": "The Lightagent Web UI: a browser SPA served by the harness itself.",
   "scripts": {
