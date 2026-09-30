@@ -17,6 +17,10 @@
   --ground-3: #f6e9ec;
   --ground-4: #cfe0f4;
 
+  --chat-ground: #f8fafc;
+  --chat-history: #f1f5f9;
+  --chat-thread: #ffffff;
+  --chat-rule: rgba(15, 23, 42, 0.1);
   /* --- surfaces ---------------------------------------------------------- */
   --surface: rgba(255, 255, 255, 0.78);
   --surface-solid: #ffffff;
@@ -127,6 +131,10 @@
     --ground-3: #1b1622;
     --ground-4: #0d1526;
 
+    --chat-ground: #000000;
+    --chat-history: #0d0d0d;
+    --chat-thread: #000000;
+    --chat-rule: rgba(255, 255, 255, 0.12);
     --surface: rgba(148, 163, 184, 0.1);
     --surface-solid: #151d2e;
     --surface-raised: rgba(148, 163, 184, 0.14);
@@ -190,6 +198,10 @@
   --ground-4: #0d1526;
 
   --surface: rgba(148, 163, 184, 0.1);
+  --chat-ground: #000000;
+  --chat-history: #0d0d0d;
+  --chat-thread: #000000;
+  --chat-rule: rgba(255, 255, 255, 0.12);
   --surface-solid: #151d2e;
   --surface-raised: rgba(148, 163, 184, 0.14);
   --surface-sunken: rgba(2, 6, 23, 0.35);

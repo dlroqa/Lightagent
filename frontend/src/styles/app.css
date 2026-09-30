@@ -1338,3 +1338,150 @@ textarea {
     display: none;
   }
 }
+
+/* The agent screen is intentionally unlike the administrative screens. It is a
+ * focused chat surface, while the icon rail keeps the resource center one click
+ * away without making it compete with a conversation. */
+.shell--chat {
+  --rail-width: 72px;
+  padding: 0;
+  background: var(--chat-ground);
+}
+
+.shell--chat .shell__frame {
+  display: none;
+}
+
+.shell--chat .rail {
+  padding: 14px 10px;
+  border: 0;
+  border-right: 1px solid var(--chat-rule);
+  border-radius: 0;
+  background: var(--chat-history);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.shell--chat .rail__brand,
+.shell--chat .rail__nav,
+.shell--chat .rail__controls {
+  align-items: center;
+}
+
+.shell--chat .rail__brand {
+  padding: 2px 0 10px;
+}
+
+.shell--chat .rail__mark {
+  width: 36px;
+  height: 36px;
+}
+
+.shell--chat .navitem {
+  width: 44px;
+  justify-content: center;
+  border-radius: 10px;
+}
+
+.shell--chat .main {
+  border: 0;
+  border-radius: 0;
+  background: var(--chat-thread);
+}
+
+.shell--chat .topbar {
+  display: none;
+}
+
+.shell--chat .page {
+  height: 100%;
+  padding: 0;
+}
+
+.shell--chat .chat-workspace {
+  grid-template-columns: 268px minmax(0, 1fr);
+  min-height: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: var(--chat-thread);
+  box-shadow: none;
+}
+
+.shell--chat .chat-history {
+  padding: 14px 12px;
+  border-right-color: var(--chat-rule);
+  background: var(--chat-history);
+}
+
+.shell--chat .chat-history .input {
+  border-color: var(--chat-rule);
+  background: transparent;
+}
+
+.shell--chat .chat-history > .btn {
+  min-height: 42px;
+  border-color: var(--chat-rule);
+  background: transparent;
+  color: var(--text);
+}
+
+.shell--chat .chat-history > .btn:first-of-type {
+  background: var(--surface-raised);
+}
+
+.shell--chat .chat-thread {
+  padding: 0 24px 16px;
+  background: var(--chat-thread);
+}
+
+.shell--chat .chat-transcript {
+  padding-top: 28px;
+}
+
+.shell--chat .agent-welcome {
+  min-height: 70vh;
+}
+
+.shell--chat .agent-welcome h2 {
+  font-size: clamp(32px, 4vw, 46px);
+}
+
+.shell--chat .welcome-composer,
+.shell--chat .chat-composer {
+  border-color: var(--chat-rule);
+  background: var(--surface-raised);
+  box-shadow: none;
+}
+
+.shell--chat .chat-message.is-user {
+  border-color: var(--chat-rule);
+}
+
+.shell--chat .composer-meta__tools,
+.shell--chat .composer-fact {
+  border-color: var(--chat-rule);
+  background: transparent;
+}
+
+@media (max-width: 860px) {
+  .shell--chat {
+    padding: var(--space-2);
+  }
+
+  .shell--chat .shell__frame {
+    display: block;
+    border-color: var(--chat-rule);
+    background: var(--chat-thread);
+  }
+
+  .shell--chat .main {
+    border: 1px solid var(--chat-rule);
+    border-radius: var(--radius-lg);
+  }
+
+  .shell--chat .chat-workspace {
+    height: auto;
+    min-height: 0;
+  }
+}

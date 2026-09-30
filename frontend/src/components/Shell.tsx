@@ -27,8 +27,9 @@ export function Shell() {
   const { preferences, update } = usePreferences();
   const location = useLocation();
   const mobile = useMediaQuery("(max-width: 760px)");
+  const chatRoute = location.pathname === "/" || location.pathname === "/agent";
   const tablet = useMediaQuery("(max-width: 1100px) and (min-width: 761px)");
-  const collapsed = mobile ? false : tablet ? true : preferences.railCollapsed;
+  const collapsed = mobile ? false : chatRoute || tablet ? true : preferences.railCollapsed;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const tools = usePoll(() => agentApi.tools().then((body) => body.tools), 10_000);
 
@@ -40,7 +41,7 @@ export function Shell() {
   const nextTheme = preferences.theme === "dark" ? "light" : "dark";
 
   return (
-    <div className={`shell${collapsed ? " is-collapsed" : ""}`}>
+    <div className={`shell${collapsed ? " is-collapsed" : ""}${chatRoute ? " shell--chat" : ""}`}>
       <div className="shell__frame" aria-hidden="true" />
 
       {mobile && drawerOpen && (
@@ -108,7 +109,7 @@ export function Shell() {
         </div>
       </nav>
 
-      <main className="main">
+      <main className={`main${chatRoute ? " main--chat" : ""}`}>
         <div className="mobilebar">
           <button type="button" className="btn btn--icon" aria-label="Open the menu"
             aria-expanded={drawerOpen} onClick={() => setDrawerOpen(true)}>
