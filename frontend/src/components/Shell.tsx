@@ -41,7 +41,7 @@ export function Shell() {
   const nextTheme = preferences.theme === "dark" ? "light" : "dark";
 
   return (
-    <div className={`shell${collapsed ? " is-collapsed" : ""}${chatRoute ? " shell--chat" : ""}`}>
+    <div className={`shell shell--workspace${collapsed ? " is-collapsed" : ""}${chatRoute ? " shell--chat" : ""}`}>
       <div className="shell__frame" aria-hidden="true" />
 
       {mobile && drawerOpen && (

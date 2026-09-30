@@ -95,9 +95,7 @@ export function Agent() {
   const [railToolsOpen, setRailToolsOpen] = useState(false);
   const composerToolsBtn = useRef<HTMLButtonElement | null>(null);
   const railToolsBtn = useRef<HTMLButtonElement | null>(null);
-  const [activeId, setActiveId] = useState<string | null>(() =>
-    window.localStorage.getItem(SESSION_KEY),
-  );
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [session, setSession] = useState<AgentSession | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");

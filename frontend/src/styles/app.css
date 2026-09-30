@@ -1684,3 +1684,36 @@ textarea {
   border-color: var(--border-quiet);
   box-shadow: none;
 }
+
+/* The resource center uses the same opaque product shell as Chat. */
+.shell--workspace:not(.shell--chat) {
+  padding: 0;
+  background: var(--chat-ground);
+}
+
+.shell--workspace:not(.shell--chat) .shell__frame {
+  display: none;
+}
+
+.shell--workspace:not(.shell--chat) .rail {
+  border: 0;
+  border-right: 1px solid var(--chat-rule);
+  border-radius: 0;
+  background: var(--chat-history);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.shell--workspace:not(.shell--chat) .main {
+  border: 0;
+  border-radius: 0;
+}
+
+.shell--workspace:not(.shell--chat) .topbar {
+  padding: 28px 32px 18px;
+}
+
+.shell--workspace:not(.shell--chat) .page {
+  padding: 24px 32px 32px;
+}
