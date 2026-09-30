@@ -1661,3 +1661,26 @@ textarea {
     min-height: 68vh;
   }
 }
+
+/* Tools and Settings share the same opaque application frame as the chat
+ * workspace; their data controls remain untouched. */
+.main:not(.main--chat) {
+  background: var(--surface-solid);
+  border-color: var(--border-quiet);
+}
+
+.main:not(.main--chat) .topbar {
+  border-bottom: 1px solid var(--rule);
+  background: var(--surface-solid);
+}
+
+.main:not(.main--chat) .page {
+  padding-top: var(--space-5);
+  background: var(--surface-solid);
+}
+
+.main:not(.main--chat) .card {
+  background: var(--surface-solid);
+  border-color: var(--border-quiet);
+  box-shadow: none;
+}

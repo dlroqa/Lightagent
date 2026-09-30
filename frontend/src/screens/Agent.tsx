@@ -441,7 +441,7 @@ export function Agent() {
               <p>Start a conversation with your connected local agent.</p>
               <div className="welcome-composer">
                 <CirclePlus size={21} aria-hidden="true" />
-                <textarea rows={1} value={draft} onChange={(event) => setDraft(event.target.value)}
+                <textarea autoFocus rows={1} value={draft} onChange={(event) => setDraft(event.target.value)}
                   placeholder="Message Lightagent" disabled={busy || serviceUnavailable}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" && !event.shiftKey) {
