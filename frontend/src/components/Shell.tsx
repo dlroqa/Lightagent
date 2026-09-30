@@ -49,6 +49,7 @@ export function Shell() {
           onClick={() => setDrawerOpen(false)} />
       )}
 
+      {!chatRoute && (
       <nav className={`rail${mobile && drawerOpen ? " is-open" : ""}`}
         aria-label="Sections" aria-hidden={mobile && !drawerOpen}>
         <div className="rail__brand">
@@ -108,7 +109,7 @@ export function Shell() {
           </button>
         </div>
       </nav>
-
+      )}
       <main className={`main${chatRoute ? " main--chat" : ""}`}>
         <div className="mobilebar">
           <button type="button" className="btn btn--icon" aria-label="Open the menu"

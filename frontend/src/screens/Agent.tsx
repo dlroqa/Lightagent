@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { NavLink } from "react-router-dom";
 import { Ban, ChevronDown, CirclePlus, Cpu, FileText, Plus, Search, Send, ShieldCheck, Sparkles, Trash2, Wrench } from "lucide-react";
 
 import {
@@ -365,6 +366,19 @@ export function Agent() {
       />
       <div className="page agent-layout chat-workspace">
         <aside className="agent-sessions agent-sidebar chat-history" style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
+          <div className="chat-sidebar__brand">
+            <img src="/icon.png" alt="" width={30} height={30} />
+            <span><strong>Lightagent</strong><small>Agent workspace</small></span>
+          </div>
+          <button type="button" className="chat-sidebar__new" disabled={hasPendingWork} onClick={() => void startNew()}>
+            <Plus size={17} /> New chat
+          </button>
+          <nav className="chat-sidebar__nav" aria-label="Workspace">
+            <NavLink to="/" end><Sparkles size={16} /> Chat</NavLink>
+            <NavLink to="/tools"><Wrench size={16} /> Tools</NavLink>
+            <NavLink to="/settings"><ShieldCheck size={16} /> Settings</NavLink>
+          </nav>
+          <div className="chat-sidebar__section">Recent chats</div>
           <div style={{ position: "relative" }}>
             <Search size={15} style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", color: "var(--text-faint)" }} />
             <input className="input" style={{ paddingLeft: 34 }} placeholder="Search sessions…"
