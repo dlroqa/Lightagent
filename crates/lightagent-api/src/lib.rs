@@ -27,7 +27,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
-use lightagent_core::{AgentEvent, ApprovalPolicy, ConfigStore, ProfileId, ProfileStore};
+use lightagent_core::{
+    AgentEvent, ApprovalPolicy, ConfigStore, PlatformEndpointConfig, ProfileId, ProfileStore,
+    SkillStore, skill_dirs,
+};
 use lightagent_store::{Session, SessionId, SessionStore, StoredMessage, model_history};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -64,6 +67,12 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/lightagent/v1/tools", get(list_tools))
+        .route(
+            "/api/lightagent/v1/provider",
+            get(get_provider_capabilities),
+        )
+        .route("/api/lightagent/v1/skills", get(list_skills))
+        .route("/api/lightagent/v1/profiles", get(list_profiles))
         .route(
             "/api/lightagent/v1/settings",
             get(get_settings).put(save_settings),
@@ -190,7 +199,99 @@ async fn list_tools(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
     Json(json!({ "tools": tools })).into_response()
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+/// Public metadata for skills installed for the active profile. Bodies stay in
+/// the harness and are read by the approval-gated `skill.read` tool only.
+async fn list_skills(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::ToolsRead) {
+        return rejection;
+    }
+    let Some(config_store) = &state.config_store else {
+        return internal("Lightagent skills are unavailable in this embedding");
+    };
+    let Some(root) = config_store.path().parent() else {
+        return internal("Lightagent config has no parent directory");
+    };
+    let profile_id = match ProfileId::new(&state.session_profile) {
+        Ok(id) => id,
+        Err(error) => return internal(&error.to_string()),
+    };
+    let profiles = ProfileStore::new(root);
+    let skills = SkillStore::load(&skill_dirs(root, profiles.handle(&profile_id).dir()));
+    let skills: Vec<_> = skills
+        .names()
+        .into_iter()
+        .filter_map(|name| {
+            skills.get(&name).map(|skill| {
+                json!({
+                    "name": skill.name, "description": skill.description,
+                })
+            })
+        })
+        .collect();
+    Json(json!({ "skills": skills })).into_response()
+}
+async fn get_provider_capabilities(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::ToolsRead) {
+        return rejection;
+    }
+    match state.manager.provider_capabilities().await {
+        Ok(capabilities) => Json(capabilities).into_response(),
+        Err(error) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": error }))).into_response(),
+    }
+}
+
+/// A concise, non-sensitive view of a profile suitable for a model/profile picker.
+#[derive(Serialize)]
+struct ProfileSummary {
+    id: String,
+    name: String,
+    model: String,
+    active: bool,
+}
+
+async fn list_profiles(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::SessionsRead) {
+        return rejection;
+    }
+    let Some(config_store) = &state.config_store else {
+        return internal("Lightagent profiles are unavailable in this embedding");
+    };
+    let Some(root) = config_store.path().parent() else {
+        return internal("Lightagent config has no parent directory");
+    };
+    let profiles = ProfileStore::new(root);
+    let ids = match profiles.list() {
+        Ok(ids) => ids,
+        Err(error) => return internal(&error.to_string()),
+    };
+    let mut summaries = Vec::with_capacity(ids.len());
+    for id in ids {
+        let profile = match profiles.load(&id) {
+            Ok(profile) => profile,
+            Err(error) => return internal(&error.to_string()),
+        };
+        summaries.push(ProfileSummary {
+            active: profile.id.as_str() == state.session_profile,
+            id: profile.id.as_str().to_owned(),
+            name: profile.name,
+            model: profile.routing.model,
+        });
+    }
+    Json(json!({ "active_profile": state.session_profile, "profiles": summaries })).into_response()
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct UiPlatformEndpoint {
+    enabled: bool,
+    base_url: Option<String>,
+    /// Presence only: secret references and values never cross the API boundary.
+    api_key_configured: bool,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 struct UiSettings {
     max_turns: u32,
     max_tool_calls: u32,
@@ -201,6 +302,10 @@ struct UiSettings {
     terminal_enabled: bool,
     memory_enabled: bool,
     show_reasoning_in_tui: bool,
+    jev: UiPlatformEndpoint,
+    qdrant: UiPlatformEndpoint,
+    infinity: UiPlatformEndpoint,
+    open_terminal: UiPlatformEndpoint,
 }
 
 fn ui_settings(config: &lightagent_core::Config) -> UiSettings {
@@ -214,7 +319,29 @@ fn ui_settings(config: &lightagent_core::Config) -> UiSettings {
         terminal_enabled: config.tools.allow_terminal,
         memory_enabled: config.memory.auto_capture,
         show_reasoning_in_tui: config.tui.show_reasoning,
+        jev: ui_platform_endpoint(&config.platform.jev),
+        qdrant: ui_platform_endpoint(&config.platform.qdrant),
+        infinity: ui_platform_endpoint(&config.platform.infinity),
+        open_terminal: ui_platform_endpoint(&config.platform.open_terminal),
     }
+}
+
+fn ui_platform_endpoint(endpoint: &PlatformEndpointConfig) -> UiPlatformEndpoint {
+    UiPlatformEndpoint {
+        enabled: endpoint.enabled,
+        base_url: endpoint.base_url.clone(),
+        api_key_configured: endpoint.api_key.is_some(),
+    }
+}
+
+fn apply_platform_endpoint(endpoint: &mut PlatformEndpointConfig, settings: &UiPlatformEndpoint) {
+    endpoint.enabled = settings.enabled;
+    endpoint.base_url = settings
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned);
 }
 
 fn active_profile(
@@ -288,6 +415,10 @@ async fn save_settings(
     config.tools.allow_terminal = settings.terminal_enabled;
     config.memory.auto_capture = settings.memory_enabled;
     config.tui.show_reasoning = settings.show_reasoning_in_tui;
+    apply_platform_endpoint(&mut config.platform.jev, &settings.jev);
+    apply_platform_endpoint(&mut config.platform.qdrant, &settings.qdrant);
+    apply_platform_endpoint(&mut config.platform.infinity, &settings.infinity);
+    apply_platform_endpoint(&mut config.platform.open_terminal, &settings.open_terminal);
     if let Err(error) = config.validate() {
         return bad_request(&error.to_string());
     }
@@ -313,6 +444,8 @@ struct CreateRunBody {
     profile: Option<String>,
     #[serde(default)]
     session_id: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 async fn create_run(
@@ -373,6 +506,7 @@ async fn create_run(
             history,
             profile,
             cwd: None,
+            model: body.model,
         })
         .await;
     if let Some(id) = &session_id {

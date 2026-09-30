@@ -3,7 +3,7 @@
 use std::io::{BufRead, IsTerminal as _, Write};
 
 use clap::ValueEnum;
-use dialoguer::{Confirm, Input, MultiSelect, Select, theme::ColorfulTheme};
+use dialoguer::{Confirm, Input, MultiSelect, Password, Select, theme::ColorfulTheme};
 use lightagent_core::{
     AgentProfile, ApprovalPolicy, Config, ConfigStore, DUCKDUCKGO_SEARCH_ENDPOINT, LightagentPaths,
     ProfileId, ProfileStore,
@@ -323,11 +323,15 @@ async fn configure_gateway_tui(
         return Ok(true);
     }
 
-    let (base_url, api_key) = if selected == 0 {
-        (LOCAL_URL.to_owned(), None)
+    let (base_url, mut api_key, provider_id) = if selected == 0 {
+        (LOCAL_URL.to_owned(), None, "lightweight-local".to_owned())
     } else if selected < custom_index {
         let saved = &config.inference.saved_providers[selected - 1];
-        (saved.base_url.clone(), saved.api_key.clone())
+        (
+            saved.base_url.clone(),
+            saved.api_key.clone(),
+            provider_key_id(&saved.name),
+        )
     } else {
         let name = Input::<String>::with_theme(theme)
             .with_prompt("Provider name")
@@ -351,22 +355,7 @@ async fn configure_gateway_tui(
             })
             .interact_text()
             .map_err(dialog_error)?;
-        let needs_key = Confirm::with_theme(theme)
-            .with_prompt("Does this provider require an API key?")
-            .default(false)
-            .interact_opt()
-            .map_err(dialog_error)?
-            .unwrap_or(false);
-        let api_key = if needs_key {
-            let variable = Input::<String>::with_theme(theme)
-                .with_prompt("Environment variable containing the API key")
-                .with_initial_text("LIGHTAGENT_PROVIDER_API_KEY")
-                .interact_text()
-                .map_err(dialog_error)?;
-            Some(SecretRef::env(variable))
-        } else {
-            None
-        };
+        let api_key = None;
         let saved = SavedProvider {
             name: name.trim().to_owned(),
             base_url: base_url.trim_end_matches('/').to_owned(),
@@ -382,16 +371,33 @@ async fn configure_gateway_tui(
         } else {
             config.inference.saved_providers.push(saved);
         }
-        (base_url, api_key)
+        (base_url, api_key, provider_key_id(&name))
     };
 
-    let mut provider_config = ProviderConfig::new(&base_url, "default");
-    if let Some(key) = api_key.as_ref().and_then(SecretRef::resolve) {
-        provider_config = provider_config.with_api_key(key);
+    let mut models = provider_models(&base_url, api_key.as_ref()).await;
+    if api_key.is_none()
+        && models
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.to_string().contains("401 Unauthorized"))
+    {
+        let save_key = Confirm::with_theme(theme)
+            .with_prompt("This provider requires an API key. Paste and save it privately?")
+            .default(true)
+            .interact_opt()
+            .map_err(dialog_error)?
+            .unwrap_or(false);
+        if save_key {
+            api_key = Some(store_provider_key_tui(paths, &provider_id, theme)?);
+            models = provider_models(&base_url, api_key.as_ref()).await;
+        }
     }
-    let models = match LightweightProvider::new(provider_config) {
-        Ok(provider) => provider.models().await.unwrap_or_default(),
-        Err(_) => Vec::new(),
+    let models = match models {
+        Ok(models) => models,
+        Err(error) => {
+            eprintln!("Could not list models: {error}");
+            Vec::new()
+        }
     };
     let mut items = vec!["Automatic — follow the loaded model".to_owned()];
     items.extend(models.iter().cloned());
@@ -411,6 +417,14 @@ async fn configure_gateway_tui(
         return Ok(false);
     };
     let model = selected.checked_sub(1).map(|index| models[index].clone());
+    if let Some(saved) = config
+        .inference
+        .saved_providers
+        .iter_mut()
+        .find(|saved| saved.base_url == base_url)
+    {
+        saved.api_key = api_key.clone();
+    }
     config.inference.base_url = base_url;
     config.inference.api_key = api_key;
     config.inference.model = model.clone();
@@ -419,6 +433,53 @@ async fn configure_gateway_tui(
         profile.routing.model = model.unwrap_or_else(|| "default".to_owned());
     })?;
     Ok(true)
+}
+
+async fn provider_models(
+    base_url: &str,
+    api_key: Option<&SecretRef>,
+) -> Result<Vec<String>, lightagent_core::ProviderError> {
+    let mut config = ProviderConfig::new(base_url, "default");
+    if let Some(key) = api_key.and_then(SecretRef::resolve) {
+        config = config.with_api_key(key);
+    }
+    LightweightProvider::new(config)?.models().await
+}
+
+fn store_provider_key_tui(
+    paths: &LightagentPaths,
+    provider_id: &str,
+    theme: &ColorfulTheme,
+) -> Result<SecretRef, String> {
+    let key = Password::with_theme(theme)
+        .with_prompt("Provider API key")
+        .interact()
+        .map_err(dialog_error)?;
+    if key.trim().is_empty() {
+        return Err("provider API key cannot be empty".to_owned());
+    }
+    let path = paths.provider_key_file(provider_id);
+    lightagent_core::paths::write_private(&path, key.as_bytes()).map_err(io_error)?;
+    Ok(SecretRef::file(path))
+}
+
+fn provider_key_id(name: &str) -> String {
+    let id = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let id = id.trim_matches('-');
+    if id.is_empty() {
+        "provider".to_owned()
+    } else {
+        id.to_owned()
+    }
 }
 
 fn configure_tools_tui(config: &mut Config, theme: &ColorfulTheme) -> Result<bool, String> {

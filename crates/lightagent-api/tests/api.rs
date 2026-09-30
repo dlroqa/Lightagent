@@ -234,6 +234,7 @@ async fn a_run_drives_to_completion_and_buffers_its_events() {
             history: Vec::new(),
             profile: None,
             cwd: None,
+            model: None,
         })
         .await;
 

@@ -26,6 +26,12 @@ const FORMAT_VERSION: u32 = 1;
 pub enum SecretRef {
     /// Read the secret from an environment variable at point of use.
     Env { var: String },
+    /// Read the secret from a private file managed by Lightagent.
+    ///
+    /// The file is created owner-only by the setup flow. Keeping the value out
+    /// of the main configuration makes a pasted provider key convenient
+    /// without making it appear in config views or backups of that file.
+    File { path: PathBuf },
 }
 
 /// A named OpenAI-compatible endpoint saved for quick switching in the CLI.
@@ -44,6 +50,11 @@ impl SecretRef {
         Self::Env { var: var.into() }
     }
 
+    /// Reference a private file containing a secret.
+    pub fn file(path: impl Into<PathBuf>) -> Self {
+        Self::File { path: path.into() }
+    }
+
     /// Resolve the secret's value now, if the reference points somewhere real.
     ///
     /// The only place a secret becomes a value. Returns `None` when the
@@ -52,6 +63,10 @@ impl SecretRef {
     pub fn resolve(&self) -> Option<String> {
         match self {
             Self::Env { var } => std::env::var(var).ok().filter(|value| !value.is_empty()),
+            Self::File { path } => std::fs::read_to_string(path)
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
         }
     }
 
@@ -60,6 +75,7 @@ impl SecretRef {
     pub fn redacted(&self) -> String {
         match self {
             Self::Env { var } => format!("${{env:{var}}}"),
+            Self::File { path } => format!("${{file:{}}}", path.display()),
         }
     }
 }
@@ -538,6 +554,67 @@ impl Default for TuiConfig {
     }
 }
 
+/// Server-controlled limits for the opt-in hierarchical delegation feature.
+///
+/// The feature is disabled by default. Ordinary CLI and HTTP chat remain on
+/// the single-agent path unless a run explicitly delegates a bounded task.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SubagentsConfig {
+    /// Allow bounded subagent delegation for newly created runs.
+    pub enabled: bool,
+    /// Deepest allowed child generation; the lead is depth zero.
+    pub max_depth: u8,
+    /// Maximum direct children an agent may create.
+    pub max_children_per_agent: u8,
+    /// Role profile names a delegated task may request.
+    pub allowed_roles: Vec<String>,
+}
+
+impl Default for SubagentsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_depth: 2,
+            max_children_per_agent: 3,
+            allowed_roles: vec![
+                "researcher".to_owned(),
+                "coder".to_owned(),
+                "reviewer".to_owned(),
+                "tester".to_owned(),
+            ],
+        }
+    }
+}
+
+/// An opt-in endpoint owned by an external platform component.
+///
+/// Lightagent never starts, embeds, or stores credentials for these services.
+/// Keeping their addresses in the harness configuration makes the deployment
+/// topology explicit while preserving the provider and tool boundaries.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlatformEndpointConfig {
+    pub enabled: bool,
+    pub base_url: Option<String>,
+    pub api_key: Option<SecretRef>,
+}
+
+/// Optional services that surround the Lightagent harness in a full platform
+/// deployment. They are configuration only: each service keeps its own
+/// lifecycle, data, and security boundary.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlatformConfig {
+    /// Jev makes routing and confidence decisions before a run is dispatched.
+    pub jev: PlatformEndpointConfig,
+    /// Qdrant stores durable vectors for a remote retrieval deployment.
+    pub qdrant: PlatformEndpointConfig,
+    /// Infinity reranks retrieved candidates.
+    pub infinity: PlatformEndpointConfig,
+    /// Open Terminal executes code in an isolated execution environment.
+    pub open_terminal: PlatformEndpointConfig,
+}
 /// The whole typed configuration.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
@@ -563,8 +640,14 @@ pub struct Config {
     pub runtime: RuntimeConfig,
     #[serde(default)]
     pub tui: TuiConfig,
-    /// Top-level keys this build does not understand, preserved across a save.
+    /// Addresses for optional, externally operated platform components.
+    #[serde(default)]
+    pub platform: PlatformConfig,
+    /// Server controls for opt-in bounded hierarchical delegation.
+    #[serde(default)]
+    pub subagents: SubagentsConfig,
     #[serde(flatten)]
+    /// Top-level keys this build does not understand, preserved across a save.
     pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -735,8 +818,51 @@ impl Config {
                 "memory.top_k must be at least 1".to_owned(),
             ));
         }
+        for (name, endpoint) in [
+            ("platform.jev", &self.platform.jev),
+            ("platform.qdrant", &self.platform.qdrant),
+            ("platform.infinity", &self.platform.infinity),
+            ("platform.open_terminal", &self.platform.open_terminal),
+        ] {
+            if endpoint.enabled {
+                match endpoint.base_url.as_deref().map(str::trim) {
+                    Some(url) if url.starts_with("http://") || url.starts_with("https://") => {}
+                    _ => {
+                        return Err(ConfigError::Invalid(format!(
+                            "{name}.base_url must be an http(s) URL when enabled"
+                        )));
+                    }
+                }
+            }
+        }
+
+        let device = self.runtime.preferred_device.trim().to_ascii_lowercase();
+        if self.subagents.enabled {
+            if self.subagents.max_depth == 0 || self.subagents.max_depth > 2 {
+                return Err(ConfigError::Invalid(
+                    "subagents.max_depth must be between 1 and 2".to_owned(),
+                ));
+            }
+            if self.subagents.max_children_per_agent == 0
+                || self.subagents.max_children_per_agent > 3
+            {
+                return Err(ConfigError::Invalid(
+                    "subagents.max_children_per_agent must be between 1 and 3".to_owned(),
+                ));
+            }
+            if self.subagents.allowed_roles.is_empty()
+                || self
+                    .subagents
+                    .allowed_roles
+                    .iter()
+                    .any(|role| role.trim().is_empty())
+            {
+                return Err(ConfigError::Invalid(
+                    "subagents.allowed_roles must contain non-empty roles".to_owned(),
+                ));
+            }
+        }
         {
-            let device = self.runtime.preferred_device.trim().to_ascii_lowercase();
             if !matches!(device.as_str(), "auto" | "cpu" | "cuda" | "metal" | "rocm") {
                 return Err(ConfigError::Invalid(format!(
                     "runtime.preferred_device must be auto, cpu, cuda, metal or rocm, got {:?}",
@@ -809,6 +935,24 @@ impl Config {
                 "api_key".to_owned(),
                 serde_json::Value::String(api_key.redacted()),
             );
+        }
+        for (name, endpoint) in [
+            ("jev", &self.platform.jev),
+            ("qdrant", &self.platform.qdrant),
+            ("infinity", &self.platform.infinity),
+            ("open_terminal", &self.platform.open_terminal),
+        ] {
+            if let Some(api_key) = &endpoint.api_key
+                && let Some(component) = value
+                    .get_mut("platform")
+                    .and_then(|platform| platform.get_mut(name))
+                    .and_then(serde_json::Value::as_object_mut)
+            {
+                component.insert(
+                    "api_key".to_owned(),
+                    serde_json::Value::String(api_key.redacted()),
+                );
+            }
         }
         value
     }
@@ -1192,6 +1336,19 @@ mod tests {
                 .and_then(SecretRef::resolve),
             Some(value)
         );
+    }
+
+    #[test]
+    fn a_private_file_secret_resolves_without_entering_config() {
+        let path = scratch().join("provider.key");
+        let value = "private-provider-token";
+        paths::write_private(&path, value.as_bytes()).expect("write secret");
+
+        let secret = SecretRef::file(&path);
+        assert_eq!(secret.resolve().as_deref(), Some(value));
+        assert!(!secret.redacted().contains(value));
+
+        std::fs::remove_dir_all(path.parent().expect("temporary parent")).ok();
     }
 
     #[test]

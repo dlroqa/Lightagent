@@ -79,13 +79,13 @@ fn worker_store(home: &std::path::Path) -> ProfileStore {
 }
 
 fn delegation(store: ProfileStore, worker: MockProvider) -> Delegation {
-    Delegation {
-        profiles: Arc::new(store),
-        factory: Arc::new(MockFactory { provider: worker }),
-        worker_registry: ToolRegistry::worker_default(),
-        worker_per_call: Duration::from_secs(5),
-        worker_max_output_bytes: 262_144,
-    }
+    Delegation::new(
+        Arc::new(store),
+        Arc::new(MockFactory { provider: worker }),
+        ToolRegistry::worker_default(),
+        Duration::from_secs(5),
+        262_144,
+    )
 }
 
 #[tokio::test]

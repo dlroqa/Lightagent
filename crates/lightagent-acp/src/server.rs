@@ -449,6 +449,7 @@ impl PromptTask {
                 history,
                 profile,
                 cwd,
+                model: None,
             })
             .await;
         let cancel = run.cancel_token();

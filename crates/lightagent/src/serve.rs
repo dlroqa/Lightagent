@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use lightagent_api::manager::{self, RunFactory, RunManager, RunStatus, StartRun};
+use lightagent_api::manager::{
+    self, ProviderCapabilities, RunFactory, RunManager, RunStatus, StartRun,
+};
 use lightagent_api::{AppState, AuthConfig, Scope, router};
 use lightagent_core::{
     AgentEvent, AgentEventSink, AgentLoop, ApprovalDecision, ConfigStore, LightagentPaths,
@@ -52,6 +54,43 @@ impl RunFactory for LightweightRunFactory {
             .collect())
     }
 
+    async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let config = ConfigStore::at(&paths)
+            .load()
+            .map_err(|error| error.to_string())?;
+        let profiles = ProfileStore::new(&self.root);
+        let profile = resolve_profile(&profiles, &config, None)?;
+        let base_url = profile
+            .routing
+            .base_url
+            .unwrap_or_else(|| config.inference.base_url.clone());
+        let configured_model = configured_model(&profile.routing.model, &config);
+        let api_key = config
+            .inference
+            .api_key
+            .as_ref()
+            .and_then(|secret| secret.resolve());
+        let mut provider_config = ProviderConfig::new(base_url.clone(), configured_model.clone());
+        if let Some(key) = api_key {
+            provider_config = provider_config.with_api_key(key);
+        }
+        let models = LightweightProvider::new(provider_config)
+            .map_err(|error| error.to_string())?
+            .models()
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(ProviderCapabilities {
+            provider: config.inference.provider,
+            base_url,
+            configured_model: (!configured_model.eq("default")).then_some(configured_model),
+            models,
+            streaming: true,
+            tool_calls: true,
+            reasoning_content: false,
+        })
+    }
+
     async fn run(
         &self,
         request: StartRun,
@@ -81,7 +120,10 @@ impl RunFactory for LightweightRunFactory {
             .base_url
             .clone()
             .unwrap_or_else(|| config.inference.base_url.clone());
-        let model = configured_model(&profile.routing.model, &config);
+        let model = request
+            .model
+            .clone()
+            .unwrap_or_else(|| configured_model(&profile.routing.model, &config));
         let api_key = config
             .inference
             .api_key
@@ -110,13 +152,14 @@ impl RunFactory for LightweightRunFactory {
         let profile_dir = store.handle(&profile.id).dir().to_path_buf();
         let extensions = load_extensions(&self.root, &profile_dir);
         let skills = load_skills(&self.root, &profile_dir, &extensions, &config);
-        let delegation = Delegation {
-            profiles: Arc::new(store),
-            factory: Arc::new(LightweightFactory { base_url, api_key }),
-            worker_registry: ToolRegistry::worker_default(),
-            worker_per_call: Duration::from_secs(60),
-            worker_max_output_bytes: 262_144,
-        };
+        let mut delegation = Delegation::new(
+            Arc::new(store),
+            Arc::new(LightweightFactory { base_url, api_key }),
+            ToolRegistry::worker_default(),
+            Duration::from_secs(60),
+            262_144,
+        );
+        delegation.subagents = crate::chat::subagent_policy(&config);
         let registry =
             configured_registry(&config, &profile_dir, &extensions, !skills.is_empty()).await;
         let mut executor = BoundedExecutor::new(

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Ban, ChevronDown, Cpu, Plus, Search, Send, ShieldCheck, Trash2, Wrench } from "lucide-react";
+import { Ban, ChevronDown, CirclePlus, Cpu, FileText, Plus, Search, Send, ShieldCheck, Sparkles, Trash2, Wrench } from "lucide-react";
 
 import {
   agentApi,
@@ -87,6 +87,8 @@ export function Agent() {
   const sessions = usePoll(() => agentApi.sessions().then((body) => body.sessions), 2000);
   // Runtime facts exposed by this same Lightagent process.
   const toolCatalog = usePoll(() => agentApi.tools().then((body) => body.tools), 0);
+  const provider = usePoll(agentApi.provider, 10_000);
+  const [selectedModel, setSelectedModel] = useState<string>("");
   const agentSettings = usePoll(agentApi.settings, 0);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [railToolsOpen, setRailToolsOpen] = useState(false);
@@ -193,7 +195,7 @@ export function Agent() {
         let created: Awaited<ReturnType<typeof agentApi.createRun>> | null = null;
         for (let attempt = 0; attempt < 20; attempt += 1) {
           try {
-            created = await agentApi.createRun(next, undefined, activeId);
+            created = await agentApi.createRun(next, undefined, activeId, selectedModel || undefined);
             break;
           } catch (cause) {
             const message = cause instanceof Error ? cause.message : String(cause);
@@ -301,7 +303,7 @@ export function Agent() {
         loadGeneration.current += 1;
         setActiveId(id);
       }
-      const run = await agentApi.createRun(message, undefined, id);
+      const run = await agentApi.createRun(message, undefined, id, selectedModel || undefined);
       setRunId(run.id);
       await load(id);
       sessions.refresh();
@@ -350,7 +352,7 @@ export function Agent() {
         }
       />
       <div className="page agent-layout">
-        <aside className="card agent-sessions" style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
+        <aside className="card agent-sessions agent-sidebar" style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
           <div style={{ position: "relative" }}>
             <Search size={15} style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", color: "var(--text-faint)" }} />
             <input className="input" style={{ paddingLeft: 34 }} placeholder="Search sessions…"
@@ -400,15 +402,44 @@ export function Agent() {
             )}
           </div>
         </aside>
-        <section className="card" style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
+        <section className="card agent-conversation" style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
           {shownError && (
             <div className="notice notice--danger" role="alert">
               <div>{shownError}</div>
             </div>
           )}
           {!session ? (
-            <Empty title="Start an agent session"
-              hint="Pick one from the list, or create a new session. Saved sessions can be resumed or deleted at any time." />
+            <div className="agent-welcome">
+              <div className="agent-welcome__eyebrow"><Sparkles size={15} /> Lightagent</div>
+              <h2>Where should we begin?</h2>
+              <p>Start a conversation with your connected local agent.</p>
+              <div className="welcome-composer">
+                <CirclePlus size={21} aria-hidden="true" />
+                <textarea rows={1} value={draft} onChange={(event) => setDraft(event.target.value)}
+                  placeholder="Message Lightagent" disabled={busy || serviceUnavailable}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      void send();
+                    }
+                  }} aria-label="Message Lightagent" />
+                <label className="welcome-composer__model">
+                  <Cpu size={14} />
+                  <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} disabled={!provider.data || busy} aria-label="Model for this conversation">
+                    <option value="">{provider.data?.configured_model ?? "Auto model"}</option>
+                    {provider.data?.models.map((model) => <option key={model} value={model}>{model}</option>)}
+                  </select>
+                </label>
+                <button type="button" className="welcome-composer__send"
+                  disabled={!draft.trim() || busy || serviceUnavailable} onClick={() => void send()} aria-label="Send message">
+                  <Send size={17} />
+                </button>
+              </div>
+              <div className="agent-suggestions">
+                <button type="button" onClick={() => setDraft("Summarize the current project status, blockers, decisions, and next milestones.")}><FileText size={16} /> Summarize this project</button>
+                <button type="button" onClick={() => setDraft("Help me plan the next steps for this task.")}><Sparkles size={16} /> Plan next steps</button>
+              </div>
+            </div>
           ) : (
             <>
               <div style={{ flex: 1, overflowY: "auto", paddingRight: 4 }}>
@@ -512,17 +543,24 @@ export function Agent() {
                   open={toolsOpen}
                   anchorRef={composerToolsBtn}
                   onClose={() => setToolsOpen(false)}
+
                   tools={toolCatalog.data}
                 />
-                {session.profile && (
-                  <span className="composer-fact" title="Runs follow this session's profile">
-                    <Cpu size={13} /> {session.profile}
-                  </span>
-                )}
                 {agentSettings.data && (
+                  <>
+                <label className="composer-model">
+                  <Cpu size={13} />
+                  <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} disabled={!provider.data || running} aria-label="Model for the next run">
+                    <option value="">{provider.data?.configured_model ?? "Auto model"}</option>
+                    {provider.data?.models.map((model) => <option key={model} value={model}>{model}</option>)}
+                  </select>
+                </label>
+                {provider.data && <span className="composer-fact"><Sparkles size={13} /> {provider.data.reasoning_content ? "Reasoning ready" : "Standard reasoning"}</span>}
+
                   <span className="composer-fact" title="Approval policy for new runs">
                     <ShieldCheck size={13} /> {POLICY_LABEL[agentSettings.data.approval_policy] ?? agentSettings.data.approval_policy}
                   </span>
+                  </>
                 )}
                 <span style={{ flex: 1 }} />
                 <span className="composer-fact">{session.messages.length} msgs · {session.runs.length} runs</span>

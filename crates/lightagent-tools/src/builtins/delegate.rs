@@ -33,7 +33,10 @@ pub struct AgentDelegate {
 /// fields, so this deserialization does not fail in practice.
 #[derive(Debug, Deserialize)]
 struct DelegateArgs {
-    profile: String,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
     task: String,
     #[serde(default)]
     max_turns: Option<u32>,
@@ -52,7 +55,12 @@ impl AgentDelegate {
         let parameters = json!({
             "type": "object",
             "properties": {
-                "profile": { "type": "string", "description": "The worker profile id to run the task." },
+                "profile": { "type": "string", "description": "The worker profile id to run the task (legacy mode)." },
+                "role": {
+                    "type": "string",
+                    "enum": ["researcher", "coder", "reviewer", "tester"],
+                    "description": "An enabled server-defined worker role."
+                },
                 "task": { "type": "string", "description": "The instruction for the worker." },
                 "max_turns": { "type": "integer", "minimum": 1, "description": "Cap the worker's model turns." },
                 "max_seconds": { "type": "integer", "minimum": 1, "description": "Cap the worker's wall-clock seconds." },
@@ -62,7 +70,8 @@ impl AgentDelegate {
                     "description": "Restrict the worker to these tool names.",
                 }
             },
-            "required": ["profile", "task"],
+            "required": ["task"],
+            "anyOf": [{"required": ["profile"]}, {"required": ["role"]}],
             "additionalProperties": false,
         });
         Self {
@@ -99,8 +108,32 @@ impl Tool for AgentDelegate {
                 return ToolOutcome::error(format!("could not read delegate arguments: {error}"));
             }
         };
-
-        let profile_id = match ProfileId::new(&args.profile) {
+        let profile_name = match (args.profile.as_deref(), args.role.as_deref()) {
+            (Some(_), Some(_)) => {
+                return ToolOutcome::error("provide either profile or role, not both");
+            }
+            (Some(profile), None) => profile,
+            (None, Some(role)) => {
+                if !delegation.subagents.enabled {
+                    return ToolOutcome::error("named subagent roles are disabled for this run");
+                }
+                match delegation.role_profile(role) {
+                    Some(profile) => profile,
+                    None => {
+                        return ToolOutcome::error(format!("worker role '{role}' is not allowed"));
+                    }
+                }
+            }
+            (None, None) => return ToolOutcome::error("a worker profile or role is required"),
+        };
+        // Turning hierarchy on also caps legacy delegates. With the default
+        // disabled policy their long-standing one-level behavior is unchanged.
+        if delegation.subagents.enabled
+            && let Err(error) = delegation.reserve_child()
+        {
+            return ToolOutcome::error(error);
+        }
+        let profile_id = match ProfileId::new(profile_name) {
             Ok(id) => id,
             Err(error) => return ToolOutcome::error(format!("invalid worker profile id: {error}")),
         };
@@ -109,7 +142,7 @@ impl Tool for AgentDelegate {
             Err(error) => {
                 return ToolOutcome::error(format!(
                     "could not load worker profile '{}': {error}",
-                    args.profile
+                    profile_name
                 ));
             }
         };
@@ -119,27 +152,34 @@ impl Tool for AgentDelegate {
             Err(error) => {
                 return ToolOutcome::error(format!(
                     "no provider for worker '{}': {error}",
-                    args.profile
+                    profile_name
                 ));
             }
         };
 
-        // A fresh, scoped tool set: the worker's tools, narrowed to `tool_scope`
-        // when given, and always without `agent.delegate` (single level deep).
+        // A fresh, scoped tool set. Legacy delegates remain one level deep;
+        // opted-in role delegates may expose one further bounded level.
         let mut registry = match &args.tool_scope {
             Some(scope) => delegation.worker_registry.scoped(scope),
             None => delegation.worker_registry.clone(),
         };
-        registry = registry.without(Self::NAME);
+        if !delegation.permits_nested_delegation() {
+            registry = registry.without(Self::NAME);
+        } else if !registry.contains(Self::NAME) {
+            registry = registry.with(std::sync::Arc::new(AgentDelegate::new()));
+        }
 
         let limits = intersect_caps(&worker.limits, args.max_turns, args.max_seconds);
-        let executor = BoundedExecutor::new(
+        let mut executor = BoundedExecutor::new(
             registry,
             PolicyEngine::new(worker.approval_policy.into()),
             delegation.worker_per_call,
             delegation.worker_max_output_bytes,
         )
         .with_clock(Clock::System);
+        if delegation.permits_nested_delegation() {
+            executor = executor.with_delegation(delegation.child_context());
+        }
 
         let mut config = RunConfig::new(worker.routing.model.clone());
         config.system = Some(worker.persona.clone());
@@ -151,15 +191,15 @@ impl Tool for AgentDelegate {
             Ok(RunOutcome::Completed { events }) => ToolOutcome::ok(final_content(&events)),
             Ok(RunOutcome::AwaitingApproval { .. }) => ToolOutcome::error(format!(
                 "worker '{}' paused awaiting approval, which delegation cannot grant",
-                args.profile
+                profile_name
             )),
             // Unreachable under the default wrap-up policy a worker runs with;
             // handled so a pause could never be mistaken for an answer.
             Ok(RunOutcome::OutOfTime { .. }) => ToolOutcome::error(format!(
                 "worker '{}' ran out of time before answering",
-                args.profile
+                profile_name
             )),
-            Err(error) => ToolOutcome::error(format!("worker '{}' failed: {error}", args.profile)),
+            Err(error) => ToolOutcome::error(format!("worker '{profile_name}' failed: {error}")),
         }
     }
 }

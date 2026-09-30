@@ -10,6 +10,8 @@ import { usePreferences } from "../state/preferences";
 export function SettingsScreen() {
   const { preferences, update } = usePreferences();
   const settings = usePoll(agentApi.settings, 0);
+  const profiles = usePoll(agentApi.profiles, 0);
+  const tools = usePoll(() => agentApi.tools().then((body) => body.tools), 0);
   const [current, setCurrent] = useState<LightagentSettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -34,6 +36,7 @@ export function SettingsScreen() {
   }
 
   const value = current ?? settings.data;
+  const delegationAvailable = tools.data?.some((tool) => tool.name === "agent.delegate");
   return (
     <>
       <TopBar title="Settings" subtitle="Harness policy, tools, memory, and appearance" />
@@ -76,6 +79,45 @@ export function SettingsScreen() {
               onSave={(wall_clock_secs) => persist({ wall_clock_secs })} />
           </Card>
 
+          <Card title="Profiles">
+            <p className="card__note">
+              Saved CLI profiles keep model and routing choices together. The active profile is used by new sessions.
+            </p>
+            {profiles.data ? (
+              <div className="profile-list">
+                {profiles.data.profiles.map((profile) => (
+                  <div className="profile-row" key={profile.id}>
+                    <div>
+                      <strong>{profile.name}</strong>
+                      <span>{profile.model}</span>
+                    </div>
+                    {profile.active && <span className="status-chip">Active</span>}
+                  </div>
+                ))}
+                {profiles.data.profiles.length === 0 && <span className="muted">No saved profiles were reported.</span>}
+              </div>
+            ) : (
+              <span className="muted">{profiles.error ? "Profiles are unavailable for this server." : "Loading profiles…"}</span>
+            )}
+          </Card>
+
+          <Card title="Subagents">
+            {tools.data ? (
+              delegationAvailable ? (
+                <div className="capability-status capability-status--available">
+                  <strong>Delegation available</strong>
+                  <span>Eligible runs can request the approval-gated agent.delegate tool. It remains opt-in.</span>
+                </div>
+              ) : (
+                <div className="capability-status">
+                  <strong>Delegation is not enabled</strong>
+                  <span>This harness is running in its standard single-agent mode.</span>
+                </div>
+              )
+            ) : <span className="muted">Checking harness capabilities…</span>}
+          </Card>
+
+
           <Card title="Capabilities">
             <ToggleRow label="Web tools" hint="Allow configured web search and fetch tools."
               checked={value?.web_enabled ?? false} disabled={!value || saving}
@@ -96,6 +138,24 @@ export function SettingsScreen() {
             <ToggleRow label="Show reasoning in terminal" hint="Presentation setting for the terminal UI."
               checked={value?.show_reasoning_in_tui ?? true} disabled={!value || saving}
               onChange={(show_reasoning_in_tui) => void persist({ show_reasoning_in_tui })} />
+          </Card>
+
+          <Card title="Platform endpoints">
+            <p className="card__note">
+              Connect external services only when your deployment provides them. URLs must use HTTP or HTTPS; secrets stay in the CLI configuration and are never shown here.
+            </p>
+            <PlatformEndpointRow label="Jev" hint="Routing and confidence decisions before a run is dispatched."
+              endpoint={value?.jev} disabled={!value || saving}
+              onSave={(jev) => persist({ jev })} />
+            <PlatformEndpointRow label="Qdrant" hint="Remote vector retrieval for configured knowledge sources."
+              endpoint={value?.qdrant} disabled={!value || saving}
+              onSave={(qdrant) => persist({ qdrant })} />
+            <PlatformEndpointRow label="Infinity" hint="Reranks retrieved candidates before they reach the agent."
+              endpoint={value?.infinity} disabled={!value || saving}
+              onSave={(infinity) => persist({ infinity })} />
+            <PlatformEndpointRow label="Open Terminal" hint="An isolated code-execution service; separate from local terminal tools."
+              endpoint={value?.open_terminal} disabled={!value || saving}
+              onSave={(open_terminal) => persist({ open_terminal })} />
           </Card>
 
           <Card title="Appearance">
@@ -194,6 +254,41 @@ function ToggleRow({ label, hint, checked, onChange, disabled }: {
         <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>{hint}</div>
       </div>
       <Switch checked={checked} onChange={onChange} label={label} disabled={disabled} />
+    </div>
+  );
+}
+
+function PlatformEndpointRow({ label, hint, endpoint, disabled, onSave }: {
+  label: string;
+  hint: string;
+  endpoint: LightagentSettings["jev"] | undefined;
+  disabled: boolean;
+  onSave: (endpoint: LightagentSettings["jev"]) => Promise<void>;
+}) {
+  const [baseUrl, setBaseUrl] = useState(endpoint?.base_url ?? "");
+  useEffect(() => setBaseUrl(endpoint?.base_url ?? ""), [endpoint?.base_url]);
+
+  if (!endpoint) return null;
+  const saveUrl = () => {
+    const next = baseUrl.trim() || null;
+    if (next !== endpoint.base_url) void onSave({ ...endpoint, base_url: next });
+  };
+  return (
+    <div style={{ padding: "14px 0", borderBottom: "1px solid var(--rule)" }}>
+      <ToggleRow label={label} hint={hint} checked={endpoint.enabled} disabled={disabled}
+        onChange={(enabled) => void onSave({ ...endpoint, enabled })} />
+      <div className="field" style={{ marginTop: 10 }}>
+        <label className="field__label" htmlFor={`platform-${label.toLowerCase().replaceAll(" ", "-")}`}>
+          Base URL
+        </label>
+        <input className="input" type="url" inputMode="url" placeholder="https://service.example"
+          id={`platform-${label.toLowerCase().replaceAll(" ", "-")}`} value={baseUrl}
+          disabled={disabled || !endpoint.enabled} onChange={(event) => setBaseUrl(event.target.value)}
+          onBlur={saveUrl} />
+        <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 4 }}>
+          {endpoint.api_key_configured ? "A secret is configured in the CLI; its value is hidden." : "No secret configured."}
+        </div>
+      </div>
     </div>
   );
 }

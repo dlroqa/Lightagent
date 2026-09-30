@@ -129,6 +129,8 @@ enum Command {
     },
     /// Serve the Agent Client Protocol (ACP) over stdio, for an editor to drive.
     Acp,
+    /// Show the configured agent-platform component topology.
+    Architecture,
 
     /// Report the environment, home, profile and provider.
     Doctor,
@@ -398,6 +400,7 @@ async fn dispatch(cli: Cli) -> Result<(), String> {
             web_root,
         }) => serve::run(host, port, key_env, web_root).await,
         Some(Command::Acp) => acp::run().await,
+        Some(Command::Architecture) => architecture(cli.json),
         Some(Command::Doctor) => doctor(cli.json).await,
         Some(Command::Import { source }) => match source {
             ImportSource::Hermes {
@@ -521,8 +524,68 @@ pub(crate) fn default_profile(config: &Config) -> Result<AgentProfile, String> {
     Ok(profile)
 }
 
-// --- doctor -----------------------------------------------------------------
+/// Print the deployment topology without contacting optional endpoints.
+fn architecture(json: bool) -> Result<(), String> {
+    let paths = paths()?;
+    let config = load_config(&paths)?;
+    let component = |endpoint: &lightagent_core::PlatformEndpointConfig| {
+        if endpoint.enabled {
+            format!(
+                "configured @ {}",
+                endpoint.base_url.as_deref().unwrap_or("(invalid)")
+            )
+        } else {
+            "not configured".to_owned()
+        }
+    };
 
+    if json {
+        let value = serde_json::json!({
+            "harness": "Lightagent CLI/API and browser UI",
+            "web_ui": "served by `lightagent serve --web-root`",
+            "jev": component(&config.platform.jev),
+            "qdrant": component(&config.platform.qdrant),
+            "infinity": component(&config.platform.infinity),
+            "searxng": if config.web.enabled { config.web.search.endpoint.clone() } else { None },
+            "open_terminal": component(&config.platform.open_terminal),
+            "lightweight": config.inference.base_url,
+        });
+        println!("{value:#}");
+        return Ok(());
+    }
+
+    println!("Agent harness / Open WebUI");
+    println!(
+        "├─ Jev: routing and confidence decisions [{}]",
+        component(&config.platform.jev)
+    );
+    println!(
+        "├─ Qdrant + Infinity: retrieve and rerank knowledge [{}; {}]",
+        component(&config.platform.qdrant),
+        component(&config.platform.infinity)
+    );
+    println!(
+        "├─ SearXNG: current web information [{}]",
+        config
+            .web
+            .search
+            .endpoint
+            .as_deref()
+            .filter(|_| config.web.enabled)
+            .unwrap_or("not configured")
+    );
+    println!(
+        "├─ Open Terminal: isolated code execution [{}]",
+        component(&config.platform.open_terminal)
+    );
+    println!(
+        "└─ Lightweight: local inference and API gateway [{}]",
+        config.inference.base_url
+    );
+    Ok(())
+}
+
+// --- doctor -----------------------------------------------------------------
 async fn doctor(json: bool) -> Result<(), String> {
     let paths = paths()?;
     let config = load_config(&paths)?;

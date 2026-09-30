@@ -54,6 +54,8 @@ pub struct StartRun {
     /// session. Empty for a genuinely new session or a stateless API call.
     pub history: Vec<ProviderMessage>,
     pub profile: Option<String>,
+    /// Optional model id selected for this run; validated by the provider.
+    pub model: Option<String>,
     /// The working directory for this run (an ACP session's `cwd`); when set it
     /// becomes the confined workspace root instead of the profile's default.
     pub cwd: Option<String>,
@@ -149,6 +151,21 @@ impl RunState {
 
 /// Builds and drives the concrete agent loop for a run.
 ///
+/// Capabilities discovered from the provider currently selected by the harness.
+///
+/// This is intentionally a transport-neutral API shape. The concrete run
+/// factory owns the provider protocol and performs the discovery.
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderCapabilities {
+    pub provider: String,
+    pub base_url: String,
+    pub configured_model: Option<String>,
+    pub models: Vec<String>,
+    pub streaming: bool,
+    pub tool_calls: bool,
+    pub reasoning_content: bool,
+}
+
 /// The manager is generic over how a run is executed: a test supplies a factory
 /// over `MockProvider`; production supplies one over the Lightweight provider and
 /// the bounded tool executor. The factory calls [`drive`] with the loop it built.
@@ -162,6 +179,11 @@ pub trait RunFactory: Send + Sync + 'static {
             .iter()
             .filter_map(|name| registry.get(name).map(|tool| tool.definition().clone()))
             .collect())
+    }
+
+    /// Discover capabilities from the active provider.
+    async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
+        Err("provider capability discovery is not available in this embedding".to_owned())
     }
 
     /// Drive `request` to a terminal [`RunStatus`], emitting events to `sink`,
@@ -270,6 +292,10 @@ impl RunManager {
     /// The tools the factory currently offers to the active target.
     pub async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
         self.factory.tools().await
+    }
+    /// Discover the selected provider's current model catalog and capabilities.
+    pub async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
+        self.factory.provider_capabilities().await
     }
 
     /// Start a run and return its shared state. The run drives in the background.

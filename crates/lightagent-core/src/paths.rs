@@ -107,6 +107,20 @@ impl LightagentPaths {
         self.root.join("cache")
     }
 
+    /// Owner-only files holding secrets entered through interactive setup.
+    pub fn secrets_dir(&self) -> PathBuf {
+        self.root.join("secrets")
+    }
+
+    /// A stable, owner-only file for one provider API key.
+    ///
+    /// `provider_id` is limited to a filename-safe identifier by the setup
+    /// flow, so it cannot escape the Lightagent home.
+    pub fn provider_key_file(&self, provider_id: &str) -> PathBuf {
+        self.secrets_dir()
+            .join(format!("provider-{provider_id}.key"))
+    }
+
     /// Global skills directory.
     pub fn skills_dir(&self) -> PathBuf {
         self.root.join("skills")

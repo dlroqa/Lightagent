@@ -5,7 +5,7 @@
 //! returned, tool activity is shown on stderr, and a tool call that needs
 //! approval pauses for a numbered decision at the prompt before the run resumes.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::io::{BufRead as _, IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -29,13 +29,34 @@ use lightagent_store::{
     Session, SessionId, SessionStore, StoredMessage, model_history as build_model_history,
 };
 use lightagent_tools::{
-    BoundedExecutor, Delegation, SkillContext, Tool, ToolRegistry, WebContext, WebPolicy,
-    Workspace, WorkspaceContext, WorkspacePolicy,
+    BoundedExecutor, Delegation, SkillContext, SubagentPolicy, SubagentRole, Tool, ToolRegistry,
+    WebContext, WebPolicy, Workspace, WorkspaceContext, WorkspacePolicy,
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::slash::{self, Slash};
-
+/// Translate persisted server settings into the transport-neutral delegation policy.
+pub(crate) fn subagent_policy(config: &Config) -> SubagentPolicy {
+    let roles: BTreeMap<_, _> = config
+        .subagents
+        .allowed_roles
+        .iter()
+        .map(|role| {
+            (
+                role.clone(),
+                SubagentRole {
+                    profile: role.clone(),
+                },
+            )
+        })
+        .collect();
+    SubagentPolicy {
+        enabled: config.subagents.enabled,
+        max_depth: config.subagents.max_depth,
+        max_children_per_agent: config.subagents.max_children_per_agent,
+        roles,
+    }
+}
 /// Build the web context for a run when web access is enabled, else `None`.
 ///
 /// Shared by `chat` and `serve`. The client disables automatic redirects so
@@ -360,12 +381,30 @@ async fn build_chat_runtime(
         .api_key
         .as_ref()
         .and_then(|secret| secret.resolve());
-    let delegation = Delegation {
-        profiles: Arc::new(ProfileStore::new(home)),
-        factory: Arc::new(LightweightFactory { base_url, api_key }),
-        worker_registry: ToolRegistry::worker_default(),
-        worker_per_call: Duration::from_secs(60),
-        worker_max_output_bytes: 262_144,
+    let mut delegation = Delegation::new(
+        Arc::new(ProfileStore::new(home)),
+        Arc::new(LightweightFactory { base_url, api_key }),
+        ToolRegistry::worker_default(),
+        Duration::from_secs(60),
+        262_144,
+    );
+    delegation.subagents = SubagentPolicy {
+        enabled: config.subagents.enabled,
+        max_depth: config.subagents.max_depth,
+        max_children_per_agent: config.subagents.max_children_per_agent,
+        roles: config
+            .subagents
+            .allowed_roles
+            .iter()
+            .map(|role| {
+                (
+                    role.clone(),
+                    SubagentRole {
+                        profile: role.clone(),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>(),
     };
     let registry = configured_registry(config, profile_dir, &extensions, !skills.is_empty()).await;
     let tools = registry.names();

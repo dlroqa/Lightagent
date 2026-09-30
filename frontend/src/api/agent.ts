@@ -7,6 +7,11 @@ export interface ToolInfo {
   risk: string;
   description: string;
 }
+export interface SkillInfo {
+  name: string;
+  description: string;
+}
+
 
 export interface PendingApproval {
   approval_id: string;
@@ -59,13 +64,36 @@ export interface SessionRun {
   tools: ToolHistoryEntry[];
 }
 
+/** Runtime model catalog and features reported by the connected provider. */
+export interface ProviderCapabilities {
+  provider: string;
+  base_url: string;
+  configured_model: string | null;
+  models: string[];
+  streaming: boolean;
+  tool_calls: boolean;
+  reasoning_content: boolean;
+}
+
+
+/** A non-sensitive saved CLI profile advertised by the active server. */
+export interface ProfileSummary {
+  id: string;
+  name: string;
+  model: string;
+  active: boolean;
+}
+
+export interface ProfileCatalog {
+  active_profile: string;
+  profiles: ProfileSummary[];
+}
 export interface AgentSession {
   id: string;
   profile: string;
   cwd?: string;
   title: string;
   created_at: SystemTime;
-  updated_at: SystemTime;
   messages: SessionMessage[];
   approvals_unrestricted: boolean;
   runs: SessionRun[];
@@ -81,7 +109,19 @@ export interface LightagentSettings {
   terminal_enabled: boolean;
   memory_enabled: boolean;
   show_reasoning_in_tui: boolean;
+  jev: PlatformEndpointSettings;
+  qdrant: PlatformEndpointSettings;
+  infinity: PlatformEndpointSettings;
+  open_terminal: PlatformEndpointSettings;
 }
+
+/** Safe endpoint metadata for an optional platform service. Secrets never cross the API boundary. */
+export interface PlatformEndpointSettings {
+  enabled: boolean;
+  base_url: string | null;
+  api_key_configured: boolean;
+}
+
 
 export interface ApprovalRow {
   run: string;
@@ -115,16 +155,19 @@ async function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const agentApi = {
   tools: () => jsonRequest<{ tools: ToolInfo[] }>("/tools"),
+  skills: () => jsonRequest<{ skills: SkillInfo[] }>("/skills"),
   settings: () => jsonRequest<LightagentSettings>("/settings"),
   saveSettings: (settings: LightagentSettings) =>
     jsonRequest<LightagentSettings>("/settings", {
       method: "PUT",
       body: JSON.stringify(settings),
     }),
-  createRun: (message: string, profile?: string, sessionId?: string) =>
+  provider: () => jsonRequest<ProviderCapabilities>("/provider"),
+  profiles: () => jsonRequest<ProfileCatalog>("/profiles"),
+  createRun: (message: string, profile?: string, sessionId?: string, model?: string) =>
     jsonRequest<{ id: string; status: string; session_id: string | null }>("/runs", {
       method: "POST",
-      body: JSON.stringify({ message, profile, session_id: sessionId }),
+      body: JSON.stringify({ message, profile, session_id: sessionId, model }),
     }),
   createSession: () => jsonRequest<{ id: string }>("/sessions", { method: "POST", body: "{}" }),
   session: (id: string) =>

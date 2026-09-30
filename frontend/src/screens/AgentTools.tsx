@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Wrench } from "lucide-react";
 
-import { agentApi, type ToolInfo } from "../api/agent";
+import { agentApi, type SkillInfo, type ToolInfo } from "../api/agent";
 import { Card } from "../components/Card";
 import { Empty, Pill } from "../components/Bits";
 import { TopBar } from "../components/Shell";
@@ -27,6 +27,7 @@ function riskTone(risk: string): Tone {
 }
 
 export function AgentTools() {
+  const [skills, setSkills] = useState<SkillInfo[] | null>(null);
   const [tools, setTools] = useState<ToolInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -34,11 +35,14 @@ export function AgentTools() {
   useEffect(() => {
     let live = true;
     setError(null);
+    setSkills(null);
     setTools(null);
-    agentApi
-      .tools()
-      .then((response) => {
-        if (live) setTools(response.tools);
+    Promise.all([agentApi.tools(), agentApi.skills()])
+      .then(([toolResponse, skillResponse]) => {
+        if (live) {
+          setTools(toolResponse.tools);
+          setSkills(skillResponse.skills);
+        }
       })
       .catch((cause) => {
         if (live) setError(cause instanceof Error ? cause.message : String(cause));
@@ -87,6 +91,21 @@ export function AgentTools() {
                   <span className="muted" style={{ fontSize: 13 }}>
                     {tool.description}
                   </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+        <Card title="Installed skills">
+          <p className="card__note">Instructions available to the harness on demand. Full skill bodies remain server-side.</p>
+          {!skills ? <span className="muted">Loading skills…</span> : skills.length === 0 ? (
+            <Empty title="No skills installed" hint="Add a SKILL.md under the global or active profile skills directory." />
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {skills.map((skill) => (
+                <div key={skill.name} style={{ padding: "10px 12px", border: "1px solid var(--border, #2a2a2a)", borderRadius: 8 }}>
+                  <strong>{skill.name}</strong>
+                  {skill.description && <span className="muted" style={{ marginLeft: 10, fontSize: 13 }}>{skill.description}</span>}
                 </div>
               ))}
             </div>

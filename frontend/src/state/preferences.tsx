@@ -10,7 +10,7 @@ import {
 
 /** Browser-local presentation preferences for the standalone Web UI. */
 export const DEFAULT_PREFERENCES = {
-  theme: "system" as "light" | "dark" | "system",
+  theme: "dark" as "light" | "dark" | "system",
   translucent: true,
   compact: false,
   railCollapsed: false,

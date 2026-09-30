@@ -7,7 +7,11 @@
 //! [`Delegation`] bundle with the worker profile store, the provider factory and
 //! the registry and bounds a worker run is given.
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, Ordering},
+};
 use std::time::{Duration, SystemTime};
 
 use lightagent_core::{ProfileStore, ProviderFactory, RunId, SkillStore};
@@ -54,6 +58,125 @@ pub struct Delegation {
     pub worker_per_call: Duration,
     /// The output ceiling a worker run's executor enforces.
     pub worker_max_output_bytes: usize,
+    /// Extra, opt-in controls for named hierarchical workers. When disabled,
+    /// legacy profile delegation remains deliberately one level deep.
+    pub subagents: SubagentPolicy,
+    /// Depth of this execution in the delegation tree. The lead is zero.
+    pub depth: u8,
+    /// Number of direct children this execution has reserved. This is shared
+    /// only by calls made from the same executor and therefore cannot be used
+    /// by a descendant to consume its parent's allowance.
+    pub(crate) children: Arc<AtomicU8>,
+}
+
+/// A server-provided role preset. The model supplies only a role id; the
+/// profile, permissions and provider routing remain server-owned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubagentRole {
+    pub profile: String,
+}
+
+/// Controls the optional hierarchical delegation path.
+///
+/// This is intentionally separate from the legacy `agent.delegate` profile
+/// argument. Keeping it disabled by default makes an existing installation
+/// retain its exact single-worker behavior until the CLI/server opts in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubagentPolicy {
+    pub enabled: bool,
+    /// Maximum depth below the lead. Values above two are clamped when used.
+    pub max_depth: u8,
+    pub max_children_per_agent: u8,
+    pub roles: BTreeMap<String, SubagentRole>,
+}
+
+impl Default for SubagentPolicy {
+    fn default() -> Self {
+        let roles = ["researcher", "coder", "reviewer", "tester"]
+            .into_iter()
+            .map(|id| {
+                (
+                    id.to_owned(),
+                    SubagentRole {
+                        profile: id.to_owned(),
+                    },
+                )
+            })
+            .collect();
+        Self {
+            enabled: false,
+            max_depth: 2,
+            max_children_per_agent: 3,
+            roles,
+        }
+    }
+}
+
+impl Delegation {
+    /// Start a root delegation context with legacy-safe policy defaults.
+    pub fn new(
+        profiles: Arc<ProfileStore>,
+        factory: Arc<dyn ProviderFactory>,
+        worker_registry: ToolRegistry,
+        worker_per_call: Duration,
+        worker_max_output_bytes: usize,
+    ) -> Self {
+        Self {
+            profiles,
+            factory,
+            worker_registry,
+            worker_per_call,
+            worker_max_output_bytes,
+            subagents: SubagentPolicy::default(),
+            depth: 0,
+            children: Arc::new(AtomicU8::new(0)),
+        }
+    }
+
+    /// Return the configured profile for an allowed named role.
+    pub fn role_profile(&self, role: &str) -> Option<&str> {
+        self.subagents
+            .roles
+            .get(role)
+            .map(|preset| preset.profile.as_str())
+    }
+
+    /// Whether a child can itself be offered `agent.delegate`.
+    pub fn permits_nested_delegation(&self) -> bool {
+        self.subagents.enabled && self.depth < self.subagents.max_depth.min(2)
+    }
+
+    /// Reserve one direct child. Reservations are monotonic for the lifetime
+    /// of an execution, preventing repeated calls from bypassing the limit.
+    pub fn reserve_child(&self) -> Result<(), String> {
+        let maximum = self.subagents.max_children_per_agent;
+        if maximum == 0 {
+            return Err("subagent policy does not allow child workers".to_owned());
+        }
+        let result = self
+            .children
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
+                (used < maximum).then_some(used + 1)
+            });
+        result
+            .map(|_| ())
+            .map_err(|_| format!("subagent child limit ({maximum}) reached for this execution"))
+    }
+
+    /// Build an isolated child context. Its direct-child counter is new, so a
+    /// descendant cannot spend its parent's budget.
+    pub fn child_context(&self) -> Self {
+        Self {
+            profiles: Arc::clone(&self.profiles),
+            factory: Arc::clone(&self.factory),
+            worker_registry: self.worker_registry.clone(),
+            worker_per_call: self.worker_per_call,
+            worker_max_output_bytes: self.worker_max_output_bytes,
+            subagents: self.subagents.clone(),
+            depth: self.depth.saturating_add(1),
+            children: Arc::new(AtomicU8::new(0)),
+        }
+    }
 }
 
 /// The effective web-access settings a web tool enforces.

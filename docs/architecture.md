@@ -1,6 +1,41 @@
 # Architecture
 
 Lightagent is an agent harness, not an inference engine.
+## Platform topology
+
+
+```text
+Agent harness / Open WebUI
+ ├─ Jev: routing and confidence decisions
+ ├─ Qdrant + Infinity: retrieve and rerank knowledge
+ ├─ SearXNG: current web information
+ ├─ Open Terminal: isolated code execution
+ └─ Lightweight: local inference and API gateway
+```
+
+The harness is the control plane: it owns the agent loop, policies, sessions,
+approvals, and the browser/API surfaces. The components beneath it are separate
+services with independent deployment and trust boundaries; Lightagent does not
+embed or supervise them.
+
+- **Jev** is the optional pre-dispatch router and confidence-decision service.
+- **Qdrant** and **Infinity** are the optional remote retrieval and reranking
+  tier. The built-in profile-local RAG remains available when they are absent.
+- **SearXNG** is configured through `web.search.endpoint`; its JSON response is
+  already supported by `web.search` and `rag.realtime`.
+- **Open Terminal** is the optional isolated execution service. The built-in
+  `terminal.run` tool remains locally confined and approval-gated, but is not
+  presented as an OS sandbox.
+- **Lightweight** remains an OpenAI-compatible inference/API endpoint, not a
+  workspace dependency.
+
+`platform.jev`, `platform.qdrant`, `platform.infinity`, and
+`platform.open_terminal` are typed, opt-in endpoint settings. They record the
+deployment topology and validate/redact endpoint credentials; a configured
+endpoint is not contacted until its service-specific adapter is enabled. Use
+`lightagent architecture` to report this topology and `lightagent config show`
+to inspect the redacted configuration.
+
 
 ```text
 Terminal UI ─┐

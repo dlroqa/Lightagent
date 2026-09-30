@@ -57,7 +57,9 @@ Once the server is running, open these local addresses:
 - API: <http://127.0.0.1:8735/api/lightagent/v1>
 - Health check: <http://127.0.0.1:8735/health>
 
-API keys are stored as environment-variable references, not literal secrets.
+Provider keys pasted during interactive setup are saved in an owner-only file under
+`~/.lightagent/secrets`; the main configuration retains only a reference.
+Environment-variable references remain supported for managed deployments.
 Use `lightagent setup`, `lightagent profile`, and `lightagent config --help` for
 additional runtime configuration.
 
