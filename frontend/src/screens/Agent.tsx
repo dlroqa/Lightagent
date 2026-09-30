@@ -135,7 +135,11 @@ export function Agent() {
   // the answer, so the live copy is hidden even if the stream's terminal event
   // has not arrived yet — a session reloaded in that gap (a fast run finishing
   // before `send` reloads it) would otherwise show the answer twice.
-  const showLiveAnswer = runId !== null && !persisted;
+  const savedAnswerMatchesLive = answer.length > 0 && session?.messages
+    .filter((message) => message.role === "assistant")
+    .some((message) => message.content.trim() === answer.trim());
+  // Covers a fast terminal save whose run metadata has not reached the session payload yet.
+  const showLiveAnswer = runId !== null && !persisted && !savedAnswerMatchesLive;
   const pending = useMemo(() => {
     if (done) return null;
     let open: { id: string; tool: string } | null = null;
@@ -359,8 +363,8 @@ export function Agent() {
           )
         }
       />
-      <div className="page agent-layout">
-        <aside className="card agent-sessions agent-sidebar" style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
+      <div className="page agent-layout chat-workspace">
+        <aside className="agent-sessions agent-sidebar chat-history" style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
           <div style={{ position: "relative" }}>
             <Search size={15} style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", color: "var(--text-faint)" }} />
             <input className="input" style={{ paddingLeft: 34 }} placeholder="Search sessions…"
@@ -410,7 +414,7 @@ export function Agent() {
             )}
           </div>
         </aside>
-        <section className="card agent-conversation" style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
+        <section className="agent-conversation chat-thread" style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
           {shownError && (
             <div className="notice notice--danger" role="alert">
               <div>{shownError}</div>
@@ -450,7 +454,7 @@ export function Agent() {
             </div>
           ) : (
             <>
-              <div style={{ flex: 1, overflowY: "auto", paddingRight: 4 }}>
+              <div className="chat-transcript" style={{ flex: 1, overflowY: "auto", paddingRight: 4 }}>
                 {session.messages.length === 0 && !showLiveAnswer && (
                   <Empty title="Nothing said yet"
                     hint="Messages, runs, and tool calls are saved with this session." />
@@ -516,7 +520,7 @@ export function Agent() {
                   </span>
                 </div>
               )}
-              <div style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
+              <div className="chat-composer" style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
                 <textarea className="input" rows={2} style={{ resize: "none" }}
                   value={draft} placeholder={running ? "Type a steer to queue…" : "Ask the agent…"}
                   disabled={busy || serviceUnavailable}
@@ -619,12 +623,11 @@ function SessionRow({ row, active, disabled, onOpen, onDelete }: {
 function AgentMessage({ message, streaming }: { message: SessionMessage; streaming?: boolean }) {
   const mine = message.role === "user";
   return (
-    <article style={{ marginTop: 10, padding: "12px 14px", borderRadius: "var(--radius)",
-      border: "1px solid var(--border)", background: mine ? "var(--accent-soft)" : "var(--surface-raised)" }}>
-      <div style={{ color: mine ? "var(--accent)" : "var(--text)", fontWeight: 600, fontSize: 13 }}>
+    <article className={`chat-message${mine ? " is-user" : ""}${streaming ? " is-streaming" : ""}`}>
+      <div className="chat-message__role">
         {mine ? "You" : "Agent"}{streaming && <span className="muted"> · responding</span>}
       </div>
-      <div style={{ marginTop: 6, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{message.content}</div>
+      <div className="chat-message__content">{message.content}</div>
     </article>
   );
 }
