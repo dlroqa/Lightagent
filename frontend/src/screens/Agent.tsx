@@ -327,17 +327,25 @@ export function Agent() {
 
   const serviceUnavailable = sessions.error !== null && sessions.data === null;
   const shownError = error ?? sessions.error?.message ?? null;
-  const badge = running
-    ? { tone: "accent" as const, label: "running" }
-    : serviceUnavailable
-      ? { tone: "danger" as const, label: "offline" }
-      : failure
-          ? { tone: "danger" as const, label: "failed" }
+  const activeTool = tools.find((tool) => tool.status === "running" || tool.status === "requested");
+  const activity = pending
+    ? { tone: "warn" as const, label: "approval needed", detail: `${pending.tool} is paused until you decide.` }
+    : queuePaused
+      ? { tone: "warn" as const, label: "queue paused", detail: "A queued steer is paused; retry or clear it." }
+      : serviceUnavailable
+        ? { tone: "danger" as const, label: "offline", detail: "The Lightagent service cannot be reached." }
+        : failure
+          ? { tone: "danger" as const, label: "error", detail: failure }
           : cancelled
-            ? { tone: "warn" as const, label: "stopped" }
-            : done
-              ? { tone: "ok" as const, label: "done" }
-              : { tone: "neutral" as const, label: "ready" };
+            ? { tone: "warn" as const, label: "cancelled", detail: "The active run was cancelled." }
+            : activeTool
+              ? { tone: "accent" as const, label: "tool active", detail: `${activeTool.name} is ${STATUS_LABEL[activeTool.status]}.` }
+              : running
+                ? { tone: "accent" as const, label: "running", detail: answer ? "The model is responding." : "The agent is preparing its response." }
+                : done
+                  ? { tone: "ok" as const, label: "completed", detail: "The run completed." }
+                  : { tone: "neutral" as const, label: "ready", detail: "No run is active." };
+  const badge = { tone: activity.tone, label: activity.label };
   return (
     <>
       <TopBar
@@ -564,7 +572,9 @@ export function Agent() {
                 )}
                 <span style={{ flex: 1 }} />
                 <span className="composer-fact">{session.messages.length} msgs · {session.runs.length} runs</span>
-                <Pill tone={badge.tone} dot>{badge.label}</Pill>
+                <span title={activity.detail} aria-label={`Run activity: ${activity.detail}`}>
+                  <Pill tone={badge.tone} dot>{badge.label}</Pill>
+                </span>
               </div>
             </>
           )}
