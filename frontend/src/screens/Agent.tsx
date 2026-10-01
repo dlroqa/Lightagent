@@ -140,6 +140,7 @@ export function Agent() {
   const [queuePaused, setQueuePaused] = useState(false);
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
+  const [deciding, setDeciding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const end = useRef<HTMLDivElement | null>(null);
   const dispatching = useRef(false);
@@ -178,17 +179,26 @@ export function Agent() {
   const showLiveAnswer = runId !== null && !persisted && !savedAnswerMatchesLive;
   const pending = useMemo(() => {
     if (done) return null;
-    let open: { id: string; tool: string } | null = null;
+    let open: { toolCallId: string; tool: string } | null = null;
     for (const event of events) {
       const id = text(event.data.id);
-      if (event.type === "approval.required") open = { id, tool: text(event.data.name) };
+      if (event.type === "approval.required") {
+        // Approval decisions have their own id. Later tool lifecycle events use
+        // the model's tool-call id, so retain that id to clear this prompt once
+        // the decision takes effect.
+        open = { toolCallId: text(event.data.tool_call_id), tool: text(event.data.name) };
+      }
       else if (
-        open?.id === id &&
+        open?.toolCallId === id &&
         ["tool.started", "tool.output", "tool.failed"].includes(event.type)
       ) open = null;
     }
     return open;
   }, [done, events]);
+
+  useEffect(() => {
+    if (!pending) setDeciding(false);
+  }, [pending]);
 
   const load = useCallback(async (id: string) => {
     const generation = ++loadGeneration.current;
@@ -361,8 +371,18 @@ export function Agent() {
   }
 
   async function decide(approve: boolean) {
-    if (runId) await agentApi.respondApproval(runId, approve).catch((cause) =>
-      setError(cause instanceof Error ? cause.message : String(cause)));
+    if (!runId || deciding) return;
+    setDeciding(true);
+    try {
+      const result = await agentApi.respondApproval(runId, approve);
+      if (!result.delivered) {
+        setDeciding(false);
+        setError("The approval was no longer waiting for a decision. Please wait for the run to update.");
+      }
+    } catch (cause) {
+      setDeciding(false);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
   }
 
   const serviceUnavailable = sessions.error !== null && sessions.data === null;
@@ -538,8 +558,10 @@ export function Agent() {
                     </span>
                   </div>
                   <div style={{ display: "flex", gap: 8, flex: "none" }}>
-                    <button type="button" className="btn" onClick={() => void decide(false)}>Deny</button>
-                    <button type="button" className="btn btn--primary" onClick={() => void decide(true)}>Allow once</button>
+                    <button type="button" className="btn" disabled={deciding} onClick={() => void decide(false)}>Deny</button>
+                    <button type="button" className="btn btn--primary" disabled={deciding} onClick={() => void decide(true)}>
+                      {deciding ? "Deciding…" : "Allow once"}
+                    </button>
                   </div>
                 </div>
               )}
