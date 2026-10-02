@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { NavLink } from "react-router-dom";
 import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, CirclePlus, Cpu, FilePenLine, FileText, Folder, Globe, MoreHorizontal, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, Terminal, Trash2, Wrench } from "lucide-react";
 
@@ -156,6 +156,7 @@ export function Agent() {
   const [busy, setBusy] = useState(false);
   const [deciding, setDeciding] = useState(false);
   const [savingPolicy, setSavingPolicy] = useState(false);
+  const [followTranscript, setFollowTranscript] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const end = useRef<HTMLDivElement | null>(null);
   const dispatching = useRef(false);
@@ -293,8 +294,8 @@ export function Agent() {
   }, [activeId, busy, done, load, queuePaused, sessions.refresh, steering]);
 
   useEffect(() => {
-    end.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [answer, session?.messages.length, tools.length]);
+    if (followTranscript) end.current?.scrollIntoView({ behavior: "auto", block: "end" });
+  }, [answer, followTranscript, session?.messages.length, tools.length]);
 
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -366,6 +367,7 @@ export function Agent() {
       return;
     }
     if (busy) return;
+    setFollowTranscript(true);
     setBusy(true);
     setDraft("");
     setError(null);
@@ -568,7 +570,12 @@ export function Agent() {
             </div>
           ) : (
             <>
-              <div className="chat-transcript">
+              <div className="chat-transcript" onScroll={(event) => {
+                const transcript = event.currentTarget;
+                setFollowTranscript(
+                  transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 64,
+                );
+              }}>
                 <div className="chat-transcript__content">
                   {session.messages.length === 0 && !showLiveAnswer && (
                     <Empty title="Nothing said yet"
@@ -779,9 +786,31 @@ function AgentMessage({ message, streaming }: { message: SessionMessage; streami
   return (
     <article className={`chat-message${mine ? " is-user" : ""}${streaming ? " is-streaming" : ""}`}
       aria-label={mine ? "Your message" : "Agent message"}>
-      <div className="chat-message__content">{message.content}</div>
+      <div className="chat-message__content">{linkifyMessage(message.content)}</div>
     </article>
   );
+}
+
+/** Render Markdown-style and plain HTTP(S) URLs without interpreting arbitrary HTML. */
+function linkifyMessage(content: string) {
+  const links = /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<]+)/g;
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = links.exec(content)) !== null) {
+    if (match.index > cursor) parts.push(content.slice(cursor, match.index));
+    const href = match[2] ?? match[3];
+    const label = match[1] ?? href;
+    parts.push(
+      <a key={`${match.index}-${href}`} href={href} target="_blank" rel="noreferrer noopener"
+        aria-label={`Open ${label} in a new tab`}>
+        {label}
+      </a>,
+    );
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < content.length) parts.push(content.slice(cursor));
+  return parts;
 }
 
 function ToolList({ title, tools }: { title: string; tools: ToolCall[] }) {

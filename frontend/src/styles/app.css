@@ -1367,6 +1367,21 @@ textarea {
   line-height: 1.65;
 }
 
+.chat-message__content a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.chat-message__content a:hover {
+  color: var(--accent-hover);
+}
+
+.chat-message.is-user .chat-message__content a {
+  color: inherit;
+}
+
 .tool-activity {
   width: min(100%, 680px);
   color: var(--text-soft);
