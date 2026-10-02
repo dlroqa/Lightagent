@@ -5,6 +5,7 @@ import { Ban, BookOpen, ChevronDown, CirclePlus, Cpu, FilePenLine, FileText, Glo
 import {
   agentApi,
   type AgentSession,
+  type LightagentSettings,
   type SessionMessage,
   type SessionSummary,
   type SystemTime,
@@ -18,6 +19,16 @@ import { usePoll } from "../hooks/usePoll";
 import { useRunEvents, type RunEvent } from "../hooks/useRunEvents";
 
 const SESSION_KEY = "lightagent.agent.session";
+const WELCOME_PROMPTS = [
+  "Where should we begin?",
+  "What would you like to make?",
+  "What are we exploring today?",
+  "Give me a problem worth solving.",
+  "Let’s turn an idea into progress.",
+  "What’s on your mind?",
+  "Point me at the next challenge.",
+  "Let’s untangle something.",
+];
 const text = (value: unknown) => (typeof value === "string" ? value : "");
 const unix = (value: SystemTime) => value.secs_since_epoch;
 
@@ -88,10 +99,10 @@ const RISK_TONE: Record<string, "ok" | "warn" | "danger" | "info" | "neutral"> =
 };
 const riskTone = (risk: string) => RISK_TONE[risk] ?? "neutral";
 
-const POLICY_LABEL: Record<string, string> = {
-  permissive: "Permissive",
-  balanced: "Balanced",
-  strict: "Strict",
+const POLICY_HINT: Record<string, string> = {
+  permissive: "Auto-approves lower-risk tools; writes and commands still ask.",
+  balanced: "Asks before a tool changes state or runs code.",
+  strict: "Asks before any tool that does more than read.",
 };
 
 function foldTools(events: RunEvent[]): ToolCall[] {
@@ -127,6 +138,7 @@ export function Agent() {
   const toolCatalog = usePoll(() => agentApi.tools().then((body) => body.tools), 0);
   const provider = usePoll(agentApi.provider, 10_000);
   const [selectedModel, setSelectedModel] = useState<string>("");
+  const [welcomePromptIndex, setWelcomePromptIndex] = useState(0);
   const agentSettings = usePoll(agentApi.settings, 0);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [railToolsOpen, setRailToolsOpen] = useState(false);
@@ -141,6 +153,7 @@ export function Agent() {
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
   const [deciding, setDeciding] = useState(false);
+  const [savingPolicy, setSavingPolicy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const end = useRef<HTMLDivElement | null>(null);
   const dispatching = useRef(false);
@@ -166,6 +179,7 @@ export function Agent() {
   const cancelled = events.some((event) => event.type === "run.cancelled");
   const running = busy || (runId !== null && !done);
   const hasPendingWork = running || steering.length > 0;
+  const isNewConversation = !session || (session.messages.length === 0 && session.runs.length === 0);
   const persisted = runId !== null && session?.runs.some((run) => run.run_id === runId);
   // The API records a run in its session only once the run is terminal, in the
   // same save as its assistant message. From then on the saved transcript holds
@@ -199,6 +213,14 @@ export function Agent() {
   useEffect(() => {
     if (!pending) setDeciding(false);
   }, [pending]);
+
+  useEffect(() => {
+    if (!isNewConversation || draft.trim()) return;
+    const timer = window.setInterval(() => {
+      setWelcomePromptIndex((current) => (current + 1) % WELCOME_PROMPTS.length);
+    }, 12_000);
+    return () => window.clearInterval(timer);
+  }, [draft, isNewConversation]);
 
   const load = useCallback(async (id: string) => {
     const generation = ++loadGeneration.current;
@@ -306,6 +328,7 @@ export function Agent() {
       setRunId(null);
       await load(created.id);
       sessions.refresh();
+      setWelcomePromptIndex((current) => (current + 1) % WELCOME_PROMPTS.length);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -382,6 +405,21 @@ export function Agent() {
     } catch (cause) {
       setDeciding(false);
       setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function setApprovalPolicy(policy: LightagentSettings["approval_policy"]) {
+    const settings = agentSettings.data;
+    if (!settings || savingPolicy) return;
+    setSavingPolicy(true);
+    setError(null);
+    try {
+      await agentApi.saveSettings({ ...settings, approval_policy: policy });
+      agentSettings.refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSavingPolicy(false);
     }
   }
 
@@ -489,10 +527,10 @@ export function Agent() {
               <div>{shownError}</div>
             </div>
           )}
-          {!session ? (
+          {isNewConversation ? (
             <div className="agent-welcome">
               <div className="agent-welcome__eyebrow"><Sparkles size={15} /> Lightagent</div>
-              <h2>Where should we begin?</h2>
+              <h2 className="agent-welcome__prompt" key={welcomePromptIndex}>{WELCOME_PROMPTS[welcomePromptIndex]}</h2>
               <p>Start a conversation with your connected local agent.</p>
               <div className="welcome-composer">
                 <CirclePlus size={21} aria-hidden="true" />
@@ -523,28 +561,30 @@ export function Agent() {
             </div>
           ) : (
             <>
-              <div className="chat-transcript" style={{ flex: 1, overflowY: "auto", paddingRight: 4 }}>
-                {session.messages.length === 0 && !showLiveAnswer && (
-                  <Empty title="Nothing said yet"
-                    hint="Messages, runs, and tool calls are saved with this session." />
-                )}
-                {session.messages.map((message, index) => (
-                  <AgentMessage key={message.role + index} message={message} />
-                ))}
-                {showLiveAnswer && answer && (
-                  <AgentMessage message={{ role: "assistant", content: answer }} streaming={!done} />
-                )}
-                {running && !answer && tools.length === 0 && (
-                  <div className="tool-activity is-active" style={{ marginTop: 10 }} aria-live="polite">
-                    <div className="tool-activity__heading">
-                      <span>Thinking</span><span className="tool-activity__dots" aria-hidden="true"><i /><i /><i /></span>
+              <div className="chat-transcript">
+                <div className="chat-transcript__content">
+                  {session.messages.length === 0 && !showLiveAnswer && (
+                    <Empty title="Nothing said yet"
+                      hint="Messages, runs, and tool calls are saved with this session." />
+                  )}
+                  {session.messages.map((message, index) => (
+                    <AgentMessage key={message.role + index} message={message} />
+                  ))}
+                  {showLiveAnswer && answer && (
+                    <AgentMessage message={{ role: "assistant", content: answer }} streaming={!done} />
+                  )}
+                  {running && !answer && tools.length === 0 && (
+                    <div className="tool-activity is-active" style={{ marginTop: 10 }} aria-live="polite">
+                      <div className="tool-activity__heading">
+                        <span>Thinking</span><span className="tool-activity__dots" aria-hidden="true"><i /><i /><i /></span>
+                      </div>
                     </div>
-                  </div>
-                )}
-                {failure && <div className="notice notice--danger" style={{ marginTop: 10 }}>{failure}</div>}
-                {tools.length > 0 && <ToolList title="Current tool calls" tools={tools} />}
-                <SavedTools session={session} currentRunId={runId} />
-                <div ref={end} />
+                  )}
+                  {failure && <div className="notice notice--danger" style={{ marginTop: 10 }}>{failure}</div>}
+                  {tools.length > 0 && <ToolList title="Current tool calls" tools={tools} />}
+                  <SavedTools session={session} currentRunId={runId} />
+                  <div ref={end} />
+                </div>
               </div>
               {pending && (
                 <div className="approval" role="alertdialog" aria-label={`Approve ${pending.tool}`}>
@@ -641,9 +681,19 @@ export function Agent() {
                 </label>
                 {provider.data && <span className="composer-fact"><Sparkles size={13} /> {provider.data.reasoning_content ? "Reasoning ready" : "Standard reasoning"}</span>}
 
-                  <span className="composer-fact" title="Approval policy for new runs">
-                    <ShieldCheck size={13} /> {POLICY_LABEL[agentSettings.data.approval_policy] ?? agentSettings.data.approval_policy}
-                  </span>
+                  <label className="composer-policy" title={POLICY_HINT[agentSettings.data.approval_policy]}>
+                    <ShieldCheck size={13} />
+                    <span className="sr-only">Approval policy for new runs</span>
+                    <select value={agentSettings.data.approval_policy} disabled={savingPolicy}
+                      aria-label="Approval policy for new runs"
+                      onChange={(event) => void setApprovalPolicy(
+                        event.target.value as LightagentSettings["approval_policy"],
+                      )}>
+                      <option value="balanced">Balanced</option>
+                      <option value="strict">Strict</option>
+                      <option value="permissive">Permissive</option>
+                    </select>
+                  </label>
                   </>
                 )}
                 <span style={{ flex: 1 }} />
@@ -695,10 +745,8 @@ function SessionRow({ row, active, disabled, onOpen, onDelete }: {
 function AgentMessage({ message, streaming }: { message: SessionMessage; streaming?: boolean }) {
   const mine = message.role === "user";
   return (
-    <article className={`chat-message${mine ? " is-user" : ""}${streaming ? " is-streaming" : ""}`}>
-      <div className="chat-message__role">
-        {mine ? "You" : "Agent"}{streaming && <span className="muted"> · responding</span>}
-      </div>
+    <article className={`chat-message${mine ? " is-user" : ""}${streaming ? " is-streaming" : ""}`}
+      aria-label={mine ? "Your message" : "Agent message"}>
       <div className="chat-message__content">{message.content}</div>
     </article>
   );
