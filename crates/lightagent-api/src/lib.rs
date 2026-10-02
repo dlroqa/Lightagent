@@ -20,7 +20,8 @@ use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::body::Bytes;
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -90,6 +91,10 @@ pub fn router(state: AppState) -> Router {
             get(get_session)
                 .patch(update_session)
                 .delete(delete_session),
+        )
+        .route(
+            "/api/lightagent/v1/sessions/{id}/attachments",
+            post(upload_attachment).layer(DefaultBodyLimit::max(20 * 1024 * 1024)),
         )
         .route("/api/lightagent/v1/approvals", get(list_approvals))
         .route("/api/lightagent/v1/approvals/{run}", post(respond_approval))
@@ -748,6 +753,46 @@ async fn create_session(State(state): State<Arc<AppState>>, headers: HeaderMap) 
     let session = Session::new(&state.session_profile, "agent session");
     match state.sessions.save(&session) {
         Ok(()) => (StatusCode::CREATED, Json(json!({ "id": session.id }))).into_response(),
+        Err(error) => internal(&error.to_string()),
+    }
+}
+
+/// Save one browser-selected attachment for a session. The filename is accepted
+/// only as a simple basename, preventing a client from choosing its destination.
+async fn upload_attachment(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::SessionsWrite) {
+        return rejection;
+    }
+    const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
+    if body.len() > MAX_ATTACHMENT_BYTES {
+        return bad_request("attachments must be 20 MB or smaller");
+    }
+    let id = match SessionId::parse(&id) {
+        Ok(id) => id,
+        Err(error) => return bad_request(&error.to_string()),
+    };
+    let filename = headers.get("x-lightagent-filename").and_then(|value| value.to_str().ok())
+        .map(str::trim).filter(|name| {
+            !name.is_empty() && name.len() <= 180 && name.chars().all(|character|
+                character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | ' '))
+        });
+    let Some(filename) = filename else {
+        return bad_request("attachment filename is invalid");
+    };
+    let session = match state.sessions.load(&id) {
+        Ok(session) => session,
+        Err(error) => return not_found(&error.to_string()),
+    };
+    if session.profile != state.session_profile {
+        return bad_request("session profile does not match");
+    }
+    match state.sessions.save_attachment(&id, filename, &body) {
+        Ok(path) => Json(json!({ "name": filename, "path": path })).into_response(),
         Err(error) => internal(&error.to_string()),
     }
 }

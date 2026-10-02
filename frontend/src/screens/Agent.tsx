@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { NavLink } from "react-router-dom";
-import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, CirclePlus, Cpu, FilePenLine, FileText, Folder, Globe, MoreHorizontal, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, Terminal, Trash2, Wrench } from "lucide-react";
+import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, Cpu, FilePenLine, FileText, Folder, Globe, MoreHorizontal, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, Terminal, Trash2, Wrench } from "lucide-react";
 
 import {
   agentApi,
@@ -11,8 +11,9 @@ import {
   type SessionSummary,
   type SystemTime,
   type ToolInfo,
+  type UploadedAttachment,
 } from "../api/agent";
-import { whenever } from "../api/format";
+import { promptTimestamp } from "../api/format";
 import { Empty, Pill } from "../components/Bits";
 import { Menu, MenuItem } from "../components/Menu";
 import { TopBar } from "../components/Shell";
@@ -148,6 +149,7 @@ export function Agent() {
   const [session, setSession] = useState<AgentSession | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [attachments, setAttachments] = useState<UploadedAttachment[]>([]);
   const [steering, setSteering] = useState<string[]>([]);
   const [queuePaused, setQueuePaused] = useState(false);
   const [search, setSearch] = useState("");
@@ -160,6 +162,7 @@ export function Agent() {
   const [followTranscript, setFollowTranscript] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const end = useRef<HTMLDivElement | null>(null);
+  const fileInput = useRef<HTMLInputElement | null>(null);
   const dispatching = useRef(false);
   const selected = useRef(activeId);
   const loadGeneration = useRef(0);
@@ -300,13 +303,17 @@ export function Agent() {
 
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    return (sessions.data ?? []).filter((row) => row.archived === showArchived).filter(
-      (row) =>
+    return (sessions.data ?? [])
+      // Empty chats have no context to name. Keep them as an unsaved draft until
+      // the first prompt gives the server a meaningful default title.
+      .filter((row) => row.title !== "agent session" || row.message_count > 0 || row.run_count > 0)
+      .filter((row) => row.archived === showArchived)
+      .filter((row) =>
         !needle ||
         row.title.toLowerCase().includes(needle) ||
         row.profile.toLowerCase().includes(needle) ||
         row.project?.toLowerCase().includes(needle),
-    );
+      );
   }, [search, sessions.data, showArchived]);
   const sessionSections = useMemo(() => {
     const pinned = visible.filter((row) => row.pinned);
@@ -335,25 +342,17 @@ export function Agent() {
     setError(null);
   }
 
-  async function startNew() {
+  function startNew() {
     if (hasPendingWork) return;
-    setBusy(true);
     setError(null);
-    try {
-      const created = await agentApi.createSession();
-      window.localStorage.setItem(SESSION_KEY, created.id);
-      selected.current = created.id;
-      loadGeneration.current += 1;
-      setActiveId(created.id);
-      setRunId(null);
-      await load(created.id);
-      sessions.refresh();
-      setWelcomePromptIndex((current) => (current + 1) % WELCOME_PROMPTS.length);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(false);
-    }
+    window.localStorage.removeItem(SESSION_KEY);
+    selected.current = null;
+    loadGeneration.current += 1;
+    setActiveId(null);
+    setSession(null);
+    setRunId(null);
+    setAttachments([]);
+    setWelcomePromptIndex((current) => (current + 1) % WELCOME_PROMPTS.length);
   }
 
   async function remove(id: string) {
@@ -413,7 +412,10 @@ export function Agent() {
   }
 
   async function send() {
-    const message = draft.trim();
+    const prompt = draft.trim();
+    const message = attachments.length > 0
+      ? `${prompt}${prompt ? "\n\n" : ""}Attached files (available locally to inspect):\n${attachments.map((file) => `- ${file.path}`).join("\n")}`
+      : prompt;
     if (!message) return;
     if ((runId !== null && !done) || steering.length > 0 || dispatching.current) {
       setSteering((current) => [...current, message]);
@@ -437,6 +439,7 @@ export function Agent() {
       }
       const run = await agentApi.createRun(message, undefined, id, selectedModel || undefined);
       setRunId(run.id);
+      setAttachments([]);
       await load(id);
       sessions.refresh();
     } catch (cause) {
@@ -444,6 +447,31 @@ export function Agent() {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function uploadFiles(files: FileList | null) {
+    if (!files?.length || hasPendingWork) return;
+    setBusy(true);
+    setError(null);
+    try {
+      let id = activeId;
+      if (!id) {
+        id = (await agentApi.createSession()).id;
+        window.localStorage.setItem(SESSION_KEY, id);
+        selected.current = id;
+        loadGeneration.current += 1;
+        setActiveId(id);
+      }
+      const uploaded = await Promise.all([...files].map((file) => agentApi.uploadAttachment(id!, file)));
+      setAttachments((current) => [...current, ...uploaded]);
+      await load(id);
+      sessions.refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+      if (fileInput.current) fileInput.current.value = "";
     }
   }
 
@@ -505,6 +533,9 @@ export function Agent() {
   const badge = { tone: activity.tone, label: activity.label };
   return (
     <>
+      <input ref={fileInput} className="composer-attachment-input" type="file" multiple
+        accept="image/*,.pdf,.txt,.md,.csv,.json,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+        onChange={(event) => void uploadFiles(event.target.files)} />
       <TopBar
         title="Agent"
         subtitle={session?.title || "Tool-using conversations"}
@@ -594,7 +625,9 @@ export function Agent() {
               <h2 className="agent-welcome__prompt" key={welcomePromptIndex}>{WELCOME_PROMPTS[welcomePromptIndex]}</h2>
               <p>Start a conversation with your connected local agent.</p>
               <div className="welcome-composer">
-                <CirclePlus size={21} aria-hidden="true" />
+                <button type="button" className="composer-attach" title="Add photos or files"
+                  aria-label="Add photos or files" disabled={busy || serviceUnavailable}
+                  onClick={() => fileInput.current?.click()}><Plus size={23} /></button>
                 <textarea autoFocus rows={1} value={draft} onChange={(event) => setDraft(event.target.value)}
                   placeholder="Message Lightagent" disabled={busy || serviceUnavailable}
                   onKeyDown={(event) => {
@@ -611,10 +644,13 @@ export function Agent() {
                   </select>
                 </label>
                 <button type="button" className="welcome-composer__send"
-                  disabled={!draft.trim() || busy || serviceUnavailable} onClick={() => void send()} aria-label="Send message">
+                  disabled={(!draft.trim() && attachments.length === 0) || busy || serviceUnavailable} onClick={() => void send()} aria-label="Send message">
                   <Send size={17} />
                 </button>
               </div>
+              {attachments.length > 0 && <div className="composer-attachments" aria-label="Attached files">
+                {attachments.map((file) => <span key={file.path}>{file.name}</span>)}
+              </div>}
               <div className="agent-suggestions">
                 <button type="button" onClick={() => setDraft("Summarize the current project status, blockers, decisions, and next milestones.")}><FileText size={16} /> Summarize this project</button>
                 <button type="button" onClick={() => setDraft("Help me plan the next steps for this task.")}><Sparkles size={16} /> Plan next steps</button>
@@ -699,6 +735,9 @@ export function Agent() {
                 </div>
               )}
               <div className="chat-composer">
+                <button type="button" className="composer-attach" title="Add photos or files"
+                  aria-label="Add photos or files" disabled={busy || serviceUnavailable}
+                  onClick={() => fileInput.current?.click()}><Plus size={23} /></button>
                 <textarea className="input" rows={1}
                   value={draft} placeholder={running ? "Type a steer to queue…" : "Ask the agent…"}
                   disabled={busy || serviceUnavailable}
@@ -718,12 +757,15 @@ export function Agent() {
                   </select>
                 </label>
                 <button type="button" className="btn btn--primary chat-composer__send"
-                  disabled={!draft.trim() || busy || serviceUnavailable} onClick={() => void send()}
+                  disabled={(!draft.trim() && attachments.length === 0) || busy || serviceUnavailable} onClick={() => void send()}
                   aria-label={running || steering.length > 0 ? "Queue steer" : "Send message"}
                   title={running || steering.length > 0 ? "Queue steer" : "Send message"}>
                   <Send size={18} />
                 </button>
               </div>
+              {attachments.length > 0 && <div className="composer-attachments" aria-label="Attached files">
+                {attachments.map((file) => <span key={file.path}>{file.name}</span>)}
+              </div>}
               <div className="status-controls">
                 <button type="button" className="status-controls__toggle"
                   aria-expanded={statusControlsOpen} onClick={() => {
@@ -837,10 +879,6 @@ function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete
             color: "inherit", textAlign: "left", cursor: disabled ? "default" : "pointer" }}>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 13, fontWeight: active ? 600 : 500 }}>
             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
-            <span className="tnum" style={{ color: "var(--text-faint)", fontSize: 11, flex: "none" }}>{whenever(unix(row.updated_at))}</span>
-          </div>
-          <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>
-            {row.project && <>{row.project} · </>}{row.message_count} messages · {row.run_count} runs
           </div>
         </button>
         <button type="button" className={`session-row__action${row.pinned ? " is-pinned" : ""}`}
@@ -870,11 +908,15 @@ function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete
 
 function AgentMessage({ message, streaming }: { message: SessionMessage; streaming?: boolean }) {
   const mine = message.role === "user";
+  const timestamp = mine && message.created_at ? promptTimestamp(unix(message.created_at)) : null;
   return (
-    <article className={`chat-message${mine ? " is-user" : ""}${streaming ? " is-streaming" : ""}`}
-      aria-label={mine ? "Your message" : "Agent message"}>
-      <div className="chat-message__content">{linkifyMessage(message.content)}</div>
-    </article>
+    <>
+      {timestamp && <div className="chat-message__timestamp">{timestamp}</div>}
+      <article className={`chat-message${mine ? " is-user" : ""}${streaming ? " is-streaming" : ""}`}
+        aria-label={mine ? "Your message" : "Agent message"}>
+        <div className="chat-message__content">{linkifyMessage(message.content)}</div>
+      </article>
+    </>
   );
 }
 

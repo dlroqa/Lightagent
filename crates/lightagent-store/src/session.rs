@@ -66,6 +66,10 @@ fn hex(bytes: &[u8]) -> String {
 pub struct StoredMessage {
     pub role: String,
     pub content: String,
+    /// When this message was added to the transcript. Older session files did
+    /// not record this, so keep it optional when reading existing history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<SystemTime>,
 }
 
 impl StoredMessage {
@@ -73,6 +77,7 @@ impl StoredMessage {
         Self {
             role: role.into(),
             content: content.into(),
+            created_at: Some(SystemTime::now()),
         }
     }
 }
@@ -310,6 +315,27 @@ impl SessionStore {
         self.directory.join(format!("{}.json", id.as_str()))
     }
 
+    /// Save an uploaded attachment next to its session with owner-only access.
+    pub fn save_attachment(
+        &self,
+        id: &SessionId,
+        filename: &str,
+        bytes: &[u8],
+    ) -> Result<PathBuf, StoreError> {
+        let directory = self.directory.parent().unwrap_or(&self.directory)
+            .join("attachments").join(id.as_str());
+        paths::create_private_dir(&directory).map_err(|err| StoreError::Directory {
+            path: directory.clone(),
+            reason: err.to_string(),
+        })?;
+        let path = directory.join(filename);
+        paths::write_private(&path, bytes).map_err(|err| StoreError::Unwritable {
+            id: id.as_str().to_owned(),
+            reason: err.to_string(),
+        })?;
+        Ok(path)
+    }
+
     /// Persist a session atomically and owner-only. A no-op when history is off.
     pub fn save(&self, session: &Session) -> Result<(), StoreError> {
         if !self.keep_history {
@@ -515,6 +541,14 @@ mod tests {
         assert!(tool.id.is_empty());
         assert!(tool.result_excerpt.is_empty());
         assert_eq!(tool.source, None);
+    }
+
+    #[test]
+    fn message_timestamps_are_added_without_breaking_existing_history() {
+        assert!(StoredMessage::new("user", "hello").created_at.is_some());
+        let message: StoredMessage =
+            serde_json::from_str(r#"{"role":"user","content":"earlier prompt"}"#).unwrap();
+        assert_eq!(message.created_at, None);
     }
 
     #[test]

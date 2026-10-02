@@ -53,6 +53,12 @@ export interface SystemTime {
 export interface SessionMessage {
   role: string;
   content: string;
+  created_at?: SystemTime;
+}
+
+export interface UploadedAttachment {
+  name: string;
+  path: string;
 }
 
 export interface ToolHistoryEntry {
@@ -217,6 +223,17 @@ export const agentApi = {
       body: JSON.stringify({ message, profile, session_id: sessionId, model }),
     }),
   createSession: () => jsonRequest<{ id: string }>("/sessions", { method: "POST", body: "{}" }),
+  uploadAttachment: async (sessionId: string, file: File): Promise<UploadedAttachment> => {
+    const filename = file.name.replace(/[^A-Za-z0-9._ -]/g, "_").slice(0, 180) || "attachment";
+    const response = await fetch(`${BASE}/sessions/${encodeURIComponent(sessionId)}/attachments`, {
+      method: "POST",
+      headers: { "X-Lightagent-Filename": filename },
+      body: file,
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(`${response.status}: ${body?.error ?? response.statusText}`);
+    return body as UploadedAttachment;
+  },
   session: (id: string) =>
     jsonRequest<AgentSession>(`/sessions/${encodeURIComponent(id)}`),
   deleteSession: (id: string) =>
