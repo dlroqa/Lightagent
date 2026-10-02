@@ -18,7 +18,9 @@ services:
     # The CPU image is deliberate: it is portable to Docker Desktop and the
     # Ubuntu GitHub runner.  Keep this tag in sync with the server API asserted
     # by scripts/platform-contract-test.py.
-    image: michaelf34/infinity:v0.0.77-cpu
+    # Docker Hub no longer resolves the historical tag reliably; pin the
+    # upstream 0.0.77 CPU manifest directly for a reproducible CI pull.
+    image: michaelf34/infinity@sha256:94db836145f609c508f3f296f3b9bd0e78ae088025e879664d073dfd9f929e96
     command:
       - v2
       - --engine

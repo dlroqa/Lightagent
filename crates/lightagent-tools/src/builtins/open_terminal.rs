@@ -349,10 +349,11 @@ impl Tool for OpenTerminalRun {
                     .into_iter()
                     .map(|part| part.data)
                     .collect::<String>();
-                let suffix = status
-                    .truncated
-                    .then_some("\n[remote output truncated]")
-                    .unwrap_or("");
+                let suffix = if status.truncated {
+                    "\n[remote output truncated]"
+                } else {
+                    ""
+                };
                 return ToolOutcome {
                     content: format!(
                         "exit: {}\n{}{}",
