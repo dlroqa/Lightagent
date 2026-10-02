@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NavLink } from "react-router-dom";
-import { Ban, BookOpen, ChevronDown, CirclePlus, Cpu, FilePenLine, FileText, Globe, Plus, Search, Send, ShieldCheck, Sparkles, Terminal, Trash2, Wrench } from "lucide-react";
+import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, CirclePlus, Cpu, FilePenLine, FileText, Folder, Globe, MoreHorizontal, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, Terminal, Trash2, Wrench } from "lucide-react";
 
 import {
   agentApi,
@@ -13,7 +13,7 @@ import {
 } from "../api/agent";
 import { whenever } from "../api/format";
 import { Empty, Pill } from "../components/Bits";
-import { Menu } from "../components/Menu";
+import { Menu, MenuItem } from "../components/Menu";
 import { TopBar } from "../components/Shell";
 import { usePoll } from "../hooks/usePoll";
 import { useRunEvents, type RunEvent } from "../hooks/useRunEvents";
@@ -142,6 +142,7 @@ export function Agent() {
   const agentSettings = usePoll(agentApi.settings, 0);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [railToolsOpen, setRailToolsOpen] = useState(false);
+  const [statusControlsOpen, setStatusControlsOpen] = useState(false);
   const composerToolsBtn = useRef<HTMLButtonElement | null>(null);
   const railToolsBtn = useRef<HTMLButtonElement | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -151,6 +152,7 @@ export function Agent() {
   const [steering, setSteering] = useState<string[]>([]);
   const [queuePaused, setQueuePaused] = useState(false);
   const [search, setSearch] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [deciding, setDeciding] = useState(false);
   const [savingPolicy, setSavingPolicy] = useState(false);
@@ -462,6 +464,10 @@ export function Agent() {
           <div className="chat-sidebar__brand">
             <img src="/icon.png" alt="" width={30} height={30} />
             <span><strong>Lightagent</strong><small>Agent workspace</small></span>
+            <button type="button" className="chat-sidebar__search-button" aria-label="Search chats"
+              aria-expanded={searchOpen} onClick={() => setSearchOpen((open) => !open)}>
+              <Search size={16} />
+            </button>
           </div>
           <button type="button" className="chat-sidebar__new" disabled={hasPendingWork} onClick={() => void startNew()}>
             <Plus size={17} /> New chat
@@ -472,12 +478,13 @@ export function Agent() {
             <NavLink to="/settings"><ShieldCheck size={16} /> Settings</NavLink>
           </nav>
           <div className="chat-sidebar__section">Recent chats</div>
-          <div style={{ position: "relative" }}>
-            <Search size={15} style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", color: "var(--text-faint)" }} />
-            <input className="input" style={{ paddingLeft: 34 }} placeholder="Search sessions…"
-              value={search} onChange={(event) => setSearch(event.target.value)}
-              aria-label="Search agent sessions" />
-          </div>
+          {searchOpen && (
+            <div className="chat-sidebar__search">
+              <Search size={15} aria-hidden="true" />
+              <input autoFocus value={search} onChange={(event) => setSearch(event.target.value)}
+                placeholder="Search chats…" aria-label="Search agent sessions" />
+            </div>
+          )}
           <button type="button" className="btn" disabled={hasPendingWork} onClick={() => void startNew()}>
             <Plus size={16} /> New session
           </button>
@@ -632,8 +639,8 @@ export function Agent() {
                   </span>
                 </div>
               )}
-              <div className="chat-composer" style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
-                <textarea className="input" rows={2} style={{ resize: "none" }}
+              <div className="chat-composer">
+                <textarea className="input" rows={1}
                   value={draft} placeholder={running ? "Type a steer to queue…" : "Ask the agent…"}
                   disabled={busy || serviceUnavailable}
                   onChange={(event) => setDraft(event.target.value)}
@@ -643,64 +650,71 @@ export function Agent() {
                       void send();
                     }
                   }} aria-label="Message" />
-                <button type="button" className="btn btn--primary"
-                  disabled={!draft.trim() || busy || serviceUnavailable} onClick={() => void send()}>
-                  <Send size={15} /> {running || steering.length > 0 ? "Queue steer" : "Send"}
-                </button>
-              </div>
-              <div className="composer-meta">
-                <button
-                  ref={composerToolsBtn}
-                  type="button"
-                  className="composer-meta__tools"
-                  aria-haspopup="menu"
-                  aria-expanded={toolsOpen}
-                  disabled={!toolCatalog.data}
-                  onClick={() => setToolsOpen((current) => !current)}
-                  title="Tools this agent can call"
-                >
-                  <Wrench size={13} />
-                  <span>{toolCatalog.data ? `${toolCatalog.data.length} tools` : "Tools"}</span>
-                  <ChevronDown size={13} />
-                </button>
-                <ToolMenu
-                  open={toolsOpen}
-                  anchorRef={composerToolsBtn}
-                  onClose={() => setToolsOpen(false)}
-
-                  tools={toolCatalog.data}
-                />
-                {agentSettings.data && (
-                  <>
-                <label className="composer-model">
-                  <Cpu size={13} />
-                  <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} disabled={!provider.data || running} aria-label="Model for the next run">
+                <label className="chat-composer__model">
+                  <Cpu size={15} />
+                  <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)}
+                    disabled={!provider.data || running} aria-label="Model for the next run">
                     <option value="">{provider.data?.configured_model ?? "Auto model"}</option>
                     <ModelOptions provider={provider.data} />
                   </select>
                 </label>
-                {provider.data && <span className="composer-fact"><Sparkles size={13} /> {provider.data.reasoning_content ? "Reasoning ready" : "Standard reasoning"}</span>}
-
-                  <label className="composer-policy" title={POLICY_HINT[agentSettings.data.approval_policy]}>
-                    <ShieldCheck size={13} />
-                    <span className="sr-only">Approval policy for new runs</span>
-                    <select value={agentSettings.data.approval_policy} disabled={savingPolicy}
-                      aria-label="Approval policy for new runs"
-                      onChange={(event) => void setApprovalPolicy(
-                        event.target.value as LightagentSettings["approval_policy"],
-                      )}>
-                      <option value="balanced">Balanced</option>
-                      <option value="strict">Strict</option>
-                      <option value="permissive">Permissive</option>
-                    </select>
-                  </label>
-                  </>
+                <button type="button" className="btn btn--primary chat-composer__send"
+                  disabled={!draft.trim() || busy || serviceUnavailable} onClick={() => void send()}
+                  aria-label={running || steering.length > 0 ? "Queue steer" : "Send message"}
+                  title={running || steering.length > 0 ? "Queue steer" : "Send message"}>
+                  <Send size={18} />
+                </button>
+              </div>
+              <div className="status-controls">
+                <button type="button" className="status-controls__toggle"
+                  aria-expanded={statusControlsOpen} onClick={() => {
+                    if (statusControlsOpen) setToolsOpen(false);
+                    setStatusControlsOpen((open) => !open);
+                  }}>
+                  <ChevronRight size={14} /> Status Control
+                </button>
+                {statusControlsOpen && (
+                  <div className="composer-meta">
+                    <button
+                      ref={composerToolsBtn}
+                      type="button"
+                      className="composer-meta__tools"
+                      aria-haspopup="menu"
+                      aria-expanded={toolsOpen}
+                      disabled={!toolCatalog.data}
+                      onClick={() => setToolsOpen((current) => !current)}
+                      title="Tools this agent can call"
+                    >
+                      <Wrench size={13} />
+                      <span>{toolCatalog.data ? `${toolCatalog.data.length} tools` : "Tools"}</span>
+                      <ChevronDown size={13} />
+                    </button>
+                    <ToolMenu open={toolsOpen} anchorRef={composerToolsBtn} onClose={() => setToolsOpen(false)} tools={toolCatalog.data} />
+                    {agentSettings.data && (
+                      <>
+                        {provider.data && <span className="composer-fact"><Sparkles size={13} /> {provider.data.reasoning_content ? "Reasoning ready" : "Standard reasoning"}</span>}
+                        <label className="composer-policy" title={POLICY_HINT[agentSettings.data.approval_policy]}>
+                          <ShieldCheck size={13} />
+                          <span className="sr-only">Approval policy for new runs</span>
+                          <select value={agentSettings.data.approval_policy} disabled={savingPolicy}
+                            aria-label="Approval policy for new runs"
+                            onChange={(event) => void setApprovalPolicy(
+                              event.target.value as LightagentSettings["approval_policy"],
+                            )}>
+                            <option value="balanced">Balanced</option>
+                            <option value="strict">Strict</option>
+                            <option value="permissive">Permissive</option>
+                          </select>
+                        </label>
+                      </>
+                    )}
+                    <span style={{ flex: 1 }} />
+                    <span className="composer-fact">{session.messages.length} msgs · {session.runs.length} runs</span>
+                    <span title={activity.detail} aria-label={`Run activity: ${activity.detail}`}>
+                      <Pill tone={badge.tone} dot>{badge.label}</Pill>
+                    </span>
+                  </div>
                 )}
-                <span style={{ flex: 1 }} />
-                <span className="composer-fact">{session.messages.length} msgs · {session.runs.length} runs</span>
-                <span title={activity.detail} aria-label={`Run activity: ${activity.detail}`}>
-                  <Pill tone={badge.tone} dot>{badge.label}</Pill>
-                </span>
               </div>
             </>
           )}
@@ -714,6 +728,10 @@ function SessionRow({ row, active, disabled, onOpen, onDelete }: {
   row: SessionSummary; active: boolean; disabled: boolean;
   onOpen: () => void; onDelete: () => void;
 }) {
+  const [pinned, setPinned] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuButton = useRef<HTMLButtonElement | null>(null);
+  const label = row.title || "Untitled";
   return (
     <li>
       <div style={{ display: "flex", gap: 8, padding: "10px 12px", borderRadius: "var(--radius)",
@@ -724,19 +742,33 @@ function SessionRow({ row, active, disabled, onOpen, onDelete }: {
           style={{ flex: 1, minWidth: 0, padding: 0, border: 0, background: "transparent",
             color: "inherit", textAlign: "left", cursor: disabled ? "default" : "pointer" }}>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 13, fontWeight: active ? 600 : 500 }}>
-            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.title || "Untitled"}</span>
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
             <span className="tnum" style={{ color: "var(--text-faint)", fontSize: 11, flex: "none" }}>{whenever(unix(row.updated_at))}</span>
           </div>
           <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>
             {row.message_count} messages · {row.run_count} runs
           </div>
         </button>
-        <button type="button" className="btn btn--ghost btn--icon"
-          style={{ width: 26, height: 26 }} disabled={disabled && active}
-          aria-label={"Delete " + (row.title || "this session")}
-          onClick={(event) => { event.stopPropagation(); onDelete(); }}>
-          <Trash2 size={14} />
+        <button type="button" className={`session-row__action${pinned ? " is-pinned" : ""}`}
+          disabled={disabled && active} aria-pressed={pinned} aria-label={`${pinned ? "Unpin" : "Pin"} ${label}`}
+          onClick={(event) => { event.stopPropagation(); setPinned((value) => !value); }}>
+          <Pin size={15} />
         </button>
+        <button ref={menuButton} type="button" className="session-row__action" disabled={disabled && active}
+          aria-label={`More actions for ${label}`} aria-haspopup="menu" aria-expanded={menuOpen}
+          onClick={(event) => { event.stopPropagation(); setMenuOpen((open) => !open); }}>
+          <MoreHorizontal size={17} />
+        </button>
+        <Menu open={menuOpen} anchorRef={menuButton} onClose={() => setMenuOpen(false)} align="end" minWidth={216} label={`Actions for ${label}`}>
+          <MenuItem disabled><span className="session-menu__item"><Pencil size={17} /> Rename</span></MenuItem>
+          <MenuItem onClick={() => { setPinned((value) => !value); setMenuOpen(false); }}><span className="session-menu__item"><Pin size={17} /> {pinned ? "Unpin" : "Pin"}</span></MenuItem>
+          <MenuItem disabled><span className="session-menu__item"><Folder size={17} /> Move to project <ChevronRight size={16} /></span></MenuItem>
+          <div className="menu__divider" role="separator" />
+          <MenuItem disabled><span className="session-menu__item"><Share2 size={17} /> Share</span></MenuItem>
+          <div className="menu__divider" role="separator" />
+          <MenuItem disabled><span className="session-menu__item"><Archive size={17} /> Archive</span></MenuItem>
+          <MenuItem onClick={() => { setMenuOpen(false); onDelete(); }}><span className="session-menu__item session-menu__item--danger"><Trash2 size={17} /> Delete</span></MenuItem>
+        </Menu>
       </div>
     </li>
   );
