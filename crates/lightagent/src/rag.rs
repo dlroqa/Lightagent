@@ -609,8 +609,8 @@ pub async fn add(path: PathBuf, source: Option<String>, json: bool) -> Result<()
             .map_err(|error| error.to_string())?;
         // The local write succeeds independently. A remote outage must never
         // make an indexed document disappear from this profile's RAG store.
-        if let Some(remote) = RemoteRag::from_config(&config, &profile) {
-            if let Err(error) = remote
+        if let Some(remote) = RemoteRag::from_config(&config, &profile)
+            && let Err(error) = remote
                 .upsert(
                     &name,
                     &text,
@@ -618,9 +618,8 @@ pub async fn add(path: PathBuf, source: Option<String>, json: bool) -> Result<()
                     config.rag.chunk_overlap_chars,
                 )
                 .await
-            {
-                eprintln!("· remote RAG sync skipped for {name}: {error}");
-            }
+        {
+            eprintln!("· remote RAG sync skipped for {name}: {error}");
         }
         total += added;
         indexed.push((name, added));
