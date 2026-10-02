@@ -552,8 +552,8 @@ export function Agent() {
           <div className="chat-sidebar__brand">
             <img src="/icon.png" alt="" width={30} height={30} />
             <span className="chat-sidebar__wordmark" aria-label="Lightagent">
-              <strong className="chat-sidebar__brand-name chat-sidebar__brand-name--light">Lightagent</strong>
-              <strong className="chat-sidebar__brand-name chat-sidebar__brand-name--lite" aria-hidden="true">Liteagent</strong>
+              <strong className="chat-sidebar__brand-name chat-sidebar__brand-name--light"><span>Lightagent</span></strong>
+              <strong className="chat-sidebar__brand-name chat-sidebar__brand-name--lite" aria-hidden="true"><span>Liteagent</span></strong>
             </span>
             <button type="button" className="chat-sidebar__search-button" aria-label="Search chats"
               aria-expanded={searchOpen} onClick={() => setSearchOpen((open) => {
