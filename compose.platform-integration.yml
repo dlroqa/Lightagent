@@ -24,7 +24,10 @@ services:
     command:
       - v2
       - --engine
-      - optimum
+      # The pinned CPU image's OpenVINO/optimum path cannot initialize the
+      # DeBERTa-based reranker on GitHub-hosted CPUs. Torch is Infinity's
+      # portable CPU backend for this embedding + reranking pair.
+      - torch
       - --model-id
       - BAAI/bge-small-en-v1.5
       - --model-id

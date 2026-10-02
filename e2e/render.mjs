@@ -179,7 +179,9 @@ async function checkOverlayOpacity(context) {
     try {
       await page.emulateMedia({ colorScheme: scheme });
       await page.goto(`${BASE}/#/`, { waitUntil: "domcontentloaded" });
-      await page.getByRole("button", { name: "New session" }).first().click();
+      // The compact duplicate "New session" action is intentionally hidden in
+      // the chat workspace. The visible primary action is "New chat".
+      await page.getByRole("button", { name: "New chat" }).click();
       // The tool controls enable once the runtime tool list has loaded.
       const composerTools = page.locator(".composer-meta__tools");
       await composerTools.waitFor({ timeout: SETTLE_MS });
@@ -221,10 +223,13 @@ async function captureResponsive(context) {
         await page.setViewportSize({ width: size.width, height: size.height });
         await page.emulateMedia({ colorScheme: scheme });
         await page.goto(`${BASE}/#/`, { waitUntil: "domcontentloaded" });
-        // Wait for the session pane, which is present whether or not a session
-        // is active — the empty-state text is not, and a session left in
-        // storage by an earlier check would otherwise never show it.
-        await page.locator(".agent-sessions").waitFor({ timeout: SETTLE_MS });
+        // The session pane remains in the DOM at every width, but the mobile
+        // chat workspace intentionally hides it to keep the composer focused.
+        const sessions = page.locator(".agent-sessions");
+        await sessions.waitFor({ state: "attached", timeout: SETTLE_MS });
+        if (size.name === "mobile" && await sessions.isVisible()) {
+          throw new Error(`${size.name} (${scheme}): session sidebar should be hidden`);
+        }
         // No horizontal overflow at any width.
         const overflow = await page.evaluate(
           () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
@@ -237,7 +242,7 @@ async function captureResponsive(context) {
         // stitch-duplicate on a full-page capture.
         const overlap = await page.evaluate(() => {
           const sessions = document.querySelector(".agent-sessions");
-          const transcript = document.querySelector(".agent-layout > .card:last-child");
+          const transcript = document.querySelector(".agent-conversation");
           if (!sessions || !transcript) return 0;
           const a = sessions.getBoundingClientRect();
           const b = transcript.getBoundingClientRect();
