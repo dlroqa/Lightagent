@@ -142,10 +142,8 @@ export function Agent() {
   const [welcomePromptIndex, setWelcomePromptIndex] = useState(0);
   const agentSettings = usePoll(agentApi.settings, 0);
   const [toolsOpen, setToolsOpen] = useState(false);
-  const [railToolsOpen, setRailToolsOpen] = useState(false);
   const [statusControlsOpen, setStatusControlsOpen] = useState(false);
   const composerToolsBtn = useRef<HTMLButtonElement | null>(null);
-  const railToolsBtn = useRef<HTMLButtonElement | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [session, setSession] = useState<AgentSession | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
@@ -310,6 +308,21 @@ export function Agent() {
         row.project?.toLowerCase().includes(needle),
     );
   }, [search, sessions.data, showArchived]);
+  const sessionSections = useMemo(() => {
+    const pinned = visible.filter((row) => row.pinned);
+    const projects = new Map<string, SessionSummary[]>();
+    for (const row of visible) {
+      if (!row.project) continue;
+      const rows = projects.get(row.project) ?? [];
+      rows.push(row);
+      projects.set(row.project, rows);
+    }
+    return {
+      pinned,
+      projects: [...projects.entries()].sort(([left], [right]) => left.localeCompare(right)),
+      recent: visible.filter((row) => !row.pinned && !row.project),
+    };
+  }, [visible]);
 
   function select(id: string) {
     if (hasPendingWork || id === activeId) return;
@@ -524,13 +537,6 @@ export function Agent() {
             <NavLink to="/tools"><Wrench size={16} /> Tools</NavLink>
             <NavLink to="/settings"><ShieldCheck size={16} /> Settings</NavLink>
           </nav>
-          <div className="chat-sidebar__section chat-sidebar__section--controls">
-            <span>{showArchived ? "Archived chats" : "Recent chats"}</span>
-            <button type="button" className="chat-sidebar__archive-toggle" aria-pressed={showArchived}
-              onClick={() => setShowArchived((value) => !value)} title={showArchived ? "Show recent chats" : "Show archived chats"}>
-              <Archive size={14} />
-            </button>
-          </div>
           {searchOpen && (
             <div className="chat-sidebar__search">
               <Search size={15} aria-hidden="true" />
@@ -539,46 +545,40 @@ export function Agent() {
             </div>
           )}
           {sidebarNotice && <span className="chat-sidebar__notice" role="status">{sidebarNotice}</span>}
-          <button type="button" className="btn" disabled={hasPendingWork} onClick={() => void startNew()}>
-            <Plus size={16} /> New session
-          </button>
-          <button
-            ref={railToolsBtn}
-            type="button"
-            className="btn"
-            style={{ justifyContent: "space-between" }}
-            aria-haspopup="menu"
-            aria-expanded={railToolsOpen}
-            disabled={!toolCatalog.data}
-            onClick={() => setRailToolsOpen((current) => !current)}
-          >
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-              <Wrench size={15} /> Tool access
-            </span>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <span className="muted" style={{ fontSize: 12 }}>{toolCatalog.data?.length ?? "—"}</span>
-              <ChevronDown size={15} />
-            </span>
-          </button>
-          <ToolMenu
-            open={railToolsOpen}
-            anchorRef={railToolsBtn}
-            onClose={() => setRailToolsOpen(false)}
-            tools={toolCatalog.data}
-          />
           <div className="agent-sessions__list" style={{ flex: 1, overflowY: "auto", margin: "0 -6px" }}>
             {visible.length === 0 ? (
               <div className="empty" style={{ padding: 20 }}>
-                <span>{sessions.loading ? "Loading sessions…" : search ? "Nothing matches." : "No agent sessions yet."}</span>
+                <span>{sessions.loading ? "Loading sessions…" : search ? "Nothing matches." : showArchived ? "No archived chats." : "No chats yet."}</span>
               </div>
             ) : (
-              <ul style={{ margin: 0, padding: 0, listStyle: "none" }}>
-                {visible.map((row) => (
-                  <SessionRow key={row.id} row={row} active={row.id === activeId}
-                    disabled={hasPendingWork} onOpen={() => select(row.id)} onUpdate={updateSession}
-                    onShare={() => void shareSession(row)} onDelete={() => void remove(row.id)} />
-                ))}
-              </ul>
+              showArchived ? (
+                <SessionGroup title="Archived chats" rows={visible} activeId={activeId} disabled={hasPendingWork}
+                  onOpen={select} onUpdate={updateSession} onShare={shareSession} onDelete={remove}
+                  trailing={<button type="button" className="chat-sidebar__archive-toggle" aria-pressed
+                    onClick={() => setShowArchived(false)} title="Show recent chats"><Archive size={14} /></button>} />
+              ) : (
+                <>
+                  {sessionSections.pinned.length > 0 && <SessionGroup title="Pinned" rows={sessionSections.pinned}
+                    activeId={activeId} disabled={hasPendingWork} onOpen={select} onUpdate={updateSession}
+                    onShare={shareSession} onDelete={remove} />}
+                  {sessionSections.projects.length > 0 && (
+                    <section className="session-group" aria-label="Projects">
+                      <div className="chat-sidebar__section">Projects</div>
+                      {sessionSections.projects.map(([project, rows]) => (
+                        <div className="session-project" key={project}>
+                          <span className="session-project__name">{project}</span>
+                          <SessionGroup rows={rows} activeId={activeId} disabled={hasPendingWork} onOpen={select}
+                            onUpdate={updateSession} onShare={shareSession} onDelete={remove} />
+                        </div>
+                      ))}
+                    </section>
+                  )}
+                  <SessionGroup title="Recent chats" rows={sessionSections.recent} activeId={activeId}
+                    disabled={hasPendingWork} onOpen={select} onUpdate={updateSession} onShare={shareSession}
+                    onDelete={remove} trailing={<button type="button" className="chat-sidebar__archive-toggle" aria-pressed={false}
+                      onClick={() => setShowArchived(true)} title="Show archived chats"><Archive size={14} /></button>} />
+                </>
+              )
             )}
           </div>
         </aside>
@@ -780,6 +780,31 @@ export function Agent() {
         </section>
       </div>
     </>
+  );
+}
+
+function SessionGroup({ title, rows, activeId, disabled, onOpen, onUpdate, onShare, onDelete, trailing }: {
+  title?: string;
+  rows: SessionSummary[];
+  activeId: string | null;
+  disabled: boolean;
+  onOpen: (id: string) => void;
+  onUpdate: (id: string, patch: SessionPatch) => Promise<boolean>;
+  onShare: (row: SessionSummary) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+  trailing?: ReactNode;
+}) {
+  return (
+    <section className="session-group">
+      {title && <div className="chat-sidebar__section chat-sidebar__section--controls"><span>{title}</span>{trailing}</div>}
+      <ul className="session-group__list">
+        {rows.map((row) => (
+          <SessionRow key={row.id} row={row} active={row.id === activeId} disabled={disabled}
+            onOpen={() => onOpen(row.id)} onUpdate={onUpdate} onShare={() => void onShare(row)}
+            onDelete={() => void onDelete(row.id)} />
+        ))}
+      </ul>
+    </section>
   );
 }
 

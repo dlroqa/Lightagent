@@ -220,6 +220,7 @@ textarea {
   flex: none;
   width: 38px;
   height: 38px;
+  object-fit: contain;
   border-radius: 11px;
   box-shadow: 0 4px 12px rgba(8, 15, 20, 0.3);
   outline: 1px solid rgba(148, 163, 184, 0.22);
@@ -1540,7 +1541,8 @@ textarea {
 }
 
 .chat-composer__model select {
-  max-width: 154px;
+  width: 110px;
+  max-width: 110px;
   min-width: 0;
   border: 0;
   outline: 0;
@@ -1874,7 +1876,9 @@ textarea {
 }
 
 .chat-sidebar__brand img {
-  border-radius: 8px;
+  width: 34px;
+  height: 34px;
+  object-fit: contain;
 }
 
 .chat-sidebar__brand strong,
@@ -1950,6 +1954,31 @@ textarea {
 .chat-sidebar__section--controls {
   display: flex;
   align-items: center;
+}
+
+.session-group + .session-group {
+  margin-top: 8px;
+}
+
+.session-group__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.session-project {
+  margin: 3px 0 8px;
+}
+
+.session-project__name {
+  display: block;
+  padding: 0 10px 3px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat-sidebar__archive-toggle {
