@@ -29,8 +29,9 @@ use lightagent_store::{
     Session, SessionId, SessionStore, StoredMessage, model_history as build_model_history,
 };
 use lightagent_tools::{
-    BoundedExecutor, Delegation, SkillContext, SubagentPolicy, SubagentRole, Tool, ToolRegistry,
-    WebContext, WebPolicy, Workspace, WorkspaceContext, WorkspacePolicy,
+    BoundedExecutor, Delegation, OpenTerminalContext, OpenTerminalPolicy, SkillContext,
+    SubagentPolicy, SubagentRole, Tool, ToolRegistry, WebContext, WebPolicy, Workspace,
+    WorkspaceContext, WorkspacePolicy,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -136,6 +137,38 @@ pub(crate) fn workspace_context(config: &Config, default_dir: PathBuf) -> Option
     })
 }
 
+/// Build a run-local Open Terminal connection when explicitly enabled.
+///
+/// This keeps the external service outside the harness: the adapter receives a
+/// resolved bearer key only in memory and never has a host workspace or host
+/// environment to forward. Command approval is still enforced by the tool's
+/// `Executable` risk class.
+pub(crate) fn open_terminal_context(config: &Config) -> Option<OpenTerminalContext> {
+    let endpoint = &config.platform.open_terminal.endpoint;
+    if !endpoint.enabled {
+        return None;
+    }
+    let base_url = endpoint.base_url.as_ref()?.trim().trim_end_matches('/');
+    if base_url.is_empty() {
+        return None;
+    }
+    lightagent_provider_lightweight::ensure_provider();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("lightagent/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .ok()?;
+    Some(OpenTerminalContext {
+        client,
+        policy: Arc::new(OpenTerminalPolicy {
+            base_url: base_url.to_owned(),
+            api_key: endpoint.api_key.as_ref().and_then(|key| key.resolve()),
+            poll_interval: Duration::from_millis(250),
+        }),
+    })
+}
+
 /// Build the built-in registry that matches the capabilities enabled for this run.
 pub(crate) fn configured_builtin_registry(config: &Config, has_skills: bool) -> ToolRegistry {
     let mut registry = ToolRegistry::builtin();
@@ -152,6 +185,11 @@ pub(crate) fn configured_builtin_registry(config: &Config, has_skills: bool) -> 
             .without("terminal.run");
     } else if !config.tools.allow_terminal {
         registry = registry.without("terminal.run");
+    }
+    if !config.platform.open_terminal.endpoint.enabled
+        || config.platform.open_terminal.endpoint.base_url.is_none()
+    {
+        registry = registry.without("open_terminal.run");
     }
     if !has_skills {
         registry = registry.without("skill.read");
@@ -442,6 +480,9 @@ async fn build_chat_runtime(
     }
     if let Some(workspace) = workspace_context(config, workspace_dir) {
         executor = executor.with_workspace(workspace);
+    }
+    if let Some(open_terminal) = open_terminal_context(config) {
+        executor = executor.with_open_terminal(open_terminal);
     }
     let mut run_profile = profile.clone();
     if !skills.is_empty() {

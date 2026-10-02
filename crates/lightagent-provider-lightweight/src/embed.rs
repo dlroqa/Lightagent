@@ -18,6 +18,7 @@ pub struct EmbeddingClient {
     client: reqwest::Client,
     base_url: String,
     api_key: Option<String>,
+    embeddings_path: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -44,7 +45,19 @@ impl EmbeddingClient {
             client,
             base_url: base_url.into(),
             api_key,
+            embeddings_path: "/v1/embeddings",
         })
+    }
+
+    /// Build a client for Infinity's OpenAI-shaped embeddings endpoint. Infinity
+    /// intentionally exposes it at `/embeddings`, not `/v1/embeddings`.
+    pub fn infinity(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+    ) -> Result<Self, ProviderError> {
+        let mut client = Self::new(base_url, api_key)?;
+        client.embeddings_path = "/embeddings";
+        Ok(client)
     }
 
     fn base(&self) -> &str {
@@ -63,7 +76,7 @@ impl EmbeddingClient {
         let body = json!({ "model": model, "input": inputs });
         let mut request = self
             .client
-            .post(format!("{}/v1/embeddings", self.base()))
+            .post(format!("{}{}", self.base(), self.embeddings_path))
             .json(&body);
         if let Some(key) = &self.api_key {
             request = request.bearer_auth(key);

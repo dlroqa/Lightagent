@@ -609,20 +609,102 @@ pub struct PlatformEndpointConfig {
     pub api_key: Option<SecretRef>,
 }
 
-/// Optional services that surround the Lightagent harness in a full platform
-/// deployment. They are configuration only: each service keeps its own
-/// lifecycle, data, and security boundary.
+/// TypeSafe Jev's typed-decision service. It is deliberately a routing aid,
+/// never a permission authority.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JevConfig {
+    #[serde(flatten)]
+    pub endpoint: PlatformEndpointConfig,
+    pub model: String,
+    pub confidence_threshold: f32,
+    /// Model identifiers Jev may select. An empty list deliberately disables
+    /// routing even when the endpoint is enabled: Jev is never an authority
+    /// for arbitrary provider model identifiers.
+    #[serde(default)]
+    pub allowed_models: Vec<String>,
+    /// Bound the advisory routing call so an unavailable control plane never
+    /// delays a normal agent run for long.
+    #[serde(default = "default_jev_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+const fn default_jev_timeout_secs() -> u64 {
+    3
+}
+
+impl Default for JevConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: PlatformEndpointConfig::default(),
+            model: "jev-latest".to_owned(),
+            confidence_threshold: 0.85,
+            allowed_models: Vec::new(),
+            timeout_secs: default_jev_timeout_secs(),
+        }
+    }
+}
+
+/// Qdrant's remote collection used for durable document vectors.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QdrantConfig {
+    #[serde(flatten)]
+    pub endpoint: PlatformEndpointConfig,
+    pub collection: String,
+}
+
+impl Default for QdrantConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: PlatformEndpointConfig::default(),
+            collection: "lightagent-default".to_owned(),
+        }
+    }
+}
+
+/// Infinity provides the embedding and cross-encoder reranking stages.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InfinityConfig {
+    #[serde(flatten)]
+    pub endpoint: PlatformEndpointConfig,
+    pub embedding_model: String,
+    pub rerank_model: String,
+}
+
+impl Default for InfinityConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: PlatformEndpointConfig::default(),
+            embedding_model: "BAAI/bge-small-en-v1.5".to_owned(),
+            rerank_model: "mixedbread-ai/mxbai-rerank-xsmall-v1".to_owned(),
+        }
+    }
+}
+
+/// Open WebUI Open Terminal's isolated, session-scoped execution service.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenTerminalConfig {
+    #[serde(flatten)]
+    pub endpoint: PlatformEndpointConfig,
+}
+
+/// Optional services that surround the Lightagent harness in a full platform
+/// deployment. Each service keeps its own lifecycle and security boundary; an
+/// enabled endpoint is useful only to its explicit, policy-preserving adapter.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlatformConfig {
     /// Jev makes routing and confidence decisions before a run is dispatched.
-    pub jev: PlatformEndpointConfig,
+    pub jev: JevConfig,
     /// Qdrant stores durable vectors for a remote retrieval deployment.
-    pub qdrant: PlatformEndpointConfig,
+    pub qdrant: QdrantConfig,
     /// Infinity reranks retrieved candidates.
-    pub infinity: PlatformEndpointConfig,
+    pub infinity: InfinityConfig,
     /// Open Terminal executes code in an isolated execution environment.
-    pub open_terminal: PlatformEndpointConfig,
+    pub open_terminal: OpenTerminalConfig,
 }
 /// The whole typed configuration.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -828,10 +910,13 @@ impl Config {
             ));
         }
         for (name, endpoint) in [
-            ("platform.jev", &self.platform.jev),
-            ("platform.qdrant", &self.platform.qdrant),
-            ("platform.infinity", &self.platform.infinity),
-            ("platform.open_terminal", &self.platform.open_terminal),
+            ("platform.jev", &self.platform.jev.endpoint),
+            ("platform.qdrant", &self.platform.qdrant.endpoint),
+            ("platform.infinity", &self.platform.infinity.endpoint),
+            (
+                "platform.open_terminal",
+                &self.platform.open_terminal.endpoint,
+            ),
         ] {
             if endpoint.enabled {
                 match endpoint.base_url.as_deref().map(str::trim) {
@@ -843,6 +928,45 @@ impl Config {
                     }
                 }
             }
+        }
+        if self.platform.jev.endpoint.enabled
+            && !(0.0..=1.0).contains(&self.platform.jev.confidence_threshold)
+        {
+            return Err(ConfigError::Invalid(
+                "platform.jev.confidence_threshold must be between 0 and 1".to_owned(),
+            ));
+        }
+        if self.platform.jev.endpoint.enabled && self.platform.jev.timeout_secs == 0 {
+            return Err(ConfigError::Invalid(
+                "platform.jev.timeout_secs must be at least 1".to_owned(),
+            ));
+        }
+        if self
+            .platform
+            .jev
+            .allowed_models
+            .iter()
+            .any(|model| model.trim().is_empty())
+        {
+            return Err(ConfigError::Invalid(
+                "platform.jev.allowed_models cannot contain an empty model id".to_owned(),
+            ));
+        }
+        if self.platform.qdrant.endpoint.enabled
+            && self.platform.qdrant.collection.trim().is_empty()
+        {
+            return Err(ConfigError::Invalid(
+                "platform.qdrant.collection must not be empty when enabled".to_owned(),
+            ));
+        }
+        if self.platform.infinity.endpoint.enabled
+            && (self.platform.infinity.embedding_model.trim().is_empty()
+                || self.platform.infinity.rerank_model.trim().is_empty())
+        {
+            return Err(ConfigError::Invalid(
+                "platform.infinity embedding_model and rerank_model are required when enabled"
+                    .to_owned(),
+            ));
         }
 
         let device = self.runtime.preferred_device.trim().to_ascii_lowercase();
@@ -946,10 +1070,10 @@ impl Config {
             );
         }
         for (name, endpoint) in [
-            ("jev", &self.platform.jev),
-            ("qdrant", &self.platform.qdrant),
-            ("infinity", &self.platform.infinity),
-            ("open_terminal", &self.platform.open_terminal),
+            ("jev", &self.platform.jev.endpoint),
+            ("qdrant", &self.platform.qdrant.endpoint),
+            ("infinity", &self.platform.infinity.endpoint),
+            ("open_terminal", &self.platform.open_terminal.endpoint),
         ] {
             if let Some(api_key) = &endpoint.api_key
                 && let Some(component) = value
@@ -1307,6 +1431,38 @@ mod tests {
         let json = serde_json::to_string(&config).expect("serialize");
         let back: Config = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, config);
+    }
+
+    #[test]
+    fn legacy_platform_endpoint_shape_loads_typed_defaults() {
+        let config: Config = serde_json::from_str(
+            r#"{"platform":{"infinity":{"enabled":true,"base_url":"http://infinity:7997","api_key":null}}}"#,
+        )
+        .expect("legacy platform config loads");
+        assert!(config.platform.infinity.endpoint.enabled);
+        assert_eq!(
+            config.platform.infinity.embedding_model,
+            "BAAI/bge-small-en-v1.5"
+        );
+        assert_eq!(
+            config.platform.infinity.rerank_model,
+            "mixedbread-ai/mxbai-rerank-xsmall-v1"
+        );
+    }
+
+    #[test]
+    fn platform_specific_settings_are_validated() {
+        let mut config = Config::default();
+        config.platform.jev.endpoint.enabled = true;
+        config.platform.jev.endpoint.base_url = Some("https://api.typesafe.ai".to_owned());
+        config.platform.jev.confidence_threshold = 1.1;
+        assert!(config.validate().is_err());
+
+        config.platform.jev.confidence_threshold = 0.85;
+        config.platform.qdrant.endpoint.enabled = true;
+        config.platform.qdrant.endpoint.base_url = Some("http://qdrant:6333".to_owned());
+        config.platform.qdrant.collection.clear();
+        assert!(config.validate().is_err());
     }
 
     #[test]

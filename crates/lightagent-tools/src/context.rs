@@ -267,6 +267,39 @@ pub struct WorkspaceContext {
     pub policy: Arc<WorkspacePolicy>,
 }
 
+/// Resolved connection details for an Open Terminal instance.
+///
+/// The bearer credential is held only in this run-local object and is redacted
+/// from `Debug`; persisted configuration remains a `SecretRef` in the caller.
+#[derive(Clone)]
+pub struct OpenTerminalContext {
+    /// HTTP client constructed by the harness.
+    pub client: reqwest::Client,
+    /// Effective remote-execution policy.
+    pub policy: Arc<OpenTerminalPolicy>,
+}
+
+/// Bounded, session-scoped Open Terminal execution policy.
+#[derive(Clone)]
+pub struct OpenTerminalPolicy {
+    /// Service root, without a trailing slash.
+    pub base_url: String,
+    /// Resolved bearer token. It is never included in diagnostics.
+    pub api_key: Option<String>,
+    /// Polling interval for a background process.
+    pub poll_interval: Duration,
+}
+
+impl std::fmt::Debug for OpenTerminalPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenTerminalPolicy")
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("poll_interval", &self.poll_interval)
+            .finish()
+    }
+}
+
 /// The skills a run's `skill.read` tool can serve, injected by the caller so this
 /// crate does not read the skills directories itself.
 #[derive(Clone)]
@@ -291,6 +324,8 @@ pub struct ToolCtx {
     pub web: Option<WebContext>,
     /// Present only when filesystem/terminal access is enabled for this run.
     pub workspace: Option<WorkspaceContext>,
+    /// Present only when a configured Open Terminal service is available.
+    pub open_terminal: Option<OpenTerminalContext>,
     /// Present only when skills are available for this run.
     pub skills: Option<SkillContext>,
 }
@@ -305,6 +340,7 @@ impl ToolCtx {
             delegation: None,
             web: None,
             workspace: None,
+            open_terminal: None,
             skills: None,
         }
     }
@@ -336,6 +372,12 @@ impl ToolCtx {
     /// Enable filesystem/terminal access with the given context.
     pub fn with_workspace(mut self, workspace: WorkspaceContext) -> Self {
         self.workspace = Some(workspace);
+        self
+    }
+
+    /// Enable the isolated remote execution service for this run.
+    pub fn with_open_terminal(mut self, open_terminal: OpenTerminalContext) -> Self {
+        self.open_terminal = Some(open_terminal);
         self
     }
 

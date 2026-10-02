@@ -120,9 +120,9 @@ export interface LightagentSettings {
   terminal_enabled: boolean;
   memory_enabled: boolean;
   show_reasoning_in_tui: boolean;
-  jev: PlatformEndpointSettings;
-  qdrant: PlatformEndpointSettings;
-  infinity: PlatformEndpointSettings;
+  jev: JevSettings;
+  qdrant: QdrantSettings;
+  infinity: InfinitySettings;
   open_terminal: PlatformEndpointSettings;
 }
 
@@ -131,6 +131,20 @@ export interface PlatformEndpointSettings {
   enabled: boolean;
   base_url: string | null;
   api_key_configured: boolean;
+}
+
+export interface JevSettings extends PlatformEndpointSettings {
+  model: string;
+  confidence_threshold: number;
+}
+
+export interface QdrantSettings extends PlatformEndpointSettings {
+  collection: string;
+}
+
+export interface InfinitySettings extends PlatformEndpointSettings {
+  embedding_model: string;
+  rerank_model: string;
 }
 
 

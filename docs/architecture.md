@@ -30,11 +30,18 @@ embed or supervise them.
   workspace dependency.
 
 `platform.jev`, `platform.qdrant`, `platform.infinity`, and
-`platform.open_terminal` are typed, opt-in endpoint settings. They record the
-deployment topology and validate/redact endpoint credentials; a configured
-endpoint is not contacted until its service-specific adapter is enabled. Use
+`platform.open_terminal` are typed, opt-in settings. An endpoint is never a
+permission grant: every adapter remains inside the harness policy boundary.
+Infinity supplies semantic embeddings when enabled; the remaining adapters are
+enabled only when their protocol clients and health checks are present. Use
 `lightagent architecture` to report this topology and `lightagent config show`
 to inspect the redacted configuration.
+
+When deployed, the retrieval path is Infinity embeddings → Qdrant candidate
+search → Infinity reranking → bounded cited context. Jev may select only a
+prevalidated route above its configured confidence threshold; it never grants
+tool permissions. Open Terminal is exposed as a distinct executable tool, so
+the normal approval, cancellation, output-limit, and audit rules still apply.
 
 
 ```text

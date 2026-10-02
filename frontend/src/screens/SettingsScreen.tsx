@@ -1,6 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
-import { agentApi, type LightagentSettings } from "../api/agent";
+import {
+  agentApi,
+  type InfinitySettings,
+  type JevSettings,
+  type LightagentSettings,
+  type PlatformEndpointSettings,
+  type QdrantSettings,
+} from "../api/agent";
 import { Switch } from "../components/Bits";
 import { Card } from "../components/Card";
 import { TopBar } from "../components/Shell";
@@ -144,14 +151,11 @@ export function SettingsScreen() {
             <p className="card__note">
               Connect external services only when your deployment provides them. URLs must use HTTP or HTTPS; secrets stay in the CLI configuration and are never shown here.
             </p>
-            <PlatformEndpointRow label="Jev" hint="Routing and confidence decisions before a run is dispatched."
-              endpoint={value?.jev} disabled={!value || saving}
+            <JevSettingsRow endpoint={value?.jev} disabled={!value || saving}
               onSave={(jev) => persist({ jev })} />
-            <PlatformEndpointRow label="Qdrant" hint="Remote vector retrieval for configured knowledge sources."
-              endpoint={value?.qdrant} disabled={!value || saving}
+            <QdrantSettingsRow endpoint={value?.qdrant} disabled={!value || saving}
               onSave={(qdrant) => persist({ qdrant })} />
-            <PlatformEndpointRow label="Infinity" hint="Reranks retrieved candidates before they reach the agent."
-              endpoint={value?.infinity} disabled={!value || saving}
+            <InfinitySettingsRow endpoint={value?.infinity} disabled={!value || saving}
               onSave={(infinity) => persist({ infinity })} />
             <PlatformEndpointRow label="Open Terminal" hint="An isolated code-execution service; separate from local terminal tools."
               endpoint={value?.open_terminal} disabled={!value || saving}
@@ -258,12 +262,13 @@ function ToggleRow({ label, hint, checked, onChange, disabled }: {
   );
 }
 
-function PlatformEndpointRow({ label, hint, endpoint, disabled, onSave }: {
+function PlatformEndpointRow<E extends PlatformEndpointSettings>({ label, hint, endpoint, disabled, onSave, children }: {
   label: string;
   hint: string;
-  endpoint: LightagentSettings["jev"] | undefined;
+  endpoint: E | undefined;
   disabled: boolean;
-  onSave: (endpoint: LightagentSettings["jev"]) => Promise<void>;
+  onSave: (endpoint: E) => Promise<void>;
+  children?: ReactNode;
 }) {
   const [baseUrl, setBaseUrl] = useState(endpoint?.base_url ?? "");
   useEffect(() => setBaseUrl(endpoint?.base_url ?? ""), [endpoint?.base_url]);
@@ -289,6 +294,96 @@ function PlatformEndpointRow({ label, hint, endpoint, disabled, onSave }: {
           {endpoint.api_key_configured ? "A secret is configured in the CLI; its value is hidden." : "No secret configured."}
         </div>
       </div>
+      {children}
     </div>
   );
+}
+
+function JevSettingsRow({ endpoint, disabled, onSave }: {
+  endpoint: JevSettings | undefined;
+  disabled: boolean;
+  onSave: (settings: JevSettings) => Promise<void>;
+}) {
+  return (
+    <PlatformEndpointRow label="Jev" hint="Routing and confidence decisions before a run is dispatched."
+      endpoint={endpoint} disabled={disabled} onSave={onSave}>
+      {endpoint && <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 150px", gap: 10, marginTop: 10 }}>
+        <TextPlatformSetting label="Decision model" value={endpoint.model} disabled={disabled || !endpoint.enabled}
+          onSave={(model) => onSave({ ...endpoint, model })} />
+        <NumberPlatformSetting label="Confidence threshold" value={endpoint.confidence_threshold}
+          min={0} max={1} step={0.01} disabled={disabled || !endpoint.enabled}
+          onSave={(confidence_threshold) => onSave({ ...endpoint, confidence_threshold })} />
+      </div>}
+    </PlatformEndpointRow>
+  );
+}
+
+function QdrantSettingsRow({ endpoint, disabled, onSave }: {
+  endpoint: QdrantSettings | undefined;
+  disabled: boolean;
+  onSave: (settings: QdrantSettings) => Promise<void>;
+}) {
+  return (
+    <PlatformEndpointRow label="Qdrant" hint="Remote vector retrieval for configured knowledge sources."
+      endpoint={endpoint} disabled={disabled} onSave={onSave}>
+      {endpoint && <TextPlatformSetting label="Collection" value={endpoint.collection}
+        disabled={disabled || !endpoint.enabled} onSave={(collection) => onSave({ ...endpoint, collection })} />}
+    </PlatformEndpointRow>
+  );
+}
+
+function InfinitySettingsRow({ endpoint, disabled, onSave }: {
+  endpoint: InfinitySettings | undefined;
+  disabled: boolean;
+  onSave: (settings: InfinitySettings) => Promise<void>;
+}) {
+  return (
+    <PlatformEndpointRow label="Infinity" hint="Embeds and reranks retrieved candidates before they reach the agent."
+      endpoint={endpoint} disabled={disabled} onSave={onSave}>
+      {endpoint && <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10, marginTop: 10 }}>
+        <TextPlatformSetting label="Embedding model" value={endpoint.embedding_model}
+          disabled={disabled || !endpoint.enabled} onSave={(embedding_model) => onSave({ ...endpoint, embedding_model })} />
+        <TextPlatformSetting label="Reranking model" value={endpoint.rerank_model}
+          disabled={disabled || !endpoint.enabled} onSave={(rerank_model) => onSave({ ...endpoint, rerank_model })} />
+      </div>}
+    </PlatformEndpointRow>
+  );
+}
+
+function TextPlatformSetting({ label, value, disabled, onSave }: {
+  label: string;
+  value: string;
+  disabled: boolean;
+  onSave: (value: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  return <div className="field" style={{ marginTop: 10 }}>
+    <label className="field__label">{label}</label>
+    <input className="input" value={draft} disabled={disabled} onChange={(event) => setDraft(event.target.value)}
+      onBlur={() => { const next = draft.trim(); if (next !== value) onSave(next); }} />
+  </div>;
+}
+
+function NumberPlatformSetting({ label, value, min, max, step, disabled, onSave }: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  disabled: boolean;
+  onSave: (value: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => setDraft(String(value)), [value]);
+  return <div className="field" style={{ marginTop: 10 }}>
+    <label className="field__label">{label}</label>
+    <input className="input" type="number" min={min} max={max} step={step} value={draft} disabled={disabled}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={() => {
+        const next = Number(draft);
+        if (Number.isFinite(next) && next >= min && next <= max && next !== value) onSave(next);
+        else setDraft(String(value));
+      }} />
+  </div>;
 }

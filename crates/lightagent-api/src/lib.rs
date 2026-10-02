@@ -291,6 +291,32 @@ struct UiPlatformEndpoint {
     api_key_configured: bool,
 }
 
+/// Non-sensitive settings for TypeSafe Jev's routing adapter.
+#[derive(Clone, Deserialize, Serialize)]
+struct UiJevSettings {
+    #[serde(flatten)]
+    endpoint: UiPlatformEndpoint,
+    model: String,
+    confidence_threshold: f32,
+}
+
+/// Non-sensitive settings for Qdrant's retrieval adapter.
+#[derive(Clone, Deserialize, Serialize)]
+struct UiQdrantSettings {
+    #[serde(flatten)]
+    endpoint: UiPlatformEndpoint,
+    collection: String,
+}
+
+/// Non-sensitive settings for Infinity's embedding and reranking adapter.
+#[derive(Clone, Deserialize, Serialize)]
+struct UiInfinitySettings {
+    #[serde(flatten)]
+    endpoint: UiPlatformEndpoint,
+    embedding_model: String,
+    rerank_model: String,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 struct UiSettings {
     max_turns: u32,
@@ -302,9 +328,9 @@ struct UiSettings {
     terminal_enabled: bool,
     memory_enabled: bool,
     show_reasoning_in_tui: bool,
-    jev: UiPlatformEndpoint,
-    qdrant: UiPlatformEndpoint,
-    infinity: UiPlatformEndpoint,
+    jev: UiJevSettings,
+    qdrant: UiQdrantSettings,
+    infinity: UiInfinitySettings,
     open_terminal: UiPlatformEndpoint,
 }
 
@@ -319,10 +345,21 @@ fn ui_settings(config: &lightagent_core::Config) -> UiSettings {
         terminal_enabled: config.tools.allow_terminal,
         memory_enabled: config.memory.auto_capture,
         show_reasoning_in_tui: config.tui.show_reasoning,
-        jev: ui_platform_endpoint(&config.platform.jev),
-        qdrant: ui_platform_endpoint(&config.platform.qdrant),
-        infinity: ui_platform_endpoint(&config.platform.infinity),
-        open_terminal: ui_platform_endpoint(&config.platform.open_terminal),
+        jev: UiJevSettings {
+            endpoint: ui_platform_endpoint(&config.platform.jev.endpoint),
+            model: config.platform.jev.model.clone(),
+            confidence_threshold: config.platform.jev.confidence_threshold,
+        },
+        qdrant: UiQdrantSettings {
+            endpoint: ui_platform_endpoint(&config.platform.qdrant.endpoint),
+            collection: config.platform.qdrant.collection.clone(),
+        },
+        infinity: UiInfinitySettings {
+            endpoint: ui_platform_endpoint(&config.platform.infinity.endpoint),
+            embedding_model: config.platform.infinity.embedding_model.clone(),
+            rerank_model: config.platform.infinity.rerank_model.clone(),
+        },
+        open_terminal: ui_platform_endpoint(&config.platform.open_terminal.endpoint),
     }
 }
 
@@ -415,10 +452,24 @@ async fn save_settings(
     config.tools.allow_terminal = settings.terminal_enabled;
     config.memory.auto_capture = settings.memory_enabled;
     config.tui.show_reasoning = settings.show_reasoning_in_tui;
-    apply_platform_endpoint(&mut config.platform.jev, &settings.jev);
-    apply_platform_endpoint(&mut config.platform.qdrant, &settings.qdrant);
-    apply_platform_endpoint(&mut config.platform.infinity, &settings.infinity);
-    apply_platform_endpoint(&mut config.platform.open_terminal, &settings.open_terminal);
+    apply_platform_endpoint(&mut config.platform.jev.endpoint, &settings.jev.endpoint);
+    config.platform.jev.model = settings.jev.model.trim().to_owned();
+    config.platform.jev.confidence_threshold = settings.jev.confidence_threshold;
+    apply_platform_endpoint(
+        &mut config.platform.qdrant.endpoint,
+        &settings.qdrant.endpoint,
+    );
+    config.platform.qdrant.collection = settings.qdrant.collection.trim().to_owned();
+    apply_platform_endpoint(
+        &mut config.platform.infinity.endpoint,
+        &settings.infinity.endpoint,
+    );
+    config.platform.infinity.embedding_model = settings.infinity.embedding_model.trim().to_owned();
+    config.platform.infinity.rerank_model = settings.infinity.rerank_model.trim().to_owned();
+    apply_platform_endpoint(
+        &mut config.platform.open_terminal.endpoint,
+        &settings.open_terminal,
+    );
     if let Err(error) = config.validate() {
         return bad_request(&error.to_string());
     }
@@ -809,4 +860,35 @@ fn event_stream(run: Arc<RunState>) -> impl Stream<Item = Result<Event, Infallib
             }
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lightagent_core::SecretRef;
+
+    #[test]
+    fn typed_platform_settings_are_exposed_without_secret_references() {
+        let mut config = lightagent_core::Config::default();
+        config.platform.jev.endpoint.enabled = true;
+        config.platform.jev.endpoint.api_key = Some(SecretRef::env("JEV_TEST_TOKEN"));
+        config.platform.jev.model = "jev-router-v2".to_owned();
+        config.platform.jev.confidence_threshold = 0.9;
+        config.platform.qdrant.collection = "workspace-documents".to_owned();
+        config.platform.infinity.embedding_model = "embedding-v2".to_owned();
+        config.platform.infinity.rerank_model = "reranker-v2".to_owned();
+
+        let value = serde_json::to_value(ui_settings(&config)).expect("settings serialize");
+
+        assert_eq!(value["jev"]["model"], "jev-router-v2");
+        let confidence = value["jev"]["confidence_threshold"]
+            .as_f64()
+            .expect("confidence is numeric");
+        assert!((confidence - 0.9).abs() < 1e-6);
+        assert_eq!(value["qdrant"]["collection"], "workspace-documents");
+        assert_eq!(value["infinity"]["embedding_model"], "embedding-v2");
+        assert_eq!(value["infinity"]["rerank_model"], "reranker-v2");
+        assert_eq!(value["jev"]["api_key_configured"], true);
+        assert!(!value.to_string().contains("JEV_TEST_TOKEN"));
+    }
 }

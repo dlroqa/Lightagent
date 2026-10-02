@@ -179,6 +179,10 @@ bash scripts/package-lightagent.sh
 bash scripts/smoke-lightagent-package.sh
 ```
 
+The optional live Qdrant + Infinity contract environment is documented in
+[platform integration](docs/platform-integration.md). It requires Docker and is
+not needed for ordinary local development.
+
 The archive contains the CLI, `web/`, the license, and Linux service examples.
 Run the packaged Web UI with `./lightagent serve --web-root ./web`.
 

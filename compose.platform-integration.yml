@@ -1,0 +1,45 @@
+# Reproducible local dependencies for Lightagent's remote-RAG integration tests.
+#
+# Both ports bind only to loopback.  The named volumes cache model downloads and
+# retain Qdrant data between `docker compose up` invocations; remove them with
+# `docker compose -f compose.platform-integration.yml down --volumes`.
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.13.6
+    ports:
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - lightagent-qdrant-data:/qdrant/storage
+    # The contract test polls Qdrant's documented /readyz endpoint. Keeping
+    # that probe outside the image avoids assuming diagnostic binaries exist in
+    # every pinned Qdrant image.
+
+  infinity:
+    # The CPU image is deliberate: it is portable to Docker Desktop and the
+    # Ubuntu GitHub runner.  Keep this tag in sync with the server API asserted
+    # by scripts/platform-contract-test.py.
+    image: michaelf34/infinity:v0.0.77-cpu
+    command:
+      - v2
+      - --engine
+      - optimum
+      - --model-id
+      - BAAI/bge-small-en-v1.5
+      - --model-id
+      - mixedbread-ai/mxbai-rerank-xsmall-v1
+      - --port
+      - "7997"
+    ports:
+      - "127.0.0.1:7997:7997"
+    volumes:
+      - lightagent-infinity-cache:/app/.cache
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:7997/health', timeout=2)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+
+volumes:
+  lightagent-qdrant-data:
+  lightagent-infinity-cache:

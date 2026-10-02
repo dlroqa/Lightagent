@@ -20,7 +20,9 @@ use lightagent_core::{
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::context::{Clock, Delegation, SkillContext, ToolCtx, WebContext, WorkspaceContext};
+use crate::context::{
+    Clock, Delegation, OpenTerminalContext, SkillContext, ToolCtx, WebContext, WorkspaceContext,
+};
 use crate::output::clamp;
 use crate::registry::ToolRegistry;
 use crate::schema;
@@ -42,6 +44,7 @@ pub struct BoundedExecutor {
     delegation: Option<Delegation>,
     web: Option<WebContext>,
     workspace: Option<WorkspaceContext>,
+    open_terminal: Option<OpenTerminalContext>,
     skills: Option<SkillContext>,
 }
 
@@ -65,6 +68,7 @@ impl BoundedExecutor {
             delegation: None,
             web: None,
             workspace: None,
+            open_terminal: None,
             skills: None,
         }
     }
@@ -117,6 +121,12 @@ impl BoundedExecutor {
     /// Enable the `fs.*`/`terminal.run` tools by supplying the confined workspace.
     pub fn with_workspace(mut self, workspace: WorkspaceContext) -> Self {
         self.workspace = Some(workspace);
+        self
+    }
+
+    /// Enable `open_terminal.run` with a resolved, run-local connection.
+    pub fn with_open_terminal(mut self, open_terminal: OpenTerminalContext) -> Self {
+        self.open_terminal = Some(open_terminal);
         self
     }
 
@@ -190,6 +200,9 @@ impl BoundedExecutor {
         }
         if let Some(workspace) = &self.workspace {
             ctx = ctx.with_workspace(workspace.clone());
+        }
+        if let Some(open_terminal) = &self.open_terminal {
+            ctx = ctx.with_open_terminal(open_terminal.clone());
         }
         if let Some(skills) = &self.skills {
             ctx = ctx.with_skills(skills.clone());

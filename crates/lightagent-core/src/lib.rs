@@ -33,9 +33,9 @@ pub mod tool_stream;
 
 pub use config::{
     AgentConfig, ApprovalPolicy, Config, ConfigError, ConfigStore, DUCKDUCKGO_SEARCH_ENDPOINT,
-    ExtensionsConfig, InferenceConfig, McpConfig, McpServerEntry, PlatformConfig,
-    PlatformEndpointConfig, SavedProvider, SecretRef, SecurityConfig, SubagentsConfig, ToolsConfig,
-    WebConfig, WebSearchConfig,
+    ExtensionsConfig, InferenceConfig, InfinityConfig, JevConfig, McpConfig, McpServerEntry,
+    OpenTerminalConfig, PlatformConfig, PlatformEndpointConfig, QdrantConfig, SavedProvider,
+    SecretRef, SecurityConfig, SubagentsConfig, ToolsConfig, WebConfig, WebSearchConfig,
 };
 pub use event::{AgentEvent, StopReason};
 pub use ids::RunId;

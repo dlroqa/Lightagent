@@ -15,6 +15,7 @@ mod banner;
 mod chat;
 mod extensions;
 mod import;
+mod jev;
 mod markdown;
 mod memory;
 mod rag;
@@ -543,11 +544,11 @@ fn architecture(json: bool) -> Result<(), String> {
         let value = serde_json::json!({
             "harness": "Lightagent CLI/API and browser UI",
             "web_ui": "served by `lightagent serve --web-root`",
-            "jev": component(&config.platform.jev),
-            "qdrant": component(&config.platform.qdrant),
-            "infinity": component(&config.platform.infinity),
+            "jev": component(&config.platform.jev.endpoint),
+            "qdrant": component(&config.platform.qdrant.endpoint),
+            "infinity": component(&config.platform.infinity.endpoint),
             "searxng": if config.web.enabled { config.web.search.endpoint.clone() } else { None },
-            "open_terminal": component(&config.platform.open_terminal),
+            "open_terminal": component(&config.platform.open_terminal.endpoint),
             "lightweight": config.inference.base_url,
         });
         println!("{value:#}");
@@ -557,12 +558,12 @@ fn architecture(json: bool) -> Result<(), String> {
     println!("Agent harness / Open WebUI");
     println!(
         "├─ Jev: routing and confidence decisions [{}]",
-        component(&config.platform.jev)
+        component(&config.platform.jev.endpoint)
     );
     println!(
         "├─ Qdrant + Infinity: retrieve and rerank knowledge [{}; {}]",
-        component(&config.platform.qdrant),
-        component(&config.platform.infinity)
+        component(&config.platform.qdrant.endpoint),
+        component(&config.platform.infinity.endpoint)
     );
     println!(
         "├─ SearXNG: current web information [{}]",
@@ -576,7 +577,7 @@ fn architecture(json: bool) -> Result<(), String> {
     );
     println!(
         "├─ Open Terminal: isolated code execution [{}]",
-        component(&config.platform.open_terminal)
+        component(&config.platform.open_terminal.endpoint)
     );
     println!(
         "└─ Lightweight: local inference and API gateway [{}]",
@@ -1009,6 +1010,59 @@ fn get_key(config: &Config, key: &str) -> Option<String> {
         "web.max_fetch_bytes" => Some(config.web.max_fetch_bytes.to_string()),
         "web.timeout_secs" => Some(config.web.timeout_secs.to_string()),
         "rag.realtime_enabled" => Some(config.rag.realtime_enabled.to_string()),
+        "platform.jev.enabled" => Some(config.platform.jev.endpoint.enabled.to_string()),
+        "platform.jev.base_url" => Some(
+            config
+                .platform
+                .jev
+                .endpoint
+                .base_url
+                .clone()
+                .unwrap_or_default(),
+        ),
+        "platform.jev.model" => Some(config.platform.jev.model.clone()),
+        "platform.jev.confidence_threshold" => {
+            Some(config.platform.jev.confidence_threshold.to_string())
+        }
+        "platform.jev.allowed_models" => Some(config.platform.jev.allowed_models.join(",")),
+        "platform.jev.timeout_secs" => Some(config.platform.jev.timeout_secs.to_string()),
+        "platform.qdrant.enabled" => Some(config.platform.qdrant.endpoint.enabled.to_string()),
+        "platform.qdrant.base_url" => Some(
+            config
+                .platform
+                .qdrant
+                .endpoint
+                .base_url
+                .clone()
+                .unwrap_or_default(),
+        ),
+        "platform.qdrant.collection" => Some(config.platform.qdrant.collection.clone()),
+        "platform.infinity.enabled" => Some(config.platform.infinity.endpoint.enabled.to_string()),
+        "platform.infinity.base_url" => Some(
+            config
+                .platform
+                .infinity
+                .endpoint
+                .base_url
+                .clone()
+                .unwrap_or_default(),
+        ),
+        "platform.infinity.embedding_model" => {
+            Some(config.platform.infinity.embedding_model.clone())
+        }
+        "platform.infinity.rerank_model" => Some(config.platform.infinity.rerank_model.clone()),
+        "platform.open_terminal.enabled" => {
+            Some(config.platform.open_terminal.endpoint.enabled.to_string())
+        }
+        "platform.open_terminal.base_url" => Some(
+            config
+                .platform
+                .open_terminal
+                .endpoint
+                .base_url
+                .clone()
+                .unwrap_or_default(),
+        ),
         "tui.show_reasoning" => Some(config.tui.show_reasoning.to_string()),
         "runtime.preferred_device" => Some(config.runtime.preferred_device.clone()),
         "runtime.allow_cpu_fallback" => Some(config.runtime.allow_cpu_fallback.to_string()),
@@ -1102,6 +1156,49 @@ fn set_key(config: &mut Config, key: &str, value: &str) -> Result<(), String> {
             config.web.timeout_secs = parse_u64(value, "web.timeout_secs")?;
         }
         "rag.realtime_enabled" => config.rag.realtime_enabled = parse_bool(value)?,
+        "platform.jev.enabled" => config.platform.jev.endpoint.enabled = parse_bool(value)?,
+        "platform.jev.base_url" => config.platform.jev.endpoint.base_url = parse_opt_string(value),
+        "platform.jev.model" => config.platform.jev.model = value.trim().to_owned(),
+        "platform.jev.confidence_threshold" => {
+            config.platform.jev.confidence_threshold = value
+                .trim()
+                .parse()
+                .map_err(|_| "platform.jev.confidence_threshold must be a number".to_owned())?;
+        }
+        "platform.jev.allowed_models" => {
+            config.platform.jev.allowed_models = value
+                .split(',')
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+        "platform.jev.timeout_secs" => {
+            config.platform.jev.timeout_secs = parse_u64(value, "platform.jev.timeout_secs")?;
+        }
+        "platform.qdrant.enabled" => config.platform.qdrant.endpoint.enabled = parse_bool(value)?,
+        "platform.qdrant.base_url" => {
+            config.platform.qdrant.endpoint.base_url = parse_opt_string(value)
+        }
+        "platform.qdrant.collection" => config.platform.qdrant.collection = value.trim().to_owned(),
+        "platform.infinity.enabled" => {
+            config.platform.infinity.endpoint.enabled = parse_bool(value)?
+        }
+        "platform.infinity.base_url" => {
+            config.platform.infinity.endpoint.base_url = parse_opt_string(value)
+        }
+        "platform.infinity.embedding_model" => {
+            config.platform.infinity.embedding_model = value.trim().to_owned()
+        }
+        "platform.infinity.rerank_model" => {
+            config.platform.infinity.rerank_model = value.trim().to_owned()
+        }
+        "platform.open_terminal.enabled" => {
+            config.platform.open_terminal.endpoint.enabled = parse_bool(value)?
+        }
+        "platform.open_terminal.base_url" => {
+            config.platform.open_terminal.endpoint.base_url = parse_opt_string(value)
+        }
         "tui.show_reasoning" => config.tui.show_reasoning = parse_bool(value)?,
         "runtime.preferred_device" => config.runtime.preferred_device = value.to_string(),
         "runtime.allow_cpu_fallback" => {

@@ -28,7 +28,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::chat::{
     LightweightFactory, configured_model, configured_registry, load_extensions, load_skills,
-    resolve_profile, web_context, web_research_instructions, workspace_context,
+    open_terminal_context, resolve_profile, web_context, web_research_instructions,
+    workspace_context,
 };
 
 /// Builds and drives a real run with the Lightweight provider per request.
@@ -155,10 +156,21 @@ impl RunFactory for LightweightRunFactory {
             .base_url
             .clone()
             .unwrap_or_else(|| config.inference.base_url.clone());
-        let model = request
+        let explicit_model = request.model.is_some();
+        let default_model = request
             .model
             .clone()
             .unwrap_or_else(|| configured_model(&profile.routing.model, &config));
+        // Jev may advise a provider model only. It is deliberately invoked
+        // before provider construction and cannot select a profile, tools, or
+        // approval policy. Any issue retains the ordinary configured route.
+        let model = crate::jev::select_model(
+            &config.platform.jev,
+            &request.message,
+            default_model,
+            explicit_model,
+        )
+        .await;
         let api_key = config
             .inference
             .api_key
@@ -210,6 +222,9 @@ impl RunFactory for LightweightRunFactory {
         }
         if let Some(workspace) = workspace_context(&config, workspace_dir) {
             executor = executor.with_workspace(workspace);
+        }
+        if let Some(open_terminal) = open_terminal_context(&config) {
+            executor = executor.with_open_terminal(open_terminal);
         }
         if !skills.is_empty() {
             profile
