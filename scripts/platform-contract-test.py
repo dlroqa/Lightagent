@@ -34,7 +34,15 @@ def request(method, url, body=None):
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
             raw = response.read().decode("utf-8")
-            return response.status, json.loads(raw) if raw else {}
+            # Qdrant's documented readiness probe is successful plain text,
+            # whereas its data APIs and Infinity responses are JSON. Health
+            # checks need the HTTP status, not an invented JSON contract.
+            if not raw:
+                return response.status, {}
+            try:
+                return response.status, json.loads(raw)
+            except json.JSONDecodeError:
+                return response.status, {"_raw": raw}
     except urllib.error.HTTPError as error:
         raw = error.read().decode("utf-8", errors="replace")
         raise AssertionError(f"{method} {url} returned {error.code}: {raw}") from error
