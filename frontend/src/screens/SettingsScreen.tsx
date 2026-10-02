@@ -289,10 +289,14 @@ function PlatformEndpointRow<E extends PlatformEndpointSettings>({ label, hint, 
         </label>
         <input className="input" type="url" inputMode="url" placeholder="https://service.example"
           id={`platform-${label.toLowerCase().replaceAll(" ", "-")}`} value={baseUrl}
-          disabled={disabled || !endpoint.enabled} onChange={(event) => setBaseUrl(event.target.value)}
+          disabled={disabled} onChange={(event) => setBaseUrl(event.target.value)}
           onBlur={saveUrl} />
         <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 4 }}>
-          {endpoint.api_key_configured ? "A secret is configured in the CLI; its value is hidden." : "No secret configured."}
+          {endpoint.enabled
+            ? endpoint.api_key_configured
+              ? "A secret is configured in the CLI; its value is hidden."
+              : "No secret configured."
+            : "Set a valid URL, then enable this endpoint."}
         </div>
       </div>
       {children}
