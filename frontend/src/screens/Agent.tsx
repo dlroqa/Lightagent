@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NavLink } from "react-router-dom";
-import { Ban, ChevronDown, CirclePlus, Cpu, FileText, Plus, Search, Send, ShieldCheck, Sparkles, Trash2, Wrench } from "lucide-react";
+import { Ban, BookOpen, ChevronDown, CirclePlus, Cpu, FilePenLine, FileText, Globe, Plus, Search, Send, ShieldCheck, Sparkles, Terminal, Trash2, Wrench } from "lucide-react";
 
 import {
   agentApi,
@@ -534,10 +534,11 @@ export function Agent() {
                 {showLiveAnswer && answer && (
                   <AgentMessage message={{ role: "assistant", content: answer }} streaming={!done} />
                 )}
-                {running && !answer && (
-                  <div className="card" style={{ marginTop: 10 }}>
-                    <strong style={{ color: "var(--accent)", fontSize: 13 }}>Agent</strong>
-                    <div className="muted" style={{ marginTop: 6 }}>Working on the request…</div>
+                {running && !answer && tools.length === 0 && (
+                  <div className="tool-activity is-active" style={{ marginTop: 10 }} aria-live="polite">
+                    <div className="tool-activity__heading">
+                      <span>Thinking</span><span className="tool-activity__dots" aria-hidden="true"><i /><i /><i /></span>
+                    </div>
                   </div>
                 )}
                 {failure && <div className="notice notice--danger" style={{ marginTop: 10 }}>{failure}</div>}
@@ -704,9 +705,12 @@ function AgentMessage({ message, streaming }: { message: SessionMessage; streami
 }
 
 function ToolList({ title, tools }: { title: string; tools: ToolCall[] }) {
+  const active = tools.some((tool) => tool.status === "requested" || tool.status === "running");
   return (
-    <div style={{ marginTop: 12 }}>
-      <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>{title}</div>
+    <div className={`tool-activity${active ? " is-active" : ""}`} style={{ marginTop: 12 }}>
+      <div className="tool-activity__heading" aria-live="polite">
+        {active ? <><span>Thinking</span><span className="tool-activity__dots" aria-hidden="true"><i /><i /><i /></span></> : title}
+      </div>
       {tools.map((tool) => <ToolRow key={tool.id} tool={tool} />)}
     </div>
   );
@@ -730,23 +734,70 @@ function SavedTools({ session, currentRunId }: { session: AgentSession; currentR
 }
 
 function ToolRow({ tool }: { tool: ToolCall }) {
+  const active = tool.status === "requested" || tool.status === "running";
+  const [open, setOpen] = useState(active);
+  const activity = describeTool(tool);
+
+  useEffect(() => {
+    setOpen(active);
+  }, [active]);
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4, padding: "10px 12px",
-      marginTop: 8, border: "1px solid var(--border)", borderRadius: "var(--radius)" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <Wrench size={14} /><strong style={{ overflowWrap: "anywhere" }}>{tool.name}</strong>
-        <Pill tone={tool.status === "ok" ? "ok" : tool.status === "error" ? "danger" : "accent"} dot={tool.status === "running"}>
-          {STATUS_LABEL[tool.status]}
-        </Pill>
+    <details className={`tool-call${tool.status === "error" ? " is-error" : ""}`} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary className="tool-call__summary">
+        <ToolActivityIcon kind={activity.kind} />
+        <span className="tool-call__label">
+          {activity.verb} <span className="tool-call__subject">{activity.subject}</span>
+        </span>
+        {tool.status === "error" && <span className="tool-call__status">failed</span>}
         <span style={{ flex: 1 }} />
         {tool.durationMs !== undefined && (
           <span className="tnum muted" style={{ fontSize: 11.5 }}>{formatDuration(tool.durationMs)}</span>
         )}
+      </summary>
+      <div className="tool-call__details">
+        {tool.arguments && tool.arguments !== "{}" && <code className="muted" style={{ fontSize: 12, overflowWrap: "anywhere" }}>{tool.arguments}</code>}
+        {tool.result && <span style={{ fontSize: 13, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{tool.result}</span>}
       </div>
-      {tool.arguments && tool.arguments !== "{}" && <code className="muted" style={{ fontSize: 12, overflowWrap: "anywhere" }}>{tool.arguments}</code>}
-      {tool.result && <span style={{ fontSize: 13, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{tool.result}</span>}
-    </div>
+    </details>
   );
+}
+
+type ToolActivityKind = "read" | "search" | "edit" | "web" | "terminal" | "tool";
+
+function describeTool(tool: ToolCall): { verb: string; subject: string; kind: ToolActivityKind } {
+  let args: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(tool.arguments);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) args = parsed as Record<string, unknown>;
+  } catch {
+    // The raw arguments remain available in the expanded details.
+  }
+  const stringArg = (key: string) => typeof args[key] === "string" ? args[key] : "";
+
+  switch (tool.name) {
+    case "fs.read": return { verb: "Read", subject: stringArg("path") || "a file", kind: "read" };
+    case "fs.list": return { verb: "Looked through", subject: stringArg("path") || "the workspace", kind: "read" };
+    case "fs.write": return { verb: "Edited", subject: stringArg("path") || "a file", kind: "edit" };
+    case "web.search": return { verb: "Searched for", subject: stringArg("query") || "the web", kind: "search" };
+    case "web.fetch": return { verb: "Visited", subject: stringArg("url") || "a web page", kind: "web" };
+    case "terminal.run":
+    case "open_terminal.run": return { verb: "Ran", subject: stringArg("command") || "a command", kind: "terminal" };
+    case "agent.delegate": return { verb: "Asked an agent to", subject: stringArg("task") || "help", kind: "tool" };
+    default: return { verb: "Used", subject: tool.name, kind: "tool" };
+  }
+}
+
+function ToolActivityIcon({ kind }: { kind: ToolActivityKind }) {
+  const props = { size: 19, strokeWidth: 1.7, "aria-hidden": true as const };
+  switch (kind) {
+    case "read": return <BookOpen {...props} />;
+    case "search": return <Search {...props} />;
+    case "edit": return <FilePenLine {...props} />;
+    case "web": return <Globe {...props} />;
+    case "terminal": return <Terminal {...props} />;
+    default: return <Wrench {...props} />;
+  }
 }
 
 /** A tool call's wall time, as `840 ms` or `2.4 s`. */
