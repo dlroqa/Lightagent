@@ -1349,6 +1349,7 @@ textarea {
 }
 
 .chat-message.is-user {
+  width: fit-content;
   margin-left: auto;
   padding: 15px 32px;
   border: 0;
