@@ -87,7 +87,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/lightagent/v1/sessions/{id}",
-            get(get_session).delete(delete_session),
+            get(get_session)
+                .patch(update_session)
+                .delete(delete_session),
         )
         .route("/api/lightagent/v1/approvals", get(list_approvals))
         .route("/api/lightagent/v1/approvals/{run}", post(respond_approval))
@@ -779,6 +781,119 @@ async fn get_session(
             Json(json!({ "error": error.to_string() })),
         )
             .into_response(),
+    }
+}
+
+/// Fields that can be changed from the session sidebar. `project: null` clears
+/// an existing project; omitted fields are left unchanged.
+#[derive(Deserialize)]
+struct UpdateSessionBody {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    pinned: Option<bool>,
+    #[serde(default)]
+    archived: Option<bool>,
+    #[serde(default)]
+    project: Patch<Option<String>>,
+}
+
+/// Distinguishes an omitted PATCH field from an explicitly supplied JSON null.
+enum Patch<T> {
+    Missing,
+    Value(T),
+}
+
+impl<T> Default for Patch<T> {
+    fn default() -> Self {
+        Self::Missing
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Patch<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        T::deserialize(deserializer).map(Self::Value)
+    }
+}
+
+const SESSION_TITLE_LIMIT: usize = 200;
+const SESSION_PROJECT_LIMIT: usize = 120;
+
+fn normalized_metadata(value: String, field: &str, limit: usize) -> Result<String, Response> {
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        return Err(bad_request(&format!("session {field} cannot be empty")));
+    }
+    if value.chars().count() > limit {
+        return Err(bad_request(&format!(
+            "session {field} must be at most {limit} characters"
+        )));
+    }
+    Ok(value)
+}
+
+async fn update_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateSessionBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::SessionsWrite) {
+        return rejection;
+    }
+    let id = match SessionId::parse(&id) {
+        Ok(id) => id,
+        Err(error) => return bad_request(&error.to_string()),
+    };
+    let title = match body.title {
+        Some(value) => match normalized_metadata(value, "title", SESSION_TITLE_LIMIT) {
+            Ok(value) => Some(value),
+            Err(response) => return response,
+        },
+        None => None,
+    };
+    let project = match body.project {
+        Patch::Value(Some(value)) => {
+            match normalized_metadata(value, "project", SESSION_PROJECT_LIMIT) {
+                Ok(value) => Some(Some(value)),
+                Err(response) => return response,
+            }
+        }
+        Patch::Value(None) => Some(None),
+        Patch::Missing => None,
+    };
+
+    let busy = state.busy_sessions.lock().await;
+    if busy.contains(&id) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "session has an active run" })),
+        )
+            .into_response();
+    }
+    let mut session = match state.sessions.load(&id) {
+        Ok(session) => session,
+        Err(error) => return not_found(&error.to_string()),
+    };
+    if let Some(value) = title {
+        session.title = value;
+    }
+    if let Some(value) = body.pinned {
+        session.pinned = value;
+    }
+    if let Some(value) = body.archived {
+        session.archived = value;
+    }
+    if let Some(value) = project {
+        session.project = value;
+    }
+    session.touch();
+    let summary = lightagent_store::SessionSummary::of(&session);
+    let result = state.sessions.save(&session);
+    drop(busy);
+    match result {
+        Ok(()) => Json(summary).into_response(),
+        Err(error) => internal(&error.to_string()),
     }
 }
 

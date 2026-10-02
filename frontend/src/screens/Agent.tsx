@@ -6,6 +6,7 @@ import {
   agentApi,
   type AgentSession,
   type LightagentSettings,
+  type SessionPatch,
   type SessionMessage,
   type SessionSummary,
   type SystemTime,
@@ -153,6 +154,8 @@ export function Agent() {
   const [queuePaused, setQueuePaused] = useState(false);
   const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+  const [sidebarNotice, setSidebarNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [deciding, setDeciding] = useState(false);
   const [savingPolicy, setSavingPolicy] = useState(false);
@@ -299,13 +302,14 @@ export function Agent() {
 
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    return (sessions.data ?? []).filter(
+    return (sessions.data ?? []).filter((row) => row.archived === showArchived).filter(
       (row) =>
         !needle ||
         row.title.toLowerCase().includes(needle) ||
-        row.profile.toLowerCase().includes(needle),
+        row.profile.toLowerCase().includes(needle) ||
+        row.project?.toLowerCase().includes(needle),
     );
-  }, [search, sessions.data]);
+  }, [search, sessions.data, showArchived]);
 
   function select(id: string) {
     if (hasPendingWork || id === activeId) return;
@@ -353,6 +357,44 @@ export function Agent() {
       }
       sessions.refresh();
     } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function updateSession(id: string, patch: SessionPatch) {
+    try {
+      await agentApi.updateSession(id, patch);
+      if (id === activeId && patch.archived) {
+        window.localStorage.removeItem(SESSION_KEY);
+        selected.current = null;
+        loadGeneration.current += 1;
+        setActiveId(null);
+        setSession(null);
+        setRunId(null);
+      } else if (id === activeId) {
+        await load(id);
+      }
+      sessions.refresh();
+      return true;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    }
+  }
+
+  async function shareSession(row: SessionSummary) {
+    try {
+      const transcript = await agentApi.session(row.id);
+      const text = transcript.messages.map((message) => `${message.role === "user" ? "You" : "Agent"}: ${message.content}`).join("\n\n");
+      if (navigator.share) {
+        await navigator.share({ title: row.title || "Lightagent conversation", text });
+        setSidebarNotice("Conversation shared.");
+      } else {
+        await navigator.clipboard.writeText(text);
+        setSidebarNotice("Conversation copied to your clipboard.");
+      }
+    } catch (cause) {
+      if (cause instanceof DOMException && cause.name === "AbortError") return;
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   }
@@ -467,7 +509,10 @@ export function Agent() {
             <img src="/icon.png" alt="" width={30} height={30} />
             <span><strong>Lightagent</strong><small>Agent workspace</small></span>
             <button type="button" className="chat-sidebar__search-button" aria-label="Search chats"
-              aria-expanded={searchOpen} onClick={() => setSearchOpen((open) => !open)}>
+              aria-expanded={searchOpen} onClick={() => setSearchOpen((open) => {
+                if (open) setSearch("");
+                return !open;
+              })}>
               <Search size={16} />
             </button>
           </div>
@@ -479,7 +524,13 @@ export function Agent() {
             <NavLink to="/tools"><Wrench size={16} /> Tools</NavLink>
             <NavLink to="/settings"><ShieldCheck size={16} /> Settings</NavLink>
           </nav>
-          <div className="chat-sidebar__section">Recent chats</div>
+          <div className="chat-sidebar__section chat-sidebar__section--controls">
+            <span>{showArchived ? "Archived chats" : "Recent chats"}</span>
+            <button type="button" className="chat-sidebar__archive-toggle" aria-pressed={showArchived}
+              onClick={() => setShowArchived((value) => !value)} title={showArchived ? "Show recent chats" : "Show archived chats"}>
+              <Archive size={14} />
+            </button>
+          </div>
           {searchOpen && (
             <div className="chat-sidebar__search">
               <Search size={15} aria-hidden="true" />
@@ -487,6 +538,7 @@ export function Agent() {
                 placeholder="Search chats…" aria-label="Search agent sessions" />
             </div>
           )}
+          {sidebarNotice && <span className="chat-sidebar__notice" role="status">{sidebarNotice}</span>}
           <button type="button" className="btn" disabled={hasPendingWork} onClick={() => void startNew()}>
             <Plus size={16} /> New session
           </button>
@@ -523,8 +575,8 @@ export function Agent() {
               <ul style={{ margin: 0, padding: 0, listStyle: "none" }}>
                 {visible.map((row) => (
                   <SessionRow key={row.id} row={row} active={row.id === activeId}
-                    disabled={hasPendingWork} onOpen={() => select(row.id)}
-                    onDelete={() => void remove(row.id)} />
+                    disabled={hasPendingWork} onOpen={() => select(row.id)} onUpdate={updateSession}
+                    onShare={() => void shareSession(row)} onDelete={() => void remove(row.id)} />
                 ))}
               </ul>
             )}
@@ -731,14 +783,24 @@ export function Agent() {
   );
 }
 
-function SessionRow({ row, active, disabled, onOpen, onDelete }: {
+function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete }: {
   row: SessionSummary; active: boolean; disabled: boolean;
-  onOpen: () => void; onDelete: () => void;
+  onOpen: () => void; onUpdate: (id: string, patch: SessionPatch) => Promise<boolean>;
+  onShare: () => void; onDelete: () => void;
 }) {
-  const [pinned, setPinned] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuButton = useRef<HTMLButtonElement | null>(null);
   const label = row.title || "Untitled";
+  const rename = () => {
+    const title = window.prompt("Rename conversation", label);
+    if (title?.trim() && title.trim() !== label) void onUpdate(row.id, { title: title.trim() });
+    setMenuOpen(false);
+  };
+  const moveToProject = () => {
+    const project = window.prompt("Move conversation to project (leave blank to remove)", row.project ?? "");
+    if (project !== null) void onUpdate(row.id, { project: project.trim() || null });
+    setMenuOpen(false);
+  };
   return (
     <li>
       <div style={{ display: "flex", gap: 8, padding: "10px 12px", borderRadius: "var(--radius)",
@@ -753,12 +815,12 @@ function SessionRow({ row, active, disabled, onOpen, onDelete }: {
             <span className="tnum" style={{ color: "var(--text-faint)", fontSize: 11, flex: "none" }}>{whenever(unix(row.updated_at))}</span>
           </div>
           <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>
-            {row.message_count} messages · {row.run_count} runs
+            {row.project && <>{row.project} · </>}{row.message_count} messages · {row.run_count} runs
           </div>
         </button>
-        <button type="button" className={`session-row__action${pinned ? " is-pinned" : ""}`}
-          disabled={disabled && active} aria-pressed={pinned} aria-label={`${pinned ? "Unpin" : "Pin"} ${label}`}
-          onClick={(event) => { event.stopPropagation(); setPinned((value) => !value); }}>
+        <button type="button" className={`session-row__action${row.pinned ? " is-pinned" : ""}`}
+          disabled={disabled && active} aria-pressed={row.pinned} aria-label={`${row.pinned ? "Unpin" : "Pin"} ${label}`}
+          onClick={(event) => { event.stopPropagation(); void onUpdate(row.id, { pinned: !row.pinned }); }}>
           <Pin size={15} />
         </button>
         <button ref={menuButton} type="button" className="session-row__action" disabled={disabled && active}
@@ -767,13 +829,13 @@ function SessionRow({ row, active, disabled, onOpen, onDelete }: {
           <MoreHorizontal size={17} />
         </button>
         <Menu open={menuOpen} anchorRef={menuButton} onClose={() => setMenuOpen(false)} align="end" minWidth={216} label={`Actions for ${label}`}>
-          <MenuItem disabled><span className="session-menu__item"><Pencil size={17} /> Rename</span></MenuItem>
-          <MenuItem onClick={() => { setPinned((value) => !value); setMenuOpen(false); }}><span className="session-menu__item"><Pin size={17} /> {pinned ? "Unpin" : "Pin"}</span></MenuItem>
-          <MenuItem disabled><span className="session-menu__item"><Folder size={17} /> Move to project <ChevronRight size={16} /></span></MenuItem>
+          <MenuItem onClick={rename}><span className="session-menu__item"><Pencil size={17} /> Rename</span></MenuItem>
+          <MenuItem onClick={() => { void onUpdate(row.id, { pinned: !row.pinned }); setMenuOpen(false); }}><span className="session-menu__item"><Pin size={17} /> {row.pinned ? "Unpin" : "Pin"}</span></MenuItem>
+          <MenuItem onClick={moveToProject}><span className="session-menu__item"><Folder size={17} /> Move to project <ChevronRight size={16} /></span></MenuItem>
           <div className="menu__divider" role="separator" />
-          <MenuItem disabled><span className="session-menu__item"><Share2 size={17} /> Share</span></MenuItem>
+          <MenuItem onClick={() => { onShare(); setMenuOpen(false); }}><span className="session-menu__item"><Share2 size={17} /> Share</span></MenuItem>
           <div className="menu__divider" role="separator" />
-          <MenuItem disabled><span className="session-menu__item"><Archive size={17} /> Archive</span></MenuItem>
+          <MenuItem onClick={() => { void onUpdate(row.id, { archived: !row.archived }); setMenuOpen(false); }}><span className="session-menu__item"><Archive size={17} /> {row.archived ? "Unarchive" : "Archive"}</span></MenuItem>
           <MenuItem onClick={() => { setMenuOpen(false); onDelete(); }}><span className="session-menu__item session-menu__item--danger"><Trash2 size={17} /> Delete</span></MenuItem>
         </Menu>
       </div>

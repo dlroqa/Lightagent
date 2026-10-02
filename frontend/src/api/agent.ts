@@ -30,9 +30,19 @@ export interface SessionSummary {
   id: string;
   profile: string;
   title: string;
+  pinned: boolean;
+  archived: boolean;
+  project?: string;
   updated_at: SystemTime;
   message_count: number;
   run_count: number;
+}
+
+export interface SessionPatch {
+  title?: string;
+  pinned?: boolean;
+  archived?: boolean;
+  project?: string | null;
 }
 
 export interface SystemTime {
@@ -212,6 +222,11 @@ export const agentApi = {
   deleteSession: (id: string) =>
     jsonRequest<{ deleted: boolean }>(`/sessions/${encodeURIComponent(id)}`, {
       method: "DELETE",
+    }),
+  updateSession: (id: string, patch: SessionPatch) =>
+    jsonRequest<SessionSummary>(`/sessions/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
     }),
   run: (id: string) => jsonRequest<RunView>(`/runs/${id}`),
   cancelRun: (id: string) =>

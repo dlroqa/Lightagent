@@ -468,6 +468,70 @@ async fn a_saved_session_is_reused_by_follow_up_runs_and_new_sessions_are_empty(
 }
 
 #[tokio::test]
+async fn session_metadata_can_be_updated_and_is_returned_in_listings() {
+    let state = app_state(AuthConfig::open());
+    let store = state.sessions.clone();
+    let mut session = lightagent_store::Session::new("default", "Initial title");
+    session.archived = true;
+    store.save(&session).unwrap();
+    let id = session.id.as_str().to_owned();
+    let addr = spawn_server(state).await;
+
+    let (status, body) = http(
+        &addr,
+        "PATCH",
+        &format!("/api/lightagent/v1/sessions/{id}"),
+        &[],
+        Some(r#"{"title":"Renamed chat","pinned":true,"archived":false,"project":"Launch"}"#),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(updated["title"], "Renamed chat");
+    assert_eq!(updated["pinned"], true);
+    assert_eq!(updated["archived"], false);
+    assert_eq!(updated["project"], "Launch");
+    assert!(updated.get("message_count").is_some());
+
+    let saved = store
+        .load(&lightagent_store::SessionId::parse(&id).unwrap())
+        .unwrap();
+    assert_eq!(saved.title, "Renamed chat");
+    assert!(saved.pinned);
+    assert!(!saved.archived);
+    assert_eq!(saved.project.as_deref(), Some("Launch"));
+
+    let (status, body) = http(&addr, "GET", "/api/lightagent/v1/sessions", &[], None).await;
+    assert_eq!(status, 200, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let summary = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == id)
+        .unwrap();
+    assert_eq!(summary["pinned"], true);
+    assert_eq!(summary["archived"], false);
+    assert_eq!(summary["project"], "Launch");
+
+    let (status, body) = http(
+        &addr,
+        "PATCH",
+        &format!("/api/lightagent/v1/sessions/{id}"),
+        &[],
+        Some(r#"{"project":null}"#),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&body)
+            .unwrap()
+            .get("project")
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn ui_settings_update_the_cli_config_and_active_profile() {
     let root = std::env::temp_dir().join(format!(
         "lightagent-ui-settings-{}",

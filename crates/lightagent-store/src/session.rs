@@ -123,6 +123,15 @@ pub struct Session {
     pub cwd: Option<String>,
     #[serde(default)]
     pub title: String,
+    /// Whether this conversation is pinned above ordinary recent chats.
+    #[serde(default)]
+    pub pinned: bool,
+    /// Whether this conversation has been archived by the user.
+    #[serde(default)]
+    pub archived: bool,
+    /// An optional user-assigned project grouping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
     #[serde(default)]
@@ -143,6 +152,9 @@ impl Session {
             profile: profile.into(),
             cwd: None,
             title: title.into(),
+            pinned: false,
+            archived: false,
+            project: None,
             created_at: now,
             updated_at: now,
             messages: Vec::new(),
@@ -160,6 +172,11 @@ impl Session {
     /// Append a run record and stamp the update time.
     pub fn push_run(&mut self, run: RunRecord) {
         self.runs.push(run);
+        self.updated_at = SystemTime::now();
+    }
+
+    /// Stamp a user-visible metadata change.
+    pub fn touch(&mut self) {
         self.updated_at = SystemTime::now();
     }
 
@@ -228,17 +245,27 @@ pub struct SessionSummary {
     pub id: SessionId,
     pub profile: String,
     pub title: String,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     pub updated_at: SystemTime,
     pub message_count: usize,
     pub run_count: usize,
 }
 
 impl SessionSummary {
-    fn of(session: &Session) -> Self {
+    /// Build a transcript-free view of a session.
+    pub fn of(session: &Session) -> Self {
         Self {
             id: session.id.clone(),
             profile: session.profile.clone(),
             title: session.title.clone(),
+            pinned: session.pinned,
+            archived: session.archived,
+            project: session.project.clone(),
             updated_at: session.updated_at,
             message_count: session.messages.len(),
             run_count: session.runs.len(),
@@ -379,7 +406,12 @@ impl SessionStore {
         }
         // Re-sort on the recorded time: a backup restore rewrites every mtime at
         // once, and the order the user remembers is the one in the file.
-        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at));
+        summaries.sort_by_key(|summary| {
+            (
+                std::cmp::Reverse(summary.pinned),
+                std::cmp::Reverse(summary.updated_at),
+            )
+        });
         Ok(summaries)
     }
 }
@@ -483,6 +515,17 @@ mod tests {
         assert!(tool.id.is_empty());
         assert!(tool.result_excerpt.is_empty());
         assert_eq!(tool.source, None);
+    }
+
+    #[test]
+    fn older_sessions_default_to_unpinned_unarchived_without_a_project() {
+        let session: Session = serde_json::from_str(
+            r#"{"id":"00000000000000000000000000000000","profile":"default","title":"Old chat","created_at":{"secs_since_epoch":0,"nanos_since_epoch":0},"updated_at":{"secs_since_epoch":0,"nanos_since_epoch":0}}"#,
+        )
+        .unwrap();
+        assert!(!session.pinned);
+        assert!(!session.archived);
+        assert_eq!(session.project, None);
     }
 
     #[test]
