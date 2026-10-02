@@ -33,6 +33,45 @@ const WELCOME_PROMPTS = [
 ];
 const text = (value: unknown) => (typeof value === "string" ? value : "");
 const unix = (value: SystemTime) => value.secs_since_epoch;
+const BRAND_NAMES = ["Lightagent", "Liteagent"] as const;
+const BRAND_ALTERNATE_MS = 45_000;
+const BRAND_CHARACTER_MS = 120;
+
+function AnimatedBrandName() {
+  const [nameIndex, setNameIndex] = useState(0);
+  const [characterCount, setCharacterCount] = useState(0);
+  const [reduceMotion, setReduceMotion] = useState(() =>
+    typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
+  const name = BRAND_NAMES[nameIndex] ?? BRAND_NAMES[0];
+
+  useEffect(() => {
+    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const update = () => setReduceMotion(query.matches);
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+
+  useEffect(() => {
+    if (reduceMotion) {
+      setNameIndex(0);
+      setCharacterCount(BRAND_NAMES[0].length);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      if (characterCount < name.length) setCharacterCount((count) => count + 1);
+      else {
+        setNameIndex((index) => (index + 1) % BRAND_NAMES.length);
+        setCharacterCount(0);
+      }
+    }, characterCount < name.length
+      ? BRAND_CHARACTER_MS
+      : BRAND_ALTERNATE_MS - name.length * BRAND_CHARACTER_MS);
+    return () => window.clearTimeout(timer);
+  }, [characterCount, name, reduceMotion]);
+
+  return <strong className="chat-sidebar__brand-name">{name.slice(0, characterCount)}</strong>;
+}
 
 type ToolStatus = "requested" | "running" | "ok" | "error";
 
@@ -552,8 +591,7 @@ export function Agent() {
           <div className="chat-sidebar__brand">
             <img src="/icon.png" alt="" width={30} height={30} />
             <span className="chat-sidebar__wordmark" aria-label="Lightagent">
-              <strong className="chat-sidebar__brand-name chat-sidebar__brand-name--light"><span>Lightagent</span></strong>
-              <strong className="chat-sidebar__brand-name chat-sidebar__brand-name--lite" aria-hidden="true"><span>Liteagent</span></strong>
+              <AnimatedBrandName />
             </span>
             <button type="button" className="chat-sidebar__search-button" aria-label="Search chats"
               aria-expanded={searchOpen} onClick={() => setSearchOpen((open) => {

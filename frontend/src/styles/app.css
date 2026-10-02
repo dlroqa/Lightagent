@@ -1928,95 +1928,33 @@ textarea {
 }
 
 .chat-sidebar__wordmark {
-  position: relative;
-  display: inline-grid;
+  display: inline-flex;
   min-width: 10ch;
 }
 
 .chat-sidebar__brand-name {
-  grid-area: 1 / 1;
   display: inline-flex;
   font-size: 16px;
   letter-spacing: -0.02em;
   white-space: nowrap;
 }
 
-.chat-sidebar__brand-name > span {
-  display: inline-block;
-  width: 0;
-  overflow: hidden;
-}
-
 .chat-sidebar__brand-name::after {
   display: inline-block;
-  width: 1px;
-  height: 1em;
-  margin-left: 1px;
-  vertical-align: -0.12em;
-  background: currentColor;
-  content: "";
+  margin-left: 2px;
+  content: "|";
   animation: chat-sidebar-caret 700ms steps(1, end) infinite;
 }
 
-.chat-sidebar__brand-name--light {
-  animation: chat-sidebar-word-light 4s steps(1, end) infinite;
-}
-
-.chat-sidebar__brand-name--light > span {
-  animation: chat-sidebar-type-light 4s steps(10, end) infinite;
-}
-
-.chat-sidebar__brand-name--lite {
-  animation: chat-sidebar-word-lite 4s steps(1, end) infinite;
-}
-
-.chat-sidebar__brand-name--lite > span {
-  animation: chat-sidebar-type-lite 4s steps(9, end) infinite;
-}
-
-@keyframes chat-sidebar-word-light {
-  0%, 48% { opacity: 1; }
-  49%, 99% { opacity: 0; }
-  100% { opacity: 1; }
-}
-
-@keyframes chat-sidebar-word-lite {
-  0%, 49% { opacity: 0; }
-  50%, 99% { opacity: 1; }
-  100% { opacity: 0; }
-}
-
-@keyframes chat-sidebar-type-light {
-  0% { width: 0; }
-  25%, 48% { width: 10ch; }
-  49%, 100% { width: 0; }
-}
-
-@keyframes chat-sidebar-type-lite {
-  0%, 49% { width: 0; }
-  50% { width: 0; }
-  75%, 99% { width: 9ch; }
-  100% { width: 0; }
-}
-
 @keyframes chat-sidebar-caret {
-  0%, 49% { opacity: 1; }
-  50%, 100% { opacity: 0; }
+  0%, 49% { content: "|"; }
+  50%, 100% { content: "_"; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .chat-sidebar__brand-name,
-  .chat-sidebar__brand-name::after,
-  .chat-sidebar__brand-name > span {
+  .chat-sidebar__brand-name::after {
     animation: none;
-  }
-
-  .chat-sidebar__brand-name--light > span {
-    width: auto;
-  }
-
-  .chat-sidebar__brand-name--lite {
-    display: none;
   }
 }
 
