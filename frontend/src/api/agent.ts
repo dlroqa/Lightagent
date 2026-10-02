@@ -123,7 +123,7 @@ export interface LightagentSettings {
   jev: JevSettings;
   qdrant: QdrantSettings;
   infinity: InfinitySettings;
-  open_terminal: PlatformEndpointSettings;
+  open_terminal: OpenTerminalSettings;
 }
 
 /** Safe endpoint metadata for an optional platform service. Secrets never cross the API boundary. */
@@ -136,15 +136,27 @@ export interface PlatformEndpointSettings {
 export interface JevSettings extends PlatformEndpointSettings {
   model: string;
   confidence_threshold: number;
+  allowed_models: string[];
+  allowed_profiles: string[];
+  timeout_secs: number;
 }
 
 export interface QdrantSettings extends PlatformEndpointSettings {
   collection: string;
+  timeout_secs: number;
 }
 
 export interface InfinitySettings extends PlatformEndpointSettings {
   embedding_model: string;
   rerank_model: string;
+  timeout_secs: number;
+}
+
+export interface OpenTerminalSettings extends PlatformEndpointSettings {
+  request_timeout_secs: number;
+  execution_timeout_secs: number;
+  poll_interval_ms: number;
+  max_output_bytes: number;
 }
 
 

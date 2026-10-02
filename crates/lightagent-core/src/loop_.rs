@@ -305,6 +305,13 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
         &self.config
     }
 
+    /// Select inference before a fresh run while preserving the existing
+    /// invoker, approval state, persona and execution limits.
+    pub fn set_inference_route(&mut self, provider: P, model: impl Into<String>) {
+        self.provider = provider;
+        self.config.model = model.into();
+    }
+
     /// The bound tool invoker, for session-scoped policy changes by a caller.
     pub fn invoker(&self) -> &I {
         &self.invoker
@@ -793,6 +800,25 @@ mod tests {
     use crate::profile::{AgentProfile, ProfileId};
     use crate::provider::{ProviderEvent, Role, Usage};
     use async_trait::async_trait;
+
+    #[test]
+    fn inference_route_change_retains_execution_configuration_and_invoker() {
+        let mut profile = AgentProfile::new(
+            ProfileId::new("original").unwrap(),
+            "Original",
+            "Keep this persona",
+            "original-model",
+        );
+        profile.limits.max_turns = 2;
+        let mut agent = AgentLoop::from_profile(MockProvider::new(vec![]), NullInvoker, &profile);
+        let before = agent.config().clone();
+        let invoker = agent.invoker() as *const NullInvoker;
+        agent.set_inference_route(MockProvider::new(vec![]), "routed-model");
+        let mut expected = before;
+        expected.model = "routed-model".to_owned();
+        assert_eq!(agent.config(), &expected);
+        assert_eq!(agent.invoker() as *const NullInvoker, invoker);
+    }
 
     #[tokio::test]
     async fn run_streaming_emits_each_event_live() {

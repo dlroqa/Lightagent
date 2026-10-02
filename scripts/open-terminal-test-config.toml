@@ -1,0 +1,3 @@
+# Disposable live-contract server. Credentials and log paths arrive through env.
+enable_terminal = true
+enable_notebooks = false

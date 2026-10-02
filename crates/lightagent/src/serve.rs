@@ -37,6 +37,42 @@ struct LightweightRunFactory {
     root: PathBuf,
 }
 
+async fn inference_for_request(
+    config: &lightagent_core::Config,
+    store: &ProfileStore,
+    profile: &lightagent_core::AgentProfile,
+    request: &StartRun,
+) -> (String, String) {
+    let base_url = profile
+        .routing
+        .base_url
+        .clone()
+        .unwrap_or_else(|| config.inference.base_url.clone());
+    let default_model = request
+        .model
+        .clone()
+        .unwrap_or_else(|| configured_model(&profile.routing.model, config));
+    // The saved session's profile identifies context, not a model override.
+    let route = crate::jev::select_route(
+        &config.platform.jev,
+        &request.message,
+        default_model.clone(),
+        request.model.is_some(),
+    )
+    .await;
+    let routed_profile = route
+        .profile
+        .as_ref()
+        .and_then(|name| resolve_profile(store, config, Some(name.clone())).ok());
+    crate::jev::inference_route(
+        route,
+        routed_profile.as_ref(),
+        config,
+        default_model,
+        base_url,
+    )
+}
+
 #[async_trait]
 impl RunFactory for LightweightRunFactory {
     async fn tools(&self) -> Result<Vec<ToolDefinition>, String> {
@@ -143,7 +179,7 @@ impl RunFactory for LightweightRunFactory {
             }
         };
         let store = ProfileStore::new(&self.root);
-        let mut profile = match resolve_profile(&store, &config, request.profile) {
+        let mut profile = match resolve_profile(&store, &config, request.profile.clone()) {
             Ok(profile) => profile,
             Err(error) => {
                 fail(&sink, &error);
@@ -151,26 +187,7 @@ impl RunFactory for LightweightRunFactory {
             }
         };
 
-        let base_url = profile
-            .routing
-            .base_url
-            .clone()
-            .unwrap_or_else(|| config.inference.base_url.clone());
-        let explicit_model = request.model.is_some();
-        let default_model = request
-            .model
-            .clone()
-            .unwrap_or_else(|| configured_model(&profile.routing.model, &config));
-        // Jev may advise a provider model only. It is deliberately invoked
-        // before provider construction and cannot select a profile, tools, or
-        // approval policy. Any issue retains the ordinary configured route.
-        let model = crate::jev::select_model(
-            &config.platform.jev,
-            &request.message,
-            default_model,
-            explicit_model,
-        )
-        .await;
+        let (model, base_url) = inference_for_request(&config, &store, &profile, &request).await;
         let api_key = config
             .inference
             .api_key
@@ -361,4 +378,50 @@ pub async fn run(
         .await
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn saved_session_identity_profile_keeps_jev_active_but_explicit_model_bypasses_it() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            let count = stream.read(&mut bytes).await.unwrap();
+            assert!(String::from_utf8_lossy(&bytes[..count]).starts_with("POST /v1/systemone "));
+            let body = r#"{"model":"jev-1.13.0","answers":{"route":{"type":"choice","choice":"model:fast","confidence":0.99,"probabilities":{"default":0.01,"model:fast":0.99}}},"usage":{"input_tokens":10,"output_tokens":2}}"#;
+            stream.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        let mut config = lightagent_core::Config::default();
+        config.platform.jev.endpoint.enabled = true;
+        config.platform.jev.endpoint.base_url = Some(format!("http://{address}"));
+        config.platform.jev.allowed_models = vec!["fast".to_owned()];
+        let profile = lightagent_core::AgentProfile::new(
+            lightagent_core::ProfileId::new("identity").unwrap(),
+            "Identity",
+            "Original persona",
+            "original-model",
+        );
+        let original = profile.clone();
+        let store = ProfileStore::new(std::env::temp_dir());
+        let mut request = StartRun {
+            message: "hello".to_owned(),
+            history: vec![],
+            profile: Some("identity".to_owned()),
+            model: None,
+            cwd: None,
+        };
+        let (model, _) = inference_for_request(&config, &store, &profile, &request).await;
+        assert_eq!(model, "fast");
+        assert_eq!(profile, original);
+        server.await.unwrap();
+        request.model = Some("explicit".to_owned());
+        let (model, _) = inference_for_request(&config, &store, &profile, &request).await;
+        assert_eq!(model, "explicit");
+    }
 }

@@ -14,4 +14,7 @@ thiserror.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true }
 tokio-util.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["query"] }
+
+[dev-dependencies]
+rustls.workspace = true

@@ -1025,6 +1025,7 @@ fn get_key(config: &Config, key: &str) -> Option<String> {
             Some(config.platform.jev.confidence_threshold.to_string())
         }
         "platform.jev.allowed_models" => Some(config.platform.jev.allowed_models.join(",")),
+        "platform.jev.allowed_profiles" => Some(config.platform.jev.allowed_profiles.join(",")),
         "platform.jev.timeout_secs" => Some(config.platform.jev.timeout_secs.to_string()),
         "platform.qdrant.enabled" => Some(config.platform.qdrant.endpoint.enabled.to_string()),
         "platform.qdrant.base_url" => Some(
@@ -1037,6 +1038,7 @@ fn get_key(config: &Config, key: &str) -> Option<String> {
                 .unwrap_or_default(),
         ),
         "platform.qdrant.collection" => Some(config.platform.qdrant.collection.clone()),
+        "platform.qdrant.timeout_secs" => Some(config.platform.qdrant.timeout_secs.to_string()),
         "platform.infinity.enabled" => Some(config.platform.infinity.endpoint.enabled.to_string()),
         "platform.infinity.base_url" => Some(
             config
@@ -1051,6 +1053,7 @@ fn get_key(config: &Config, key: &str) -> Option<String> {
             Some(config.platform.infinity.embedding_model.clone())
         }
         "platform.infinity.rerank_model" => Some(config.platform.infinity.rerank_model.clone()),
+        "platform.infinity.timeout_secs" => Some(config.platform.infinity.timeout_secs.to_string()),
         "platform.open_terminal.enabled" => {
             Some(config.platform.open_terminal.endpoint.enabled.to_string())
         }
@@ -1063,6 +1066,26 @@ fn get_key(config: &Config, key: &str) -> Option<String> {
                 .clone()
                 .unwrap_or_default(),
         ),
+        "platform.open_terminal.request_timeout_secs" => Some(
+            config
+                .platform
+                .open_terminal
+                .request_timeout_secs
+                .to_string(),
+        ),
+        "platform.open_terminal.execution_timeout_secs" => Some(
+            config
+                .platform
+                .open_terminal
+                .execution_timeout_secs
+                .to_string(),
+        ),
+        "platform.open_terminal.poll_interval_ms" => {
+            Some(config.platform.open_terminal.poll_interval_ms.to_string())
+        }
+        "platform.open_terminal.max_output_bytes" => {
+            Some(config.platform.open_terminal.max_output_bytes.to_string())
+        }
         "tui.show_reasoning" => Some(config.tui.show_reasoning.to_string()),
         "runtime.preferred_device" => Some(config.runtime.preferred_device.clone()),
         "runtime.allow_cpu_fallback" => Some(config.runtime.allow_cpu_fallback.to_string()),
@@ -1176,11 +1199,22 @@ fn set_key(config: &mut Config, key: &str, value: &str) -> Result<(), String> {
         "platform.jev.timeout_secs" => {
             config.platform.jev.timeout_secs = parse_u64(value, "platform.jev.timeout_secs")?;
         }
+        "platform.jev.allowed_profiles" => {
+            config.platform.jev.allowed_profiles = value
+                .split(',')
+                .map(str::trim)
+                .filter(|profile| !profile.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
         "platform.qdrant.enabled" => config.platform.qdrant.endpoint.enabled = parse_bool(value)?,
         "platform.qdrant.base_url" => {
             config.platform.qdrant.endpoint.base_url = parse_opt_string(value)
         }
         "platform.qdrant.collection" => config.platform.qdrant.collection = value.trim().to_owned(),
+        "platform.qdrant.timeout_secs" => {
+            config.platform.qdrant.timeout_secs = parse_u64(value, key)?
+        }
         "platform.infinity.enabled" => {
             config.platform.infinity.endpoint.enabled = parse_bool(value)?
         }
@@ -1193,11 +1227,28 @@ fn set_key(config: &mut Config, key: &str, value: &str) -> Result<(), String> {
         "platform.infinity.rerank_model" => {
             config.platform.infinity.rerank_model = value.trim().to_owned()
         }
+        "platform.infinity.timeout_secs" => {
+            config.platform.infinity.timeout_secs = parse_u64(value, key)?
+        }
         "platform.open_terminal.enabled" => {
             config.platform.open_terminal.endpoint.enabled = parse_bool(value)?
         }
         "platform.open_terminal.base_url" => {
             config.platform.open_terminal.endpoint.base_url = parse_opt_string(value)
+        }
+        "platform.open_terminal.request_timeout_secs" => {
+            config.platform.open_terminal.request_timeout_secs = parse_u64(value, key)?
+        }
+        "platform.open_terminal.execution_timeout_secs" => {
+            config.platform.open_terminal.execution_timeout_secs = parse_u64(value, key)?
+        }
+        "platform.open_terminal.poll_interval_ms" => {
+            config.platform.open_terminal.poll_interval_ms = parse_u64(value, key)?
+        }
+        "platform.open_terminal.max_output_bytes" => {
+            config.platform.open_terminal.max_output_bytes = value
+                .parse()
+                .map_err(|_| format!("{key} must be a nonnegative integer"))?
         }
         "tui.show_reasoning" => config.tui.show_reasoning = parse_bool(value)?,
         "runtime.preferred_device" => config.runtime.preferred_device = value.to_string(),

@@ -154,7 +154,9 @@ pub(crate) fn open_terminal_context(config: &Config) -> Option<OpenTerminalConte
     }
     lightagent_provider_lightweight::ensure_provider();
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(
+            config.platform.open_terminal.request_timeout_secs,
+        ))
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("lightagent/", env!("CARGO_PKG_VERSION")))
         .build()
@@ -164,7 +166,14 @@ pub(crate) fn open_terminal_context(config: &Config) -> Option<OpenTerminalConte
         policy: Arc::new(OpenTerminalPolicy {
             base_url: base_url.to_owned(),
             api_key: endpoint.api_key.as_ref().and_then(|key| key.resolve()),
-            poll_interval: Duration::from_millis(250),
+            poll_interval: Duration::from_millis(config.platform.open_terminal.poll_interval_ms),
+            request_timeout: Duration::from_secs(
+                config.platform.open_terminal.request_timeout_secs,
+            ),
+            execution_timeout: Duration::from_secs(
+                config.platform.open_terminal.execution_timeout_secs,
+            ),
+            max_output_bytes: config.platform.open_terminal.max_output_bytes,
         }),
     })
 }
@@ -567,6 +576,7 @@ pub async fn run(
         .clone()
         .unwrap_or_else(|| config.inference.base_url.clone());
     let model = configured_model(&profile.routing.model, &config);
+    let mut current_route_model = model.clone();
     let api_key = config
         .inference
         .api_key
@@ -577,8 +587,9 @@ pub async fn run(
     if let Some(key) = &api_key {
         provider_config = provider_config.with_api_key(key.clone());
     }
-    let provider = LightweightProvider::new(provider_config).map_err(|error| error.to_string())?;
-    let active_model = provider
+    let mut provider =
+        LightweightProvider::new(provider_config).map_err(|error| error.to_string())?;
+    let mut active_model = provider
         .resolve_model()
         .await
         .map_err(|error| error.to_string())?;
@@ -622,7 +633,7 @@ pub async fn run(
     }
 
     let stdin = std::io::stdin();
-    let context_limit = configured_context_limit(config.runtime.n_ctx, &active_model);
+    let mut context_limit = configured_context_limit(config.runtime.n_ctx, &active_model);
     let mut last_turn = TurnStatus::default();
     let mut prompt = TerminalPrompt::new();
     let mut initialization_shown = false;
@@ -848,6 +859,56 @@ pub async fn run(
         }
         if let Some(run) = paused.take() {
             drop_paused(run, &mut session, &session_store);
+        }
+        // Route only at the start of a fresh turn, preserving this session's
+        // executor and approvals across model changes and continuations.
+        if config.platform.jev.endpoint.enabled {
+            let default_model = configured_model(&profile.routing.model, &config);
+            let default_url = profile
+                .routing
+                .base_url
+                .clone()
+                .unwrap_or_else(|| config.inference.base_url.clone());
+            let route =
+                crate::jev::select_route(&config.platform.jev, &line, default_model.clone(), false)
+                    .await;
+            let routed_profile = route
+                .profile
+                .as_ref()
+                .and_then(|name| resolve_profile(&store, &config, Some(name.clone())).ok());
+            let (model, url) = crate::jev::inference_route(
+                route,
+                routed_profile.as_ref(),
+                &config,
+                default_model.clone(),
+                default_url,
+            );
+            if model != current_route_model {
+                for candidate_model in [model, default_model] {
+                    let mut routed_config =
+                        ProviderConfig::new(url.clone(), candidate_model.clone());
+                    if let Some(key) = config
+                        .inference
+                        .api_key
+                        .as_ref()
+                        .and_then(|secret| secret.resolve())
+                    {
+                        routed_config = routed_config.with_api_key(key);
+                    }
+                    let Ok(candidate) = LightweightProvider::new(routed_config) else {
+                        continue;
+                    };
+                    let Ok(resolved_model) = candidate.resolve_model().await else {
+                        continue;
+                    };
+                    provider = candidate;
+                    active_model = resolved_model;
+                    context_limit = configured_context_limit(config.runtime.n_ctx, &active_model);
+                    current_route_model = candidate_model.clone();
+                    agent.set_inference_route(provider.clone(), candidate_model);
+                    break;
+                }
+            }
         }
         let mut history = model_history(&session, &line, context_limit);
         match crate::memory::relevant_catalog(&profile_dir, &config, &line).await {

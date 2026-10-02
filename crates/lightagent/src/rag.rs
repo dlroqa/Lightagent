@@ -47,6 +47,8 @@ impl SemanticEmbedder for ProviderSemanticEmbedder {
 #[derive(Clone)]
 struct RemoteRag {
     client: reqwest::Client,
+    qdrant_timeout: Duration,
+    infinity_timeout: Duration,
     qdrant_url: String,
     qdrant_key: Option<String>,
     infinity_url: String,
@@ -109,6 +111,8 @@ impl RemoteRag {
             .ok()?;
         Some(Self {
             client,
+            qdrant_timeout: Duration::from_secs(qdrant.timeout_secs),
+            infinity_timeout: Duration::from_secs(infinity.timeout_secs),
             qdrant_url: qdrant_url.trim_end_matches('/').to_owned(),
             qdrant_key: qdrant
                 .endpoint
@@ -129,6 +133,7 @@ impl RemoteRag {
     }
 
     fn qdrant(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let request = request.timeout(self.qdrant_timeout);
         match &self.qdrant_key {
             Some(key) => request.header("api-key", key),
             None => request,
@@ -136,6 +141,7 @@ impl RemoteRag {
     }
 
     fn infinity(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let request = request.timeout(self.infinity_timeout);
         match &self.infinity_key {
             Some(key) => request.bearer_auth(key),
             None => request,
@@ -731,6 +737,8 @@ mod tests {
         lightagent_provider_lightweight::ensure_provider();
         RemoteRag {
             client: reqwest::Client::builder().build().unwrap(),
+            qdrant_timeout: Duration::from_secs(5),
+            infinity_timeout: Duration::from_secs(5),
             qdrant_url,
             qdrant_key: Some("qdrant-secret".to_owned()),
             infinity_url,

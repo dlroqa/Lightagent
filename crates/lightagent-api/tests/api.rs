@@ -478,7 +478,12 @@ async fn ui_settings_update_the_cli_config_and_active_profile() {
     let profile_id = ProfileId::new("default").unwrap();
     let profile = AgentProfile::new(profile_id.clone(), "Default", "Be helpful.", "default");
     profiles.save(&profile).unwrap();
-    config_store.save(&Default::default()).unwrap();
+    let mut initial = lightagent_core::Config::default();
+    initial.platform.jev.endpoint.api_key =
+        Some(lightagent_core::SecretRef::env("JEV_TEST_REFERENCE"));
+    initial.platform.open_terminal.endpoint.api_key =
+        Some(lightagent_core::SecretRef::env("TERMINAL_TEST_REFERENCE"));
+    config_store.save(&initial).unwrap();
 
     let mut state = app_state(AuthConfig::open());
     state.config_store = Some(config_store.clone());
@@ -493,6 +498,13 @@ async fn ui_settings_update_the_cli_config_and_active_profile() {
     settings["filesystem_tools_enabled"] = true.into();
     settings["terminal_enabled"] = true.into();
     settings["memory_enabled"] = false.into();
+    settings["jev"]["allowed_models"] = serde_json::json!(["fast"]);
+    settings["jev"]["allowed_profiles"] = serde_json::json!(["careful"]);
+    settings["jev"]["timeout_secs"] = 2.into();
+    settings["qdrant"]["timeout_secs"] = 9.into();
+    settings["infinity"]["timeout_secs"] = 12.into();
+    settings["open_terminal"]["execution_timeout_secs"] = 90.into();
+    settings["open_terminal"]["max_output_bytes"] = 4096.into();
     let payload = settings.to_string();
     let (status, body) = http(
         &addr,
@@ -512,11 +524,89 @@ async fn ui_settings_update_the_cli_config_and_active_profile() {
     assert!(loaded.web.enabled);
     assert!(loaded.tools.enabled && loaded.tools.allow_terminal);
     assert!(!loaded.memory.auto_capture);
+    assert_eq!(loaded.platform.jev.allowed_models, ["fast"]);
+    assert_eq!(loaded.platform.jev.allowed_profiles, ["careful"]);
+    assert_eq!(loaded.platform.jev.timeout_secs, 2);
+    assert_eq!(loaded.platform.qdrant.timeout_secs, 9);
+    assert_eq!(loaded.platform.infinity.timeout_secs, 12);
+    assert_eq!(loaded.platform.open_terminal.execution_timeout_secs, 90);
+    assert_eq!(loaded.platform.open_terminal.max_output_bytes, 4096);
+    assert_eq!(
+        loaded.platform.jev.endpoint.api_key,
+        initial.platform.jev.endpoint.api_key
+    );
+    assert_eq!(
+        loaded.platform.open_terminal.endpoint.api_key,
+        initial.platform.open_terminal.endpoint.api_key
+    );
+    assert!(!body.contains("JEV_TEST_REFERENCE"));
+    assert!(!body.contains("TERMINAL_TEST_REFERENCE"));
     let profile = profiles.load(&profile_id).unwrap();
     assert_eq!(profile.approval_policy, ConfigApprovalPolicy::Strict);
     assert_eq!(profile.limits.max_turns, 12);
     assert_eq!(profile.limits.max_tool_calls, 7);
 
+    // Older clients omit newly introduced platform fields. Preserve their
+    // configured routing, limits and secrets when saving that payload.
+    let mut legacy_settings = settings.clone();
+    for (section, fields) in [
+        (
+            "jev",
+            vec!["allowed_models", "allowed_profiles", "timeout_secs"],
+        ),
+        ("qdrant", vec!["timeout_secs"]),
+        ("infinity", vec!["timeout_secs"]),
+        (
+            "open_terminal",
+            vec![
+                "request_timeout_secs",
+                "execution_timeout_secs",
+                "poll_interval_ms",
+                "max_output_bytes",
+            ],
+        ),
+    ] {
+        let endpoint = legacy_settings[section].as_object_mut().unwrap();
+        for field in fields {
+            endpoint.remove(field);
+        }
+    }
+    legacy_settings["show_reasoning_in_tui"] = true.into();
+    let (status, body) = http(
+        &addr,
+        "PUT",
+        "/api/lightagent/v1/settings",
+        &[],
+        Some(&legacy_settings.to_string()),
+    )
+    .await;
+    assert_eq!(status, 200, "legacy settings payload: {body}");
+    let legacy_loaded = config_store.load().unwrap();
+    assert_eq!(legacy_loaded.platform, loaded.platform);
+    assert!(legacy_loaded.tui.show_reasoning);
+    assert!(!body.contains("JEV_TEST_REFERENCE"));
+    assert!(!body.contains("TERMINAL_TEST_REFERENCE"));
+
+    settings["open_terminal"]["execution_timeout_secs"] = 0.into();
+    let (status, _) = http(
+        &addr,
+        "PUT",
+        "/api/lightagent/v1/settings",
+        &[],
+        Some(&settings.to_string()),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(
+        config_store
+            .load()
+            .unwrap()
+            .platform
+            .open_terminal
+            .execution_timeout_secs,
+        90
+    );
+    settings["open_terminal"]["execution_timeout_secs"] = 90.into();
     settings["max_turns"] = 0.into();
     let (status, _) = http(
         &addr,

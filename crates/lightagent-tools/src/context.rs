@@ -288,6 +288,12 @@ pub struct OpenTerminalPolicy {
     pub api_key: Option<String>,
     /// Polling interval for a background process.
     pub poll_interval: Duration,
+    /// Timeout for each HTTP operation, including cleanup.
+    pub request_timeout: Duration,
+    /// Maximum duration of a command, including service checks.
+    pub execution_timeout: Duration,
+    /// Maximum output returned by this adapter.
+    pub max_output_bytes: usize,
 }
 
 impl std::fmt::Debug for OpenTerminalPolicy {
@@ -296,6 +302,9 @@ impl std::fmt::Debug for OpenTerminalPolicy {
             .field("base_url", &self.base_url)
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
             .field("poll_interval", &self.poll_interval)
+            .field("request_timeout", &self.request_timeout)
+            .field("execution_timeout", &self.execution_timeout)
+            .field("max_output_bytes", &self.max_output_bytes)
             .finish()
     }
 }

@@ -618,11 +618,13 @@ pub struct JevConfig {
     pub endpoint: PlatformEndpointConfig,
     pub model: String,
     pub confidence_threshold: f32,
-    /// Model identifiers Jev may select. An empty list deliberately disables
-    /// routing even when the endpoint is enabled: Jev is never an authority
-    /// for arbitrary provider model identifiers.
+    /// Model identifiers Jev may select. Routing is disabled when both route
+    /// allowlists are empty; Jev never authorizes arbitrary model identifiers.
     #[serde(default)]
     pub allowed_models: Vec<String>,
+    /// Existing profiles permitted as inference-only routes. Their tools,
+    /// persona, workspace, limits and approval policy are never adopted.
+    pub allowed_profiles: Vec<String>,
     /// Bound the advisory routing call so an unavailable control plane never
     /// delays a normal agent run for long.
     #[serde(default = "default_jev_timeout_secs")]
@@ -640,6 +642,7 @@ impl Default for JevConfig {
             model: "jev-latest".to_owned(),
             confidence_threshold: 0.85,
             allowed_models: Vec::new(),
+            allowed_profiles: Vec::new(),
             timeout_secs: default_jev_timeout_secs(),
         }
     }
@@ -652,6 +655,7 @@ pub struct QdrantConfig {
     #[serde(flatten)]
     pub endpoint: PlatformEndpointConfig,
     pub collection: String,
+    pub timeout_secs: u64,
 }
 
 impl Default for QdrantConfig {
@@ -659,6 +663,7 @@ impl Default for QdrantConfig {
         Self {
             endpoint: PlatformEndpointConfig::default(),
             collection: "lightagent-default".to_owned(),
+            timeout_secs: 5,
         }
     }
 }
@@ -671,6 +676,7 @@ pub struct InfinityConfig {
     pub endpoint: PlatformEndpointConfig,
     pub embedding_model: String,
     pub rerank_model: String,
+    pub timeout_secs: u64,
 }
 
 impl Default for InfinityConfig {
@@ -679,16 +685,33 @@ impl Default for InfinityConfig {
             endpoint: PlatformEndpointConfig::default(),
             embedding_model: "BAAI/bge-small-en-v1.5".to_owned(),
             rerank_model: "mixedbread-ai/mxbai-rerank-xsmall-v1".to_owned(),
+            timeout_secs: 5,
         }
     }
 }
 
 /// Open WebUI Open Terminal's isolated, session-scoped execution service.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OpenTerminalConfig {
     #[serde(flatten)]
     pub endpoint: PlatformEndpointConfig,
+    pub request_timeout_secs: u64,
+    pub execution_timeout_secs: u64,
+    pub poll_interval_ms: u64,
+    pub max_output_bytes: usize,
+}
+
+impl Default for OpenTerminalConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: PlatformEndpointConfig::default(),
+            request_timeout_secs: 30,
+            execution_timeout_secs: 60,
+            poll_interval_ms: 250,
+            max_output_bytes: 32768,
+        }
+    }
 }
 
 /// Optional services that surround the Lightagent harness in a full platform
@@ -936,9 +959,9 @@ impl Config {
                 "platform.jev.confidence_threshold must be between 0 and 1".to_owned(),
             ));
         }
-        if self.platform.jev.endpoint.enabled && self.platform.jev.timeout_secs == 0 {
+        if !(1..=300).contains(&self.platform.jev.timeout_secs) {
             return Err(ConfigError::Invalid(
-                "platform.jev.timeout_secs must be at least 1".to_owned(),
+                "platform.jev.timeout_secs must be between 1 and 300".to_owned(),
             ));
         }
         if self
@@ -950,6 +973,36 @@ impl Config {
         {
             return Err(ConfigError::Invalid(
                 "platform.jev.allowed_models cannot contain an empty model id".to_owned(),
+            ));
+        }
+        let jev_choices = self
+            .platform
+            .jev
+            .allowed_models
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            + self
+                .platform
+                .jev
+                .allowed_profiles
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+        if jev_choices > 254 {
+            return Err(ConfigError::Invalid(
+                "platform.jev allowlists support at most 254 alternative routes".to_owned(),
+            ));
+        }
+        if self
+            .platform
+            .jev
+            .allowed_profiles
+            .iter()
+            .any(|profile| crate::profile::ProfileId::new(profile.clone()).is_err())
+        {
+            return Err(ConfigError::Invalid(
+                "platform.jev.allowed_profiles must contain valid profile identifiers".to_owned(),
             ));
         }
         if self.platform.qdrant.endpoint.enabled
@@ -967,6 +1020,45 @@ impl Config {
                 "platform.infinity embedding_model and rerank_model are required when enabled"
                     .to_owned(),
             ));
+        }
+
+        for (name, value, maximum) in [
+            (
+                "platform.qdrant.timeout_secs",
+                self.platform.qdrant.timeout_secs,
+                300,
+            ),
+            (
+                "platform.infinity.timeout_secs",
+                self.platform.infinity.timeout_secs,
+                300,
+            ),
+            (
+                "platform.open_terminal.request_timeout_secs",
+                self.platform.open_terminal.request_timeout_secs,
+                300,
+            ),
+            (
+                "platform.open_terminal.execution_timeout_secs",
+                self.platform.open_terminal.execution_timeout_secs,
+                3600,
+            ),
+            (
+                "platform.open_terminal.poll_interval_ms",
+                self.platform.open_terminal.poll_interval_ms,
+                60000,
+            ),
+            (
+                "platform.open_terminal.max_output_bytes",
+                self.platform.open_terminal.max_output_bytes as u64,
+                1048576,
+            ),
+        ] {
+            if value == 0 || value > maximum {
+                return Err(ConfigError::Invalid(format!(
+                    "{name} must be between 1 and {maximum}"
+                )));
+            }
         }
 
         let device = self.runtime.preferred_device.trim().to_ascii_lowercase();
@@ -1463,6 +1555,58 @@ mod tests {
         config.platform.qdrant.endpoint.base_url = Some("http://qdrant:6333".to_owned());
         config.platform.qdrant.collection.clear();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn jev_allowlist_and_timeout_are_validated_even_when_disabled() {
+        let mut config = Config::default();
+        for timeout in [0, 301] {
+            config.platform.jev.timeout_secs = timeout;
+            assert!(config.validate().is_err());
+        }
+        config.platform.jev.timeout_secs = 300;
+        for invalid in ["../escape", "Uppercase", "-leading", ""] {
+            config.platform.jev.allowed_profiles = vec![invalid.to_owned()];
+            assert!(config.validate().is_err());
+        }
+        config.platform.jev.allowed_profiles = vec!["careful-1".to_owned()];
+        assert!(config.validate().is_ok());
+        config.platform.jev.allowed_models =
+            (0..254).map(|index| format!("model-{index}")).collect();
+        assert!(
+            config.validate().is_err(),
+            "default choice counts toward native 255-choice limit"
+        );
+    }
+
+    #[test]
+    fn platform_timeout_and_output_limits_are_bounded_and_legacy_defaults_load() {
+        let config: Config =
+            serde_json::from_str(r#"{"platform":{"qdrant":{},"infinity":{},"open_terminal":{}}}"#)
+                .unwrap();
+        assert_eq!(config.platform.qdrant.timeout_secs, 5);
+        assert_eq!(config.platform.infinity.timeout_secs, 5);
+        assert_eq!(config.platform.open_terminal.execution_timeout_secs, 60);
+        assert_eq!(config.platform.open_terminal.max_output_bytes, 32768);
+        config.validate().unwrap();
+
+        let mut invalid = config.clone();
+        invalid.platform.qdrant.timeout_secs = 0;
+        assert!(invalid.validate().is_err());
+        invalid = config.clone();
+        invalid.platform.infinity.timeout_secs = 301;
+        assert!(invalid.validate().is_err());
+        invalid = config.clone();
+        invalid.platform.open_terminal.execution_timeout_secs = 3601;
+        assert!(invalid.validate().is_err());
+        invalid = config.clone();
+        invalid.platform.open_terminal.request_timeout_secs = 0;
+        assert!(invalid.validate().is_err());
+        invalid = config.clone();
+        invalid.platform.open_terminal.poll_interval_ms = 0;
+        assert!(invalid.validate().is_err());
+        invalid.platform.open_terminal.max_output_bytes = 1048577;
+        assert!(invalid.validate().is_err());
     }
 
     #[test]

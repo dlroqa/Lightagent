@@ -49,6 +49,44 @@ jobs:
           cargo run -q -p lightagent --bin lightagent -- banner --preview
           cargo run -q -p lightagent --bin lightagent -- tools list --json | grep -q datetime.now
 
+  open-terminal-live:
+    name: Open Terminal live contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: open-terminal-live
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Provision actual Open Terminal and test the adapter
+        shell: bash
+        env:
+          LIGHTAGENT_OPEN_TERMINAL_URL: http://127.0.0.1:18765
+          LIGHTAGENT_OPEN_TERMINAL_TOKEN: lightagent-test-only
+        run: |
+          set -euo pipefail
+          terminal_test_root=$(mktemp -d)
+          python -m venv "$terminal_test_root/venv"
+          "$terminal_test_root/venv/bin/pip" install 'open-terminal==0.14.0'
+          export OPEN_TERMINAL_API_KEY="$LIGHTAGENT_OPEN_TERMINAL_TOKEN"
+          export OPEN_TERMINAL_LOG_DIR="$terminal_test_root/logs"
+          "$terminal_test_root/venv/bin/open-terminal" run --host 127.0.0.1 --port 18765 \
+            --config "$GITHUB_WORKSPACE/scripts/open-terminal-test-config.toml" \
+            --cwd "$terminal_test_root" > "$terminal_test_root/server.log" 2>&1 &
+          terminal_test_pid=$!
+          trap 'kill "$terminal_test_pid" 2>/dev/null || true' EXIT
+          ready=false
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent "$LIGHTAGENT_OPEN_TERMINAL_URL/health"; then ready=true; break; fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then cat "$terminal_test_root/server.log"; exit 1; fi
+          cargo test -p lightagent-tools live_open_terminal -- --ignored --nocapture
+
   web-render:
     name: standalone Web UI render
     runs-on: ubuntu-latest

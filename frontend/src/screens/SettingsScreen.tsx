@@ -5,6 +5,7 @@ import {
   type InfinitySettings,
   type JevSettings,
   type LightagentSettings,
+  type OpenTerminalSettings,
   type PlatformEndpointSettings,
   type QdrantSettings,
 } from "../api/agent";
@@ -157,7 +158,7 @@ export function SettingsScreen() {
               onSave={(qdrant) => persist({ qdrant })} />
             <InfinitySettingsRow endpoint={value?.infinity} disabled={!value || saving}
               onSave={(infinity) => persist({ infinity })} />
-            <PlatformEndpointRow label="Open Terminal" hint="An isolated code-execution service; separate from local terminal tools."
+            <OpenTerminalSettingsRow
               endpoint={value?.open_terminal} disabled={!value || saving}
               onSave={(open_terminal) => persist({ open_terminal })} />
           </Card>
@@ -314,6 +315,15 @@ function JevSettingsRow({ endpoint, disabled, onSave }: {
           min={0} max={1} step={0.01} disabled={disabled || !endpoint.enabled}
           onSave={(confidence_threshold) => onSave({ ...endpoint, confidence_threshold })} />
       </div>}
+      {endpoint && <>
+        <TextPlatformSetting label="Permitted models (comma-separated)" value={endpoint.allowed_models.join(", ")}
+          disabled={disabled || !endpoint.enabled} onSave={(value) => onSave({ ...endpoint, allowed_models: splitRoutes(value) })} />
+        <TextPlatformSetting label="Permitted inference profiles (comma-separated)" value={endpoint.allowed_profiles.join(", ")}
+          disabled={disabled || !endpoint.enabled} onSave={(value) => onSave({ ...endpoint, allowed_profiles: splitRoutes(value) })} />
+        <NumberPlatformSetting label="Routing timeout (seconds)" value={endpoint.timeout_secs}
+          min={1} max={300} step={1} disabled={disabled || !endpoint.enabled}
+          onSave={(timeout_secs) => onSave({ ...endpoint, timeout_secs })} />
+      </>}
     </PlatformEndpointRow>
   );
 }
@@ -328,6 +338,9 @@ function QdrantSettingsRow({ endpoint, disabled, onSave }: {
       endpoint={endpoint} disabled={disabled} onSave={onSave}>
       {endpoint && <TextPlatformSetting label="Collection" value={endpoint.collection}
         disabled={disabled || !endpoint.enabled} onSave={(collection) => onSave({ ...endpoint, collection })} />}
+      {endpoint && <NumberPlatformSetting label="Request timeout (seconds)" value={endpoint.timeout_secs}
+        min={1} max={300} step={1} disabled={disabled || !endpoint.enabled}
+        onSave={(timeout_secs) => onSave({ ...endpoint, timeout_secs })} />}
     </PlatformEndpointRow>
   );
 }
@@ -345,9 +358,36 @@ function InfinitySettingsRow({ endpoint, disabled, onSave }: {
           disabled={disabled || !endpoint.enabled} onSave={(embedding_model) => onSave({ ...endpoint, embedding_model })} />
         <TextPlatformSetting label="Reranking model" value={endpoint.rerank_model}
           disabled={disabled || !endpoint.enabled} onSave={(rerank_model) => onSave({ ...endpoint, rerank_model })} />
+        <NumberPlatformSetting label="Request timeout (seconds)" value={endpoint.timeout_secs}
+          min={1} max={300} step={1} disabled={disabled || !endpoint.enabled}
+          onSave={(timeout_secs) => onSave({ ...endpoint, timeout_secs })} />
       </div>}
     </PlatformEndpointRow>
   );
+}
+
+function splitRoutes(value: string): string[] {
+  return [...new Set(value.split(",").map((route) => route.trim()).filter(Boolean))];
+}
+
+function OpenTerminalSettingsRow({ endpoint, disabled, onSave }: {
+  endpoint: OpenTerminalSettings | undefined;
+  disabled: boolean;
+  onSave: (settings: OpenTerminalSettings) => Promise<void>;
+}) {
+  return <PlatformEndpointRow label="Open Terminal" hint="Approved commands run in the isolated service with bounded time and output."
+    endpoint={endpoint} disabled={disabled} onSave={onSave}>
+    {endpoint && <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10 }}>
+      {([
+        ["request_timeout_secs", "Request timeout (seconds)", 300],
+        ["execution_timeout_secs", "Execution timeout (seconds)", 3600],
+        ["poll_interval_ms", "Polling interval (milliseconds)", 60000],
+        ["max_output_bytes", "Maximum output (bytes)", 1048576],
+      ] as const).map(([key, label, max]) => <NumberPlatformSetting key={key} label={label}
+        value={endpoint[key]} min={1} max={max} step={1} disabled={disabled || !endpoint.enabled}
+        onSave={(value) => onSave({ ...endpoint, [key]: value })} />)}
+    </div>}
+  </PlatformEndpointRow>;
 }
 
 function TextPlatformSetting({ label, value, disabled, onSave }: {
@@ -382,7 +422,7 @@ function NumberPlatformSetting({ label, value, min, max, step, disabled, onSave 
       onChange={(event) => setDraft(event.target.value)}
       onBlur={() => {
         const next = Number(draft);
-        if (Number.isFinite(next) && next >= min && next <= max && next !== value) onSave(next);
+        if (Number.isFinite(next) && (step !== 1 || Number.isInteger(next)) && next >= min && next <= max && next !== value) onSave(next);
         else setDraft(String(value));
       }} />
   </div>;

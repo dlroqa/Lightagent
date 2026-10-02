@@ -306,16 +306,25 @@ impl ToolInvoker for BoundedExecutor {
         }
 
         let ctx = self.ctx(cancel.clone());
+        // Remote command duration is an explicit operator setting. The run's
+        // cancellation token and approval boundary still apply unchanged.
+        let per_call = if call.name == crate::builtins::OpenTerminalRun::NAME {
+            self.open_terminal
+                .as_ref()
+                .map_or(self.per_call, |remote| remote.policy.execution_timeout)
+        } else {
+            self.per_call
+        };
         let outcome = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
                 ToolOutcome::error(format!("the tool '{}' was cancelled", call.name))
             }
-            result = tokio::time::timeout(self.per_call, tool.call(&args, &ctx)) => match result {
+            result = tokio::time::timeout(per_call, tool.call(&args, &ctx)) => match result {
                 Ok(outcome) => outcome,
                 Err(_) => ToolOutcome::error(format!(
                     "the tool '{}' timed out after {:?}",
-                    call.name, self.per_call
+                    call.name, per_call
                 )),
             }
         };

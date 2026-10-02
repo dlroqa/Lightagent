@@ -298,6 +298,12 @@ struct UiJevSettings {
     endpoint: UiPlatformEndpoint,
     model: String,
     confidence_threshold: f32,
+    #[serde(default)]
+    allowed_models: Option<Vec<String>>,
+    #[serde(default)]
+    allowed_profiles: Option<Vec<String>>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
 }
 
 /// Non-sensitive settings for Qdrant's retrieval adapter.
@@ -306,6 +312,8 @@ struct UiQdrantSettings {
     #[serde(flatten)]
     endpoint: UiPlatformEndpoint,
     collection: String,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
 }
 
 /// Non-sensitive settings for Infinity's embedding and reranking adapter.
@@ -315,6 +323,22 @@ struct UiInfinitySettings {
     endpoint: UiPlatformEndpoint,
     embedding_model: String,
     rerank_model: String,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct UiOpenTerminalSettings {
+    #[serde(flatten)]
+    endpoint: UiPlatformEndpoint,
+    #[serde(default)]
+    request_timeout_secs: Option<u64>,
+    #[serde(default)]
+    execution_timeout_secs: Option<u64>,
+    #[serde(default)]
+    poll_interval_ms: Option<u64>,
+    #[serde(default)]
+    max_output_bytes: Option<usize>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -331,7 +355,7 @@ struct UiSettings {
     jev: UiJevSettings,
     qdrant: UiQdrantSettings,
     infinity: UiInfinitySettings,
-    open_terminal: UiPlatformEndpoint,
+    open_terminal: UiOpenTerminalSettings,
 }
 
 fn ui_settings(config: &lightagent_core::Config) -> UiSettings {
@@ -349,17 +373,28 @@ fn ui_settings(config: &lightagent_core::Config) -> UiSettings {
             endpoint: ui_platform_endpoint(&config.platform.jev.endpoint),
             model: config.platform.jev.model.clone(),
             confidence_threshold: config.platform.jev.confidence_threshold,
+            allowed_models: Some(config.platform.jev.allowed_models.clone()),
+            allowed_profiles: Some(config.platform.jev.allowed_profiles.clone()),
+            timeout_secs: Some(config.platform.jev.timeout_secs),
         },
         qdrant: UiQdrantSettings {
             endpoint: ui_platform_endpoint(&config.platform.qdrant.endpoint),
             collection: config.platform.qdrant.collection.clone(),
+            timeout_secs: Some(config.platform.qdrant.timeout_secs),
         },
         infinity: UiInfinitySettings {
             endpoint: ui_platform_endpoint(&config.platform.infinity.endpoint),
             embedding_model: config.platform.infinity.embedding_model.clone(),
             rerank_model: config.platform.infinity.rerank_model.clone(),
+            timeout_secs: Some(config.platform.infinity.timeout_secs),
         },
-        open_terminal: ui_platform_endpoint(&config.platform.open_terminal.endpoint),
+        open_terminal: UiOpenTerminalSettings {
+            endpoint: ui_platform_endpoint(&config.platform.open_terminal.endpoint),
+            request_timeout_secs: Some(config.platform.open_terminal.request_timeout_secs),
+            execution_timeout_secs: Some(config.platform.open_terminal.execution_timeout_secs),
+            poll_interval_ms: Some(config.platform.open_terminal.poll_interval_ms),
+            max_output_bytes: Some(config.platform.open_terminal.max_output_bytes),
+        },
     }
 }
 
@@ -455,21 +490,48 @@ async fn save_settings(
     apply_platform_endpoint(&mut config.platform.jev.endpoint, &settings.jev.endpoint);
     config.platform.jev.model = settings.jev.model.trim().to_owned();
     config.platform.jev.confidence_threshold = settings.jev.confidence_threshold;
+    if let Some(value) = settings.jev.allowed_models {
+        config.platform.jev.allowed_models = value;
+    }
+    if let Some(value) = settings.jev.allowed_profiles {
+        config.platform.jev.allowed_profiles = value;
+    }
+    if let Some(value) = settings.jev.timeout_secs {
+        config.platform.jev.timeout_secs = value;
+    }
     apply_platform_endpoint(
         &mut config.platform.qdrant.endpoint,
         &settings.qdrant.endpoint,
     );
     config.platform.qdrant.collection = settings.qdrant.collection.trim().to_owned();
+    if let Some(value) = settings.qdrant.timeout_secs {
+        config.platform.qdrant.timeout_secs = value;
+    }
     apply_platform_endpoint(
         &mut config.platform.infinity.endpoint,
         &settings.infinity.endpoint,
     );
     config.platform.infinity.embedding_model = settings.infinity.embedding_model.trim().to_owned();
     config.platform.infinity.rerank_model = settings.infinity.rerank_model.trim().to_owned();
+    if let Some(value) = settings.infinity.timeout_secs {
+        config.platform.infinity.timeout_secs = value;
+    }
     apply_platform_endpoint(
         &mut config.platform.open_terminal.endpoint,
-        &settings.open_terminal,
+        &settings.open_terminal.endpoint,
     );
+    if let Some(value) = settings.open_terminal.request_timeout_secs {
+        config.platform.open_terminal.request_timeout_secs = value;
+    }
+    if let Some(value) = settings.open_terminal.execution_timeout_secs {
+        config.platform.open_terminal.execution_timeout_secs = value;
+    }
+    if let Some(value) = settings.open_terminal.poll_interval_ms {
+        config.platform.open_terminal.poll_interval_ms = value;
+    }
+    if let Some(value) = settings.open_terminal.max_output_bytes {
+        config.platform.open_terminal.max_output_bytes = value;
+    }
     if let Err(error) = config.validate() {
         return bad_request(&error.to_string());
     }
@@ -874,13 +936,33 @@ mod tests {
         config.platform.jev.endpoint.api_key = Some(SecretRef::env("JEV_TEST_TOKEN"));
         config.platform.jev.model = "jev-router-v2".to_owned();
         config.platform.jev.confidence_threshold = 0.9;
+        config.platform.jev.allowed_models = vec!["permitted-model".to_owned()];
+        config.platform.jev.allowed_profiles = vec!["permitted-profile".to_owned()];
+        config.platform.jev.timeout_secs = 7;
         config.platform.qdrant.collection = "workspace-documents".to_owned();
+        config.platform.qdrant.timeout_secs = 11;
+        config.platform.infinity.timeout_secs = 13;
+        config.platform.open_terminal.endpoint.api_key =
+            Some(SecretRef::env("TERMINAL_TEST_TOKEN"));
+        config.platform.open_terminal.execution_timeout_secs = 120;
         config.platform.infinity.embedding_model = "embedding-v2".to_owned();
         config.platform.infinity.rerank_model = "reranker-v2".to_owned();
 
         let value = serde_json::to_value(ui_settings(&config)).expect("settings serialize");
 
         assert_eq!(value["jev"]["model"], "jev-router-v2");
+        assert_eq!(value["jev"]["allowed_models"], json!(["permitted-model"]));
+        assert_eq!(
+            value["jev"]["allowed_profiles"],
+            json!(["permitted-profile"])
+        );
+        assert_eq!(value["jev"]["timeout_secs"], 7);
+        assert_eq!(value["qdrant"]["timeout_secs"], 11);
+        assert_eq!(value["infinity"]["timeout_secs"], 13);
+        assert_eq!(value["open_terminal"]["execution_timeout_secs"], 120);
+        assert_eq!(value["open_terminal"]["request_timeout_secs"], 30);
+        assert_eq!(value["open_terminal"]["poll_interval_ms"], 250);
+        assert_eq!(value["open_terminal"]["max_output_bytes"], 32768);
         let confidence = value["jev"]["confidence_threshold"]
             .as_f64()
             .expect("confidence is numeric");
@@ -890,5 +972,17 @@ mod tests {
         assert_eq!(value["infinity"]["rerank_model"], "reranker-v2");
         assert_eq!(value["jev"]["api_key_configured"], true);
         assert!(!value.to_string().contains("JEV_TEST_TOKEN"));
+        assert!(!value.to_string().contains("TERMINAL_TEST_TOKEN"));
+        let decoded: UiSettings = serde_json::from_value(value).expect("settings roundtrip");
+        assert_eq!(
+            decoded.jev.allowed_profiles,
+            Some(config.platform.jev.allowed_profiles.clone())
+        );
+        let mut endpoint = config.platform.open_terminal.endpoint.clone();
+        apply_platform_endpoint(&mut endpoint, &decoded.open_terminal.endpoint);
+        assert_eq!(
+            endpoint.api_key,
+            config.platform.open_terminal.endpoint.api_key
+        );
     }
 }
