@@ -551,7 +551,10 @@ export function Agent() {
         <aside className="agent-sessions agent-sidebar chat-history" style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
           <div className="chat-sidebar__brand">
             <img src="/icon.png" alt="" width={30} height={30} />
-            <span><strong>Lightagent</strong><small>Agent workspace</small></span>
+            <span className="chat-sidebar__wordmark" aria-label="Lightagent">
+              <strong className="chat-sidebar__brand-name chat-sidebar__brand-name--light">Lightagent</strong>
+              <strong className="chat-sidebar__brand-name chat-sidebar__brand-name--lite" aria-hidden="true">Liteagent</strong>
+            </span>
             <button type="button" className="chat-sidebar__search-button" aria-label="Search chats"
               aria-expanded={searchOpen} onClick={() => setSearchOpen((open) => {
                 if (open) setSearch("");
