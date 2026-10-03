@@ -904,7 +904,6 @@ export function Agent() {
                     </div>
                   )}
                   {failure && <div className="notice notice--danger" style={{ marginTop: 10 }}>{failure}</div>}
-                  <SavedTools session={session} currentRunId={runId} />
                   <div ref={end} />
                 </div>
               </div>
@@ -929,7 +928,7 @@ export function Agent() {
                 </div>
               )}
               {steering.length > 0 && (
-                <div className="notice notice--info" role="status">
+                <div className="notice notice--info chat-queue" role="status">
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                     <strong>Queued steers ({steering.length})</strong>
                     <span style={{ flex: 1 }} />
@@ -1052,6 +1051,7 @@ export function Agent() {
                     </span>
                     </div>
                     {tools.length > 0 && <ToolList title="Current tool calls" tools={tools} />}
+                    <SavedTools session={session} currentRunId={runId} />
                   </>
                 )}
               </div>

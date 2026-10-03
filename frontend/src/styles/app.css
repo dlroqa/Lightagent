@@ -1296,6 +1296,13 @@ textarea {
   color: var(--accent);
 }
 
+/* Queue feedback belongs to the composer, not the full transcript width. */
+.chat-queue {
+  box-sizing: border-box;
+  width: min(760px, 100%);
+  margin: 0 auto;
+}
+
 .skeleton {
   border-radius: var(--radius-sm);
   background: linear-gradient(
