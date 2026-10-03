@@ -1753,7 +1753,6 @@ textarea {
 }
 
 .reasoning-panel {
-  border: 1px solid var(--border-quiet);
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--surface-hover), var(--ground-2) 28%);
   overflow: hidden;
