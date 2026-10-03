@@ -76,6 +76,13 @@ textarea {
   --rail-width: 76px;
 }
 
+/* Keep the administrative rail's minimized geometry aligned with the chat
+ * sidebar: the top mark and bottom account avatar share the same 68px column
+ * and 12px side inset. */
+.shell--workspace.is-collapsed:not(.shell--chat) {
+  --rail-width: 68px;
+}
+
 .shell__frame {
   position: absolute;
   inset: var(--space-4);
@@ -204,7 +211,6 @@ textarea {
   display: inline-grid;
   width: 32px;
   height: 32px;
-  margin-left: auto;
   place-items: center;
   flex: none;
   border: 0;
@@ -215,6 +221,43 @@ textarea {
 }
 
 .rail__toggle:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.rail__app-actions {
+  display: grid;
+  gap: var(--space-5);
+}
+
+.rail__back,
+.rail__search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 15px;
+  text-align: left;
+}
+
+.rail__back {
+  padding: var(--space-2);
+}
+
+.rail__search {
+  min-height: 48px;
+  padding: 0 var(--space-3);
+  border-radius: 999px;
+  background: var(--surface-hover);
+  color: var(--text-muted);
+}
+
+.rail__back:hover,
+.rail__search:hover {
   background: var(--surface-hover);
   color: var(--text);
 }
@@ -402,12 +445,32 @@ textarea {
 
 .shell.is-collapsed .rail__account {
   justify-content: center;
-  padding-inline: 0;
+  min-height: 48px;
+  padding: 4px 0;
   border-top: 0;
 }
 
 .shell.is-collapsed .rail__brand {
   justify-content: center;
+}
+
+.shell--workspace.is-collapsed:not(.shell--chat) .rail {
+  padding: 20px 12px;
+}
+
+.shell--workspace.is-collapsed:not(.shell--chat) .rail__brand {
+  padding: 2px 0 12px;
+}
+
+.shell--workspace.is-collapsed:not(.shell--chat) .rail__collapsed-logo .rail__mark {
+  width: 34px;
+  height: 34px;
+}
+
+.shell--workspace.is-collapsed:not(.shell--chat) .rail__avatar {
+  width: 40px;
+  height: 40px;
+  font-size: 12px;
 }
 
 .railcard {

@@ -1,10 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Settings, Wrench } from "lucide-react";
+import { ArrowLeft, Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Search, Settings, Wrench } from "lucide-react";
 
-import { agentApi } from "../api/agent";
 import { useMediaQuery } from "../hooks/useMediaQuery";
-import { usePoll } from "../hooks/usePoll";
 import { usePreferences } from "../state/preferences";
 import { Menu, MenuItem } from "./Menu";
 
@@ -19,7 +17,6 @@ export function Shell() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const accountButton = useRef<HTMLButtonElement | null>(null);
-  const tools = usePoll(() => agentApi.tools().then((body) => body.tools), 10_000);
   const collapsed = mobile ? false : chatRoute ? true : workspaceSidebarCollapsed;
 
   useEffect(() => setDrawerOpen(false), [location.pathname]);
@@ -48,32 +45,23 @@ export function Shell() {
               <PanelLeftOpen size={21} aria-hidden="true" />
             </button>
           ) : <>
-            <img className="rail__mark" src="/icon.png" alt="" width={38} height={38} />
-            <span className="rail__name">
-              <strong>Lightagent</strong>
-              <span>Agent Harness</span>
-            </span>
             <button type="button" className="rail__toggle" aria-label="Collapse sidebar" title="Collapse sidebar"
               onClick={() => setWorkspaceSidebarCollapsed(true)}><PanelLeftClose size={18} /></button>
           </>}
         </div>
 
-        <div className="rail__spacer" />
-
         {!collapsed && (
-          <div className="railcard">
-            <span className="railcard__label">Harness</span>
-            <span style={{ display: "flex", alignItems: "center", gap: 7,
-              color: tools.error ? "var(--danger)" : "var(--ok)", fontSize: 13, fontWeight: 500 }}>
-              <span className="dot" />
-              {tools.error ? "Unavailable" : "Ready"}
-            </span>
-            <span className="railcard__line">
-              {tools.data ? `${tools.data.length} runtime tools` : "Loading runtime tools"}
-            </span>
-            <span className="railcard__line">Provider-neutral agent loop</span>
+          <div className="rail__app-actions">
+            <button type="button" className="rail__back" onClick={() => navigate("/")}>
+              <ArrowLeft size={24} /> Back to app
+            </button>
+            <button type="button" className="rail__search" onClick={() => navigate("/")}>
+              <Search size={22} /> Search
+            </button>
           </div>
         )}
+
+        <div className="rail__spacer" />
 
         <button ref={accountButton} type="button" className="rail__account" aria-label="Open account menu"
           aria-expanded={accountOpen} onClick={() => setAccountOpen((open) => !open)}>
