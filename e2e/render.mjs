@@ -171,7 +171,9 @@ async function assertOpaqueOverlay(page, openMenu, scheme, where) {
 
 /**
  * Open both tool menus in both colour schemes and assert every one is opaque.
- * A session is created first so the composer, and its tool control, are present.
+ * Sending a probe creates a session so the chat composer and Status Control
+ * are present. The standalone harness has an unreachable model endpoint, so
+ * this deliberately leaves a harmless failed run rather than invoking a model.
  */
 async function checkOverlayOpacity(context) {
   for (const scheme of ["dark", "light"]) {
@@ -179,9 +181,8 @@ async function checkOverlayOpacity(context) {
     try {
       await page.emulateMedia({ colorScheme: scheme });
       await page.goto(`${BASE}/#/`, { waitUntil: "domcontentloaded" });
-      // The compact duplicate "New session" action is intentionally hidden in
-      // the chat workspace. The visible primary action is "New chat".
-      await page.getByRole("button", { name: "New chat" }).click();
+      await page.getByRole("textbox", { name: "Ask Lightagent" }).fill("render probe");
+      await page.getByRole("button", { name: "Send message" }).click();
       // Tool controls live inside Status Control so the composer remains
       // focused while they are not needed.
       await page.getByRole("button", { name: "Status Control" }).click();

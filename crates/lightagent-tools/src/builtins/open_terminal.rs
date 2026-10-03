@@ -979,9 +979,9 @@ mod tests {
         .expect("live command should start");
         token.cancel();
         assert!(run.await.unwrap().is_error);
-        // Upstream Open Terminal 0.14 closes a killed runner asynchronously.
-        // Keep the contract strict, while allowing its documented cleanup to
-        // finish on a cold CI runner.
+        // A forced cancellation is asynchronous. Open Terminal may either keep
+        // the record with a terminal status or compact it from `/execute`;
+        // neither outcome may leave the command running.
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 // The process list exposes authoritative state without reading
@@ -995,11 +995,11 @@ mod tests {
                     .json::<Value>()
                     .await
                     .unwrap();
-                if processes
+                if !processes
                     .as_array()
                     .unwrap()
                     .iter()
-                    .any(|process| process["id"] == id && process["status"] == "killed")
+                    .any(|process| process["id"] == id && process["status"] == "running")
                 {
                     break;
                 }
@@ -1007,7 +1007,7 @@ mod tests {
             }
         })
         .await
-        .expect("cancellation DELETE should kill live process");
+        .expect("cancellation DELETE should leave no live process");
     }
 
     #[test]
