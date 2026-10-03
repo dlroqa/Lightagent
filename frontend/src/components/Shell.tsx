@@ -3,9 +3,7 @@ import { NavLink, Outlet, useLocation } from "react-router-dom";
 import {
   Bot,
   Menu as MenuIcon,
-  Moon,
   Settings as SettingsIcon,
-  Sun,
   Wrench,
 } from "lucide-react";
 
@@ -22,7 +20,7 @@ const NAV = [
 
 /** The standalone frame shared by every Lightagent screen. */
 export function Shell() {
-  const { preferences, update } = usePreferences();
+  const { preferences } = usePreferences();
   const location = useLocation();
   const mobile = useMediaQuery("(max-width: 760px)");
   const chatRoute = location.pathname === "/" || location.pathname === "/agent";
@@ -35,8 +33,6 @@ export function Shell() {
   useEffect(() => {
     if (!mobile) setDrawerOpen(false);
   }, [mobile]);
-
-  const nextTheme = preferences.theme === "dark" ? "light" : "dark";
 
   return (
     <div className={`shell shell--workspace${collapsed ? " is-collapsed" : ""}${chatRoute ? " shell--chat" : ""}`}>
@@ -88,13 +84,6 @@ export function Shell() {
           </div>
         )}
 
-        <div className="rail__controls">
-          <button type="button" className="btn btn--icon"
-            title={`Switch to ${nextTheme} theme`} aria-label={`Switch to ${nextTheme} theme`}
-            onClick={() => update({ theme: nextTheme })}>
-            {preferences.theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
-          </button>
-        </div>
       </nav>
       )}
       <main className={`main${chatRoute ? " main--chat" : ""}`}>

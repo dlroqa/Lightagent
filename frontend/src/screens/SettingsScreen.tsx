@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { Moon, Sun } from "lucide-react";
 
 import {
   agentApi,
@@ -45,9 +46,14 @@ export function SettingsScreen() {
 
   const value = current ?? settings.data;
   const delegationAvailable = tools.data?.some((tool) => tool.name === "agent.delegate");
+  const nextTheme = preferences.theme === "dark" ? "light" : "dark";
   return (
     <>
-      <TopBar title="Settings" subtitle="Harness policy, tools, memory, and appearance" />
+      <TopBar title="Settings" subtitle="Harness policy, tools, memory, and appearance"
+        actions={<button type="button" className="btn btn--icon" title={`Switch to ${nextTheme} theme`}
+          aria-label={`Switch to ${nextTheme} theme`} onClick={() => update({ theme: nextTheme })}>
+          {preferences.theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
+        </button>} />
       <div className="page">
         {settings.error && !value && (
           <div className="notice notice--warn" role="alert">

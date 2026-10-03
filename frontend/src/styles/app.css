@@ -506,7 +506,7 @@ textarea {
 }
 
 .tile__unit {
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--text-muted);
   margin-left: 4px;
@@ -1839,7 +1839,7 @@ textarea {
   padding: 20px 12px;
 }
 
-.shell--chat .chat-history.is-collapsed > :not(.chat-sidebar__brand) {
+.shell--chat .chat-history.is-collapsed > :not(.chat-sidebar__brand):not(.chat-sidebar__account) {
   display: none !important;
 }
 
@@ -1855,13 +1855,16 @@ textarea {
   display: inline-grid;
   width: 32px;
   height: 32px;
-  margin-left: auto;
   place-items: center;
   border: 0;
   border-radius: 8px;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
+}
+
+.chat-sidebar__search-button {
+  margin-left: auto;
 }
 
 .chat-sidebar__toggle-button:hover,
@@ -1910,6 +1913,26 @@ textarea {
 .shell--chat .chat-history.is-collapsed .chat-sidebar__brand {
   justify-content: center;
   padding-bottom: 0;
+}
+
+.shell--chat .chat-history.is-collapsed .chat-sidebar__account {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.shell--chat .chat-history.is-collapsed .chat-sidebar__account-button {
+  justify-content: center;
+  padding: 4px 0;
+}
+
+.shell--chat .chat-history.is-collapsed .chat-sidebar__account-label {
+  display: none;
+}
+
+.shell--chat .chat-history.is-collapsed .chat-sidebar__avatar {
+  width: 40px;
+  height: 40px;
+  font-size: 12px;
 }
 
 .chat-search {
