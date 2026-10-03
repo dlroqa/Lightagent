@@ -261,6 +261,10 @@ export function Agent() {
   const fileInput = useRef<HTMLInputElement | null>(null);
   const accountButton = useRef<HTMLButtonElement | null>(null);
   const dispatching = useRef(false);
+  // Runs can continue after the user visits another conversation. Keep the
+  // owning session alongside its run id so selecting that conversation can
+  // reconnect to the event stream instead of presenting an idle transcript.
+  const backgroundRuns = useRef(new Map<string, string>());
   const selected = useRef(activeId);
   const loadGeneration = useRef(0);
   selected.current = activeId;
@@ -390,6 +394,13 @@ export function Agent() {
   }, [activeId, done, load, persisted, sessions.refresh]);
 
   useEffect(() => {
+    if (!done || !runId) return;
+    for (const [sessionId, backgroundRunId] of backgroundRuns.current) {
+      if (backgroundRunId === runId) backgroundRuns.current.delete(sessionId);
+    }
+  }, [done, runId]);
+
+  useEffect(() => {
     if (!done || !activeId || steering.length === 0 || busy ||
         queuePaused || dispatching.current) return;
     const next = steering[0];
@@ -411,7 +422,8 @@ export function Agent() {
         }
         if (!created) throw new Error("The previous run has not released this session. Retry the queued steer.");
         setSteering((current) => current.slice(1));
-        setRunId(created.id);
+        backgroundRuns.current.set(activeId, created.id);
+        if (selected.current === activeId) setRunId(created.id);
         await load(activeId);
         sessions.refresh();
       } catch (cause) {
@@ -430,11 +442,7 @@ export function Agent() {
 
   useLayoutEffect(() => {
     const panel = reasoningPanel.current;
-    if (!panel) return;
-    const frame = window.requestAnimationFrame(() => {
-      panel.scrollTop = panel.scrollHeight - panel.clientHeight;
-    });
-    return () => window.cancelAnimationFrame(frame);
+    if (panel) panel.scrollTop = panel.scrollHeight;
   }, [reasoning]);
 
   const visible = useMemo(() => {
@@ -524,7 +532,7 @@ export function Agent() {
     loadGeneration.current += 1;
     setActiveId(id);
     setSession(null);
-    setRunId(null);
+    setRunId(backgroundRuns.current.get(id) ?? null);
     setError(null);
   }
 
@@ -545,6 +553,7 @@ export function Agent() {
     if (hasPendingWork && id === activeId) return;
     try {
       await agentApi.deleteSession(id);
+      backgroundRuns.current.delete(id);
       if (id === activeId) {
         window.localStorage.removeItem(SESSION_KEY);
         selected.current = null;
@@ -624,7 +633,8 @@ export function Agent() {
         setActiveId(id);
       }
       const run = await agentApi.createRun(message, undefined, id, selectedModel || undefined);
-      setRunId(run.id);
+      backgroundRuns.current.set(id, run.id);
+      if (selected.current === id) setRunId(run.id);
       setAttachments([]);
       await load(id);
       sessions.refresh();

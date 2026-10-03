@@ -1767,7 +1767,11 @@ textarea {
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  color: var(--text-soft);
+  background: none !important;
+  color: var(--text-soft) !important;
+  -webkit-background-clip: border-box !important;
+  background-clip: border-box !important;
+  animation: none !important;
 }
 
 @keyframes tool-thinking-sweep {
