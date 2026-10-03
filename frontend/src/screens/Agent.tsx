@@ -257,6 +257,7 @@ export function Agent() {
   const [followTranscript, setFollowTranscript] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const end = useRef<HTMLDivElement | null>(null);
+  const reasoningPanel = useRef<HTMLDivElement | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
   const accountButton = useRef<HTMLButtonElement | null>(null);
   const dispatching = useRef(false);
@@ -426,6 +427,11 @@ export function Agent() {
   useEffect(() => {
     if (followTranscript) end.current?.scrollIntoView({ behavior: "auto", block: "end" });
   }, [answer, followTranscript, reasoning, session?.messages.length, tools.length]);
+
+  useEffect(() => {
+    const panel = reasoningPanel.current;
+    if (panel) panel.scrollTop = panel.scrollHeight;
+  }, [reasoning]);
 
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -922,9 +928,11 @@ export function Agent() {
                   )}
                   {running && !answer && (
                     reasoning ? (
-                      <section className="reasoning-panel" aria-live="polite" aria-label="Live reasoning">
-                        <div className="reasoning-panel__heading">Reasoning</div>
-                        <div className="reasoning-panel__content">{reasoning}</div>
+                      <section className="reasoning-stream" aria-live="polite" aria-label="Live reasoning">
+                        <div className="reasoning-stream__title">Reasoning</div>
+                        <div className="reasoning-panel">
+                          <div ref={reasoningPanel} className="reasoning-panel__content">{reasoning}</div>
+                        </div>
                       </section>
                     ) : (
                       <div className="tool-activity is-active" style={{ marginTop: 10 }} aria-live="polite">
