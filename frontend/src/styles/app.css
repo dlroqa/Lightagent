@@ -1732,11 +1732,24 @@ textarea {
 
 .reasoning-stream__title {
   margin: 0 0 6px;
-  color: var(--text-muted);
   font-size: 11.5px;
   font-weight: 650;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+  background: linear-gradient(
+    100deg,
+    var(--text-faint) 0%,
+    var(--text-faint) 38%,
+    var(--text-soft) 50%,
+    var(--text-faint) 62%,
+    var(--text-faint) 100%
+  );
+  background-position: 100% 0;
+  background-size: 250% 100%;
+  color: transparent;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: tool-thinking-sweep 1.7s ease-in-out infinite;
 }
 
 .reasoning-panel {
@@ -1754,20 +1767,7 @@ textarea {
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  background: linear-gradient(
-    100deg,
-    var(--text-faint) 0%,
-    var(--text-faint) 38%,
-    var(--text-soft) 50%,
-    var(--text-faint) 62%,
-    var(--text-faint) 100%
-  );
-  background-position: 100% 0;
-  background-size: 250% 100%;
-  color: transparent;
-  -webkit-background-clip: text;
-  background-clip: text;
-  animation: tool-thinking-sweep 1.7s ease-in-out infinite;
+  color: var(--text-soft);
 }
 
 @keyframes tool-thinking-sweep {
@@ -1843,7 +1843,7 @@ textarea {
 
 @media (prefers-reduced-motion: reduce) {
   .tool-activity__thinking,
-  .reasoning-panel__content,
+  .reasoning-stream__title,
   .tool-call__summary::after {
     background: none;
     color: var(--text-muted);

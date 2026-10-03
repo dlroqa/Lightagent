@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, CornerDownLeft, Cpu, FilePenLine, FileText, Folder, Globe, MessageCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, SquarePen, Terminal, Trash2, Wrench, X } from "lucide-react";
 
@@ -428,9 +428,13 @@ export function Agent() {
     if (followTranscript) end.current?.scrollIntoView({ behavior: "auto", block: "end" });
   }, [answer, followTranscript, reasoning, session?.messages.length, tools.length]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const panel = reasoningPanel.current;
-    if (panel) panel.scrollTop = panel.scrollHeight;
+    if (!panel) return;
+    const frame = window.requestAnimationFrame(() => {
+      panel.scrollTop = panel.scrollHeight - panel.clientHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [reasoning]);
 
   const visible = useMemo(() => {
