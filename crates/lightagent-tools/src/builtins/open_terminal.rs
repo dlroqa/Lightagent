@@ -299,14 +299,12 @@ impl Tool for OpenTerminalRun {
         let Some(remote) = ctx.open_terminal.as_ref() else {
             return ToolOutcome::error("Open Terminal is not enabled for this run");
         };
-        tokio::select! {
-            _ = ctx.cancel.cancelled() => ToolOutcome::error("open_terminal.run was cancelled"),
-            result = tokio::time::timeout(remote.policy.execution_timeout, self.run(args, ctx)) => {
-                match result {
-                    Ok(outcome) => outcome,
-                    Err(_) => ToolOutcome::error("Open Terminal execution timed out"),
-                }
-            }
+        // `run` owns the cleanup guard once the remote process is known. Let
+        // it observe cancellation and await DELETE itself; an outer select
+        // would drop that future first and make cleanup merely best-effort.
+        match tokio::time::timeout(remote.policy.execution_timeout, self.run(args, ctx)).await {
+            Ok(outcome) => outcome,
+            Err(_) => ToolOutcome::error("Open Terminal execution timed out"),
         }
     }
 }
@@ -390,16 +388,21 @@ impl OpenTerminalRun {
                 cleanup.cleanup_now().await;
                 return ToolOutcome::error("open_terminal.run was cancelled");
             }
-            let response = match request(
+            let poll = request(
                 remote,
                 Method::GET,
                 &format!("{}/status", process_path(&process.id)),
                 &session,
             )
             .query(&[("wait", "0".to_owned()), ("offset", offset.to_string())])
-            .send()
-            .await
-            {
+            .send();
+            let response = match tokio::select! {
+                _ = ctx.cancel.cancelled() => {
+                    cleanup.cleanup_now().await;
+                    return ToolOutcome::error("open_terminal.run was cancelled");
+                }
+                response = poll => response,
+            } {
                 Ok(response) => response,
                 Err(_) => {
                     return ToolOutcome::error("Open Terminal process poll request failed");
@@ -842,7 +845,7 @@ mod tests {
             replies.push(reply("DELETE", "/execute/job-1?force=true", json!({})));
             let (mut ctx, mut requests, task) = server(replies).await;
             Arc::make_mut(&mut ctx.open_terminal.as_mut().unwrap().policy).execution_timeout =
-                Duration::from_millis(500);
+                Duration::from_millis(if cancel { 2_000 } else { 500 });
             let token = ctx.cancel.clone();
             let execution = tokio::spawn(async move { call(&ctx).await });
             while requests.recv().await.unwrap() != "/execute/job-1/status?wait=0&offset=0" {}
@@ -854,7 +857,9 @@ mod tests {
             assert!(
                 result
                     .content
-                    .contains(if cancel { "cancelled" } else { "timed out" })
+                    .contains(if cancel { "cancelled" } else { "timed out" }),
+                "unexpected result: {}",
+                result.content
             );
             task.await.unwrap();
         }
