@@ -406,12 +406,6 @@ export function Agent() {
     return rows
       .filter((row) => !row.archived)
       .filter((row) => row.title !== "agent session" || row.message_count > 0 || row.run_count > 0)
-      .filter((row) =>
-        !needle ||
-        row.title.toLowerCase().includes(needle) ||
-        row.profile.toLowerCase().includes(needle) ||
-        row.project?.toLowerCase().includes(needle),
-      )
       .filter((row) => searchCategory !== "chats" || !row.project)
       .filter((row) => searchCategory !== "projects" || Boolean(row.project))
       .filter(() => searchCategory !== "images" && searchCategory !== "documents")
