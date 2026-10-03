@@ -474,6 +474,7 @@ export function Agent() {
       recent: visible.filter((row) => !row.pinned && !row.project),
     };
   }, [visible]);
+  const projectNames = sessionSections.projects.map(([project]) => project);
   const searchResults = useMemo(() => {
     const needle = search.trim().toLowerCase();
     const rows: SessionSearchResult[] = needle ? transcriptResults : (sessions.data ?? []);
@@ -781,13 +782,14 @@ export function Agent() {
               showArchived ? (
                 <SessionGroup title="Archived chats" rows={visible} activeId={activeId} disabled={hasPendingWork}
                   onOpen={select} onUpdate={updateSession} onShare={shareSession} onDelete={remove}
+                  projectNames={projectNames}
                   trailing={<button type="button" className="chat-sidebar__archive-toggle" aria-pressed
                     onClick={() => setShowArchived(false)} title="Show recent chats"><Archive size={14} /></button>} />
               ) : (
                 <>
                   {sessionSections.pinned.length > 0 && <SessionGroup title="Pinned" rows={sessionSections.pinned}
                     activeId={activeId} disabled={hasPendingWork} onOpen={select} onUpdate={updateSession}
-                    onShare={shareSession} onDelete={remove} />}
+                    onShare={shareSession} onDelete={remove} projectNames={projectNames} />}
                   {sessionSections.projects.length > 0 && (
                     <section className="session-group" aria-label="Projects">
                       <div className="chat-sidebar__section">Projects</div>
@@ -795,14 +797,14 @@ export function Agent() {
                         <div className="session-project" key={project}>
                           <span className="session-project__name">{project}</span>
                           <SessionGroup rows={rows} activeId={activeId} disabled={hasPendingWork} onOpen={select}
-                            onUpdate={updateSession} onShare={shareSession} onDelete={remove} />
+                            onUpdate={updateSession} onShare={shareSession} onDelete={remove} projectNames={projectNames} />
                         </div>
                       ))}
                     </section>
                   )}
                   <SessionGroup title="Recent chats" rows={sessionSections.recent} activeId={activeId}
                     disabled={hasPendingWork} onOpen={select} onUpdate={updateSession} onShare={shareSession}
-                    onDelete={remove} trailing={<button type="button" className="chat-sidebar__archive-toggle" aria-pressed={false}
+                    onDelete={remove} projectNames={projectNames} trailing={<button type="button" className="chat-sidebar__archive-toggle" aria-pressed={false}
                       onClick={() => setShowArchived(true)} title="Show archived chats"><Archive size={14} /></button>} />
                 </>
               )
@@ -1116,7 +1118,7 @@ export function Agent() {
   );
 }
 
-function SessionGroup({ title, rows, activeId, disabled, onOpen, onUpdate, onShare, onDelete, trailing }: {
+function SessionGroup({ title, rows, activeId, disabled, onOpen, onUpdate, onShare, onDelete, projectNames = [], trailing }: {
   title?: string;
   rows: SessionSummary[];
   activeId: string | null;
@@ -1125,6 +1127,7 @@ function SessionGroup({ title, rows, activeId, disabled, onOpen, onUpdate, onSha
   onUpdate: (id: string, patch: SessionPatch) => Promise<boolean>;
   onShare: (row: SessionSummary) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
+  projectNames?: string[];
   trailing?: ReactNode;
 }) {
   return (
@@ -1134,19 +1137,21 @@ function SessionGroup({ title, rows, activeId, disabled, onOpen, onUpdate, onSha
         {rows.map((row) => (
           <SessionRow key={row.id} row={row} active={row.id === activeId} disabled={disabled}
             onOpen={() => onOpen(row.id)} onUpdate={onUpdate} onShare={() => void onShare(row)}
-            onDelete={() => void onDelete(row.id)} />
+            onDelete={() => void onDelete(row.id)} projectNames={projectNames} />
         ))}
       </ul>
     </section>
   );
 }
 
-function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete }: {
+function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete, projectNames }: {
   row: SessionSummary; active: boolean; disabled: boolean;
   onOpen: () => void; onUpdate: (id: string, patch: SessionPatch) => Promise<boolean>;
   onShare: () => void; onDelete: () => void;
+  projectNames: string[];
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const menuButton = useRef<HTMLButtonElement | null>(null);
   const label = row.title || "Untitled";
   const rename = () => {
@@ -1154,10 +1159,14 @@ function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete
     if (title?.trim() && title.trim() !== label) void onUpdate(row.id, { title: title.trim() });
     setMenuOpen(false);
   };
-  const moveToProject = () => {
-    const project = window.prompt("Move conversation to project (leave blank to remove)", row.project ?? "");
-    if (project !== null) void onUpdate(row.id, { project: project.trim() || null });
+  const assignProject = (project: string | null) => {
+    void onUpdate(row.id, { project });
+    setProjectPickerOpen(false);
     setMenuOpen(false);
+  };
+  const createProject = () => {
+    const project = window.prompt("Name the new project");
+    if (project?.trim()) assignProject(project.trim());
   };
   return (
     <li className="session-row">
@@ -1179,7 +1188,14 @@ function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete
         <Menu open={menuOpen} anchorRef={menuButton} onClose={() => setMenuOpen(false)} align="end" minWidth={216} label={`Actions for ${label}`}>
           <MenuItem onClick={rename}><span className="session-menu__item"><Pencil size={17} /> Rename</span></MenuItem>
           <MenuItem onClick={() => { void onUpdate(row.id, { pinned: !row.pinned }); setMenuOpen(false); }}><span className="session-menu__item"><Pin size={17} /> {row.pinned ? "Unpin" : "Pin"}</span></MenuItem>
-          <MenuItem onClick={moveToProject}><span className="session-menu__item"><Folder size={17} /> Move to project <ChevronRight size={16} /></span></MenuItem>
+          <MenuItem onClick={() => setProjectPickerOpen((open) => !open)}><span className="session-menu__item"><Folder size={17} /> Move to project <ChevronRight size={16} /></span></MenuItem>
+          {projectPickerOpen && <>
+            <MenuItem onClick={createProject}><span className="session-menu__item"><Folder size={17} /> Create project…</span></MenuItem>
+            {projectNames.filter((project) => project !== row.project).map((project) => (
+              <MenuItem key={project} onClick={() => assignProject(project)}><span className="session-menu__item">{project}</span></MenuItem>
+            ))}
+            {row.project && <MenuItem onClick={() => assignProject(null)}><span className="session-menu__item">Remove from project</span></MenuItem>}
+          </>}
           <div className="menu__divider" role="separator" />
           <MenuItem onClick={() => { onShare(); setMenuOpen(false); }}><span className="session-menu__item"><Share2 size={17} /> Share</span></MenuItem>
           <div className="menu__divider" role="separator" />
