@@ -293,6 +293,52 @@ textarea {
   flex: 1;
 }
 
+.rail__account {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: none;
+  min-height: 44px;
+  padding: var(--space-2);
+  border-top: 1px solid var(--rule);
+}
+
+.rail__avatar {
+  display: inline-grid;
+  width: 36px;
+  height: 36px;
+  flex: none;
+  place-items: center;
+  border-radius: 50%;
+  background: #0f9f8e;
+  color: #f4fffd;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.rail__account-label {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.rail__account-label strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rail__account-label small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.shell.is-collapsed .rail__account {
+  justify-content: center;
+  padding-inline: 0;
+  border-top: 0;
+}
+
 .railcard {
   flex: none;
   border-radius: var(--radius-lg);
@@ -1971,6 +2017,12 @@ textarea {
   gap: 12px;
 }
 
+.chat-search__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .chat-search__header input {
   width: 100%;
   min-width: 0;
@@ -1999,13 +2051,51 @@ textarea {
   cursor: pointer;
 }
 
+.chat-search__clear {
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--popover-muted);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.chat-search__clear:hover {
+  background: var(--popover-hover);
+  color: var(--popover-foreground);
+}
+
 .chat-search__close:hover {
   background: var(--popover-hover);
   color: var(--popover-foreground);
 }
 
+.chat-search__categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 24px 0 0;
+}
+
+.chat-search__categories button {
+  padding: 7px 11px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--popover-muted);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.chat-search__categories button:hover,
+.chat-search__categories button.is-active {
+  background: var(--popover-hover);
+  color: var(--popover-foreground);
+}
+
 .chat-search__heading {
-  margin: 38px 10px 22px;
+  margin: 26px 10px 22px;
   color: var(--popover-muted);
   font-size: 14px;
   font-weight: 600;
@@ -2044,6 +2134,16 @@ textarea {
 
 .chat-search__result svg {
   color: var(--popover-muted);
+}
+
+.chat-search__result > span {
+  display: grid;
+  gap: 2px;
+}
+
+.chat-search__result small {
+  color: var(--popover-muted);
+  font-size: 12px;
 }
 
 .chat-search__empty {
@@ -2209,8 +2309,8 @@ textarea {
   background: transparent;
   color: var(--text);
   cursor: pointer;
-  font-size: 15px;
-  font-weight: 550;
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .chat-sidebar__new:hover:not(:disabled) {

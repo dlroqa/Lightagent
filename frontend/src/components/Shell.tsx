@@ -1,22 +1,11 @@
 import { useEffect, useState } from "react";
-import { NavLink, Outlet, useLocation } from "react-router-dom";
-import {
-  Bot,
-  Menu as MenuIcon,
-  Settings as SettingsIcon,
-  Wrench,
-} from "lucide-react";
+import { Outlet, useLocation } from "react-router-dom";
+import { Menu as MenuIcon } from "lucide-react";
 
 import { agentApi } from "../api/agent";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { usePoll } from "../hooks/usePoll";
 import { usePreferences } from "../state/preferences";
-
-const NAV = [
-  { to: "/", label: "Agent", icon: Bot, end: true },
-  { to: "/tools", label: "Tools", icon: Wrench },
-  { to: "/settings", label: "Settings", icon: SettingsIcon },
-];
 
 /** The standalone frame shared by every Lightagent screen. */
 export function Shell() {
@@ -45,7 +34,7 @@ export function Shell() {
 
       {!chatRoute && (
       <nav className={`rail${mobile && drawerOpen ? " is-open" : ""}`}
-        aria-label="Sections" aria-hidden={mobile && !drawerOpen}>
+        aria-label="Workspace" aria-hidden={mobile && !drawerOpen}>
         <div className="rail__brand">
           <img className="rail__mark" src="/icon.png" alt="" width={38} height={38} />
           {!collapsed && (
@@ -54,17 +43,6 @@ export function Shell() {
               <span>Agent Harness</span>
             </span>
           )}
-        </div>
-
-        <div className="rail__nav">
-          {NAV.map(({ to, label, icon: Icon, end }) => (
-            <NavLink key={to} to={to} end={end}
-              className={({ isActive }) => `navitem${isActive ? " is-active" : ""}`}
-              title={collapsed ? label : undefined}>
-              <Icon size={18} strokeWidth={1.9} />
-              {!collapsed && <span>{label}</span>}
-            </NavLink>
-          ))}
         </div>
 
         <div className="rail__spacer" />
@@ -83,6 +61,11 @@ export function Shell() {
             <span className="railcard__line">Provider-neutral agent loop</span>
           </div>
         )}
+
+        <div className="rail__account" aria-label="Lightagent local account">
+          <span className="rail__avatar" aria-hidden="true">LA</span>
+          {!collapsed && <span className="rail__account-label"><strong>Lightagent</strong><small>Local account</small></span>}
+        </div>
 
       </nav>
       )}

@@ -36,6 +36,8 @@ const unix = (value: SystemTime) => value.secs_since_epoch;
 const BRAND_NAMES = ["Lightagent", "Liteagent"] as const;
 const BRAND_ALTERNATE_MS = 45_000;
 const BRAND_CHARACTER_MS = 120;
+const SEARCH_CATEGORIES = ["all", "chats", "images", "documents", "projects"] as const;
+type SearchCategory = typeof SEARCH_CATEGORIES[number];
 
 function AnimatedBrandName() {
   const [nameIndex, setNameIndex] = useState(0);
@@ -196,6 +198,7 @@ export function Agent() {
   const [queuePaused, setQueuePaused] = useState(false);
   const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [searchCategory, setSearchCategory] = useState<SearchCategory>("all");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
@@ -386,8 +389,11 @@ export function Agent() {
         row.profile.toLowerCase().includes(needle) ||
         row.project?.toLowerCase().includes(needle),
       )
+      .filter((row) => searchCategory !== "chats" || !row.project)
+      .filter((row) => searchCategory !== "projects" || Boolean(row.project))
+      .filter(() => searchCategory !== "images" && searchCategory !== "documents")
       .slice(0, 6);
-  }, [search, sessions.data]);
+  }, [search, searchCategory, sessions.data]);
 
   useEffect(() => {
     if (!searchOpen) return;
@@ -632,7 +638,7 @@ export function Agent() {
                 <AnimatedBrandName />
               </span>
               <button type="button" className="chat-sidebar__search-button" aria-label="Search chats"
-                aria-expanded={searchOpen} onClick={() => setSearchOpen(true)}>
+                aria-expanded={searchOpen} onClick={() => { setSearchCategory("all"); setSearchOpen(true); }}>
                 <Search size={16} />
               </button>
               <button type="button" className="chat-sidebar__toggle-button" aria-label="Collapse sidebar" title="Collapse sidebar"
@@ -642,7 +648,7 @@ export function Agent() {
             </>}
           </div>
           <button type="button" className="chat-sidebar__new" disabled={hasPendingWork} onClick={() => void startNew()}>
-            <SquarePen size={21} strokeWidth={2} /> New chat
+            <SquarePen size={17} strokeWidth={2} /> New chat
           </button>
           {sidebarNotice && <span className="chat-sidebar__notice" role="status">{sidebarNotice}</span>}
           <div className="agent-sessions__list" style={{ flex: 1, overflowY: "auto", margin: "0 -6px" }}>
@@ -706,18 +712,34 @@ export function Agent() {
               <div className="chat-search__header">
                 <input autoFocus value={search} onChange={(event) => setSearch(event.target.value)}
                   placeholder="Search chats…" aria-label="Search agent sessions" />
-                <button type="button" className="chat-search__close" aria-label="Close search"
-                  onClick={() => { setSearchOpen(false); setSearch(""); }}><X size={21} /></button>
+                <div className="chat-search__actions">
+                  {search && <button type="button" className="chat-search__clear" onClick={() => setSearch("")}>Clear</button>}
+                  <button type="button" className="chat-search__close" aria-label="Close search"
+                    onClick={() => { setSearchOpen(false); setSearch(""); }}><X size={21} /></button>
+                </div>
+              </div>
+              <div className="chat-search__categories" role="tablist" aria-label="Search categories">
+                {SEARCH_CATEGORIES.map((category) => (
+                  <button type="button" role="tab" key={category} aria-selected={searchCategory === category}
+                    className={searchCategory === category ? "is-active" : undefined}
+                    onClick={() => setSearchCategory(category)}>
+                    {category[0]?.toUpperCase()}{category.slice(1)}
+                  </button>
+                ))}
               </div>
               <div className="chat-search__heading">{search.trim() ? "Search results" : "Recent chats"}</div>
               <div className="chat-search__results">
                 {searchResults.length === 0 ? (
-                  <div className="chat-search__empty">{search.trim() ? "No chats match your search." : "No recent chats yet."}</div>
+                  <div className="chat-search__empty">
+                    {searchCategory === "images" || searchCategory === "documents"
+                      ? `No indexed ${searchCategory} are available.`
+                      : search.trim() ? "No chats match your search." : "No recent chats yet."}
+                  </div>
                 ) : searchResults.map((row) => (
                   <button type="button" className="chat-search__result" key={row.id} disabled={hasPendingWork}
                     onClick={() => { select(row.id); setSearchOpen(false); setSearch(""); }}>
                     <MessageCircle size={20} aria-hidden="true" />
-                    <span>{row.title || "Untitled chat"}</span>
+                    <span>{row.title || "Untitled chat"}{row.project && <small>{row.project}</small>}</span>
                   </button>
                 ))}
               </div>
