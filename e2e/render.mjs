@@ -182,6 +182,9 @@ async function checkOverlayOpacity(context) {
       // The compact duplicate "New session" action is intentionally hidden in
       // the chat workspace. The visible primary action is "New chat".
       await page.getByRole("button", { name: "New chat" }).click();
+      // Tool controls live inside Status Control so the composer remains
+      // focused while they are not needed.
+      await page.getByRole("button", { name: "Status Control" }).click();
       // The tool controls enable once the runtime tool list has loaded.
       const composerTools = page.locator(".composer-meta__tools");
       await composerTools.waitFor({ timeout: SETTLE_MS });

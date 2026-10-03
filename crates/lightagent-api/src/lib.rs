@@ -742,7 +742,7 @@ fn session_title(message: &str) -> String {
         };
         subject = subject[prefix.len()..].trim_start();
     }
-    subject = subject.trim_start_matches(|character: char| matches!(character, '"' | '\''));
+    subject = subject.trim_start_matches(['"', '\'']);
     for article in ["the ", "a ", "an "] {
         if subject.to_lowercase().starts_with(article) {
             subject = subject[article.len()..].trim_start();
@@ -754,11 +754,10 @@ fn session_title(message: &str) -> String {
         .take(MAX_WORDS)
         .collect::<Vec<_>>();
     let joined = words.join(" ");
-    let candidate = joined
-        .trim_end_matches(|character: char| matches!(character, '.' | '?' | '!' | ':' | ';' | ','));
+    let candidate = joined.trim_end_matches(['.', '?', '!', ':', ';', ',']);
     let mut title = candidate.chars().take(LIMIT).collect::<String>();
     title = title
-        .trim_end_matches(|character: char| matches!(character, '.' | '?' | '!' | ':' | ';' | ','))
+        .trim_end_matches(['.', '?', '!', ':', ';', ','])
         .to_owned();
     if title.is_empty() {
         return "agent session".to_owned();
@@ -969,15 +968,11 @@ struct UpdateSessionBody {
 }
 
 /// Distinguishes an omitted PATCH field from an explicitly supplied JSON null.
+#[derive(Default)]
 enum Patch<T> {
+    #[default]
     Missing,
     Value(T),
-}
-
-impl<T> Default for Patch<T> {
-    fn default() -> Self {
-        Self::Missing
-    }
 }
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for Patch<T> {
@@ -989,15 +984,17 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Patch<T> {
 const SESSION_TITLE_LIMIT: usize = 200;
 const SESSION_PROJECT_LIMIT: usize = 120;
 
-fn normalized_metadata(value: String, field: &str, limit: usize) -> Result<String, Response> {
+fn normalized_metadata(value: String, field: &str, limit: usize) -> Result<String, Box<Response>> {
     let value = value.trim().to_owned();
     if value.is_empty() {
-        return Err(bad_request(&format!("session {field} cannot be empty")));
+        return Err(Box::new(bad_request(&format!(
+            "session {field} cannot be empty"
+        ))));
     }
     if value.chars().count() > limit {
-        return Err(bad_request(&format!(
+        return Err(Box::new(bad_request(&format!(
             "session {field} must be at most {limit} characters"
-        )));
+        ))));
     }
     Ok(value)
 }
@@ -1018,7 +1015,7 @@ async fn update_session(
     let title = match body.title {
         Some(value) => match normalized_metadata(value, "title", SESSION_TITLE_LIMIT) {
             Ok(value) => Some(value),
-            Err(response) => return response,
+            Err(response) => return *response,
         },
         None => None,
     };
@@ -1026,7 +1023,7 @@ async fn update_session(
         Patch::Value(Some(value)) => {
             match normalized_metadata(value, "project", SESSION_PROJECT_LIMIT) {
                 Ok(value) => Some(Some(value)),
-                Err(response) => return response,
+                Err(response) => return *response,
             }
         }
         Patch::Value(None) => Some(None),

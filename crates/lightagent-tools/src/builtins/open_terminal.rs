@@ -979,7 +979,10 @@ mod tests {
         .expect("live command should start");
         token.cancel();
         assert!(run.await.unwrap().is_error);
-        tokio::time::timeout(Duration::from_secs(3), async {
+        // Upstream Open Terminal 0.14 closes a killed runner asynchronously.
+        // Keep the contract strict, while allowing its documented cleanup to
+        // finish on a cold CI runner.
+        tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 // The process list exposes authoritative state without reading
                 // logs while upstream concurrently closes the killed runner.
