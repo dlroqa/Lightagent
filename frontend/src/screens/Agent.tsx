@@ -890,15 +890,14 @@ export function Agent() {
                   {showLiveAnswer && answer && (
                     <AgentMessage message={{ role: "assistant", content: answer }} streaming={!done} />
                   )}
-                  {running && !answer && tools.length === 0 && (
+                  {running && !answer && (
                     <div className="tool-activity is-active" style={{ marginTop: 10 }} aria-live="polite">
                       <div className="tool-activity__heading">
-                        <span className="tool-activity__thinking">Thinking</span>
+                        <span className="tool-activity__thinking">Monologuing</span>
                       </div>
                     </div>
                   )}
                   {failure && <div className="notice notice--danger" style={{ marginTop: 10 }}>{failure}</div>}
-                  {tools.length > 0 && <ToolList title="Current tool calls" tools={tools} />}
                   <SavedTools session={session} currentRunId={runId} />
                   <div ref={end} />
                 </div>
@@ -1005,7 +1004,8 @@ export function Agent() {
                   <ChevronRight size={14} /> Status Control
                 </button>
                 {statusControlsOpen && (
-                  <div className="composer-meta">
+                  <>
+                    <div className="composer-meta">
                     <button
                       ref={composerToolsBtn}
                       type="button"
@@ -1044,7 +1044,9 @@ export function Agent() {
                     <span title={activity.detail} aria-label={`Run activity: ${activity.detail}`}>
                       <Pill tone={badge.tone} dot>{badge.label}</Pill>
                     </span>
-                  </div>
+                    </div>
+                    {tools.length > 0 && <ToolList title="Current tool calls" tools={tools} />}
+                  </>
                 )}
               </div>
             </>
@@ -1177,7 +1179,7 @@ function ToolList({ title, tools }: { title: string; tools: ToolCall[] }) {
   return (
     <div className={`tool-activity${active ? " is-active" : ""}`} style={{ marginTop: 12 }}>
       <div className="tool-activity__heading" aria-live="polite">
-        {active ? <span className="tool-activity__thinking">Thinking</span> : title}
+        {title}
       </div>
       {tools.map((tool) => <ToolRow key={tool.id} tool={tool} />)}
     </div>
