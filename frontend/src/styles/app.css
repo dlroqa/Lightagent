@@ -320,6 +320,25 @@ textarea {
   opacity: 1;
 }
 
+.rail__new-chat {
+  display: grid;
+  width: var(--sidebar-logo-toggle-size);
+  height: var(--sidebar-logo-toggle-size);
+  margin: 4px auto 0;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.rail__new-chat:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
 /*
  * The brand chip: the application's icon, at rail size.
  *
@@ -354,7 +373,7 @@ textarea {
   background-position: 0 0;
   background-repeat: no-repeat;
   background-size: 300% 100%;
-  animation: lightagent-logo-frames 3.6s steps(1, end) infinite;
+  animation: lightagent-logo-frames 2.48s steps(1, end) infinite;
 }
 
 @keyframes lightagent-logo-frames {
@@ -1543,15 +1562,17 @@ textarea {
 .chat-composer textarea {
   flex: 1;
   min-width: 0;
+  height: auto;
   border: 0;
   outline: 0;
   background: transparent;
   box-shadow: none;
+  overflow-y: hidden;
+  resize: none;
 }
 
 .welcome-composer textarea {
   padding: 8px 0;
-  resize: none;
 }
 
 .welcome-composer__model,

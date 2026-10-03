@@ -230,6 +230,7 @@ impl RunFactory for LightweightRunFactory {
             Duration::from_secs(60),
             262_144,
         );
+        delegation.delegate_timeout = Duration::from_secs(config.subagents.delegate_timeout_secs);
         delegation.subagents = crate::chat::subagent_policy(&config);
         let registry =
             configured_registry(&config, &profile_dir, &extensions, !skills.is_empty()).await;

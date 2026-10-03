@@ -312,6 +312,10 @@ impl ToolInvoker for BoundedExecutor {
             self.open_terminal
                 .as_ref()
                 .map_or(self.per_call, |remote| remote.policy.execution_timeout)
+        } else if call.name == crate::builtins::AgentDelegate::NAME {
+            self.delegation
+                .as_ref()
+                .map_or(self.per_call, |delegation| delegation.delegate_timeout)
         } else {
             self.per_call
         };

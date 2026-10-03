@@ -56,6 +56,8 @@ pub struct Delegation {
     pub worker_registry: ToolRegistry,
     /// The per-call timeout a worker run's executor enforces.
     pub worker_per_call: Duration,
+    /// The maximum time a delegated worker may occupy the parent tool call.
+    pub delegate_timeout: Duration,
     /// The output ceiling a worker run's executor enforces.
     pub worker_max_output_bytes: usize,
     /// Extra, opt-in controls for named hierarchical workers. When disabled,
@@ -126,6 +128,7 @@ impl Delegation {
             factory,
             worker_registry,
             worker_per_call,
+            delegate_timeout: Duration::from_secs(60),
             worker_max_output_bytes,
             subagents: SubagentPolicy::default(),
             depth: 0,
@@ -171,6 +174,7 @@ impl Delegation {
             factory: Arc::clone(&self.factory),
             worker_registry: self.worker_registry.clone(),
             worker_per_call: self.worker_per_call,
+            delegate_timeout: self.delegate_timeout,
             worker_max_output_bytes: self.worker_max_output_bytes,
             subagents: self.subagents.clone(),
             depth: self.depth.saturating_add(1),

@@ -362,6 +362,8 @@ struct UiSettings {
     show_reasoning_in_tui: bool,
     #[serde(default)]
     subagents_enabled: Option<bool>,
+    #[serde(default)]
+    delegate_timeout_secs: Option<u64>,
     jev: UiJevSettings,
     qdrant: UiQdrantSettings,
     infinity: UiInfinitySettings,
@@ -380,6 +382,7 @@ fn ui_settings(config: &lightagent_core::Config) -> UiSettings {
         memory_enabled: config.memory.auto_capture,
         show_reasoning_in_tui: config.tui.show_reasoning,
         subagents_enabled: Some(config.subagents.enabled),
+        delegate_timeout_secs: Some(config.subagents.delegate_timeout_secs),
         jev: UiJevSettings {
             endpoint: ui_platform_endpoint(&config.platform.jev.endpoint),
             model: config.platform.jev.model.clone(),
@@ -500,6 +503,9 @@ async fn save_settings(
     config.tui.show_reasoning = settings.show_reasoning_in_tui;
     if let Some(enabled) = settings.subagents_enabled {
         config.subagents.enabled = enabled;
+    }
+    if let Some(timeout) = settings.delegate_timeout_secs {
+        config.subagents.delegate_timeout_secs = timeout;
     }
     apply_platform_endpoint(&mut config.platform.jev.endpoint, &settings.jev.endpoint);
     config.platform.jev.model = settings.jev.model.trim().to_owned();

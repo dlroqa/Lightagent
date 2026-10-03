@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, CornerDownLeft, Cpu, FilePenLine, FileText, Folder, Globe, MessageCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, SquarePen, Terminal, Trash2, Wrench, X } from "lucide-react";
 
 import {
@@ -189,6 +189,7 @@ function foldTools(events: RunEvent[]): ToolCall[] {
 
 export function Agent() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { preferences, update: updatePreferences } = usePreferences();
   const sessions = usePoll(() => agentApi.sessions().then((body) => body.sessions), 2000);
   // Runtime facts exposed by this same Lightagent process.
@@ -201,6 +202,7 @@ export function Agent() {
   const [toolsOpen, setToolsOpen] = useState(false);
   const [statusControlsOpen, setStatusControlsOpen] = useState(false);
   const composerToolsBtn = useRef<HTMLButtonElement | null>(null);
+  const composerTextarea = useRef<HTMLTextAreaElement | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [session, setSession] = useState<AgentSession | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
@@ -230,6 +232,12 @@ export function Agent() {
   const loadGeneration = useRef(0);
   selected.current = activeId;
   const { events, done } = useRunEvents(runId);
+
+  const resizeComposer = useCallback((textarea: HTMLTextAreaElement | null) => {
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    textarea.style.height = `${textarea.scrollHeight}px`;
+  }, []);
 
   const answer = useMemo(
     () => events.filter((event) => event.type === "model.delta")
@@ -284,6 +292,10 @@ export function Agent() {
   }, [pending]);
 
   useEffect(() => {
+    resizeComposer(composerTextarea.current);
+  }, [draft, isNewConversation, resizeComposer]);
+
+  useEffect(() => {
     if (!isNewConversation || draft.trim()) return;
     const timer = window.setInterval(() => {
       setWelcomePromptIndex((current) => (current + 1) % WELCOME_PROMPTS.length);
@@ -319,6 +331,20 @@ export function Agent() {
     if (activeId) void load(activeId);
     else setSession(null);
   }, [activeId, load]);
+
+  useEffect(() => {
+    if (new URLSearchParams(location.search).get("new-chat") !== "1") return;
+    window.localStorage.removeItem(SESSION_KEY);
+    selected.current = null;
+    loadGeneration.current += 1;
+    setActiveId(null);
+    setSession(null);
+    setRunId(null);
+    setAttachments([]);
+    setError(null);
+    setWelcomePromptIndex((current) => (current + 1) % WELCOME_PROMPTS.length);
+    navigate("/", { replace: true });
+  }, [location.search, navigate]);
 
   useEffect(() => {
     if (!done || !activeId || persisted) return;
@@ -813,7 +839,10 @@ export function Agent() {
                   onClick={() => fileInput.current?.click()}><Plus size={23} /></button>
                 <div className="composer-prompt">
                   <AnimatedLogo className="composer-prompt__logo" width={20} height={20} />
-                  <textarea autoFocus rows={1} value={draft} onChange={(event) => setDraft(event.target.value)}
+                  <textarea ref={composerTextarea} autoFocus rows={1} value={draft} onChange={(event) => {
+                    setDraft(event.target.value);
+                    resizeComposer(event.currentTarget);
+                  }}
                     placeholder={COMPOSER_PROMPTS[composerPromptIndex]} disabled={busy || serviceUnavailable}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" && !event.shiftKey) {
@@ -934,10 +963,13 @@ export function Agent() {
                     onClick={() => fileInput.current?.click()}><Plus size={23} /></button>
                   <div className="composer-prompt">
                     <AnimatedLogo className="composer-prompt__logo" width={20} height={20} />
-                    <textarea className="input" rows={1}
+                    <textarea ref={composerTextarea} className="input" rows={1}
                       value={draft} placeholder={running ? "Type a steer to queue…" : COMPOSER_PROMPTS[composerPromptIndex]}
                       disabled={busy || serviceUnavailable}
-                      onChange={(event) => setDraft(event.target.value)}
+                      onChange={(event) => {
+                        setDraft(event.target.value);
+                        resizeComposer(event.currentTarget);
+                      }}
                       onKeyDown={(event) => {
                         if (event.key === "Enter" && !event.shiftKey) {
                           event.preventDefault();

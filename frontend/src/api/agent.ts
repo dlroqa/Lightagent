@@ -142,6 +142,7 @@ export interface LightagentSettings {
   memory_enabled: boolean;
   show_reasoning_in_tui: boolean;
   subagents_enabled: boolean;
+  delegate_timeout_secs: number;
   jev: JevSettings;
   qdrant: QdrantSettings;
   infinity: InfinitySettings;

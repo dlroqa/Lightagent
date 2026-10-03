@@ -457,6 +457,7 @@ async fn build_chat_runtime(
         Duration::from_secs(60),
         262_144,
     );
+    delegation.delegate_timeout = Duration::from_secs(config.subagents.delegate_timeout_secs);
     delegation.subagents = SubagentPolicy {
         enabled: config.subagents.enabled,
         max_depth: config.subagents.max_depth,

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { ArrowLeft, Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Search, Settings, Wrench } from "lucide-react";
+import { ArrowLeft, Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Search, Settings, SquarePen, Wrench } from "lucide-react";
 
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { usePreferences } from "../state/preferences";
@@ -50,6 +50,13 @@ export function Shell() {
               onClick={() => update({ railCollapsed: true })}><PanelLeftClose size={18} /></button>
           </>}
         </div>
+
+        {collapsed && (
+          <button type="button" className="rail__new-chat" aria-label="New chat" title="New chat"
+            onClick={() => navigate("/?new-chat=1")}>
+            <SquarePen size={17} strokeWidth={2} />
+          </button>
+        )}
 
         {!collapsed && (
           <div className="rail__app-actions">

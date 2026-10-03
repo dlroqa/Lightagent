@@ -120,6 +120,9 @@ export function SettingsScreen() {
             <ToggleRow label="Autonomous subagents" hint="For complex, independent work, let Lightagent delegate bounded specialist tasks. Simple tasks stay single-agent; approval policy still applies."
               checked={value?.subagents_enabled ?? false} disabled={!value || saving}
               onChange={(subagents_enabled) => void persist({ subagents_enabled })} />
+            <NumberSetting label="Delegate time limit (seconds)" value={value?.delegate_timeout_secs}
+              min={30} max={300} disabled={!value || saving}
+              onSave={(delegate_timeout_secs) => persist({ delegate_timeout_secs })} />
             {tools.data ? (
               delegationAvailable && autonomousSubagentsEnabled ? (
                 <div className="capability-status capability-status--available">
@@ -214,9 +217,11 @@ export function SettingsScreen() {
   );
 }
 
-function NumberSetting({ label, value, disabled, onSave }: {
+function NumberSetting({ label, value, min = 1, max, disabled, onSave }: {
   label: string;
   value: number | undefined;
+  min?: number;
+  max?: number;
   disabled: boolean;
   onSave: (value: number) => Promise<void>;
 }) {
@@ -225,11 +230,11 @@ function NumberSetting({ label, value, disabled, onSave }: {
   return (
     <div className="field">
       <label className="field__label">{label}</label>
-      <input className="input tnum" type="number" min={1} value={draft} disabled={disabled}
+      <input className="input tnum" type="number" min={min} max={max} value={draft} disabled={disabled}
         onChange={(event) => setDraft(event.target.value)}
         onBlur={() => {
           const next = Number(draft);
-          if (Number.isInteger(next) && next > 0 && next !== value) void onSave(next);
+          if (Number.isInteger(next) && next >= min && (max === undefined || next <= max) && next !== value) void onSave(next);
           else setDraft(value === undefined ? "" : String(value));
         }} />
     </div>

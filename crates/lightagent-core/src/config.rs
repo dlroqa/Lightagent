@@ -574,6 +574,8 @@ impl Default for TuiConfig {
 pub struct SubagentsConfig {
     /// Allow bounded autonomous subagent delegation for newly created runs.
     pub enabled: bool,
+    /// Maximum time a delegated worker may occupy the parent tool call.
+    pub delegate_timeout_secs: u64,
     /// Deepest allowed child generation; the lead is depth zero.
     pub max_depth: u8,
     /// Maximum direct children an agent may create.
@@ -586,6 +588,7 @@ impl Default for SubagentsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            delegate_timeout_secs: 180,
             max_depth: 2,
             max_children_per_agent: 3,
             allowed_roles: vec![
@@ -1064,6 +1067,11 @@ impl Config {
         }
 
         let device = self.runtime.preferred_device.trim().to_ascii_lowercase();
+        if !(30..=300).contains(&self.subagents.delegate_timeout_secs) {
+            return Err(ConfigError::Invalid(
+                "subagents.delegate_timeout_secs must be between 30 and 300".to_owned(),
+            ));
+        }
         if self.subagents.enabled {
             if self.subagents.max_depth == 0 || self.subagents.max_depth > 2 {
                 return Err(ConfigError::Invalid(

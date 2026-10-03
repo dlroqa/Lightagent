@@ -563,6 +563,7 @@ async fn ui_settings_update_the_cli_config_and_active_profile() {
     settings["terminal_enabled"] = true.into();
     settings["memory_enabled"] = false.into();
     settings["subagents_enabled"] = false.into();
+    settings["delegate_timeout_secs"] = 240.into();
     settings["jev"]["allowed_models"] = serde_json::json!(["fast"]);
     settings["jev"]["allowed_profiles"] = serde_json::json!(["careful"]);
     settings["jev"]["timeout_secs"] = 2.into();
@@ -590,6 +591,7 @@ async fn ui_settings_update_the_cli_config_and_active_profile() {
     assert!(loaded.tools.enabled && loaded.tools.allow_terminal);
     assert!(!loaded.memory.auto_capture);
     assert!(!loaded.subagents.enabled);
+    assert_eq!(loaded.subagents.delegate_timeout_secs, 240);
     assert_eq!(loaded.platform.jev.allowed_models, ["fast"]);
     assert_eq!(loaded.platform.jev.allowed_profiles, ["careful"]);
     assert_eq!(loaded.platform.jev.timeout_secs, 2);
@@ -642,6 +644,10 @@ async fn ui_settings_update_the_cli_config_and_active_profile() {
         .as_object_mut()
         .unwrap()
         .remove("subagents_enabled");
+    legacy_settings
+        .as_object_mut()
+        .unwrap()
+        .remove("delegate_timeout_secs");
     let (status, body) = http(
         &addr,
         "PUT",
@@ -655,6 +661,7 @@ async fn ui_settings_update_the_cli_config_and_active_profile() {
     assert_eq!(legacy_loaded.platform, loaded.platform);
     assert!(legacy_loaded.tui.show_reasoning);
     assert!(!legacy_loaded.subagents.enabled);
+    assert_eq!(legacy_loaded.subagents.delegate_timeout_secs, 240);
     assert!(!body.contains("JEV_TEST_REFERENCE"));
     assert!(!body.contains("TERMINAL_TEST_REFERENCE"));
 
