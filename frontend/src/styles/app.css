@@ -1718,6 +1718,16 @@ textarea {
   animation: tool-thinking-sweep 1.7s ease-in-out infinite;
 }
 
+.chat-monologue {
+  max-width: 680px;
+  margin-top: 5px;
+  color: var(--text-soft);
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 @keyframes tool-thinking-sweep {
   from { background-position: 100% 0; }
   to { background-position: -100% 0; }

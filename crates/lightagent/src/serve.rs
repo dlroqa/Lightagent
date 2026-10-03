@@ -126,28 +126,36 @@ impl RunFactory for LightweightRunFactory {
         if let Some(key) = api_key {
             runtime_endpoint = runtime_endpoint.with_api_key(key);
         }
-        let runtime_models = match RuntimeClient::new(runtime_endpoint) {
-            Ok(runtime) => runtime
-                .catalog()
-                .await
-                .map(|catalog| {
-                    catalog
-                        .into_iter()
-                        .map(|model| RuntimeModel {
-                            id: model.id.clone(),
-                            name: config
-                                .inference
-                                .model_aliases
-                                .get(&model.id)
-                                .cloned()
-                                .or(model.name),
-                            state: model.state,
-                            supported: model.supported,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-            Err(_) => Vec::new(),
+        let (runtime_models, reasoning_content) = match RuntimeClient::new(runtime_endpoint) {
+            Ok(runtime) => {
+                let reasoning_content = runtime
+                    .gateway()
+                    .await
+                    .map(|gateway| gateway.engine_capabilities.reasoning_content)
+                    .unwrap_or(false);
+                let models = runtime
+                    .catalog()
+                    .await
+                    .map(|catalog| {
+                        catalog
+                            .into_iter()
+                            .map(|model| RuntimeModel {
+                                id: model.id.clone(),
+                                name: config
+                                    .inference
+                                    .model_aliases
+                                    .get(&model.id)
+                                    .cloned()
+                                    .or(model.name),
+                                state: model.state,
+                                supported: model.supported,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (models, reasoning_content)
+            }
+            Err(_) => (Vec::new(), false),
         };
         Ok(ProviderCapabilities {
             provider: config.inference.provider,
@@ -159,7 +167,7 @@ impl RunFactory for LightweightRunFactory {
             runtime_models,
             streaming: true,
             tool_calls: true,
-            reasoning_content: false,
+            reasoning_content,
         })
     }
 

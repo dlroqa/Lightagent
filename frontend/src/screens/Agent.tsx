@@ -244,6 +244,11 @@ export function Agent() {
       .map((event) => text(event.data.content)).join(""),
     [events],
   );
+  const reasoning = useMemo(
+    () => events.filter((event) => event.type === "model.delta")
+      .map((event) => text(event.data.reasoning)).join(""),
+    [events],
+  );
   const tools = useMemo(() => foldTools(events), [events]);
   const failure = useMemo(() => {
     const event = [...events].reverse().find((row) => row.type === "error");
@@ -395,7 +400,7 @@ export function Agent() {
 
   useEffect(() => {
     if (followTranscript) end.current?.scrollIntoView({ behavior: "auto", block: "end" });
-  }, [answer, followTranscript, session?.messages.length, tools.length]);
+  }, [answer, followTranscript, reasoning, session?.messages.length, tools.length]);
 
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -893,8 +898,9 @@ export function Agent() {
                   {running && !answer && (
                     <div className="tool-activity is-active" style={{ marginTop: 10 }} aria-live="polite">
                       <div className="tool-activity__heading">
-                        <span className="tool-activity__thinking">Monologuing</span>
+                        {reasoning ? "Reasoning" : <span className="tool-activity__thinking">Thinking</span>}
                       </div>
+                      {reasoning && <div className="chat-monologue">{reasoning}</div>}
                     </div>
                   )}
                   {failure && <div className="notice notice--danger" style={{ marginTop: 10 }}>{failure}</div>}
