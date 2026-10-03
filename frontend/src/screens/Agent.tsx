@@ -187,6 +187,38 @@ function foldTools(events: RunEvent[]): ToolCall[] {
   return [...calls.values()];
 }
 
+/**
+ * A few local runtimes put their tool-planning text in ordinary content
+ * deltas. Hold each unfinished model turn in the reasoning panel until its
+ * outcome is known: a tool request makes it reasoning, while a completed run
+ * promotes it to the final answer.
+ */
+function foldModelOutput(events: RunEvent[]): { answer: string; reasoning: string } {
+  let answer = "";
+  let reasoning = "";
+  let turnContent = "";
+  let pendingTurnContent = "";
+
+  for (const event of events) {
+    if (event.type === "model.delta") {
+      const reasoningDelta = text(event.data.reasoning);
+      if (reasoningDelta) reasoning += reasoningDelta;
+      else turnContent += text(event.data.content);
+    } else if (event.type === "turn.completed") {
+      pendingTurnContent += turnContent;
+      turnContent = "";
+    } else if (event.type === "tool.requested") {
+      reasoning += pendingTurnContent;
+      pendingTurnContent = "";
+    } else if (["run.completed", "run.cancelled", "run.failed"].includes(event.type)) {
+      answer += pendingTurnContent;
+      pendingTurnContent = "";
+    }
+  }
+
+  return { answer, reasoning: reasoning + pendingTurnContent + turnContent };
+}
+
 export function Agent() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -239,16 +271,7 @@ export function Agent() {
     textarea.style.height = `${textarea.scrollHeight}px`;
   }, []);
 
-  const answer = useMemo(
-    () => events.filter((event) => event.type === "model.delta")
-      .map((event) => text(event.data.content)).join(""),
-    [events],
-  );
-  const reasoning = useMemo(
-    () => events.filter((event) => event.type === "model.delta")
-      .map((event) => text(event.data.reasoning)).join(""),
-    [events],
-  );
+  const { answer, reasoning } = useMemo(() => foldModelOutput(events), [events]);
   const tools = useMemo(() => foldTools(events), [events]);
   const failure = useMemo(() => {
     const event = [...events].reverse().find((row) => row.type === "error");
@@ -259,7 +282,9 @@ export function Agent() {
         : null;
   }, [events]);
   const cancelled = events.some((event) => event.type === "run.cancelled");
-  const running = busy || (runId !== null && !done);
+  // `busy` can belong to a run the user has navigated away from. Keep that
+  // background work from disabling the currently viewed conversation.
+  const running = runId !== null && !done;
   const hasPendingWork = running || steering.length > 0;
   const isNewConversation = !session || (session.messages.length === 0 && session.runs.length === 0);
   const persisted = runId !== null && session?.runs.some((run) => run.run_id === runId);
@@ -483,7 +508,7 @@ export function Agent() {
   }, [searchOpen]);
 
   function select(id: string) {
-    if (hasPendingWork || id === activeId) return;
+    if (id === activeId) return;
     window.localStorage.setItem(SESSION_KEY, id);
     selected.current = id;
     loadGeneration.current += 1;
@@ -814,7 +839,7 @@ export function Agent() {
                       : search.trim() ? "No chats match your search." : "No recent chats yet."}
                   </div>
                 ) : searchResults.map((row) => (
-                  <button type="button" className="chat-search__result" key={row.id} disabled={hasPendingWork}
+                  <button type="button" className="chat-search__result" key={row.id}
                     onClick={() => { select(row.id); setSearchOpen(false); setSearch(""); }}>
                     <MessageCircle size={20} aria-hidden="true" />
                     <span>
@@ -885,7 +910,7 @@ export function Agent() {
                 );
               }}>
                 <div className="chat-transcript__content">
-                  {session.messages.length === 0 && !showLiveAnswer && (
+                  {session.messages.length === 0 && !showLiveAnswer && !reasoning && (
                     <Empty title="Nothing said yet"
                       hint="Messages, runs, and tool calls are saved with this session." />
                   )}
@@ -1114,8 +1139,8 @@ function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete
   };
   return (
     <li className="session-row">
-      <div className={`session-row__content${active ? " is-active" : ""}${disabled && !active ? " is-disabled" : ""}`}>
-        <button type="button" className="session-row__open" disabled={disabled} onClick={onOpen}
+      <div className={`session-row__content${active ? " is-active" : ""}`}>
+        <button type="button" className="session-row__open" onClick={onOpen}
           aria-current={active ? "true" : undefined}>
           <span>{label}</span>
         </button>
