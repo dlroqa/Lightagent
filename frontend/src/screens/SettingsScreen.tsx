@@ -21,6 +21,7 @@ export function SettingsScreen() {
   const settings = usePoll(agentApi.settings, 0);
   const profiles = usePoll(agentApi.profiles, 0);
   const tools = usePoll(() => agentApi.tools().then((body) => body.tools), 0);
+  const provider = usePoll(agentApi.provider, 0);
   const [current, setCurrent] = useState<LightagentSettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -47,6 +48,15 @@ export function SettingsScreen() {
   const value = current ?? settings.data;
   const delegationAvailable = tools.data?.some((tool) => tool.name === "agent.delegate");
   const autonomousSubagentsEnabled = value?.subagents_enabled ?? false;
+  const availableModels = [...new Set([
+    ...(provider.data?.models ?? []),
+    ...(provider.data?.runtime_models
+      .filter((model) => model.supported !== false)
+      .map((model) => model.id) ?? []),
+    ...Object.keys(provider.data?.model_catalog ?? {}),
+    ...Object.keys(provider.data?.model_aliases ?? {}),
+    ...(provider.data?.configured_model ? [provider.data.configured_model] : []),
+  ])].sort((left, right) => left.localeCompare(right));
   const nextTheme = preferences.theme === "dark" ? "light" : "dark";
   return (
     <>
@@ -171,6 +181,7 @@ export function SettingsScreen() {
               Connect external services only when your deployment provides them. URLs must use HTTP or HTTPS; configured secrets are never shown again.
             </p>
             <JevSettingsRow endpoint={value?.jev} disabled={!value || saving}
+              models={availableModels} modelsError={provider.error?.message}
               onSave={(jev) => persist({ jev })} />
             <QdrantSettingsRow endpoint={value?.qdrant} disabled={!value || saving}
               onSave={(qdrant) => persist({ qdrant })} />
@@ -330,7 +341,7 @@ function PlatformEndpointRow<E extends PlatformEndpointSettings>({ label, hint, 
         <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 4 }}>
           {endpoint.enabled
             ? endpoint.api_key_configured
-              ? "A secret is configured in the CLI; its value is hidden."
+              ? "A secret is configured; its value is hidden."
               : "No secret configured."
             : "Set a valid URL, then enable this endpoint."}
         </div>
@@ -343,9 +354,11 @@ function PlatformEndpointRow<E extends PlatformEndpointSettings>({ label, hint, 
   );
 }
 
-function JevSettingsRow({ endpoint, disabled, onSave }: {
+function JevSettingsRow({ endpoint, disabled, models, modelsError, onSave }: {
   endpoint: JevSettings | undefined;
   disabled: boolean;
+  models: string[];
+  modelsError?: string;
   onSave: (settings: JevSettings) => Promise<void>;
 }) {
   const [apiKey, setApiKey] = useState("");
@@ -358,6 +371,9 @@ function JevSettingsRow({ endpoint, disabled, onSave }: {
   return (
     <PlatformEndpointRow label="Jev" hint="Routing and confidence decisions before a run is dispatched."
       endpoint={endpoint} disabled={disabled} onSave={onSave}>
+      <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 10 }}>
+        Use either the TypeSafe service root (<code>https://api.typesafe.ai</code>) or the full <code>/v1/systemone</code> endpoint.
+      </div>
       {endpoint && <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 150px", gap: 10, marginTop: 10 }}>
         <TextPlatformSetting label="Decision model" value={endpoint.model} disabled={disabled || !endpoint.enabled}
           onSave={(model) => onSave({ ...endpoint, model })} />
@@ -381,8 +397,9 @@ function JevSettingsRow({ endpoint, disabled, onSave }: {
               : "The key is stored privately by Lightagent and is never displayed here."}
           </div>
         </div>
-        <TextPlatformSetting label="Permitted models (comma-separated)" value={endpoint.allowed_models.join(", ")}
-          disabled={disabled || !endpoint.enabled} onSave={(value) => onSave({ ...endpoint, allowed_models: splitRoutes(value) })} />
+        <JevModelPicker models={models} selected={endpoint.allowed_models}
+          disabled={disabled || !endpoint.enabled} error={modelsError}
+          onChange={(allowed_models) => void onSave({ ...endpoint, allowed_models })} />
         <TextPlatformSetting label="Permitted inference profiles (comma-separated)" value={endpoint.allowed_profiles.join(", ")}
           disabled={disabled || !endpoint.enabled} onSave={(value) => onSave({ ...endpoint, allowed_profiles: splitRoutes(value) })} />
         <NumberPlatformSetting label="Routing timeout (seconds)" value={endpoint.timeout_secs}
@@ -391,6 +408,46 @@ function JevSettingsRow({ endpoint, disabled, onSave }: {
       </>}
     </PlatformEndpointRow>
   );
+}
+
+function JevModelPicker({ models, selected, disabled, error, onChange }: {
+  models: string[];
+  selected: string[];
+  disabled: boolean;
+  error?: string;
+  onChange: (models: string[]) => void;
+}) {
+  const [choice, setChoice] = useState("");
+  const choices = models.filter((model) => !selected.includes(model));
+  const add = () => {
+    if (!choice) return;
+    onChange([...selected, choice]);
+    setChoice("");
+  };
+  return <div className="field" style={{ marginTop: 10 }}>
+    <label className="field__label" htmlFor="jev-permitted-model">Permitted models</label>
+    <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 8 }}>
+      <select id="jev-permitted-model" className="select" value={choice} disabled={disabled || choices.length === 0}
+        onChange={(event) => setChoice(event.target.value)}>
+        <option value="">{choices.length ? "Choose an available model" : "No additional models available"}</option>
+        {choices.map((model) => <option key={model} value={model}>{model}</option>)}
+      </select>
+      <button type="button" className="btn" disabled={disabled || !choice} onClick={add}>Add model</button>
+    </div>
+    {selected.length > 0 ? (
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+        {selected.map((model) => <button type="button" key={model} className="status-chip" disabled={disabled}
+          title={`Remove ${model}`} onClick={() => onChange(selected.filter((item) => item !== model))}>
+          {model} ×
+        </button>)}
+      </div>
+    ) : <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 4 }}>
+      Add at least one model to let Jev choose a route other than the default.
+    </div>}
+    {error && <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 4 }}>
+      Could not load the live model catalog: {error}
+    </div>}
+  </div>;
 }
 
 function QdrantSettingsRow({ endpoint, disabled, onSave }: {

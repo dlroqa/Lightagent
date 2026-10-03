@@ -114,7 +114,7 @@ pub(crate) async fn select_route(
         Ok(client) => client,
         Err(_) => return default,
     };
-    let endpoint = format!("{}/v1/systemone", base_url.trim_end_matches('/'));
+    let endpoint = systemone_endpoint(base_url);
     let request = json!({
         "model": config.model,
         "state": bounded_message(message),
@@ -182,6 +182,18 @@ pub(crate) async fn select_route(
         return default;
     }
     decision
+}
+
+/// Accept both the TypeSafe service root and its documented SystemOne endpoint.
+/// Settings historically described this as a base URL, but accepting the full
+/// endpoint avoids turning a valid pasted URL into `/v1/systemone/v1/systemone`.
+fn systemone_endpoint(base_url: &str) -> String {
+    let base_url = base_url.trim_end_matches('/');
+    if base_url.ends_with("/v1/systemone") {
+        base_url.to_owned()
+    } else {
+        format!("{base_url}/v1/systemone")
+    }
 }
 
 fn bounded_message(message: &str) -> String {
@@ -562,6 +574,18 @@ mod tests {
     fn bounds_routing_prompt_without_splitting_unicode() {
         let message = "🦀".repeat(5_000);
         assert_eq!(bounded_message(&message).chars().count(), 4_096);
+    }
+
+    #[test]
+    fn systemone_endpoint_accepts_a_service_root_or_full_endpoint() {
+        assert_eq!(
+            systemone_endpoint("https://api.typesafe.ai"),
+            "https://api.typesafe.ai/v1/systemone"
+        );
+        assert_eq!(
+            systemone_endpoint("https://api.typesafe.ai/v1/systemone/"),
+            "https://api.typesafe.ai/v1/systemone"
+        );
     }
 
     #[tokio::test]
