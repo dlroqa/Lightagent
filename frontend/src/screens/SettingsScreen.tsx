@@ -168,7 +168,7 @@ export function SettingsScreen() {
 
           <Card title="Platform endpoints">
             <p className="card__note">
-              Connect external services only when your deployment provides them. URLs must use HTTP or HTTPS; secrets stay in the CLI configuration and are never shown here.
+              Connect external services only when your deployment provides them. URLs must use HTTP or HTTPS; configured secrets are never shown again.
             </p>
             <JevSettingsRow endpoint={value?.jev} disabled={!value || saving}
               onSave={(jev) => persist({ jev })} />
@@ -329,6 +329,13 @@ function JevSettingsRow({ endpoint, disabled, onSave }: {
   disabled: boolean;
   onSave: (settings: JevSettings) => Promise<void>;
 }) {
+  const [apiKey, setApiKey] = useState("");
+  const saveApiKey = async () => {
+    const value = apiKey.trim();
+    if (!value) return;
+    await onSave({ ...endpoint!, api_key: value });
+    setApiKey("");
+  };
   return (
     <PlatformEndpointRow label="Jev" hint="Routing and confidence decisions before a run is dispatched."
       endpoint={endpoint} disabled={disabled} onSave={onSave}>
@@ -340,6 +347,21 @@ function JevSettingsRow({ endpoint, disabled, onSave }: {
           onSave={(confidence_threshold) => onSave({ ...endpoint, confidence_threshold })} />
       </div>}
       {endpoint && <>
+        <div className="field" style={{ marginTop: 10 }}>
+          <label className="field__label" htmlFor="platform-jev-api-key">Jev API key</label>
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 8 }}>
+            <input id="platform-jev-api-key" className="input" type="password" autoComplete="new-password"
+              placeholder={endpoint.api_key_configured ? "Replace configured API key" : "Paste API key"}
+              value={apiKey} disabled={disabled} onChange={(event) => setApiKey(event.target.value)} />
+            <button type="button" className="btn" disabled={disabled || !apiKey.trim()}
+              onClick={() => void saveApiKey()}>Save key</button>
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 4 }}>
+            {endpoint.api_key_configured
+              ? "A Jev API key is configured. Enter a value only to replace it."
+              : "The key is stored privately by Lightagent and is never displayed here."}
+          </div>
+        </div>
         <TextPlatformSetting label="Permitted models (comma-separated)" value={endpoint.allowed_models.join(", ")}
           disabled={disabled || !endpoint.enabled} onSave={(value) => onSave({ ...endpoint, allowed_models: splitRoutes(value) })} />
         <TextPlatformSetting label="Permitted inference profiles (comma-separated)" value={endpoint.allowed_profiles.join(", ")}

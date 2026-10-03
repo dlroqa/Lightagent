@@ -567,6 +567,7 @@ async fn ui_settings_update_the_cli_config_and_active_profile() {
     settings["jev"]["allowed_models"] = serde_json::json!(["fast"]);
     settings["jev"]["allowed_profiles"] = serde_json::json!(["careful"]);
     settings["jev"]["timeout_secs"] = 2.into();
+    settings["jev"]["api_key"] = "jev-ui-test-secret".into();
     settings["qdrant"]["timeout_secs"] = 9.into();
     settings["infinity"]["timeout_secs"] = 12.into();
     settings["open_terminal"]["execution_timeout_secs"] = 90.into();
@@ -600,14 +601,22 @@ async fn ui_settings_update_the_cli_config_and_active_profile() {
     assert_eq!(loaded.platform.open_terminal.execution_timeout_secs, 90);
     assert_eq!(loaded.platform.open_terminal.max_output_bytes, 4096);
     assert_eq!(
-        loaded.platform.jev.endpoint.api_key,
-        initial.platform.jev.endpoint.api_key
+        loaded
+            .platform
+            .jev
+            .endpoint
+            .api_key
+            .as_ref()
+            .and_then(lightagent_core::SecretRef::resolve)
+            .as_deref(),
+        Some("jev-ui-test-secret")
     );
     assert_eq!(
         loaded.platform.open_terminal.endpoint.api_key,
         initial.platform.open_terminal.endpoint.api_key
     );
     assert!(!body.contains("JEV_TEST_REFERENCE"));
+    assert!(!body.contains("jev-ui-test-secret"));
     assert!(!body.contains("TERMINAL_TEST_REFERENCE"));
     let profile = profiles.load(&profile_id).unwrap();
     assert_eq!(profile.approval_policy, ConfigApprovalPolicy::Strict);

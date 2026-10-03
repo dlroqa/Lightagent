@@ -29,8 +29,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
 use lightagent_core::{
-    AgentEvent, ApprovalPolicy, ConfigStore, PlatformEndpointConfig, ProfileId, ProfileStore,
-    SkillStore, skill_dirs,
+    AgentEvent, ApprovalPolicy, ConfigStore, LightagentPaths, PlatformEndpointConfig, ProfileId,
+    ProfileStore, SecretRef, SkillStore, skill_dirs,
 };
 use lightagent_store::{Session, SessionId, SessionStore, StoredMessage, model_history};
 use serde::{Deserialize, Serialize};
@@ -312,6 +312,10 @@ struct UiJevSettings {
     allowed_profiles: Option<Vec<String>>,
     #[serde(default)]
     timeout_secs: Option<u64>,
+    /// Write-only credential submitted from the Settings screen. It is never
+    /// serialized in a settings response.
+    #[serde(default, skip_serializing)]
+    api_key: Option<String>,
 }
 
 /// Non-sensitive settings for Qdrant's retrieval adapter.
@@ -390,6 +394,7 @@ fn ui_settings(config: &lightagent_core::Config) -> UiSettings {
             allowed_models: Some(config.platform.jev.allowed_models.clone()),
             allowed_profiles: Some(config.platform.jev.allowed_profiles.clone()),
             timeout_secs: Some(config.platform.jev.timeout_secs),
+            api_key: None,
         },
         qdrant: UiQdrantSettings {
             endpoint: ui_platform_endpoint(&config.platform.qdrant.endpoint),
@@ -428,6 +433,28 @@ fn apply_platform_endpoint(endpoint: &mut PlatformEndpointConfig, settings: &UiP
         .map(str::trim)
         .filter(|url| !url.is_empty())
         .map(str::to_owned);
+}
+
+fn apply_jev_api_key(
+    config: &mut lightagent_core::Config,
+    store: &ConfigStore,
+    api_key: Option<String>,
+) -> Result<(), String> {
+    let Some(api_key) = api_key
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    let root = store
+        .path()
+        .parent()
+        .ok_or("Lightagent config has no parent directory")?;
+    let path = LightagentPaths::rooted_at(root).provider_key_file("jev");
+    lightagent_core::paths::write_private(&path, api_key.as_bytes())
+        .map_err(|error| format!("could not save the Jev API key: {error}"))?;
+    config.platform.jev.endpoint.api_key = Some(SecretRef::file(path));
+    Ok(())
 }
 
 fn active_profile(
@@ -518,6 +545,9 @@ async fn save_settings(
     }
     if let Some(value) = settings.jev.timeout_secs {
         config.platform.jev.timeout_secs = value;
+    }
+    if let Err(error) = apply_jev_api_key(&mut config, store, settings.jev.api_key) {
+        return internal(&error);
     }
     apply_platform_endpoint(
         &mut config.platform.qdrant.endpoint,

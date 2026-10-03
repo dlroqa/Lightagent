@@ -162,6 +162,8 @@ export interface JevSettings extends PlatformEndpointSettings {
   allowed_models: string[];
   allowed_profiles: string[];
   timeout_secs: number;
+  /** Write-only: submitted to the server but never returned in settings responses. */
+  api_key?: string;
 }
 
 export interface QdrantSettings extends PlatformEndpointSettings {
