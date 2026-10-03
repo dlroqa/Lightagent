@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { NavLink } from "react-router-dom";
-import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, Cpu, FilePenLine, FileText, Folder, Globe, MoreHorizontal, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, SquarePen, Terminal, Trash2, Wrench } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, Cpu, FilePenLine, FileText, Folder, Globe, MessageCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, SquarePen, Terminal, Trash2, Wrench, X } from "lucide-react";
 
 import {
   agentApi,
@@ -176,6 +176,7 @@ function foldTools(events: RunEvent[]): ToolCall[] {
 }
 
 export function Agent() {
+  const navigate = useNavigate();
   const sessions = usePoll(() => agentApi.sessions().then((body) => body.sessions), 2000);
   // Runtime facts exposed by this same Lightagent process.
   const toolCatalog = usePoll(() => agentApi.tools().then((body) => body.tools), 0);
@@ -195,7 +196,9 @@ export function Agent() {
   const [queuePaused, setQueuePaused] = useState(false);
   const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
   const [sidebarNotice, setSidebarNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [deciding, setDeciding] = useState(false);
@@ -204,6 +207,7 @@ export function Agent() {
   const [error, setError] = useState<string | null>(null);
   const end = useRef<HTMLDivElement | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
+  const accountButton = useRef<HTMLButtonElement | null>(null);
   const dispatching = useRef(false);
   const selected = useRef(activeId);
   const loadGeneration = useRef(0);
@@ -371,6 +375,31 @@ export function Agent() {
       recent: visible.filter((row) => !row.pinned && !row.project),
     };
   }, [visible]);
+  const searchResults = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    return (sessions.data ?? [])
+      .filter((row) => !row.archived)
+      .filter((row) => row.title !== "agent session" || row.message_count > 0 || row.run_count > 0)
+      .filter((row) =>
+        !needle ||
+        row.title.toLowerCase().includes(needle) ||
+        row.profile.toLowerCase().includes(needle) ||
+        row.project?.toLowerCase().includes(needle),
+      )
+      .slice(0, 6);
+  }, [search, sessions.data]);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSearchOpen(false);
+        setSearch("");
+      }
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [searchOpen]);
 
   function select(id: string) {
     if (hasPendingWork || id === activeId) return;
@@ -588,36 +617,33 @@ export function Agent() {
           )
         }
       />
-      <div className="page agent-layout chat-workspace">
-        <aside className="agent-sessions agent-sidebar chat-history" style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
+      <div className={`page agent-layout chat-workspace${sidebarCollapsed ? " is-sidebar-collapsed" : ""}`}>
+        <aside className={`agent-sessions agent-sidebar chat-history${sidebarCollapsed ? " is-collapsed" : ""}`} style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
           <div className="chat-sidebar__brand">
-            <img src="/icon.png" alt="" width={30} height={30} />
-            <span className="chat-sidebar__wordmark" aria-label="Lightagent">
-              <AnimatedBrandName />
-            </span>
-            <button type="button" className="chat-sidebar__search-button" aria-label="Search chats"
-              aria-expanded={searchOpen} onClick={() => setSearchOpen((open) => {
-                if (open) setSearch("");
-                return !open;
-              })}>
-              <Search size={16} />
-            </button>
+            {sidebarCollapsed ? (
+              <button type="button" className="chat-sidebar__collapsed-logo" aria-label="Expand sidebar" title="Expand sidebar"
+                onClick={() => setSidebarCollapsed(false)}>
+                <img src="/icon.png" alt="Lightagent" width={34} height={34} />
+                <PanelLeftOpen size={21} aria-hidden="true" />
+              </button>
+            ) : <>
+              <img src="/icon.png" alt="" width={30} height={30} />
+              <span className="chat-sidebar__wordmark" aria-label="Lightagent">
+                <AnimatedBrandName />
+              </span>
+              <button type="button" className="chat-sidebar__search-button" aria-label="Search chats"
+                aria-expanded={searchOpen} onClick={() => setSearchOpen(true)}>
+                <Search size={16} />
+              </button>
+              <button type="button" className="chat-sidebar__toggle-button" aria-label="Collapse sidebar" title="Collapse sidebar"
+                onClick={() => { setSidebarCollapsed(true); setSearchOpen(false); setAccountOpen(false); }}>
+                <PanelLeftClose size={18} />
+              </button>
+            </>}
           </div>
           <button type="button" className="chat-sidebar__new" disabled={hasPendingWork} onClick={() => void startNew()}>
             <SquarePen size={21} strokeWidth={2} /> New chat
           </button>
-          <nav className="chat-sidebar__nav" aria-label="Workspace">
-            <NavLink to="/" end><Sparkles size={16} /> Chat</NavLink>
-            <NavLink to="/tools"><Wrench size={16} /> Tools</NavLink>
-            <NavLink to="/settings"><ShieldCheck size={16} /> Settings</NavLink>
-          </nav>
-          {searchOpen && (
-            <div className="chat-sidebar__search">
-              <Search size={15} aria-hidden="true" />
-              <input autoFocus value={search} onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search chats…" aria-label="Search agent sessions" />
-            </div>
-          )}
           {sidebarNotice && <span className="chat-sidebar__notice" role="status">{sidebarNotice}</span>}
           <div className="agent-sessions__list" style={{ flex: 1, overflowY: "auto", margin: "0 -6px" }}>
             {visible.length === 0 ? (
@@ -655,7 +681,49 @@ export function Agent() {
               )
             )}
           </div>
+          <div className="chat-sidebar__account">
+            <button ref={accountButton} type="button" className="chat-sidebar__account-button"
+              aria-label="Open account menu" aria-expanded={accountOpen} onClick={() => setAccountOpen((open) => !open)}>
+              <span className="chat-sidebar__avatar" aria-hidden="true">LA</span>
+              <span className="chat-sidebar__account-label"><strong>Lightagent</strong><small>Local account</small></span>
+            </button>
+            <Menu open={accountOpen} anchorRef={accountButton} onClose={() => setAccountOpen(false)} minWidth={240} label="Account">
+              <div className="chat-sidebar__account-menu-profile">
+                <span className="chat-sidebar__avatar" aria-hidden="true">LA</span>
+                <span><strong>Lightagent</strong><small>Local account</small></span>
+              </div>
+              <div className="menu__divider" />
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/tools"); }}><span className="session-menu__item"><Wrench size={17} /> Tools</span></MenuItem>
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/settings"); }}><span className="session-menu__item"><ShieldCheck size={17} /> Settings</span></MenuItem>
+            </Menu>
+          </div>
         </aside>
+        {searchOpen && (
+          <div className="chat-search" role="dialog" aria-modal="true" aria-label="Search chats">
+            <button type="button" className="chat-search__backdrop" tabIndex={-1} aria-label="Close search"
+              onClick={() => { setSearchOpen(false); setSearch(""); }} />
+            <div className="chat-search__panel">
+              <div className="chat-search__header">
+                <input autoFocus value={search} onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Search chats…" aria-label="Search agent sessions" />
+                <button type="button" className="chat-search__close" aria-label="Close search"
+                  onClick={() => { setSearchOpen(false); setSearch(""); }}><X size={21} /></button>
+              </div>
+              <div className="chat-search__heading">{search.trim() ? "Search results" : "Recent chats"}</div>
+              <div className="chat-search__results">
+                {searchResults.length === 0 ? (
+                  <div className="chat-search__empty">{search.trim() ? "No chats match your search." : "No recent chats yet."}</div>
+                ) : searchResults.map((row) => (
+                  <button type="button" className="chat-search__result" key={row.id} disabled={hasPendingWork}
+                    onClick={() => { select(row.id); setSearchOpen(false); setSearch(""); }}>
+                    <MessageCircle size={20} aria-hidden="true" />
+                    <span>{row.title || "Untitled chat"}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
         <section className="agent-conversation chat-thread" style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
           {shownError && (
             <div className="notice notice--danger" role="alert">
@@ -912,27 +980,21 @@ function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete
     setMenuOpen(false);
   };
   return (
-    <li>
-      <div style={{ display: "flex", gap: 8, padding: "10px 12px", borderRadius: "var(--radius)",
-        background: active ? "var(--accent-soft)" : "transparent",
-        opacity: disabled && !active ? 0.6 : 1 }}>
-        <button type="button" disabled={disabled} onClick={onOpen}
-          aria-current={active ? "true" : undefined}
-          style={{ flex: 1, minWidth: 0, padding: 0, border: 0, background: "transparent",
-            color: "inherit", textAlign: "left", cursor: disabled ? "default" : "pointer" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 13, fontWeight: active ? 600 : 500 }}>
-            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
-          </div>
-        </button>
-        <button type="button" className={`session-row__action${row.pinned ? " is-pinned" : ""}`}
-          disabled={disabled && active} aria-pressed={row.pinned} aria-label={`${row.pinned ? "Unpin" : "Pin"} ${label}`}
-          onClick={(event) => { event.stopPropagation(); void onUpdate(row.id, { pinned: !row.pinned }); }}>
-          <Pin size={15} />
+    <li className="session-row">
+      <div className={`session-row__content${active ? " is-active" : ""}${disabled && !active ? " is-disabled" : ""}`}>
+        <button type="button" className="session-row__open" disabled={disabled} onClick={onOpen}
+          aria-current={active ? "true" : undefined}>
+          <span>{label}</span>
         </button>
         <button ref={menuButton} type="button" className="session-row__action" disabled={disabled && active}
           aria-label={`More actions for ${label}`} aria-haspopup="menu" aria-expanded={menuOpen}
           onClick={(event) => { event.stopPropagation(); setMenuOpen((open) => !open); }}>
           <MoreHorizontal size={17} />
+        </button>
+        <button type="button" className={`session-row__action${row.pinned ? " is-pinned" : ""}`}
+          disabled={disabled && active} aria-pressed={row.pinned} aria-label={`${row.pinned ? "Unpin" : "Pin"} ${label}`}
+          onClick={(event) => { event.stopPropagation(); void onUpdate(row.id, { pinned: !row.pinned }); }}>
+          <Pin size={15} />
         </button>
         <Menu open={menuOpen} anchorRef={menuButton} onClose={() => setMenuOpen(false)} align="end" minWidth={216} label={`Actions for ${label}`}>
           <MenuItem onClick={rename}><span className="session-menu__item"><Pencil size={17} /> Rename</span></MenuItem>

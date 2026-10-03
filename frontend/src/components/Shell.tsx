@@ -2,10 +2,8 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import {
   Bot,
-  ChevronLeft,
   Menu as MenuIcon,
   Moon,
-  RotateCw,
   Settings as SettingsIcon,
   Sun,
   Wrench,
@@ -95,17 +93,6 @@ export function Shell() {
             title={`Switch to ${nextTheme} theme`} aria-label={`Switch to ${nextTheme} theme`}
             onClick={() => update({ theme: nextTheme })}>
             {preferences.theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
-          </button>
-          <button type="button" className="btn btn--icon" title="Refresh"
-            aria-label="Refresh the page" onClick={() => window.location.reload()}>
-            <RotateCw size={16} />
-          </button>
-          <button type="button" className="btn btn--icon"
-            title={collapsed ? "Expand the sidebar" : "Collapse the sidebar"}
-            aria-label={collapsed ? "Expand the sidebar" : "Collapse the sidebar"}
-            onClick={() => update({ railCollapsed: !collapsed })}>
-            <ChevronLeft size={17}
-              style={{ transform: collapsed ? "rotate(180deg)" : undefined }} />
           </button>
         </div>
       </nav>
