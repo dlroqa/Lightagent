@@ -1942,11 +1942,11 @@ textarea {
 .chat-sidebar__brand-name::after {
   display: inline-block;
   margin-left: 2px;
-  content: "_";
-  opacity: 0;
+  content: "|";
 }
 
 .chat-sidebar__brand-name--complete::after {
+  content: "_";
   animation: chat-sidebar-caret 700ms steps(1, end) infinite;
 }
 
@@ -1966,14 +1966,15 @@ textarea {
   display: inline-flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 9px;
+  gap: 10px;
   min-height: 43px;
-  padding: 0 13px;
-  border: 1px solid var(--chat-rule);
-  border-radius: 10px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
   background: transparent;
   color: var(--text);
   cursor: pointer;
+  font-size: 15px;
   font-weight: 550;
 }
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { NavLink } from "react-router-dom";
-import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, Cpu, FilePenLine, FileText, Folder, Globe, MoreHorizontal, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, Terminal, Trash2, Wrench } from "lucide-react";
+import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, Cpu, FilePenLine, FileText, Folder, Globe, MoreHorizontal, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, SquarePen, Terminal, Trash2, Wrench } from "lucide-react";
 
 import {
   agentApi,
@@ -604,7 +604,7 @@ export function Agent() {
             </button>
           </div>
           <button type="button" className="chat-sidebar__new" disabled={hasPendingWork} onClick={() => void startNew()}>
-            <Plus size={17} /> New chat
+            <SquarePen size={21} strokeWidth={2} /> New chat
           </button>
           <nav className="chat-sidebar__nav" aria-label="Workspace">
             <NavLink to="/" end><Sparkles size={16} /> Chat</NavLink>
