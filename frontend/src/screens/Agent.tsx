@@ -896,12 +896,18 @@ export function Agent() {
                     <AgentMessage message={{ role: "assistant", content: answer }} streaming={!done} />
                   )}
                   {running && !answer && (
-                    <div className="tool-activity is-active" style={{ marginTop: 10 }} aria-live="polite">
-                      <div className="tool-activity__heading">
-                        {reasoning ? "Reasoning" : <span className="tool-activity__thinking">Thinking</span>}
+                    reasoning ? (
+                      <section className="reasoning-panel" aria-live="polite" aria-label="Live reasoning">
+                        <div className="reasoning-panel__heading">Reasoning</div>
+                        <div className="reasoning-panel__content">{reasoning}</div>
+                      </section>
+                    ) : (
+                      <div className="tool-activity is-active" style={{ marginTop: 10 }} aria-live="polite">
+                        <div className="tool-activity__heading">
+                          <span className="tool-activity__thinking">Thinking</span>
+                        </div>
                       </div>
-                      {reasoning && <div className="chat-monologue">{reasoning}</div>}
-                    </div>
+                    )
                   )}
                   {failure && <div className="notice notice--danger" style={{ marginTop: 10 }}>{failure}</div>}
                   <div ref={end} />
