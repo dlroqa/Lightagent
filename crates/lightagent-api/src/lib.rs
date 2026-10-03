@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -86,6 +86,7 @@ pub fn router(state: AppState) -> Router {
             "/api/lightagent/v1/sessions",
             get(list_sessions).post(create_session),
         )
+        .route("/api/lightagent/v1/sessions/search", get(search_sessions))
         .route(
             "/api/lightagent/v1/sessions/{id}",
             get(get_session)
@@ -663,17 +664,64 @@ async fn create_run(
 }
 
 fn session_title(message: &str) -> String {
-    const LIMIT: usize = 60;
+    const LIMIT: usize = 48;
+    const MAX_WORDS: usize = 7;
+    const LEADING_PHRASES: &[&str] = &[
+        "could you please ",
+        "can you please ",
+        "would you please ",
+        "please can you ",
+        "please could you ",
+        "can you ",
+        "could you ",
+        "would you ",
+        "what is ",
+        "what are ",
+        "what's ",
+        "tell me about ",
+        "tell me ",
+        "help me ",
+        "i need help ",
+        "i want to ",
+        "how do i ",
+        "how can i ",
+        "please ",
+    ];
+
     let compact = message.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut chars = compact.chars();
-    let title: String = chars.by_ref().take(LIMIT).collect();
-    if chars.next().is_some() {
-        format!("{title}…")
-    } else if title.is_empty() {
-        "agent session".to_owned()
-    } else {
-        title
+    let mut subject = compact.trim();
+    loop {
+        let lower = subject.to_lowercase();
+        let Some(prefix) = LEADING_PHRASES
+            .iter()
+            .find(|prefix| lower.starts_with(**prefix))
+        else {
+            break;
+        };
+        subject = subject[prefix.len()..].trim_start();
     }
+    subject = subject.trim_start_matches(|character: char| matches!(character, '"' | '\''));
+    for article in ["the ", "a ", "an "] {
+        if subject.to_lowercase().starts_with(article) {
+            subject = subject[article.len()..].trim_start();
+            break;
+        }
+    }
+    let words = subject
+        .split_whitespace()
+        .take(MAX_WORDS)
+        .collect::<Vec<_>>();
+    let joined = words.join(" ");
+    let candidate = joined
+        .trim_end_matches(|character: char| matches!(character, '.' | '?' | '!' | ':' | ';' | ','));
+    let mut title = candidate.chars().take(LIMIT).collect::<String>();
+    title = title
+        .trim_end_matches(|character: char| matches!(character, '.' | '?' | '!' | ':' | ';' | ','))
+        .to_owned();
+    if title.is_empty() {
+        return "agent session".to_owned();
+    }
+    title
 }
 
 async fn get_run(
@@ -739,6 +787,35 @@ async fn list_sessions(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     }
 }
 
+#[derive(Deserialize)]
+struct SearchSessionsQuery {
+    q: String,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn search_sessions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<SearchSessionsQuery>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::SessionsRead) {
+        return rejection;
+    }
+    let term = query.q.trim();
+    if term.is_empty() {
+        return Json(json!({ "sessions": [] })).into_response();
+    }
+    if term.chars().count() > 200 {
+        return bad_request("search query must be 200 characters or fewer");
+    }
+    let limit = query.limit.unwrap_or(20).clamp(1, 50);
+    match state.sessions.search(term, limit) {
+        Ok(list) => Json(json!({ "sessions": list })).into_response(),
+        Err(error) => internal(&error.to_string()),
+    }
+}
+
 async fn create_session(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if let Some(rejection) = deny(&state, &headers, Scope::SessionsWrite) {
         return rejection;
@@ -776,10 +853,16 @@ async fn upload_attachment(
         Ok(id) => id,
         Err(error) => return bad_request(&error.to_string()),
     };
-    let filename = headers.get("x-lightagent-filename").and_then(|value| value.to_str().ok())
-        .map(str::trim).filter(|name| {
-            !name.is_empty() && name.len() <= 180 && name.chars().all(|character|
-                character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | ' '))
+    let filename = headers
+        .get("x-lightagent-filename")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|name| {
+            !name.is_empty()
+                && name.len() <= 180
+                && name.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | ' ')
+                })
         });
     let Some(filename) = filename else {
         return bad_request("attachment filename is invalid");
@@ -1088,6 +1171,21 @@ fn event_stream(run: Arc<RunState>) -> impl Stream<Item = Result<Event, Infallib
 mod tests {
     use super::*;
     use lightagent_core::SecretRef;
+
+    #[test]
+    fn session_titles_extract_a_short_prompt_subject() {
+        assert_eq!(
+            session_title(
+                "What is the current news about a possible trucking strike in California?"
+            ),
+            "current news about a possible trucking strike"
+        );
+        assert_eq!(
+            session_title("Can you explain how OAuth token refresh works in browser applications?"),
+            "explain how OAuth token refresh works in"
+        );
+        assert_eq!(session_title("hello"), "hello");
+    }
 
     #[test]
     fn typed_platform_settings_are_exposed_without_secret_references() {

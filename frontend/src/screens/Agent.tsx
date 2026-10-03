@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, Cpu, FilePenLine, FileText, Folder, Globe, MessageCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, SquarePen, Terminal, Trash2, Wrench, X } from "lucide-react";
+import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, CornerDownLeft, Cpu, FilePenLine, FileText, Folder, Globe, MessageCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, SquarePen, Terminal, Trash2, Wrench, X } from "lucide-react";
 
 import {
   agentApi,
   type AgentSession,
   type LightagentSettings,
   type SessionPatch,
+  type SessionSearchResult,
   type SessionMessage,
   type SessionSummary,
   type SystemTime,
@@ -15,6 +16,7 @@ import {
 } from "../api/agent";
 import { promptTimestamp } from "../api/format";
 import { Empty, Pill } from "../components/Bits";
+import { AnimatedLogo } from "../components/Logo";
 import { Menu, MenuItem } from "../components/Menu";
 import { TopBar } from "../components/Shell";
 import { usePoll } from "../hooks/usePoll";
@@ -31,6 +33,13 @@ const WELCOME_PROMPTS = [
   "What’s on your mind?",
   "Point me at the next challenge.",
   "Let’s untangle something.",
+];
+const COMPOSER_PROMPTS = [
+  "Ask Lightagent",
+  "Message Lightagent",
+  "What can Lightagent help with?",
+  "Explore an idea with Lightagent",
+  "Give Lightagent a task",
 ];
 const text = (value: unknown) => (typeof value === "string" ? value : "");
 const unix = (value: SystemTime) => value.secs_since_epoch;
@@ -187,6 +196,7 @@ export function Agent() {
   const provider = usePoll(agentApi.provider, 10_000);
   const [selectedModel, setSelectedModel] = useState<string>("");
   const [welcomePromptIndex, setWelcomePromptIndex] = useState(0);
+  const [composerPromptIndex, setComposerPromptIndex] = useState(0);
   const agentSettings = usePoll(agentApi.settings, 0);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [statusControlsOpen, setStatusControlsOpen] = useState(false);
@@ -201,6 +211,8 @@ export function Agent() {
   const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchCategory, setSearchCategory] = useState<SearchCategory>("all");
+  const [transcriptResults, setTranscriptResults] = useState<SessionSearchResult[]>([]);
+  const [searchingTranscripts, setSearchingTranscripts] = useState(false);
   const sidebarCollapsed = preferences.railCollapsed;
   const [showArchived, setShowArchived] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
@@ -278,6 +290,14 @@ export function Agent() {
     }, 12_000);
     return () => window.clearInterval(timer);
   }, [draft, isNewConversation]);
+
+  useEffect(() => {
+    if (draft.trim() || running) return;
+    const timer = window.setInterval(() => {
+      setComposerPromptIndex((current) => (current + 1) % COMPOSER_PROMPTS.length);
+    }, 6_000);
+    return () => window.clearInterval(timer);
+  }, [draft, running]);
 
   const load = useCallback(async (id: string) => {
     const generation = ++loadGeneration.current;
@@ -382,7 +402,8 @@ export function Agent() {
   }, [visible]);
   const searchResults = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    return (sessions.data ?? [])
+    const rows: SessionSearchResult[] = needle ? transcriptResults : (sessions.data ?? []);
+    return rows
       .filter((row) => !row.archived)
       .filter((row) => row.title !== "agent session" || row.message_count > 0 || row.run_count > 0)
       .filter((row) =>
@@ -395,7 +416,34 @@ export function Agent() {
       .filter((row) => searchCategory !== "projects" || Boolean(row.project))
       .filter(() => searchCategory !== "images" && searchCategory !== "documents")
       .slice(0, 6);
-  }, [search, searchCategory, sessions.data]);
+  }, [search, searchCategory, sessions.data, transcriptResults]);
+
+  useEffect(() => {
+    const query = search.trim();
+    if (!searchOpen || !query) {
+      setTranscriptResults([]);
+      setSearchingTranscripts(false);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setSearchingTranscripts(true);
+      void agentApi.searchSessions(query)
+        .then(({ sessions: matches }) => {
+          if (!cancelled) setTranscriptResults(matches);
+        })
+        .catch(() => {
+          if (!cancelled) setTranscriptResults([]);
+        })
+        .finally(() => {
+          if (!cancelled) setSearchingTranscripts(false);
+        });
+    }, 180);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [search, searchOpen]);
 
   useEffect(() => {
     if (!searchOpen) return;
@@ -631,11 +679,11 @@ export function Agent() {
             {sidebarCollapsed ? (
               <button type="button" className="chat-sidebar__collapsed-logo" aria-label="Expand sidebar" title="Expand sidebar"
                 onClick={() => updatePreferences({ railCollapsed: false })}>
-                <img src="/icon.png" alt="Lightagent" width={34} height={34} />
+                <AnimatedLogo className="chat-sidebar__logo" alt="Lightagent" width={34} height={34} />
                 <PanelLeftOpen size={21} aria-hidden="true" />
               </button>
             ) : <>
-              <img src="/icon.png" alt="" width={30} height={30} />
+              <AnimatedLogo className="chat-sidebar__logo" width={30} height={30} />
               <span className="chat-sidebar__wordmark" aria-label="Lightagent">
                 <AnimatedBrandName />
               </span>
@@ -714,7 +762,7 @@ export function Agent() {
             <div className="chat-search__panel">
               <div className="chat-search__header">
                 <input autoFocus value={search} onChange={(event) => setSearch(event.target.value)}
-                  placeholder="Search chats…" aria-label="Search agent sessions" />
+                  placeholder="Search conversations and messages…" aria-label="Search agent conversations and messages" />
                 <div className="chat-search__actions">
                   {search && <button type="button" className="chat-search__clear" onClick={() => setSearch("")}>Clear</button>}
                   <button type="button" className="chat-search__close" aria-label="Close search"
@@ -732,7 +780,9 @@ export function Agent() {
               </div>
               <div className="chat-search__heading">{search.trim() ? "Search results" : "Recent chats"}</div>
               <div className="chat-search__results">
-                {searchResults.length === 0 ? (
+                {searchingTranscripts ? (
+                  <div className="chat-search__empty">Searching conversations…</div>
+                ) : searchResults.length === 0 ? (
                   <div className="chat-search__empty">
                     {searchCategory === "images" || searchCategory === "documents"
                       ? `No indexed ${searchCategory} are available.`
@@ -742,7 +792,10 @@ export function Agent() {
                   <button type="button" className="chat-search__result" key={row.id} disabled={hasPendingWork}
                     onClick={() => { select(row.id); setSearchOpen(false); setSearch(""); }}>
                     <MessageCircle size={20} aria-hidden="true" />
-                    <span>{row.title || "Untitled chat"}{row.project && <small>{row.project}</small>}</span>
+                    <span>
+                      {row.title || "Untitled chat"}
+                      {row.snippet ? <small><strong>{row.matched_role === "assistant" ? "Lightagent" : "You"}:</strong> {row.snippet}</small> : row.project && <small>{row.project}</small>}
+                    </span>
                   </button>
                 ))}
               </div>
@@ -764,14 +817,17 @@ export function Agent() {
                 <button type="button" className="composer-attach" title="Add photos or files"
                   aria-label="Add photos or files" disabled={busy || serviceUnavailable}
                   onClick={() => fileInput.current?.click()}><Plus size={23} /></button>
-                <textarea autoFocus rows={1} value={draft} onChange={(event) => setDraft(event.target.value)}
-                  placeholder="Message Lightagent" disabled={busy || serviceUnavailable}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      void send();
-                    }
-                  }} aria-label="Message Lightagent" />
+                <div className="composer-prompt">
+                  <AnimatedLogo className="composer-prompt__logo" width={20} height={20} />
+                  <textarea autoFocus rows={1} value={draft} onChange={(event) => setDraft(event.target.value)}
+                    placeholder={COMPOSER_PROMPTS[composerPromptIndex]} disabled={busy || serviceUnavailable}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        void send();
+                      }
+                    }} aria-label="Ask Lightagent" />
+                </div>
                 <label className="welcome-composer__model">
                   <Cpu size={14} />
                   <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} disabled={!provider.data || busy} aria-label="Model for this conversation">
@@ -814,7 +870,7 @@ export function Agent() {
                   {running && !answer && tools.length === 0 && (
                     <div className="tool-activity is-active" style={{ marginTop: 10 }} aria-live="polite">
                       <div className="tool-activity__heading">
-                        <span>Thinking</span><span className="tool-activity__dots" aria-hidden="true"><i /><i /><i /></span>
+                        <span className="tool-activity__thinking">Thinking</span>
                       </div>
                     </div>
                   )}
@@ -870,34 +926,43 @@ export function Agent() {
                   </span>
                 </div>
               )}
-              <div className="chat-composer">
-                <button type="button" className="composer-attach" title="Add photos or files"
-                  aria-label="Add photos or files" disabled={busy || serviceUnavailable}
-                  onClick={() => fileInput.current?.click()}><Plus size={23} /></button>
-                <textarea className="input" rows={1}
-                  value={draft} placeholder={running ? "Type a steer to queue…" : "Ask the agent…"}
-                  disabled={busy || serviceUnavailable}
-                  onChange={(event) => setDraft(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      void send();
-                    }
-                  }} aria-label="Message" />
-                <label className="chat-composer__model">
-                  <Cpu size={15} />
-                  <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)}
-                    disabled={!provider.data || running} aria-label="Model for the next run">
-                    <option value="">{provider.data?.configured_model ?? "Auto model"}</option>
-                    <ModelOptions provider={provider.data} />
-                  </select>
-                </label>
-                <button type="button" className="btn btn--primary chat-composer__send"
-                  disabled={(!draft.trim() && attachments.length === 0) || busy || serviceUnavailable} onClick={() => void send()}
-                  aria-label={running || steering.length > 0 ? "Queue steer" : "Send message"}
-                  title={running || steering.length > 0 ? "Queue steer" : "Send message"}>
-                  <Send size={18} />
-                </button>
+              <div className="chat-composer-stack">
+                {running && <div className="chat-composer__steer-hint" role="status">
+                  <CornerDownLeft size={15} aria-hidden="true" />
+                  <span>Steer without interrupting the current task</span>
+                </div>}
+                <div className="chat-composer">
+                  <button type="button" className="composer-attach" title="Add photos or files"
+                    aria-label="Add photos or files" disabled={busy || serviceUnavailable}
+                    onClick={() => fileInput.current?.click()}><Plus size={23} /></button>
+                  <div className="composer-prompt">
+                    <AnimatedLogo className="composer-prompt__logo" width={20} height={20} />
+                    <textarea className="input" rows={1}
+                      value={draft} placeholder={running ? "Type a steer to queue…" : COMPOSER_PROMPTS[composerPromptIndex]}
+                      disabled={busy || serviceUnavailable}
+                      onChange={(event) => setDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && !event.shiftKey) {
+                          event.preventDefault();
+                          void send();
+                        }
+                      }} aria-label="Ask Lightagent" />
+                  </div>
+                  <label className="chat-composer__model">
+                    <Cpu size={15} />
+                    <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)}
+                      disabled={!provider.data || running} aria-label="Model for the next run">
+                      <option value="">{provider.data?.configured_model ?? "Auto model"}</option>
+                      <ModelOptions provider={provider.data} />
+                    </select>
+                  </label>
+                  <button type="button" className="btn btn--primary chat-composer__send"
+                    disabled={(!draft.trim() && attachments.length === 0) || busy || serviceUnavailable} onClick={() => void send()}
+                    aria-label={running || steering.length > 0 ? "Queue steer" : "Send message"}
+                    title={running || steering.length > 0 ? "Queue steer" : "Send message"}>
+                    <Send size={18} />
+                  </button>
+                </div>
               </div>
               {attachments.length > 0 && <div className="composer-attachments" aria-label="Attached files">
                 {attachments.map((file) => <span key={file.path}>{file.name}</span>)}
@@ -1050,7 +1115,9 @@ function AgentMessage({ message, streaming }: { message: SessionMessage; streami
   );
 }
 
-/** Render Markdown-style and plain HTTP(S) URLs without interpreting arbitrary HTML. */
+/** Render Markdown-style and plain HTTP(S) URLs without interpreting arbitrary HTML.
+ * Citation-style links such as `[1](https://example.com)` retain the useful
+ * URL while keeping their source number as a readable list index. */
 function linkifyMessage(content: string) {
   const links = /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<]+)/g;
   const parts: ReactNode[] = [];
@@ -1058,12 +1125,16 @@ function linkifyMessage(content: string) {
   let match: RegExpExecArray | null;
   while ((match = links.exec(content)) !== null) {
     if (match.index > cursor) parts.push(content.slice(cursor, match.index));
-    const href = match[2] ?? match[3];
+    const href = match[2] ?? match[3] ?? "";
     const label = match[1] ?? href;
+    const isNumberedCitation = match[1] !== undefined && /^\d+$/.test(label.trim());
+    if (isNumberedCitation) {
+      parts.push(<span key={`${match.index}-number`}>{label.trim()}. </span>);
+    }
     parts.push(
       <a key={`${match.index}-${href}`} href={href} target="_blank" rel="noreferrer noopener"
-        aria-label={`Open ${label} in a new tab`}>
-        {label}
+        aria-label={`Open ${isNumberedCitation ? href : label} in a new tab`}>
+        {isNumberedCitation ? href : label}
       </a>,
     );
     cursor = match.index + match[0].length;
@@ -1077,7 +1148,7 @@ function ToolList({ title, tools }: { title: string; tools: ToolCall[] }) {
   return (
     <div className={`tool-activity${active ? " is-active" : ""}`} style={{ marginTop: 12 }}>
       <div className="tool-activity__heading" aria-live="polite">
-        {active ? <><span>Thinking</span><span className="tool-activity__dots" aria-hidden="true"><i /><i /><i /></span></> : title}
+        {active ? <span className="tool-activity__thinking">Thinking</span> : title}
       </div>
       {tools.map((tool) => <ToolRow key={tool.id} tool={tool} />)}
     </div>

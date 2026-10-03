@@ -4,6 +4,7 @@ import { ArrowLeft, Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Search, Set
 
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { usePreferences } from "../state/preferences";
+import { AnimatedLogo } from "./Logo";
 import { Menu, MenuItem } from "./Menu";
 
 /** The standalone frame shared by every Lightagent screen. */
@@ -39,11 +40,11 @@ export function Shell() {
           {collapsed ? (
             <button type="button" className="rail__collapsed-logo" aria-label="Expand sidebar" title="Expand sidebar"
               onClick={() => update({ railCollapsed: false })}>
-              <img className="rail__mark" src="/icon.png" alt="Lightagent" width={38} height={38} />
+              <AnimatedLogo className="rail__mark" alt="Lightagent" width={38} height={38} />
               <PanelLeftOpen size={21} aria-hidden="true" />
             </button>
           ) : <>
-            <img className="rail__expanded-logo" src="/icon.png" alt="" width={34} height={34} />
+            <AnimatedLogo className="rail__expanded-logo" width={34} height={34} />
             <span className="rail__wordmark">Lightagent</span>
             <button type="button" className="rail__toggle" aria-label="Collapse sidebar" title="Collapse sidebar"
               onClick={() => update({ railCollapsed: true })}><PanelLeftClose size={18} /></button>
@@ -86,8 +87,7 @@ export function Shell() {
             aria-expanded={drawerOpen} onClick={() => setDrawerOpen(true)}>
             <MenuIcon size={18} />
           </button>
-          <img className="rail__mark" src="/icon.png" alt="" width={26} height={26}
-            style={{ width: 26, height: 26 }} />
+          <AnimatedLogo className="rail__mark" width={26} height={26} />
           <span className="mobilebar__name">Lightagent</span>
         </div>
         <Outlet />

@@ -38,6 +38,11 @@ export interface SessionSummary {
   run_count: number;
 }
 
+export interface SessionSearchResult extends SessionSummary {
+  matched_role?: string;
+  snippet?: string;
+}
+
 export interface SessionPatch {
   title?: string;
   pinned?: boolean;
@@ -252,6 +257,8 @@ export const agentApi = {
       body: "{}",
     }),
   sessions: () => jsonRequest<{ sessions: SessionSummary[] }>("/sessions"),
+  searchSessions: (query: string) =>
+    jsonRequest<{ sessions: SessionSearchResult[] }>(`/sessions/search?q=${encodeURIComponent(query)}`),
   approvals: () => jsonRequest<{ approvals: ApprovalRow[] }>("/approvals"),
   respondApproval: (run: string, approve: boolean) =>
     jsonRequest<{ run: string; delivered: boolean }>(`/approvals/${run}`, {

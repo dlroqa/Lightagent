@@ -261,6 +261,21 @@ pub struct SessionSummary {
     pub run_count: usize,
 }
 
+/// A session summary accompanied by the first matching transcript excerpt.
+///
+/// Search results deliberately omit full transcripts: the sidebar needs enough
+/// context to identify a conversation without sending every saved message to
+/// the browser.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSearchResult {
+    #[serde(flatten)]
+    pub session: SessionSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+}
+
 impl SessionSummary {
     /// Build a transcript-free view of a session.
     pub fn of(session: &Session) -> Self {
@@ -322,8 +337,12 @@ impl SessionStore {
         filename: &str,
         bytes: &[u8],
     ) -> Result<PathBuf, StoreError> {
-        let directory = self.directory.parent().unwrap_or(&self.directory)
-            .join("attachments").join(id.as_str());
+        let directory = self
+            .directory
+            .parent()
+            .unwrap_or(&self.directory)
+            .join("attachments")
+            .join(id.as_str());
         paths::create_private_dir(&directory).map_err(|err| StoreError::Directory {
             path: directory.clone(),
             reason: err.to_string(),
@@ -440,6 +459,95 @@ impl SessionStore {
         });
         Ok(summaries)
     }
+
+    /// Search session metadata and saved messages, newest-first.
+    ///
+    /// The returned snippets are bounded and normalized for display. This keeps
+    /// history private by default while allowing the conversation picker to
+    /// search both user prompts and agent responses.
+    pub fn search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SessionSearchResult>, StoreError> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let entries = match std::fs::read_dir(&self.directory) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => {
+                return Err(StoreError::Directory {
+                    path: self.directory.clone(),
+                    reason: err.to_string(),
+                });
+            }
+        };
+
+        let mut results = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let Ok(session) = serde_json::from_slice::<Session>(&bytes) else {
+                continue;
+            };
+            let metadata_matches = [
+                session.title.as_str(),
+                session.profile.as_str(),
+                session.project.as_deref().unwrap_or_default(),
+            ]
+            .into_iter()
+            .any(|value| value.to_lowercase().contains(&needle));
+            let message_match = session.messages.iter().find_map(|message| {
+                message_match_excerpt(&message.content, &needle)
+                    .map(|snippet| (message.role.clone(), snippet))
+            });
+            if !metadata_matches && message_match.is_none() {
+                continue;
+            }
+            let (matched_role, snippet) = message_match
+                .map(|(role, snippet)| (Some(role), Some(snippet)))
+                .unwrap_or((None, None));
+            results.push(SessionSearchResult {
+                session: SessionSummary::of(&session),
+                matched_role,
+                snippet,
+            });
+        }
+        results.sort_by_key(|result| {
+            (
+                std::cmp::Reverse(result.session.pinned),
+                std::cmp::Reverse(result.session.updated_at),
+            )
+        });
+        results.truncate(limit);
+        Ok(results)
+    }
+}
+
+fn message_match_excerpt(content: &str, needle: &str) -> Option<String> {
+    let match_offset = content.char_indices().find_map(|(offset, _)| {
+        content[offset..]
+            .to_lowercase()
+            .starts_with(needle)
+            .then_some(offset)
+    })?;
+    let start = content[..match_offset].chars().count().saturating_sub(48);
+    let excerpt: String = content.chars().skip(start).take(180).collect();
+    let normalized = excerpt.split_whitespace().collect::<Vec<_>>().join(" ");
+    let prefix = if start > 0 { "…" } else { "" };
+    let suffix = if content.chars().count() > start + 180 {
+        "…"
+    } else {
+        ""
+    };
+    Some(format!("{prefix}{normalized}{suffix}"))
 }
 
 #[cfg(test)]
@@ -590,6 +698,45 @@ mod tests {
             "the damaged record is skipped, the good one is kept"
         );
         assert_eq!(listed[0].id, good.id);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_finds_user_and_assistant_messages_with_context() {
+        let dir = scratch_dir();
+        let store = SessionStore::new(&dir);
+        let mut user_match = Session::new("default", "Planning");
+        user_match.push_message(StoredMessage::new(
+            "user",
+            "Can we schedule the lighthouse migration for Friday?",
+        ));
+        store.save(&user_match).unwrap();
+        let mut assistant_match = Session::new("default", "Status");
+        assistant_match.push_message(StoredMessage::new(
+            "assistant",
+            "The lighthouse migration is ready for review.",
+        ));
+        store.save(&assistant_match).unwrap();
+
+        let results = store.search("Lighthouse", 20).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().any(|result| {
+            result.session.id == user_match.id
+                && result.matched_role.as_deref() == Some("user")
+                && result
+                    .snippet
+                    .as_deref()
+                    .is_some_and(|snippet| snippet.contains("lighthouse"))
+        }));
+        assert!(results.iter().any(|result| {
+            result.session.id == assistant_match.id
+                && result.matched_role.as_deref() == Some("assistant")
+                && result
+                    .snippet
+                    .as_deref()
+                    .is_some_and(|snippet| snippet.contains("lighthouse"))
+        }));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

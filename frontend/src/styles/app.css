@@ -347,6 +347,22 @@ textarea {
   outline-offset: -1px;
 }
 
+.lightagent-logo {
+  display: inline-block;
+  flex: none;
+  background-image: url("/logo-frames.png");
+  background-position: 0 0;
+  background-repeat: no-repeat;
+  background-size: 300% 100%;
+  animation: lightagent-logo-frames 3.6s steps(1, end) infinite;
+}
+
+@keyframes lightagent-logo-frames {
+  0%, 33.32% { background-position: 0 0; }
+  33.33%, 66.65% { background-position: 50% 0; }
+  66.66%, 100% { background-position: 100% 0; }
+}
+
 .rail__name {
   min-width: 0;
 }
@@ -1506,6 +1522,21 @@ textarea {
   white-space: nowrap;
 }
 
+.composer-prompt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.composer-prompt__logo {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  border-radius: 5px;
+}
+
 .welcome-composer textarea,
 .chat-composer textarea {
   flex: 1;
@@ -1646,25 +1677,27 @@ textarea {
   font-weight: 600;
 }
 
-.tool-activity__dots {
-  display: inline-flex;
-  gap: 3px;
+.tool-activity__thinking {
+  display: inline-block;
+  background: linear-gradient(
+    100deg,
+    var(--text-faint) 0%,
+    var(--text-faint) 38%,
+    var(--text) 50%,
+    var(--text-faint) 62%,
+    var(--text-faint) 100%
+  );
+  background-position: 100% 0;
+  background-size: 250% 100%;
+  color: transparent;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: tool-thinking-sweep 1.7s ease-in-out infinite;
 }
 
-.tool-activity__dots i {
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  background: currentColor;
-  animation: tool-thinking 1.1s ease-in-out infinite;
-}
-
-.tool-activity__dots i:nth-child(2) { animation-delay: 120ms; }
-.tool-activity__dots i:nth-child(3) { animation-delay: 240ms; }
-
-@keyframes tool-thinking {
-  0%, 60%, 100% { opacity: 0.25; transform: translateY(0); }
-  30% { opacity: 1; transform: translateY(-2px); }
+@keyframes tool-thinking-sweep {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
 }
 
 .tool-call {
@@ -1734,21 +1767,55 @@ textarea {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tool-activity__dots i,
+  .tool-activity__thinking,
   .tool-call__summary::after {
+    background: none;
+    color: var(--text-muted);
     animation: none;
     transition: none;
+  }
+
+  .lightagent-logo {
+    animation: none;
   }
 }
 
 .chat-composer {
   display: flex;
-  margin: 0 auto;
+  width: 100%;
+  margin: 0;
   gap: 10px;
   min-height: 64px;
   padding: 8px 10px 8px 22px;
   align-items: center;
   border: 0;
+}
+
+.chat-composer-stack {
+  display: flex;
+  width: min(760px, 100%);
+  margin: 0 auto;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.chat-composer__steer-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 8px 14px;
+  padding: 7px 11px;
+  border: 1px solid var(--border-quiet);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--text-soft);
+  box-shadow: var(--shadow-sm);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.chat-composer__steer-hint svg {
+  color: var(--text-muted);
 }
 
 .chat-composer .input {
@@ -2091,7 +2158,7 @@ textarea {
   cursor: pointer;
 }
 
-.chat-sidebar__collapsed-logo img,
+.chat-sidebar__collapsed-logo .lightagent-logo,
 .chat-sidebar__collapsed-logo svg {
   position: absolute;
   transition: opacity 140ms ease-out;
@@ -2105,7 +2172,7 @@ textarea {
   background: var(--surface-hover);
 }
 
-.chat-sidebar__collapsed-logo:hover img {
+.chat-sidebar__collapsed-logo:hover .lightagent-logo {
   opacity: 0;
 }
 
@@ -2413,10 +2480,9 @@ textarea {
   background: var(--popover-border);
 }
 
-.chat-sidebar__brand img {
+.chat-sidebar__logo {
   width: 34px;
   height: 34px;
-  object-fit: contain;
 }
 
 .chat-sidebar__wordmark {
