@@ -8,19 +8,17 @@ import { Menu, MenuItem } from "./Menu";
 
 /** The standalone frame shared by every Lightagent screen. */
 export function Shell() {
-  const { preferences } = usePreferences();
+  const { preferences, update } = usePreferences();
   const location = useLocation();
   const navigate = useNavigate();
   const mobile = useMediaQuery("(max-width: 760px)");
   const chatRoute = location.pathname === "/" || location.pathname === "/agent";
-  const [workspaceSidebarCollapsed, setWorkspaceSidebarCollapsed] = useState(preferences.railCollapsed);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const accountButton = useRef<HTMLButtonElement | null>(null);
-  const collapsed = mobile ? false : chatRoute ? true : workspaceSidebarCollapsed;
+  const collapsed = mobile ? false : chatRoute ? true : preferences.railCollapsed;
 
   useEffect(() => setDrawerOpen(false), [location.pathname]);
-  useEffect(() => setWorkspaceSidebarCollapsed(preferences.railCollapsed), [preferences.railCollapsed]);
   useEffect(() => {
     if (!mobile) setDrawerOpen(false);
   }, [mobile]);
@@ -40,7 +38,7 @@ export function Shell() {
         <div className="rail__brand">
           {collapsed ? (
             <button type="button" className="rail__collapsed-logo" aria-label="Expand sidebar" title="Expand sidebar"
-              onClick={() => setWorkspaceSidebarCollapsed(false)}>
+              onClick={() => update({ railCollapsed: false })}>
               <img className="rail__mark" src="/icon.png" alt="Lightagent" width={38} height={38} />
               <PanelLeftOpen size={21} aria-hidden="true" />
             </button>
@@ -48,7 +46,7 @@ export function Shell() {
             <img className="rail__expanded-logo" src="/icon.png" alt="" width={34} height={34} />
             <span className="rail__wordmark">Lightagent</span>
             <button type="button" className="rail__toggle" aria-label="Collapse sidebar" title="Collapse sidebar"
-              onClick={() => setWorkspaceSidebarCollapsed(true)}><PanelLeftClose size={18} /></button>
+              onClick={() => update({ railCollapsed: true })}><PanelLeftClose size={18} /></button>
           </>}
         </div>
 

@@ -2474,6 +2474,11 @@ textarea {
   background: var(--surface-hover);
 }
 
+.chat-sidebar__new.is-active {
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
 .chat-sidebar__new:disabled {
   opacity: 0.5;
 }

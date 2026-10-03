@@ -19,6 +19,7 @@ import { Menu, MenuItem } from "../components/Menu";
 import { TopBar } from "../components/Shell";
 import { usePoll } from "../hooks/usePoll";
 import { useRunEvents, type RunEvent } from "../hooks/useRunEvents";
+import { usePreferences } from "../state/preferences";
 
 const SESSION_KEY = "lightagent.agent.session";
 const WELCOME_PROMPTS = [
@@ -179,6 +180,7 @@ function foldTools(events: RunEvent[]): ToolCall[] {
 
 export function Agent() {
   const navigate = useNavigate();
+  const { preferences, update: updatePreferences } = usePreferences();
   const sessions = usePoll(() => agentApi.sessions().then((body) => body.sessions), 2000);
   // Runtime facts exposed by this same Lightagent process.
   const toolCatalog = usePoll(() => agentApi.tools().then((body) => body.tools), 0);
@@ -199,7 +201,7 @@ export function Agent() {
   const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchCategory, setSearchCategory] = useState<SearchCategory>("all");
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const sidebarCollapsed = preferences.railCollapsed;
   const [showArchived, setShowArchived] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [sidebarNotice, setSidebarNotice] = useState<string | null>(null);
@@ -628,7 +630,7 @@ export function Agent() {
           <div className="chat-sidebar__brand">
             {sidebarCollapsed ? (
               <button type="button" className="chat-sidebar__collapsed-logo" aria-label="Expand sidebar" title="Expand sidebar"
-                onClick={() => setSidebarCollapsed(false)}>
+                onClick={() => updatePreferences({ railCollapsed: false })}>
                 <img src="/icon.png" alt="Lightagent" width={34} height={34} />
                 <PanelLeftOpen size={21} aria-hidden="true" />
               </button>
@@ -642,12 +644,13 @@ export function Agent() {
                 <Search size={16} />
               </button>
               <button type="button" className="chat-sidebar__toggle-button" aria-label="Collapse sidebar" title="Collapse sidebar"
-                onClick={() => { setSidebarCollapsed(true); setSearchOpen(false); setAccountOpen(false); }}>
+                onClick={() => { updatePreferences({ railCollapsed: true }); setSearchOpen(false); setAccountOpen(false); }}>
                 <PanelLeftClose size={18} />
               </button>
             </>}
           </div>
-          <button type="button" className="chat-sidebar__new" disabled={hasPendingWork} onClick={() => void startNew()}>
+          <button type="button" className={`chat-sidebar__new${activeId === null ? " is-active" : ""}`}
+            disabled={hasPendingWork} onClick={() => void startNew()} aria-current={activeId === null ? "true" : undefined}>
             <SquarePen size={17} strokeWidth={2} /> New chat
           </button>
           {sidebarNotice && <span className="chat-sidebar__notice" role="status">{sidebarNotice}</span>}
