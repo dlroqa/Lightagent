@@ -226,6 +226,25 @@ textarea {
   color: var(--text);
 }
 
+.rail__expanded-logo {
+  display: block;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  object-fit: contain;
+}
+
+.rail__wordmark {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rail__app-actions {
   display: grid;
   gap: var(--space-5);
@@ -2686,6 +2705,7 @@ textarea {
 
 /* The resource center uses the same opaque product shell as Chat. */
 .shell--workspace:not(.shell--chat) {
+  --rail-width: 284px;
   padding: 0;
   background: var(--chat-ground);
 }
@@ -2695,6 +2715,8 @@ textarea {
 }
 
 .shell--workspace:not(.shell--chat) .rail {
+  gap: 10px;
+  padding: 20px 14px;
   border: 0;
   border-right: 1px solid var(--chat-rule);
   border-radius: 0;
@@ -2702,6 +2724,44 @@ textarea {
   box-shadow: none;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
+}
+
+/* Tools and Settings use the chat sidebar's exact brand and account geometry.
+ * That keeps the logo and account avatar stationary when either rail changes
+ * between its 284px and 68px forms. */
+.shell--workspace:not(.shell--chat) .rail__brand {
+  gap: 7px;
+  padding: 2px 0 12px;
+}
+
+.shell--workspace:not(.shell--chat) .rail__toggle {
+  margin-left: auto;
+}
+
+.shell--workspace:not(.shell--chat) .rail__account {
+  min-height: 48px;
+  padding: 6px 8px;
+  border: 0;
+  border-top: 1px solid var(--chat-rule);
+  border-radius: 0;
+}
+
+.shell--workspace:not(.shell--chat) .rail__account:hover,
+.shell--workspace:not(.shell--chat) .rail__account[aria-expanded="true"] {
+  border-radius: 8px;
+}
+
+.shell--workspace.is-collapsed:not(.shell--chat) .rail {
+  padding: 20px 12px;
+}
+
+.shell--workspace.is-collapsed:not(.shell--chat) .rail__brand {
+  padding: 2px 0 12px;
+}
+
+.shell--workspace.is-collapsed:not(.shell--chat) .rail__account {
+  padding: 4px 0;
+  border-top: 0;
 }
 
 .shell--workspace:not(.shell--chat) .main {

@@ -45,6 +45,8 @@ export function Shell() {
               <PanelLeftOpen size={21} aria-hidden="true" />
             </button>
           ) : <>
+            <img className="rail__expanded-logo" src="/icon.png" alt="" width={34} height={34} />
+            <span className="rail__wordmark">Lightagent</span>
             <button type="button" className="rail__toggle" aria-label="Collapse sidebar" title="Collapse sidebar"
               onClick={() => setWorkspaceSidebarCollapsed(true)}><PanelLeftClose size={18} /></button>
           </>}
