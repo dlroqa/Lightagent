@@ -70,7 +70,9 @@ function AnimatedBrandName() {
     return () => window.clearTimeout(timer);
   }, [characterCount, name, reduceMotion]);
 
-  return <strong className="chat-sidebar__brand-name">{name.slice(0, characterCount)}</strong>;
+  return <strong className={`chat-sidebar__brand-name${characterCount === name.length ? " chat-sidebar__brand-name--complete" : ""}`}>
+    {name.slice(0, characterCount)}
+  </strong>;
 }
 
 type ToolStatus = "requested" | "running" | "ok" | "error";
