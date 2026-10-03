@@ -14,6 +14,7 @@ pub fn name(event: &AgentEvent) -> &'static str {
     match event {
         AgentEvent::RunStarted { .. } => "run.started",
         AgentEvent::Reasoning { .. } | AgentEvent::Content { .. } => "model.delta",
+        AgentEvent::RouteSelected { .. } => "routing.selected",
         AgentEvent::ToolCallRequested { .. } => "tool.requested",
         AgentEvent::ToolCallStarted { .. } => "tool.started",
         AgentEvent::ToolCallCompleted { outcome, .. } => {
@@ -44,6 +45,15 @@ pub fn data(event: &AgentEvent) -> serde_json::Value {
         }),
         AgentEvent::Reasoning { text } => json!({ "reasoning": text }),
         AgentEvent::Content { text } => json!({ "content": text }),
+        AgentEvent::RouteSelected {
+            source,
+            model,
+            kept_default,
+        } => json!({
+            "source": source,
+            "model": model,
+            "kept_default": kept_default,
+        }),
         AgentEvent::ToolCallRequested { call } => json!({
             "id": call.id,
             "name": call.name,

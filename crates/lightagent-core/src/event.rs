@@ -41,6 +41,13 @@ pub enum AgentEvent {
     Reasoning { text: String },
     /// A fragment of the model's visible answer.
     Content { text: String },
+    /// The advisory inference router selected a model for this run. This is
+    /// informational only: it does not grant tools or alter permissions.
+    RouteSelected {
+        source: String,
+        model: String,
+        kept_default: bool,
+    },
     /// The model asked for a tool.
     ToolCallRequested { call: ToolCall },
     /// A requested tool began executing.

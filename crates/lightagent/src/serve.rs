@@ -42,7 +42,7 @@ async fn inference_for_request(
     store: &ProfileStore,
     profile: &lightagent_core::AgentProfile,
     request: &StartRun,
-) -> (String, String) {
+) -> (String, String, Option<(String, bool)>) {
     let base_url = profile
         .routing
         .base_url
@@ -52,6 +52,7 @@ async fn inference_for_request(
         .model
         .clone()
         .unwrap_or_else(|| configured_model(&profile.routing.model, config));
+    let report_jev = config.platform.jev.endpoint.enabled && request.model.is_none();
     // The saved session's profile identifies context, not a model override.
     let route = crate::jev::select_route(
         &config.platform.jev,
@@ -64,13 +65,15 @@ async fn inference_for_request(
         .profile
         .as_ref()
         .and_then(|name| resolve_profile(store, config, Some(name.clone())).ok());
-    crate::jev::inference_route(
+    let (model, base_url) = crate::jev::inference_route(
         route,
         routed_profile.as_ref(),
         config,
-        default_model,
+        default_model.clone(),
         base_url,
-    )
+    );
+    let routing_status = report_jev.then(|| (model.clone(), model == default_model));
+    (model, base_url, routing_status)
 }
 
 #[async_trait]
@@ -202,7 +205,15 @@ impl RunFactory for LightweightRunFactory {
             return RunStatus::Failed;
         }
 
-        let (model, base_url) = inference_for_request(&config, &store, &profile, &request).await;
+        let (model, base_url, routing_status) =
+            inference_for_request(&config, &store, &profile, &request).await;
+        if let Some((model, kept_default)) = routing_status {
+            let _ = sink.send(AgentEvent::RouteSelected {
+                source: "Jev".to_owned(),
+                model,
+                kept_default,
+            });
+        }
         let api_key = config
             .inference
             .api_key
@@ -435,12 +446,14 @@ mod routing_tests {
             model: None,
             cwd: None,
         };
-        let (model, _) = inference_for_request(&config, &store, &profile, &request).await;
+        let (model, _, status) = inference_for_request(&config, &store, &profile, &request).await;
         assert_eq!(model, "fast");
+        assert_eq!(status, Some(("fast".to_owned(), false)));
         assert_eq!(profile, original);
         server.await.unwrap();
         request.model = Some("explicit".to_owned());
-        let (model, _) = inference_for_request(&config, &store, &profile, &request).await;
+        let (model, _, status) = inference_for_request(&config, &store, &profile, &request).await;
         assert_eq!(model, "explicit");
+        assert_eq!(status, None);
     }
 }

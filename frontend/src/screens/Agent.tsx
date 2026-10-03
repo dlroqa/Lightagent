@@ -278,6 +278,18 @@ export function Agent() {
 
   const { answer, reasoning } = useMemo(() => foldModelOutput(events), [events]);
   const tools = useMemo(() => foldTools(events), [events]);
+  const routingStatus = useMemo(() => {
+    const event = [...events].reverse().find((row) => row.type === "routing.selected");
+    if (!event) return null;
+    const source = text(event.data.source) || "Router";
+    const model = text(event.data.model);
+    if (!model) return null;
+    return {
+      source,
+      model,
+      keptDefault: event.data.kept_default === true,
+    };
+  }, [events]);
   const failure = useMemo(() => {
     const event = [...events].reverse().find((row) => row.type === "error");
     return event
@@ -939,6 +951,12 @@ export function Agent() {
                   {session.messages.map((message, index) => (
                     <AgentMessage key={message.role + index} message={message} />
                   ))}
+                  {routingStatus && <div className="routing-status" role="status">
+                    <Cpu size={14} aria-hidden="true" />
+                    <span>{routingStatus.keptDefault
+                      ? `${routingStatus.source} kept the default route: ${routingStatus.model}`
+                      : `${routingStatus.source} routed to: ${routingStatus.model}`}</span>
+                  </div>}
                   {showLiveAnswer && answer && (
                     <AgentMessage message={{ role: "assistant", content: answer }} streaming={!done} />
                   )}
