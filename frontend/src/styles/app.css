@@ -200,6 +200,61 @@ textarea {
   min-width: 0;
 }
 
+.rail__toggle {
+  display: inline-grid;
+  width: 32px;
+  height: 32px;
+  margin-left: auto;
+  place-items: center;
+  flex: none;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.rail__toggle:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.rail__collapsed-logo {
+  position: relative;
+  display: inline-grid;
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.rail__collapsed-logo .rail__mark,
+.rail__collapsed-logo svg {
+  position: absolute;
+  transition: opacity 140ms ease-out;
+}
+
+.rail__collapsed-logo svg {
+  opacity: 0;
+}
+
+.rail__collapsed-logo:hover {
+  background: var(--surface-hover);
+}
+
+.rail__collapsed-logo:hover .rail__mark {
+  opacity: 0;
+}
+
+.rail__collapsed-logo:hover svg {
+  opacity: 1;
+}
+
 /*
  * The brand chip: the application's icon, at rail size.
  *
@@ -298,9 +353,21 @@ textarea {
   align-items: center;
   gap: var(--space-3);
   flex: none;
+  width: 100%;
   min-height: 44px;
   padding: var(--space-2);
-  border-top: 1px solid var(--rule);
+  border: 1px solid transparent;
+  border-top-color: var(--rule);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.rail__account:hover,
+.rail__account[aria-expanded="true"] {
+  background: var(--surface-hover);
+  border-radius: var(--radius);
 }
 
 .rail__avatar {
@@ -337,6 +404,10 @@ textarea {
   justify-content: center;
   padding-inline: 0;
   border-top: 0;
+}
+
+.shell.is-collapsed .rail__brand {
+  justify-content: center;
 }
 
 .railcard {
