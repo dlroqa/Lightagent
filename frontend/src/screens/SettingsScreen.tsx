@@ -48,15 +48,26 @@ export function SettingsScreen() {
   const value = current ?? settings.data;
   const delegationAvailable = tools.data?.some((tool) => tool.name === "agent.delegate");
   const autonomousSubagentsEnabled = value?.subagents_enabled ?? false;
-  const availableModels = [...new Set([
-    ...(provider.data?.models ?? []),
+  const advertisedModels = provider.data?.models ?? [];
+  // A runtime catalog can report the same loaded artifact with a context
+  // suffix (for example `model@4k`). Prefer the inference provider's own ID;
+  // that is the identifier Lightagent can actually request.
+  const preferredModels = [
+    ...advertisedModels.filter((model) => modelIdentity(model) === model),
+    ...advertisedModels.filter((model) => modelIdentity(model) !== model),
     ...(provider.data?.runtime_models
-      .filter((model) => model.supported !== false)
+      .filter((model) => model.supported !== false && ["available", "loaded"].includes(model.state))
       .map((model) => model.id) ?? []),
-    ...Object.keys(provider.data?.model_catalog ?? {}),
-    ...Object.keys(provider.data?.model_aliases ?? {}),
-    ...(provider.data?.configured_model ? [provider.data.configured_model] : []),
-  ])].sort((left, right) => left.localeCompare(right));
+  ];
+  const seenModelIds = new Set<string>();
+  const availableModels = preferredModels
+    .filter((model) => {
+      const identity = modelIdentity(model);
+      if (seenModelIds.has(identity)) return false;
+      seenModelIds.add(identity);
+      return true;
+    })
+    .sort((left, right) => left.localeCompare(right));
   const nextTheme = preferences.theme === "dark" ? "light" : "dark";
   return (
     <>
@@ -490,6 +501,10 @@ function InfinitySettingsRow({ endpoint, disabled, onSave }: {
 
 function splitRoutes(value: string): string[] {
   return [...new Set(value.split(",").map((route) => route.trim()).filter(Boolean))];
+}
+
+function modelIdentity(model: string): string {
+  return model.trim().replace(/@\d+k\b/i, "");
 }
 
 function OpenTerminalSettingsRow({ endpoint, disabled, onSave }: {
