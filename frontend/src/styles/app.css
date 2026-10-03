@@ -209,8 +209,9 @@ textarea {
 
 .rail__toggle {
   display: inline-grid;
-  width: 32px;
-  height: 32px;
+  width: var(--sidebar-toggle-size);
+  height: var(--sidebar-toggle-size);
+  padding: 0;
   place-items: center;
   flex: none;
   border: 0;
@@ -240,17 +241,19 @@ textarea {
   background: transparent;
   color: var(--text);
   cursor: pointer;
-  font-size: 15px;
+  font-size: 13px;
   text-align: left;
 }
 
 .rail__back {
   padding: var(--space-2);
+  border-radius: 8px;
 }
 
 .rail__search {
-  min-height: 48px;
-  padding: 0 var(--space-3);
+  min-height: 36px;
+  gap: var(--space-2);
+  padding: 0 10px;
   border-radius: 999px;
   background: var(--surface-hover);
   color: var(--text-muted);
@@ -265,8 +268,8 @@ textarea {
 .rail__collapsed-logo {
   position: relative;
   display: inline-grid;
-  width: 42px;
-  height: 42px;
+  width: var(--sidebar-logo-toggle-size);
+  height: var(--sidebar-logo-toggle-size);
   padding: 0;
   place-items: center;
   border: 0;
@@ -415,14 +418,14 @@ textarea {
 
 .rail__avatar {
   display: inline-grid;
-  width: 36px;
-  height: 36px;
+  width: var(--sidebar-avatar-size);
+  height: var(--sidebar-avatar-size);
   flex: none;
   place-items: center;
   border-radius: 50%;
   background: #0f9f8e;
   color: #f4fffd;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
   letter-spacing: -0.02em;
 }
@@ -468,8 +471,8 @@ textarea {
 }
 
 .shell--workspace.is-collapsed:not(.shell--chat) .rail__avatar {
-  width: 40px;
-  height: 40px;
+  width: var(--sidebar-avatar-size);
+  height: var(--sidebar-avatar-size);
   font-size: 12px;
 }
 
@@ -2033,8 +2036,9 @@ textarea {
 .chat-sidebar__toggle-button,
 .chat-sidebar__search-button {
   display: inline-grid;
-  width: 32px;
-  height: 32px;
+  width: var(--sidebar-toggle-size);
+  height: var(--sidebar-toggle-size);
+  padding: 0;
   place-items: center;
   border: 0;
   border-radius: 8px;
@@ -2057,8 +2061,8 @@ textarea {
 .chat-sidebar__collapsed-logo {
   position: relative;
   display: inline-grid;
-  width: 42px;
-  height: 42px;
+  width: var(--sidebar-logo-toggle-size);
+  height: var(--sidebar-logo-toggle-size);
   padding: 0;
   place-items: center;
   border: 0;
@@ -2110,8 +2114,8 @@ textarea {
 }
 
 .shell--chat .chat-history.is-collapsed .chat-sidebar__avatar {
-  width: 40px;
-  height: 40px;
+  width: var(--sidebar-avatar-size);
+  height: var(--sidebar-avatar-size);
   font-size: 12px;
 }
 
@@ -2483,14 +2487,14 @@ textarea {
 
 .chat-sidebar__avatar {
   display: inline-grid;
-  width: 32px;
-  height: 32px;
+  width: var(--sidebar-avatar-size);
+  height: var(--sidebar-avatar-size);
   flex: none;
   place-items: center;
   border-radius: 50%;
   background: #0f9f8e;
   color: #f4fffd;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
   letter-spacing: -0.02em;
 }

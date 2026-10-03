@@ -53,10 +53,10 @@ export function Shell() {
         {!collapsed && (
           <div className="rail__app-actions">
             <button type="button" className="rail__back" onClick={() => navigate("/")}>
-              <ArrowLeft size={24} /> Back to app
+              <ArrowLeft size={17} /> Back to app
             </button>
             <button type="button" className="rail__search" onClick={() => navigate("/")}>
-              <Search size={22} /> Search
+              <Search size={17} /> Search
             </button>
           </div>
         )}

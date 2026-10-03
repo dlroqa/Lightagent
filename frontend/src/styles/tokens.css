@@ -11,6 +11,10 @@
 :root {
   color-scheme: light;
 
+  --sidebar-toggle-size: 32px;
+  --sidebar-logo-toggle-size: 42px;
+  --sidebar-avatar-size: 40px;
+
   /* --- ground ------------------------------------------------------------ */
   --ground-1: #dbe6f6;
   --ground-2: #eef2fb;
