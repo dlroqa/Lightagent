@@ -360,6 +360,8 @@ struct UiSettings {
     terminal_enabled: bool,
     memory_enabled: bool,
     show_reasoning_in_tui: bool,
+    #[serde(default)]
+    subagents_enabled: Option<bool>,
     jev: UiJevSettings,
     qdrant: UiQdrantSettings,
     infinity: UiInfinitySettings,
@@ -377,6 +379,7 @@ fn ui_settings(config: &lightagent_core::Config) -> UiSettings {
         terminal_enabled: config.tools.allow_terminal,
         memory_enabled: config.memory.auto_capture,
         show_reasoning_in_tui: config.tui.show_reasoning,
+        subagents_enabled: Some(config.subagents.enabled),
         jev: UiJevSettings {
             endpoint: ui_platform_endpoint(&config.platform.jev.endpoint),
             model: config.platform.jev.model.clone(),
@@ -495,6 +498,9 @@ async fn save_settings(
     config.tools.allow_terminal = settings.terminal_enabled;
     config.memory.auto_capture = settings.memory_enabled;
     config.tui.show_reasoning = settings.show_reasoning_in_tui;
+    if let Some(enabled) = settings.subagents_enabled {
+        config.subagents.enabled = enabled;
+    }
     apply_platform_endpoint(&mut config.platform.jev.endpoint, &settings.jev.endpoint);
     config.platform.jev.model = settings.jev.model.trim().to_owned();
     config.platform.jev.confidence_threshold = settings.jev.confidence_threshold;

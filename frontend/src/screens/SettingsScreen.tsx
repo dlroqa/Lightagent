@@ -46,6 +46,7 @@ export function SettingsScreen() {
 
   const value = current ?? settings.data;
   const delegationAvailable = tools.data?.some((tool) => tool.name === "agent.delegate");
+  const autonomousSubagentsEnabled = value?.subagents_enabled ?? false;
   const nextTheme = preferences.theme === "dark" ? "light" : "dark";
   return (
     <>
@@ -116,16 +117,24 @@ export function SettingsScreen() {
           </Card>
 
           <Card title="Subagents">
+            <ToggleRow label="Autonomous subagents" hint="For complex, independent work, let Lightagent delegate bounded specialist tasks. Simple tasks stay single-agent; approval policy still applies."
+              checked={value?.subagents_enabled ?? false} disabled={!value || saving}
+              onChange={(subagents_enabled) => void persist({ subagents_enabled })} />
             {tools.data ? (
-              delegationAvailable ? (
+              delegationAvailable && autonomousSubagentsEnabled ? (
                 <div className="capability-status capability-status--available">
                   <strong>Delegation available</strong>
-                  <span>Eligible runs can request the approval-gated agent.delegate tool. It remains opt-in.</span>
+                  <span>Complex, independent work can be split into bounded specialist tasks. Focused work remains single-agent.</span>
+                </div>
+              ) : delegationAvailable ? (
+                <div className="capability-status">
+                  <strong>Autonomous subagents are paused</strong>
+                  <span>Turn on the setting above to let complex, independent tasks use specialist workers.</span>
                 </div>
               ) : (
                 <div className="capability-status">
-                  <strong>Delegation is not enabled</strong>
-                  <span>This harness is running in its standard single-agent mode.</span>
+                  <strong>Delegation tool unavailable</strong>
+                  <span>Enable a tool-capable runtime to use autonomous subagents.</span>
                 </div>
               )
             ) : <span className="muted">Checking harness capabilities…</span>}

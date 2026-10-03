@@ -186,6 +186,13 @@ impl RunFactory for LightweightRunFactory {
                 return RunStatus::Failed;
             }
         };
+        if let Err(error) = crate::ensure_subagent_profiles(&store, &config, &profile) {
+            fail(
+                &sink,
+                &format!("could not provision subagent profiles: {error}"),
+            );
+            return RunStatus::Failed;
+        }
 
         let (model, base_url) = inference_for_request(&config, &store, &profile, &request).await;
         let api_key = config
@@ -258,6 +265,9 @@ impl RunFactory for LightweightRunFactory {
         }
 
         if let Some(instructions) = web_research_instructions(&config) {
+            profile.persona.push_str(&format!("\n\n{instructions}"));
+        }
+        if let Some(instructions) = crate::chat::autonomous_subagent_instructions(&config) {
             profile.persona.push_str(&format!("\n\n{instructions}"));
         }
 

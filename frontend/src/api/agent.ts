@@ -141,6 +141,7 @@ export interface LightagentSettings {
   terminal_enabled: boolean;
   memory_enabled: boolean;
   show_reasoning_in_tui: boolean;
+  subagents_enabled: boolean;
   jev: JevSettings;
   qdrant: QdrantSettings;
   infinity: InfinitySettings;

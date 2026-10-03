@@ -563,14 +563,16 @@ impl Default for TuiConfig {
     }
 }
 
-/// Server-controlled limits for the opt-in hierarchical delegation feature.
+/// Server-controlled limits for bounded autonomous delegation.
 ///
-/// The feature is disabled by default. Ordinary CLI and HTTP chat remain on
-/// the single-agent path unless a run explicitly delegates a bounded task.
+/// When enabled, the lead agent decides whether a task benefits from parallel
+/// specialist work. Focused, single-step tasks stay on the normal single-agent
+/// path; delegation remains bounded by these limits and the active approval
+/// policy.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SubagentsConfig {
-    /// Allow bounded subagent delegation for newly created runs.
+    /// Allow bounded autonomous subagent delegation for newly created runs.
     pub enabled: bool,
     /// Deepest allowed child generation; the lead is depth zero.
     pub max_depth: u8,
@@ -583,7 +585,7 @@ pub struct SubagentsConfig {
 impl Default for SubagentsConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             max_depth: 2,
             max_children_per_agent: 3,
             allowed_roles: vec![

@@ -921,10 +921,13 @@ export function Agent() {
                 </div>
               )}
               <div className="chat-composer-stack">
-                {running && <div className="chat-composer__steer-hint" role="status">
+                {running && draft.trim() && <button type="button" className="chat-composer__steer-hint"
+                  onClick={() => void send()} title="Queue this steer without interrupting the current task"
+                  aria-label={`Queue steer without interrupting the current task: ${draft.trim()}`}>
                   <CornerDownLeft size={15} aria-hidden="true" />
-                  <span>Steer without interrupting the current task</span>
-                </div>}
+                  <span className="chat-composer__steer-label">Queue steer</span>
+                  <span className="chat-composer__steer-preview">{draft.trim()}</span>
+                </button>}
                 <div className="chat-composer">
                   <button type="button" className="composer-attach" title="Add photos or files"
                     aria-label="Add photos or files" disabled={busy || serviceUnavailable}

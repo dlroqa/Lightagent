@@ -1086,6 +1086,8 @@ textarea {
  */
 .approval {
   display: flex;
+  width: min(760px, 100%);
+  margin: 0 auto;
   align-items: flex-start;
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
@@ -1803,6 +1805,7 @@ textarea {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  max-width: min(100%, 560px);
   margin: 0 0 8px 14px;
   padding: 7px 11px;
   border: 1px solid var(--border-quiet);
@@ -1810,12 +1813,32 @@ textarea {
   background: var(--surface-raised);
   color: var(--text-soft);
   box-shadow: var(--shadow-sm);
+  cursor: pointer;
   font-size: 12px;
   font-weight: 500;
+  text-align: left;
 }
 
 .chat-composer__steer-hint svg {
+  flex: none;
   color: var(--text-muted);
+}
+
+.chat-composer__steer-hint:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.chat-composer__steer-label {
+  flex: none;
+  font-weight: 650;
+}
+
+.chat-composer__steer-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat-composer .input {

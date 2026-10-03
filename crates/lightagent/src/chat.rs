@@ -58,6 +58,24 @@ pub(crate) fn subagent_policy(config: &Config) -> SubagentPolicy {
         roles,
     }
 }
+
+/// Give the lead agent a complexity gate without turning every request into a
+/// multi-agent workflow. The tool and policy layers still enforce the hard
+/// depth, child-count, scope, and approval boundaries.
+pub(crate) fn autonomous_subagent_instructions(config: &Config) -> Option<String> {
+    config.subagents.enabled.then(|| {
+        let roles = config.subagents.allowed_roles.join(", ");
+        format!(
+            "Autonomous subagents are available through agent.delegate with these roles: {roles}. \
+             Decide from the user's request whether delegation materially helps. Keep simple, focused, \
+             single-step, or tightly coupled tasks in this lead run. Delegate only clearly independent, \
+             substantial tracks (for example, separate research questions, implementation plus independent \
+             review, or test verification), use the fewest specialists needed, give each a self-contained \
+             task, then synthesize their results. Never delegate merely to restate, acknowledge, or perform \
+             an easy task. Existing approval requirements and delegation limits always apply."
+        )
+    })
+}
 /// Build the web context for a run when web access is enabled, else `None`.
 ///
 /// Shared by `chat` and `serve`. The client disables automatic redirects so
@@ -412,6 +430,10 @@ async fn build_chat_runtime(
     profile_dir: &Path,
     workspace_dir: PathBuf,
 ) -> ChatRuntime {
+    let profile_store = ProfileStore::new(home);
+    if let Err(error) = crate::ensure_subagent_profiles(&profile_store, config, profile) {
+        eprintln!("could not provision subagent profiles: {error}");
+    }
     let extensions = load_extensions(home, profile_dir);
     let active_extensions = extensions
         .active(&config.extensions)
@@ -429,7 +451,7 @@ async fn build_chat_runtime(
         .as_ref()
         .and_then(|secret| secret.resolve());
     let mut delegation = Delegation::new(
-        Arc::new(ProfileStore::new(home)),
+        Arc::new(profile_store),
         Arc::new(LightweightFactory { base_url, api_key }),
         ToolRegistry::worker_default(),
         Duration::from_secs(60),
@@ -509,6 +531,9 @@ async fn build_chat_runtime(
             .push_str(&format!("\n\n{extension_instructions}"));
     }
     if let Some(instructions) = web_research_instructions(config) {
+        run_profile.persona.push_str(&format!("\n\n{instructions}"));
+    }
+    if let Some(instructions) = autonomous_subagent_instructions(config) {
         run_profile.persona.push_str(&format!("\n\n{instructions}"));
     }
     let agent = AgentLoop::from_profile(provider.clone(), executor, &run_profile)

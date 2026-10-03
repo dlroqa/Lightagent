@@ -525,6 +525,59 @@ pub(crate) fn default_profile(config: &Config) -> Result<AgentProfile, String> {
     Ok(profile)
 }
 
+/// Create the built-in worker profiles the first time autonomous delegation is
+/// enabled. Existing profiles are never changed: people can tune a specialist
+/// persona, model, or policy and it will be preserved for later runs.
+pub(crate) fn ensure_subagent_profiles(
+    store: &ProfileStore,
+    config: &Config,
+    lead: &AgentProfile,
+) -> Result<(), String> {
+    if !config.subagents.enabled {
+        return Ok(());
+    }
+
+    for role in &config.subagents.allowed_roles {
+        let id = ProfileId::new(role).map_err(|error| error.to_string())?;
+        match store.load(&id) {
+            Ok(_) => continue,
+            Err(ProfileError::NotFound { .. }) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+
+        let mut worker = lead.clone();
+        worker.id = id;
+        worker.name = format!("{role} subagent");
+        worker.description = format!("Focused {role} worker for bounded delegated tasks.");
+        worker.persona = format!("{}\n\n{}", lead.persona, subagent_role_instruction(role));
+        match store.create(&worker) {
+            Ok(()) | Err(ProfileError::AlreadyExists { .. }) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
+}
+
+fn subagent_role_instruction(role: &str) -> &'static str {
+    match role {
+        "researcher" => {
+            "You are a research specialist. Investigate the assigned question with the available tools, distinguish evidence from inference, and return concise findings with sources."
+        }
+        "coder" => {
+            "You are an implementation specialist. Make only the scoped changes requested, validate them proportionately, and report the files and verification performed."
+        }
+        "reviewer" => {
+            "You are a review specialist. Inspect the assigned work for correctness, regressions, safety, and missing tests; report actionable findings in priority order."
+        }
+        "tester" => {
+            "You are a testing specialist. Run or design the most relevant checks for the assigned change and report results, failures, and any coverage gaps."
+        }
+        _ => {
+            "You are a focused specialist subagent. Complete only the assigned bounded task, use the available tools carefully, and return concise evidence-backed results to the lead agent."
+        }
+    }
+}
+
 /// Print the deployment topology without contacting optional endpoints.
 fn architecture(json: bool) -> Result<(), String> {
     let paths = paths()?;
@@ -1451,6 +1504,35 @@ mod tests {
             std::fs::read_to_string(handle.sessions_dir().join("keep.txt")).unwrap(),
             "existing session"
         );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn autonomous_subagents_provision_missing_role_profiles_without_overwriting_them() {
+        let home = std::env::temp_dir().join(format!(
+            "lightagent-subagent-profiles-{}",
+            lightagent_core::RunId::new().as_str()
+        ));
+        let store = ProfileStore::new(&home);
+        let config = Config::default();
+        let lead = default_profile(&config).unwrap();
+
+        ensure_subagent_profiles(&store, &config, &lead).unwrap();
+        let researcher = ProfileId::new("researcher").unwrap();
+        assert!(
+            store
+                .load(&researcher)
+                .unwrap()
+                .persona
+                .contains("research specialist")
+        );
+
+        let mut customized = store.load(&researcher).unwrap();
+        customized.persona = "Keep my custom researcher persona.".to_owned();
+        store.save(&customized).unwrap();
+        ensure_subagent_profiles(&store, &config, &lead).unwrap();
+        assert_eq!(store.load(&researcher).unwrap().persona, customized.persona);
+
         std::fs::remove_dir_all(home).unwrap();
     }
 
