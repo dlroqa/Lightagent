@@ -292,17 +292,33 @@ function PlatformEndpointRow<E extends PlatformEndpointSettings>({ label, hint, 
   children?: ReactNode;
 }) {
   const [baseUrl, setBaseUrl] = useState(endpoint?.base_url ?? "");
+  const [endpointError, setEndpointError] = useState<string | null>(null);
   useEffect(() => setBaseUrl(endpoint?.base_url ?? ""), [endpoint?.base_url]);
 
   if (!endpoint) return null;
   const saveUrl = () => {
     const next = baseUrl.trim() || null;
-    if (next !== endpoint.base_url) void onSave({ ...endpoint, base_url: next });
+    if (next !== endpoint.base_url) {
+      setEndpointError(null);
+      void onSave({ ...endpoint, base_url: next });
+    }
+  };
+  const saveEnabled = (enabled: boolean) => {
+    const next = baseUrl.trim() || null;
+    if (enabled && !next) {
+      setEndpointError("Enter a valid HTTP(S) endpoint before enabling this service.");
+      return;
+    }
+    setEndpointError(null);
+    // Include the unsaved URL with the toggle mutation. This avoids a blur/click
+    // race where the toggle used the previous endpoint snapshot and the server
+    // correctly rejected an enabled service without a URL.
+    void onSave({ ...endpoint, base_url: next, enabled });
   };
   return (
     <div style={{ padding: "14px 0", borderBottom: "1px solid var(--rule)" }}>
       <ToggleRow label={label} hint={hint} checked={endpoint.enabled} disabled={disabled}
-        onChange={(enabled) => void onSave({ ...endpoint, enabled })} />
+        onChange={saveEnabled} />
       <div className="field" style={{ marginTop: 10 }}>
         <label className="field__label" htmlFor={`platform-${label.toLowerCase().replaceAll(" ", "-")}`}>
           Base URL
@@ -318,6 +334,9 @@ function PlatformEndpointRow<E extends PlatformEndpointSettings>({ label, hint, 
               : "No secret configured."
             : "Set a valid URL, then enable this endpoint."}
         </div>
+        {endpointError && <div style={{ fontSize: 11.5, color: "var(--danger)", marginTop: 4 }} role="alert">
+          {endpointError}
+        </div>}
       </div>
       {children}
     </div>
