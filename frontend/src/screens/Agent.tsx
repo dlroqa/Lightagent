@@ -683,7 +683,7 @@ export function Agent() {
                 <PanelLeftOpen size={21} aria-hidden="true" />
               </button>
             ) : <>
-              <AnimatedLogo className="chat-sidebar__logo" width={30} height={30} />
+              <AnimatedLogo className="chat-sidebar__logo" width={34} height={34} />
               <span className="chat-sidebar__wordmark" aria-label="Lightagent">
                 <AnimatedBrandName />
               </span>

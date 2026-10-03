@@ -40,7 +40,7 @@ export function Shell() {
           {collapsed ? (
             <button type="button" className="rail__collapsed-logo" aria-label="Expand sidebar" title="Expand sidebar"
               onClick={() => update({ railCollapsed: false })}>
-              <AnimatedLogo className="rail__mark" alt="Lightagent" width={38} height={38} />
+              <AnimatedLogo className="rail__mark" alt="Lightagent" width={34} height={34} />
               <PanelLeftOpen size={21} aria-hidden="true" />
             </button>
           ) : <>
