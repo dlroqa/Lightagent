@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use lightagent_core::JevConfig;
+use lightagent_core::{JevConfig, JevRoutingInput};
 use lightagent_jev::{Answer, EvaluationRequest, JevClient, JevError, Question, Response};
 use tokio_util::sync::CancellationToken;
 
@@ -69,6 +69,9 @@ pub(crate) enum RouteFallback {
     TooManyRoutes,
     /// The shared adapter produced no usable answer.
     Jev(JevError),
+    /// Sanitized input was required and the message could not be minimized
+    /// safely, so nothing was sent.
+    UnsafeInput(&'static str),
     /// The answer named something that is not a route option.
     UnexpectedChoice,
     LowConfidence,
@@ -92,6 +95,7 @@ pub(crate) fn is_auto_route(model: &str) -> bool {
 /// request. A profile identifies the session context and does not disable
 /// inference-only advisory routing. A cancelled run stops waiting for Jev at
 /// once; the agent loop then observes the same cancellation.
+#[cfg(test)]
 pub(crate) async fn select_route(
     config: &JevConfig,
     message: &str,
@@ -99,7 +103,42 @@ pub(crate) async fn select_route(
     explicit_model: bool,
     cancel: &CancellationToken,
 ) -> (Decision, bool) {
+    let report = route_for_turn(
+        config,
+        message,
+        default_model,
+        explicit_model,
+        false,
+        cancel,
+    )
+    .await;
+    (report.decision, report.invoked)
+}
+
+/// What the routing step decided and sent.
+#[derive(Debug, PartialEq)]
+pub(crate) struct RouteReport {
+    pub decision: Decision,
+    /// Whether a Jev request was made.
+    pub invoked: bool,
+    /// The routing-input policy applied, when routing got as far as preparing
+    /// an input. `None` when routing did not apply (explicit model, `Auto`,
+    /// disabled, no routes).
+    pub input: Option<&'static str>,
+}
+
+/// Route one run or terminal turn. `attachment` marks a turn whose text holds
+/// a dropped file's contents; under `sanitized` input it is never sent.
+pub(crate) async fn route_for_turn(
+    config: &JevConfig,
+    message: &str,
+    default_model: String,
+    explicit_model: bool,
+    attachment: bool,
+    cancel: &CancellationToken,
+) -> RouteReport {
     let mut invoked = false;
+    let mut input = None;
     let decision = route(
         config,
         message,
@@ -107,6 +146,8 @@ pub(crate) async fn select_route(
         explicit_model,
         cancel,
         &mut invoked,
+        attachment,
+        &mut input,
     )
     .await
     .unwrap_or(Decision {
@@ -114,9 +155,14 @@ pub(crate) async fn select_route(
         profile: None,
         confidence: 1.0,
     });
-    (decision, invoked)
+    RouteReport {
+        decision,
+        invoked,
+        input,
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn route(
     config: &JevConfig,
     message: &str,
@@ -124,6 +170,8 @@ async fn route(
     explicit_model: bool,
     cancel: &CancellationToken,
     invoked: &mut bool,
+    attachment: bool,
+    input: &mut Option<&'static str>,
 ) -> Result<Decision, RouteFallback> {
     if explicit_model {
         return Err(RouteFallback::ExplicitModel);
@@ -155,8 +203,25 @@ async fn route(
     if criteria.len() > lightagent_jev::MAX_CHOICE_OPTIONS {
         return Err(RouteFallback::TooManyRoutes);
     }
+    *input = Some(config.routing_input.as_str());
+    let state = match config.routing_input {
+        // The original behavior, kept for configurations that predate the
+        // setting: the message itself, cut to a bound.
+        JevRoutingInput::LegacyRaw => bounded_message(message),
+        // The classification sanitizer: no attachment, key material, code,
+        // URLs, paths, addresses or credential-shaped values leave the
+        // machine, and an unsafe message is not sent at all.
+        JevRoutingInput::Sanitized => {
+            if attachment {
+                return Err(RouteFallback::UnsafeInput("attachment"));
+            }
+            crate::coordinator::sanitize::summarize(message, config.classification.max_input_chars)
+                .map_err(|refusal| RouteFallback::UnsafeInput(refusal.code()))?
+                .text
+        }
+    };
     let client = JevClient::from_config(config).map_err(RouteFallback::Jev)?;
-    let request = route_request(&config.model, message, criteria);
+    let request = route_request(&config.model, state, criteria);
     *invoked = true;
     let response = client
         .evaluate(&request, cancel)
@@ -201,16 +266,16 @@ fn route_criteria(
     criteria
 }
 
-/// The legacy router's one question. Its `state` is the user's message cut to
-/// [`bounded_message`]; that exposure is unchanged from the original router.
+/// The router's one question over `state`, which the routing-input policy
+/// prepared.
 fn route_request(
     model: &str,
-    message: &str,
+    state: String,
     criteria: BTreeMap<String, String>,
 ) -> EvaluationRequest {
     EvaluationRequest::new(
         model,
-        bounded_message(message),
+        state,
         BTreeMap::from([(
             ROUTE_QUESTION.to_owned(),
             Question::choice(ROUTE_INSTRUCTIONS, criteria),
@@ -282,7 +347,7 @@ mod tests {
                     .collect()
             })
             .unwrap_or_else(|| BTreeMap::from([("default".to_owned(), String::new())]));
-        let request = route_request("jev-test", "state", criteria);
+        let request = route_request("jev-test", "state".to_owned(), criteria);
         lightagent_jev::parse_response(value, &request)
             .ok()
             .and_then(decision_from)
@@ -669,6 +734,7 @@ mod tests {
             allowed_models: vec!["fast".to_owned(), "careful".to_owned()],
             allowed_profiles: Vec::new(),
             timeout_secs: 3,
+            routing_input: JevRoutingInput::LegacyRaw,
             classification: Default::default(),
         };
         assert_eq!(
@@ -736,7 +802,10 @@ mod tests {
         });
         let start = std::time::Instant::now();
         assert_eq!(
-            route(&config, "hello", "default", false, &cancel, &mut false).await,
+            route(
+                &config, "hello", "default", false, &cancel, &mut false, false, &mut None
+            )
+            .await,
             Err(RouteFallback::Jev(JevError::Cancelled))
         );
         assert!(start.elapsed() < Duration::from_secs(2));
@@ -754,20 +823,29 @@ mod tests {
         let cancel = CancellationToken::new();
         let (config, server) = http_case(200, "{}", Duration::ZERO).await;
         assert_eq!(
-            route(&config, "hello", "default", true, &cancel, &mut false).await,
+            route(
+                &config, "hello", "default", true, &cancel, &mut false, false, &mut None
+            )
+            .await,
             Err(RouteFallback::ExplicitModel)
         );
         let mut disabled = config.clone();
         disabled.endpoint.enabled = false;
         assert_eq!(
-            route(&disabled, "hello", "default", false, &cancel, &mut false).await,
+            route(
+                &disabled, "hello", "default", false, &cancel, &mut false, false, &mut None
+            )
+            .await,
             Err(RouteFallback::Disabled)
         );
         let mut empty = config.clone();
         empty.allowed_models = vec![" ".to_owned()];
         empty.allowed_profiles.clear();
         assert_eq!(
-            route(&empty, "hello", "default", false, &cancel, &mut false).await,
+            route(
+                &empty, "hello", "default", false, &cancel, &mut false, false, &mut None
+            )
+            .await,
             Err(RouteFallback::NoRoutes)
         );
         let mut unconfigured = config.clone();
@@ -779,7 +857,9 @@ mod tests {
                 "default",
                 false,
                 &cancel,
-                &mut false
+                &mut false,
+                false,
+                &mut None,
             )
             .await,
             Err(RouteFallback::NoEndpoint)
@@ -813,7 +893,10 @@ mod tests {
         ] {
             let (config, server) = http_case(status, body, Duration::ZERO).await;
             assert_eq!(
-                route(&config, "hello", "default", false, &cancel, &mut false).await,
+                route(
+                    &config, "hello", "default", false, &cancel, &mut false, false, &mut None
+                )
+                .await,
                 Err(expected),
                 "HTTP {status} {body}"
             );
@@ -831,7 +914,9 @@ mod tests {
                 "default",
                 false,
                 &CancellationToken::new(),
-                &mut false
+                &mut false,
+                false,
+                &mut None,
             )
             .await,
             Err(RouteFallback::Jev(JevError::RateLimited {
@@ -857,6 +942,8 @@ mod tests {
                 false,
                 &CancellationToken::new(),
                 &mut false,
+                false,
+                &mut None,
             )
             .await
             .unwrap();
@@ -884,7 +971,9 @@ mod tests {
                     auto,
                     false,
                     &CancellationToken::new(),
-                    &mut invoked
+                    &mut invoked,
+                    false,
+                    &mut None,
                 )
                 .await,
                 Err(RouteFallback::AutoRoute)
@@ -911,6 +1000,261 @@ mod tests {
         }
         assert!(!is_auto_route("automatic"));
         // No request ever reached the Jev server.
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    const MIXED_MESSAGE: &str = "Fix the build: see /srv/app/Cargo.toml and https://ci.example/run/42, token ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ012345\n```\nlet secret_value = 1;\n```";
+
+    fn sent_state(request: &str) -> String {
+        let (_, body) = request.split_once("\r\n\r\n").unwrap();
+        let body: Value = serde_json::from_str(body).unwrap();
+        body["state"].as_str().unwrap().to_owned()
+    }
+
+    #[tokio::test]
+    async fn legacy_raw_sends_the_message_and_sanitized_sends_only_the_minimized_task() {
+        let default_answer = r#"{"model":"jev-1.13.0","answers":{"route":{"type":"choice","choice":"default","confidence":0.99,"probabilities":{"default":0.99,"model:fast":0.005,"profile:careful":0.005}}}}"#;
+        let (mut config, server) = http_case(200, default_answer, Duration::ZERO).await;
+        config.routing_input = JevRoutingInput::LegacyRaw;
+        let report = route_for_turn(
+            &config,
+            MIXED_MESSAGE,
+            "default".to_owned(),
+            false,
+            false,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(report.input, Some("legacy_raw"));
+        assert!(report.invoked);
+        let raw = sent_state(&server.await.unwrap());
+        for kept in [
+            "/srv/app/Cargo.toml",
+            "https://ci.example",
+            "ghp_",
+            "secret_value",
+        ] {
+            assert!(raw.contains(kept), "legacy_raw keeps sending {kept}");
+        }
+
+        let (mut config, server) = http_case(200, default_answer, Duration::ZERO).await;
+        config.routing_input = JevRoutingInput::Sanitized;
+        let report = route_for_turn(
+            &config,
+            MIXED_MESSAGE,
+            "default".to_owned(),
+            false,
+            false,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(report.input, Some("sanitized"));
+        let sanitized = sent_state(&server.await.unwrap());
+        for removed in ["/srv/app", "ci.example", "ghp_", "secret_value", "```"] {
+            assert!(
+                !sanitized.contains(removed),
+                "sanitized must not send {removed}: {sanitized}"
+            );
+        }
+        for placeholder in ["Fix the build", "[path]", "[url]", "[secret]", "[code]"] {
+            assert!(
+                sanitized.contains(placeholder),
+                "{placeholder} missing: {sanitized}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sanitized_routing_never_sends_unsafe_input_or_attachments() {
+        let (mut config, server) = http_case(200, "{}", Duration::ZERO).await;
+        config.routing_input = JevRoutingInput::Sanitized;
+        for (message, attachment, reason) in [
+            (
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nabc",
+                false,
+                "key_material",
+            ),
+            ("summarize the dropped notes", true, "attachment"),
+            (
+                "https://a.example/x 123456789",
+                false,
+                "empty_after_sanitization",
+            ),
+        ] {
+            let mut invoked = false;
+            let mut input = None;
+            assert_eq!(
+                route(
+                    &config,
+                    message,
+                    "default",
+                    false,
+                    &CancellationToken::new(),
+                    &mut invoked,
+                    attachment,
+                    &mut input,
+                )
+                .await,
+                Err(RouteFallback::UnsafeInput(reason))
+            );
+            assert!(!invoked);
+            assert_eq!(input, Some("sanitized"));
+        }
+        // Nothing reached Jev; the configured model is kept.
+        let report = route_for_turn(
+            &config,
+            "summarize the dropped notes",
+            "default".to_owned(),
+            false,
+            true,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(report.decision.model.as_deref(), Some("default"));
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn legacy_raw_keeps_its_documented_behavior_for_attachments() {
+        let (mut config, server) = http_case(
+            200,
+            r#"{"output":{"model":"fast","confidence":1}}"#,
+            Duration::ZERO,
+        )
+        .await;
+        config.routing_input = JevRoutingInput::LegacyRaw;
+        let report = route_for_turn(
+            &config,
+            "File: notes.md\n\nprivate notes",
+            "default".to_owned(),
+            false,
+            true,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            report.invoked,
+            "legacy_raw sends an attachment turn, as before"
+        );
+        assert_eq!(report.decision.model.as_deref(), Some("fast"));
+        assert!(sent_state(&server.await.unwrap()).contains("private notes"));
+    }
+
+    /// A content-sensitive stand-in for Jev: it routes to `fast` only when it
+    /// can see the build file's path. Real routing quality is not measured
+    /// here; this shows that minimization can change a decision.
+    async fn path_sensitive_jev() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut bytes = Vec::new();
+                    let mut buf = [0; 4096];
+                    while let Ok(count) = stream.read(&mut buf).await {
+                        if count == 0 {
+                            break;
+                        }
+                        bytes.extend_from_slice(&buf[..count]);
+                        if let Some(offset) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head =
+                                String::from_utf8_lossy(&bytes[..offset]).to_ascii_lowercase();
+                            let length = head
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length:"))
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if bytes.len() >= offset + 4 + length {
+                                break;
+                            }
+                        }
+                    }
+                    let request = String::from_utf8_lossy(&bytes);
+                    let choice = if request.contains("Cargo.toml") {
+                        "model:fast"
+                    } else {
+                        "default"
+                    };
+                    let other = if choice == "default" {
+                        "model:fast"
+                    } else {
+                        "default"
+                    };
+                    let body = format!(
+                        r#"{{"model":"jev-1.13.0","answers":{{"route":{{"type":"choice","choice":"{choice}","confidence":0.99,"probabilities":{{"{choice}":0.99,"{other}":0.01}}}}}}}}"#
+                    );
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn the_two_input_policies_can_route_differently() {
+        let url = path_sensitive_jev().await;
+        let mut config = JevConfig {
+            endpoint: PlatformEndpointConfig {
+                enabled: true,
+                base_url: Some(url),
+                api_key: None,
+            },
+            allowed_models: vec!["fast".to_owned()],
+            timeout_secs: 2,
+            ..JevConfig::default()
+        };
+        let message = "Fix the failing build in /srv/app/Cargo.toml";
+        config.routing_input = JevRoutingInput::LegacyRaw;
+        let raw = route_for_turn(
+            &config,
+            message,
+            "default".to_owned(),
+            false,
+            false,
+            &CancellationToken::new(),
+        )
+        .await;
+        config.routing_input = JevRoutingInput::Sanitized;
+        let sanitized = route_for_turn(
+            &config,
+            message,
+            "default".to_owned(),
+            false,
+            false,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(raw.decision.model.as_deref(), Some("fast"));
+        assert_eq!(
+            sanitized.decision.model, None,
+            "the minimized task no longer shows the path, so this stand-in keeps the default"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_is_kept_under_both_input_policies() {
+        let (mut config, server) = http_case(200, "{}", Duration::ZERO).await;
+        for policy in [JevRoutingInput::LegacyRaw, JevRoutingInput::Sanitized] {
+            config.routing_input = policy;
+            let report = route_for_turn(
+                &config,
+                MIXED_MESSAGE,
+                "Auto".to_owned(),
+                false,
+                false,
+                &CancellationToken::new(),
+            )
+            .await;
+            assert_eq!(report.decision.model.as_deref(), Some("Auto"));
+            assert!(!report.invoked);
+            assert_eq!(report.input, None, "nothing was prepared for an Auto model");
+        }
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
     }

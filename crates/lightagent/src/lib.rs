@@ -1088,6 +1088,15 @@ fn get_key(config: &Config, key: &str) -> Option<String> {
         "platform.jev.allowed_models" => Some(config.platform.jev.allowed_models.join(",")),
         "platform.jev.allowed_profiles" => Some(config.platform.jev.allowed_profiles.join(",")),
         "platform.jev.timeout_secs" => Some(config.platform.jev.timeout_secs.to_string()),
+        "platform.jev.routing_input" => Some(config.platform.jev.routing_input.as_str().to_owned()),
+        "platform.jev.classification.workflow_guidance" => Some(
+            config
+                .platform
+                .jev
+                .classification
+                .workflow_guidance
+                .to_string(),
+        ),
         "platform.jev.classification.mode" => {
             Some(config.platform.jev.classification.mode.as_str().to_owned())
         }
@@ -1297,6 +1306,10 @@ fn set_key(config: &mut Config, key: &str, value: &str) -> Result<(), String> {
         }
         "platform.jev.timeout_secs" => {
             config.platform.jev.timeout_secs = parse_u64(value, "platform.jev.timeout_secs")?;
+        }
+        "platform.jev.routing_input" => config.platform.jev.routing_input = value.parse()?,
+        "platform.jev.classification.workflow_guidance" => {
+            config.platform.jev.classification.workflow_guidance = parse_bool(value)?;
         }
         "platform.jev.classification.mode" => {
             config.platform.jev.classification.mode = value.parse()?;
@@ -1830,6 +1843,19 @@ mod tests {
             )
             .is_err()
         );
+        set_key(&mut config, "platform.jev.routing_input", "legacy_raw").unwrap();
+        assert_eq!(
+            get_key(&config, "platform.jev.routing_input").as_deref(),
+            Some("legacy_raw")
+        );
+        assert!(set_key(&mut config, "platform.jev.routing_input", "raw").is_err());
+        set_key(
+            &mut config,
+            "platform.jev.classification.workflow_guidance",
+            "true",
+        )
+        .unwrap();
+        assert!(config.platform.jev.classification.workflow_guidance);
         set_key(
             &mut config,
             "platform.jev.classification.version_thresholds",

@@ -8,8 +8,10 @@
 //!   replaces Lightweight's `Auto`, which leaves the route to the provider.
 //! * **Task classification** (`platform.jev.classification`): describes what
 //!   the task requires. It never chooses a model, tool, approval or profile.
-//!   In `active` mode an accepted category may add one fixed, advisory
-//!   instruction about tools the run already has ([`workflow_hint`]).
+//!   The typed workflow policy ([`workflow`]) decides whether an accepted
+//!   category maps to an existing, configured and permitted capability; only
+//!   then, in `active` mode with `workflow_guidance` on, may one fixed
+//!   advisory instruction be added.
 //!
 //! They are separate Jev requests because TypeSafe evaluates every question
 //! against one shared `state`: routing's state is the original bounded message,
@@ -19,19 +21,19 @@
 //! both stop the moment the run is cancelled.
 
 mod classify;
-mod sanitize;
+pub(crate) mod sanitize;
 mod state;
 mod tool;
+pub(crate) mod workflow;
 
 use std::time::{Duration, Instant};
 
 use lightagent_core::{
     AgentProfile, ClassificationDiagnostics, Config, JevClassificationMode, ProfileStore,
 };
-use lightagent_tools::ToolRegistry;
 use tokio_util::sync::CancellationToken;
 
-pub(crate) use classify::{ClassificationReport, Outcome, TaskCategory};
+pub(crate) use classify::{ClassificationReport, Outcome};
 pub(crate) use state::{JevBudget, JevState, Trigger};
 pub(crate) use tool::{add_explicit_tool, status};
 
@@ -67,6 +69,8 @@ pub(crate) struct Preflight {
     /// Jev requests made, routing and classification together.
     pub jev_calls: u32,
     pub latency: Duration,
+    /// The routing-input policy applied, when routing prepared an input.
+    pub routing_input: Option<&'static str>,
 }
 
 /// Decide the turn's inference route and, when enabled, classify the task.
@@ -92,16 +96,22 @@ pub(crate) async fn preflight(
         .map(str::to_owned)
         .unwrap_or_else(|| crate::chat::configured_model(&profile.routing.model, config));
     let report_jev = config.platform.jev.endpoint.enabled && explicit_model.is_none();
-    let routing = crate::jev::select_route(
+    let routing = crate::jev::route_for_turn(
         &config.platform.jev,
         message,
         default_model.clone(),
         explicit_model.is_some(),
+        attachment,
         cancel,
     );
     let classification =
         classify::classify(config, profile.id.as_str(), message, attachment, cancel);
-    let ((route, route_invoked), classification) = tokio::join!(routing, classification);
+    let (report, classification) = tokio::join!(routing, classification);
+    let crate::jev::RouteReport {
+        decision: route,
+        invoked: route_invoked,
+        input: routing_input,
+    } = report;
     let routed_profile = route
         .profile
         .as_ref()
@@ -125,49 +135,7 @@ pub(crate) async fn preflight(
         classification,
         jev_calls,
         latency: started.elapsed(),
-    }
-}
-
-/// The advisory instruction an accepted `active` classification adds, if its
-/// category is mapped and the run already has the tools it mentions.
-///
-/// The text is fixed — nothing from the message or from Jev is interpolated —
-/// and it only points at tools already in `registry`, whose approval policy is
-/// unchanged. Unmapped categories stay advisory.
-pub(crate) fn workflow_hint(
-    report: &ClassificationReport,
-    registry: &ToolRegistry,
-) -> Option<&'static str> {
-    if report.mode != JevClassificationMode::Active {
-        return None;
-    }
-    let Outcome::Classified(classification) = &report.outcome else {
-        return None;
-    };
-    if !classification.accepted() {
-        return None;
-    }
-    let has_any = |names: &[&str]| names.iter().any(|name| registry.contains(name));
-    match classification.category {
-        TaskCategory::Research if has_any(&["rag.realtime", "web.search", "rag.search"]) => Some(
-            "# Task assessment (advisory)\n\
-             This request appears to need current or external information. Where it helps, \
-             gather evidence with the retrieval tools you already have before answering, and \
-             cite the sources you used. This assessment grants no additional permissions.",
-        ),
-        TaskCategory::Coding if has_any(&["fs.read", "fs.list"]) => Some(
-            "# Task assessment (advisory)\n\
-             This request appears to involve code or configuration in the workspace. Inspect \
-             the relevant files with the workspace tools you already have before proposing \
-             changes. Every change remains subject to the usual approval.",
-        ),
-        TaskCategory::MultiStep if has_any(&["agent.delegate"]) => Some(
-            "# Task assessment (advisory)\n\
-             This request appears to have several distinct parts. Outline the steps before \
-             acting, and delegate a part only where delegation is already permitted. This \
-             assessment grants no additional permissions.",
-        ),
-        _ => None,
+        routing_input,
     }
 }
 
@@ -200,7 +168,7 @@ pub(crate) fn build_diagnostics(
     influenced: bool,
 ) -> ClassificationDiagnostics {
     let mut diagnostics = ClassificationDiagnostics {
-        schema: 1,
+        schema: 2,
         trigger: trigger.as_str().to_owned(),
         mode: mode.as_str().to_owned(),
         outcome: String::new(),
@@ -222,6 +190,7 @@ pub(crate) fn build_diagnostics(
         preflight_latency_ms: state::millis(total_latency),
         fallback_reason: None,
         influenced,
+        ..ClassificationDiagnostics::default()
     };
     match outcome {
         Outcome::Classified(classification) => {
@@ -233,6 +202,7 @@ pub(crate) fn build_diagnostics(
             }
             .to_owned();
             diagnostics.fallback_reason = (!accepted).then(|| "low_confidence".to_owned());
+            diagnostics.accepted = Some(accepted);
             diagnostics.source = Some("jev".to_owned());
             diagnostics.category = Some(classification.category.as_str().to_owned());
             diagnostics.category_confidence = Some(classification.category_confidence);
@@ -259,6 +229,29 @@ pub(crate) fn build_diagnostics(
     diagnostics
 }
 
+/// Add the workflow decision and routing input to a classification record.
+pub(crate) fn annotate(
+    diagnostics: &mut ClassificationDiagnostics,
+    decision: &workflow::WorkflowDecision,
+    selection: Duration,
+    routing_input: Option<&str>,
+) {
+    diagnostics.workflow = decision
+        .workflow
+        .map(|workflow| workflow.as_str().to_owned());
+    diagnostics.workflow_capability = decision
+        .workflow
+        .map(|workflow| workflow.capability().to_owned());
+    diagnostics.workflow_eligibility = Some(decision.eligibility.as_str().to_owned());
+    diagnostics.workflow_applied = decision.applied;
+    diagnostics.influenced = decision.applied;
+    diagnostics.available_tools = decision.workflow.map(|_| decision.available_tools);
+    diagnostics.approval_required = decision.workflow.map(|_| decision.approval_required);
+    diagnostics.workflow_selection_us =
+        Some(u64::try_from(selection.as_micros()).unwrap_or(u64::MAX));
+    diagnostics.routing_input = routing_input.map(str::to_owned);
+}
+
 /// One terminal line describing the classification, or `None` when off.
 pub(crate) fn terminal_summary(report: &ClassificationReport) -> String {
     match &report.outcome {
@@ -283,6 +276,7 @@ pub(crate) fn terminal_summary(report: &ClassificationReport) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::classify::TaskCategory;
     use super::classify::tests::{answer, config, jev_stub};
     use super::*;
     use lightagent_core::ProfileId;
@@ -444,16 +438,6 @@ mod tests {
         assert!(seen.lock().unwrap().len() <= 2);
     }
 
-    fn registry(names: &[&str]) -> ToolRegistry {
-        let all = ToolRegistry::builtin();
-        all.scoped(
-            &names
-                .iter()
-                .map(|name| (*name).to_owned())
-                .collect::<Vec<_>>(),
-        )
-    }
-
     fn report(
         mode: JevClassificationMode,
         category: TaskCategory,
@@ -479,54 +463,6 @@ mod tests {
     }
 
     #[test]
-    fn active_hints_are_fixed_advisory_and_limited_to_tools_the_run_has() {
-        let research = report(JevClassificationMode::Active, TaskCategory::Research, 0.95);
-        let with_search = registry(&["web.search", "web.fetch"]);
-        let hint = workflow_hint(&research, &with_search).unwrap();
-        assert!(hint.contains("advisory"));
-        assert!(hint.contains("grants no additional permissions"));
-        // Without a retrieval tool there is nothing to point at.
-        assert_eq!(workflow_hint(&research, &registry(&["datetime.now"])), None);
-        // Shadow never influences; low confidence never influences.
-        let shadow = report(JevClassificationMode::Shadow, TaskCategory::Research, 0.95);
-        assert_eq!(workflow_hint(&shadow, &with_search), None);
-        let unsure = report(JevClassificationMode::Active, TaskCategory::Research, 0.5);
-        assert_eq!(workflow_hint(&unsure, &with_search), None);
-        // Unmapped categories stay advisory.
-        for category in [
-            TaskCategory::Conversation,
-            TaskCategory::Analysis,
-            TaskCategory::Automation,
-        ] {
-            let everything = ToolRegistry::builtin();
-            assert_eq!(
-                workflow_hint(
-                    &report(JevClassificationMode::Active, category, 0.99),
-                    &everything
-                ),
-                None
-            );
-        }
-        let coding = report(JevClassificationMode::Active, TaskCategory::Coding, 0.95);
-        assert!(workflow_hint(&coding, &registry(&["fs.read"])).is_some());
-        assert_eq!(workflow_hint(&coding, &registry(&["web.search"])), None);
-        let steps = report(JevClassificationMode::Active, TaskCategory::MultiStep, 0.95);
-        assert!(workflow_hint(&steps, &registry(&["agent.delegate"])).is_some());
-        assert_eq!(workflow_hint(&steps, &registry(&[])), None);
-    }
-
-    #[test]
-    fn a_hint_never_changes_the_registry() {
-        let registry = registry(&["web.search", "web.fetch"]);
-        let before = registry.names();
-        let _ = workflow_hint(
-            &report(JevClassificationMode::Active, TaskCategory::Research, 0.99),
-            &registry,
-        );
-        assert_eq!(registry.names(), before);
-    }
-
-    #[test]
     fn diagnostics_hold_only_fixed_vocabulary_and_numbers() {
         let preflight = Preflight {
             model: "m".to_owned(),
@@ -539,6 +475,7 @@ mod tests {
             )),
             jev_calls: 1,
             latency: Duration::from_millis(7),
+            routing_input: None,
         };
         let diagnostics = diagnostics(&preflight, true).unwrap();
         assert_eq!(diagnostics.outcome, "classified");

@@ -350,6 +350,10 @@ struct UiJevSettings {
     /// leaves the saved classification settings unchanged.
     #[serde(default)]
     classification: Option<UiJevClassification>,
+    /// What model routing sends: `legacy_raw` or `sanitized`. Absent from an
+    /// older client's request, which leaves the saved policy unchanged.
+    #[serde(default)]
+    routing_input: Option<lightagent_core::JevRoutingInput>,
     /// Write-only credential submitted from the Settings screen. It is never
     /// serialized in a settings response.
     #[serde(default, skip_serializing)]
@@ -367,6 +371,9 @@ struct UiJevClassification {
     version_thresholds: std::collections::BTreeMap<String, f32>,
     explicit_tool: bool,
     max_calls_per_run: u32,
+    /// Absent from an older client's request, which leaves it unchanged.
+    #[serde(default)]
+    workflow_guidance: Option<bool>,
 }
 
 /// Non-sensitive settings for Qdrant's retrieval adapter.
@@ -458,7 +465,9 @@ fn ui_settings(config: &lightagent_core::Config) -> UiSettings {
                     .clone(),
                 explicit_tool: config.platform.jev.classification.explicit_tool,
                 max_calls_per_run: config.platform.jev.classification.max_calls_per_run,
+                workflow_guidance: Some(config.platform.jev.classification.workflow_guidance),
             }),
+            routing_input: Some(config.platform.jev.routing_input),
             api_key: None,
         },
         qdrant: UiQdrantSettings {
@@ -620,6 +629,12 @@ async fn save_settings(
         classification.version_thresholds = value.version_thresholds;
         classification.explicit_tool = value.explicit_tool;
         classification.max_calls_per_run = value.max_calls_per_run;
+        if let Some(workflow_guidance) = value.workflow_guidance {
+            classification.workflow_guidance = workflow_guidance;
+        }
+    }
+    if let Some(routing_input) = settings.jev.routing_input {
+        config.platform.jev.routing_input = routing_input;
     }
     if let Err(error) = apply_jev_api_key(&mut config, store, settings.jev.api_key) {
         return internal(&error);

@@ -145,7 +145,7 @@ export async function checkJevStates(browser, base, outDir) {
 
   try {
     // 1. Nothing configured.
-    await capture("01-not-configured", ["Not configured", "Disabled", "Not verified", "Off"]);
+    await capture("01-not-configured", ["Not configured", "Disabled", "Not verified", "Off", "Sanitized task"]);
 
     // 2. An endpoint without a credential.
     await configure({ jev: { enabled: true, base_url: `${stubUrl}/ok` } });
@@ -209,7 +209,9 @@ export async function checkJevStates(browser, base, outDir) {
     await api("/runs", { method: "POST", body: JSON.stringify({ message: "Find recent papers on solid-state batteries" }) });
     const classified = await waitForClassification("classified");
     if (JSON.stringify(classified).includes("batteries")) failures.push("classified: diagnostics contain message text");
-    await capture("11-classified", ["Classified", "research", "Automatic"]);
+    // Web tools are off in this harness, so the research workflow has no
+    // retrieval capability to point at: evaluated, not applied.
+    await capture("11-classified", ["Classified", "research", "Automatic", "not configured", "Advisory only"]);
 
     // 12. A low-confidence classification falls back.
     await configure({ jev: { base_url: `${stubUrl}/low` } });
@@ -234,12 +236,21 @@ export async function checkJevStates(browser, base, outDir) {
       (await api("/settings")).jev.classification.version_thresholds["jev-1.13.0"] === 0.8))) {
       failures.push("controls: a valid version threshold did not save");
     }
+    await page.getByLabel("What model routing sends to Jev").selectOption("legacy_raw");
+    if (!(await eventually(async () => (await api("/settings")).jev.routing_input === "legacy_raw"))) {
+      failures.push("controls: choosing legacy raw routing input did not save");
+    }
+    await page.getByLabel("What model routing sends to Jev").selectOption("sanitized");
+    await page.getByRole("switch", { name: "Workflow guidance" }).click();
+    if (!(await eventually(async () => (await api("/settings")).jev.classification.workflow_guidance === true))) {
+      failures.push("controls: the workflow guidance switch did not save");
+    }
     const check = page.getByRole("button", { name: "Test connection" });
     await check.focus();
     await page.keyboard.press("Enter");
     await page.getByRole("status").filter({ hasText: "Connection verified" }).waitFor({ timeout: 10000 });
     await endpointsCard().screenshot({ path: `${dir}/13-controls-dark.png` });
-    console.log("  [ok] jev controls: select, inline validation, keyboard connection check");
+    console.log("  [ok] jev controls: selects, switches, inline validation, keyboard connection check");
   } catch (error) {
     failures.push(`jev states: ${error instanceof Error ? error.message : String(error)}`);
   } finally {

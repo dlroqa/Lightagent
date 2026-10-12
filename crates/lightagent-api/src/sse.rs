@@ -78,6 +78,15 @@ pub fn data(event: &AgentEvent) -> serde_json::Value {
             "preflight_latency_ms": d.preflight_latency_ms,
             "fallback_reason": d.fallback_reason,
             "influenced": d.influenced,
+            "accepted": d.accepted,
+            "workflow": d.workflow,
+            "workflow_eligibility": d.workflow_eligibility,
+            "workflow_capability": d.workflow_capability,
+            "workflow_applied": d.workflow_applied,
+            "available_tools": d.available_tools,
+            "approval_required": d.approval_required,
+            "workflow_selection_us": d.workflow_selection_us,
+            "routing_input": d.routing_input,
         }),
         AgentEvent::ToolCallRequested { call } => json!({
             "id": call.id,
@@ -159,6 +168,10 @@ mod tests {
                 preflight_latency_ms: 43,
                 fallback_reason: None,
                 influenced: false,
+                accepted: Some(true),
+                workflow: Some("research".into()),
+                workflow_eligibility: Some("eligible".into()),
+                ..Default::default()
             }),
         };
         assert_eq!(name(&classified), "classification.completed");
@@ -167,7 +180,12 @@ mod tests {
         assert_eq!(payload["category"], "research");
         assert_eq!(payload["fallback_reason"], serde_json::Value::Null);
         assert_eq!(payload["trigger"], "preflight");
-        assert_eq!(payload.as_object().unwrap().len(), 22);
+        assert_eq!(payload["workflow_eligibility"], "eligible");
+        assert_eq!(payload["workflow_applied"], false);
+        assert_eq!(payload["routing_input"], serde_json::Value::Null);
+        // Every schema-1 field is still present, unchanged, beside the
+        // additive schema-2 fields.
+        assert_eq!(payload.as_object().unwrap().len(), 31);
     }
 
     #[test]
