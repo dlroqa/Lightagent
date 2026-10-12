@@ -429,6 +429,9 @@ pub(crate) mod tests {
         config.platform.jev.timeout_secs = 2;
         config.platform.jev.classification.mode = mode;
         config.platform.jev.classification.allowed_profiles = vec!["permitted".to_owned()];
+        // Routing applies only once a test allowlists a route; the same
+        // profile may then route, under the strict permission.
+        config.platform.jev.routing_allowed_profiles = vec!["permitted".to_owned()];
         config
     }
 

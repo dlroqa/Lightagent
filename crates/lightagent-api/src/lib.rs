@@ -354,6 +354,16 @@ struct UiJevSettings {
     /// older client's request, which leaves the saved policy unchanged.
     #[serde(default)]
     routing_input: Option<lightagent_core::JevRoutingInput>,
+    /// Which profiles may send task content to Jev for model routing:
+    /// `strict` or the `legacy_all_profiles` compatibility policy. Absent
+    /// from an older client's request, which leaves it unchanged.
+    #[serde(default)]
+    routing_permission: Option<lightagent_core::JevRoutingPermission>,
+    /// Profiles permitted to send task content for model routing under
+    /// `strict`. Absent from an older client's request, which leaves it
+    /// unchanged.
+    #[serde(default)]
+    routing_allowed_profiles: Option<Vec<String>>,
     /// Write-only credential submitted from the Settings screen. It is never
     /// serialized in a settings response.
     #[serde(default, skip_serializing)]
@@ -468,6 +478,8 @@ fn ui_settings(config: &lightagent_core::Config) -> UiSettings {
                 workflow_guidance: Some(config.platform.jev.classification.workflow_guidance),
             }),
             routing_input: Some(config.platform.jev.routing_input),
+            routing_permission: Some(config.platform.jev.routing_permission),
+            routing_allowed_profiles: Some(config.platform.jev.routing_allowed_profiles.clone()),
             api_key: None,
         },
         qdrant: UiQdrantSettings {
@@ -635,6 +647,12 @@ async fn save_settings(
     }
     if let Some(routing_input) = settings.jev.routing_input {
         config.platform.jev.routing_input = routing_input;
+    }
+    if let Some(routing_permission) = settings.jev.routing_permission {
+        config.platform.jev.routing_permission = routing_permission;
+    }
+    if let Some(profiles) = settings.jev.routing_allowed_profiles {
+        config.platform.jev.routing_allowed_profiles = profiles;
     }
     if let Err(error) = apply_jev_api_key(&mut config, store, settings.jev.api_key) {
         return internal(&error);

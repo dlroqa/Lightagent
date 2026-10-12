@@ -166,12 +166,19 @@ export interface JevSettings extends PlatformEndpointSettings {
   classification?: JevClassificationSettings;
   /** What model routing sends to Jev. Absent from older servers. */
   routing_input?: JevRoutingInput;
+  /** Which profiles may send task content to Jev for model routing. Absent from older servers. */
+  routing_permission?: JevRoutingPermission;
+  /** Profiles permitted to send task content for model routing under `strict`. */
+  routing_allowed_profiles?: string[];
   /** Write-only: submitted to the server but never returned in settings responses. */
   api_key?: string;
 }
 
 export type JevClassificationMode = "off" | "shadow" | "active";
 export type JevRoutingInput = "legacy_raw" | "sanitized";
+/** `legacy_all_profiles` is the compatibility policy for configurations that predate the permission. */
+export type JevRoutingPermission = "strict" | "legacy_all_profiles";
+export type JevRoutingGrant = "allowed" | "compatibility" | "denied";
 
 export interface JevClassificationSettings {
   mode: JevClassificationMode;
@@ -243,6 +250,13 @@ export interface JevStatus {
   enabled: boolean;
   model: string;
   routing_input?: JevRoutingInput;
+  /** Model-routing permission for this profile. Absent from older servers. */
+  routing?: {
+    permission_policy: JevRoutingPermission;
+    compatibility: boolean;
+    profile_permission: JevRoutingGrant;
+    allowed_profiles: string[];
+  };
   verification: JevVerification | null;
   classification: {
     mode: JevClassificationMode;

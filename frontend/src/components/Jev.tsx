@@ -7,7 +7,9 @@ import {
   type JevClassificationMode,
   type JevClassificationSettings,
   type JevDiagnostics,
+  type JevRoutingGrant,
   type JevRoutingInput,
+  type JevRoutingPermission,
   type JevSettings,
   type JevStatus,
   type ProfileSummary,
@@ -28,6 +30,18 @@ const OUTCOME_LABEL: Record<JevDiagnostics["outcome"], string> = {
   skipped: "Skipped",
   failed: "Failed — fell back",
 };
+
+const GRANT_LABEL: Record<JevRoutingGrant, { label: string; tone: Tone }> = {
+  allowed: { label: "Allowed", tone: "ok" },
+  compatibility: { label: "Compatibility", tone: "warn" },
+  denied: { label: "Denied", tone: "neutral" },
+};
+
+/** A profile's model-routing permission, decided as the server decides it. */
+export function routingGrant(policy: JevRoutingPermission, allowed: string[], profile: string): JevRoutingGrant {
+  if (policy === "legacy_all_profiles") return "compatibility";
+  return allowed.includes(profile) ? "allowed" : "denied";
+}
 
 /** Configured, enabled and verified are separate facts and are shown separately. */
 export function jevStates(status: JevStatus): { label: string; tone: Tone }[] {
@@ -179,6 +193,14 @@ export function JevToolCard() {
           <dt>Workflow guidance</dt>
           <dd>{status.classification.workflow_guidance ? "On (active mode only)" : "Off"}</dd>
         </div>
+        {status.routing && <div>
+          <dt>Model routing permission</dt>
+          <dd>{status.routing.profile_permission === "allowed"
+            ? `Allowed for ${status.profile}`
+            : status.routing.profile_permission === "compatibility"
+              ? `Compatibility policy: every profile, including ${status.profile}`
+              : `Denied for ${status.profile}`}</dd>
+        </div>}
         <div>
           <dt>Routing input</dt>
           <dd>{status.routing_input === "legacy_raw" ? "Legacy raw message" : "Sanitized task"}</dd>
@@ -283,6 +305,9 @@ export function JevClassificationSection({ endpoint, profiles, status, disabled,
           role={checkMessage.startsWith("Connection verified") ? "status" : "alert"}>{checkMessage}</p>}
       </div>
 
+      {endpoint.routing_permission && <RoutingPermissionSection endpoint={endpoint} profiles={profiles}
+        disabled={disabled} onSave={onSave} />}
+
       {endpoint.routing_input && <div className="jev-section">
         <h4 className="jev-section__title">Model routing input</h4>
         <div className="field">
@@ -318,7 +343,7 @@ export function JevClassificationSection({ endpoint, profiles, status, disabled,
           </p>
         </div>
         <fieldset className="jev-profiles" disabled={locked} style={{ marginTop: 10 }}>
-          <legend className="field__label">Profiles permitted to send a sanitized task description</legend>
+          <legend className="field__label">Task classification permission: profiles permitted to send a sanitized task description</legend>
           {profiles.length === 0 && <span className="jev-hint">No profiles reported.</span>}
           {profiles.map((profile) => {
             const checked = classification.allowed_profiles.includes(profile.id);
@@ -335,7 +360,10 @@ export function JevClassificationSection({ endpoint, profiles, status, disabled,
             );
           })}
         </fieldset>
-        <p className="jev-hint">Profiles not listed never contact Jev for classification.</p>
+        <p className="jev-hint">
+          Profiles not listed never contact Jev for classification. Separate from model routing permission:
+          granting one never grants the other.
+        </p>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10 }}>
           <NumberField id="jev-max-input" label="Maximum sanitized input (characters)" value={classification.max_input_chars}
             min={32} max={2000} step={1} disabled={locked} onSave={(max_input_chars) => save({ max_input_chars })} />
@@ -384,6 +412,78 @@ export function JevClassificationSection({ endpoint, profiles, status, disabled,
         <h4 className="jev-section__title">Last classification for {status?.profile ?? "this profile"}</h4>
         <JevDiagnosticsView diagnostics={status?.last_classification ?? null} />
       </div>
+    </div>
+  );
+}
+
+/** Which profiles may send task content to Jev for model routing. */
+function RoutingPermissionSection({ endpoint, profiles, disabled, onSave }: {
+  endpoint: JevSettings;
+  profiles: ProfileSummary[];
+  disabled: boolean;
+  onSave: (settings: JevSettings) => Promise<void>;
+}) {
+  const policy = endpoint.routing_permission ?? "strict";
+  const allowed = endpoint.routing_allowed_profiles ?? [];
+  const compatibility = policy === "legacy_all_profiles";
+  const listed = new Set(profiles.map((profile) => profile.id));
+  const missing = allowed.filter((id) => !listed.has(id));
+  return (
+    <div className="jev-section" data-testid="jev-routing-permission">
+      <h4 className="jev-section__title">Model routing permission</h4>
+      <div className="field">
+        <label className="field__label" htmlFor="jev-routing-permission">Routing permission policy</label>
+        <select id="jev-routing-permission" className="select" value={policy} disabled={disabled}
+          aria-describedby="jev-routing-permission-hint"
+          onChange={(event) => void onSave({ ...endpoint, routing_permission: event.target.value as JevRoutingPermission })}>
+          <option value="strict">Strict: only the profiles checked below</option>
+          {/* Offered only while it is the saved policy: this screen never widens disclosure back to every profile. */}
+          {compatibility && <option value="legacy_all_profiles">Compatibility: every profile (legacy behavior)</option>}
+        </select>
+        <p className="jev-hint" id="jev-routing-permission-hint">
+          Controls whether a profile may send task content to Jev for model selection. Checked on the server
+          for the run&apos;s profile before any routing input is prepared; a profile that is not permitted keeps
+          its configured model and nothing is sent. Lightweight&apos;s Auto is never routed.
+        </p>
+      </div>
+      {compatibility && (
+        <p className="jev-warning" role="note" data-testid="jev-routing-compatibility">
+          Compatibility policy: this configuration predates the routing permission, so every profile, including
+          new ones, may send task content to Jev for model routing. Check the profiles that should keep routing,
+          then choose Strict.
+        </p>
+      )}
+      <fieldset className="jev-profiles" disabled={disabled} style={{ marginTop: 10 }}>
+        <legend className="field__label">
+          Model routing permission: profiles permitted to send task content for routing{compatibility ? " (applies under Strict)" : ""}
+        </legend>
+        {profiles.length === 0 && <span className="jev-hint">No profiles reported.</span>}
+        {profiles.map((profile) => {
+          const checked = allowed.includes(profile.id);
+          const grant = GRANT_LABEL[routingGrant(policy, allowed, profile.id)];
+          return (
+            <label key={profile.id} className="jev-check">
+              <input type="checkbox" checked={checked}
+                onChange={() => void onSave({
+                  ...endpoint,
+                  routing_allowed_profiles: checked
+                    ? allowed.filter((id) => id !== profile.id)
+                    : [...allowed, profile.id],
+                })} />
+              {profile.name} <span className="muted">({profile.id})</span>
+              <Pill tone={grant.tone}>{grant.label}</Pill>
+            </label>
+          );
+        })}
+      </fieldset>
+      {missing.length > 0 && (
+        <p className="jev-hint">Also listed, but not found as a profile: {missing.join(", ")}.</p>
+      )}
+      <p className="jev-hint">
+        Separate from task classification permission. A profile permission is not proof of who is acting:
+        anyone who can run a profile can use its permission. Legacy raw routing input can send sensitive
+        content even for a permitted profile; for sensitive profiles prefer Sanitized, or leave them unchecked.
+      </p>
     </div>
   );
 }

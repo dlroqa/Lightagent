@@ -178,6 +178,10 @@ enum ConfigAction {
     Get { key: String },
     /// Set one dotted key.
     Set { key: String, value: String },
+    /// Dry run: report which profiles may send task content to Jev for model
+    /// routing now, and which would be denied under the strict policy.
+    /// Reads only; changes nothing.
+    JevRoutingReport,
 }
 
 #[derive(Subcommand)]
@@ -1022,7 +1026,136 @@ fn config_cmd(action: ConfigAction, json: bool) -> Result<(), String> {
             println!("Set {key} = {value}");
             Ok(())
         }
+        ConfigAction::JevRoutingReport => {
+            let config = store.load().map_err(|error| error.to_string())?;
+            let profiles = ProfileStore::new(paths.root())
+                .list()
+                .map_err(|error| error.to_string())?;
+            let report = jev_routing_report(&config, &profiles);
+            if json {
+                println!("{report}");
+            } else {
+                print!("{}", jev_routing_report_text(&report));
+            }
+            Ok(())
+        }
     }
+}
+
+/// The routing-permission dry run: for every profile on disk (and the
+/// built-in `default`), whether it may route now and under `strict`. Profile
+/// ids and fixed vocabulary only; no message, session or key is read.
+fn jev_routing_report(config: &Config, profiles: &[ProfileId]) -> serde_json::Value {
+    let jev = &config.platform.jev;
+    let strict = lightagent_core::JevConfig {
+        routing_permission: lightagent_core::JevRoutingPermission::Strict,
+        ..jev.clone()
+    };
+    let mut ids: Vec<String> = profiles.iter().map(|id| id.as_str().to_owned()).collect();
+    if !ids.iter().any(|id| id == "default") {
+        ids.push("default".to_owned());
+    }
+    ids.sort();
+    ids.dedup();
+    let rows: Vec<serde_json::Value> = ids
+        .iter()
+        .map(|id| {
+            serde_json::json!({
+                "profile": id,
+                "now": jev.routing_grant(id).as_str(),
+                "under_strict": strict.routing_grant(id).as_str(),
+            })
+        })
+        .collect();
+    let denied: Vec<&String> = ids
+        .iter()
+        .filter(|id| !strict.routing_grant(id).permits())
+        .collect();
+    let unknown: Vec<&String> = jev
+        .routing_allowed_profiles
+        .iter()
+        .filter(|allowed| !ids.contains(allowed))
+        .collect();
+    let routing_active = jev.endpoint.enabled
+        && (jev
+            .allowed_models
+            .iter()
+            .any(|model| !model.trim().is_empty())
+            || !jev.allowed_profiles.is_empty());
+    serde_json::json!({
+        "report": "jev-routing-permission-dry-run",
+        "changes_made": false,
+        "routing_enabled": routing_active,
+        "routing_input": jev.routing_input.as_str(),
+        "permission_policy": jev.routing_permission.as_str(),
+        "compatibility": jev.routing_permission == lightagent_core::JevRoutingPermission::LegacyAllProfiles,
+        "profiles": rows,
+        "denied_under_strict": denied,
+        "allowed_profiles_not_found": unknown,
+    })
+}
+
+fn jev_routing_report_text(report: &serde_json::Value) -> String {
+    let text = |value: &serde_json::Value| value.as_str().unwrap_or_default().to_owned();
+    let mut out = String::from("Jev model-routing permission (dry run; nothing was changed)\n\n");
+    out.push_str(&format!(
+        "Policy: {}{}\nRouting active: {}\nRouting input: {}\n\n",
+        text(&report["permission_policy"]),
+        if report["compatibility"] == true {
+            " (compatibility: every profile may send task content for routing)"
+        } else {
+            ""
+        },
+        if report["routing_enabled"] == true {
+            "yes"
+        } else {
+            "no"
+        },
+        text(&report["routing_input"]),
+    ));
+    out.push_str("Profile                        Now            Under strict\n");
+    for row in report["profiles"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "{:<30} {:<14} {}\n",
+            text(&row["profile"]),
+            text(&row["now"]),
+            text(&row["under_strict"]),
+        ));
+    }
+    let denied: Vec<String> = report["denied_under_strict"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(text)
+        .collect();
+    let unknown: Vec<String> = report["allowed_profiles_not_found"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(text)
+        .collect();
+    if !unknown.is_empty() {
+        out.push_str(&format!(
+            "\nListed but not found on disk: {}\n",
+            unknown.join(", ")
+        ));
+    }
+    out.push_str(&format!(
+        "\nDenied under strict: {}\n",
+        if denied.is_empty() {
+            "none".to_owned()
+        } else {
+            denied.join(", ")
+        }
+    ));
+    if report["compatibility"] == true {
+        out.push_str(
+            "\nTo enforce, grant the profiles that should keep routing, then switch the policy:\n  \
+             lightagent config set platform.jev.routing_allowed_profiles <profile,...>\n  \
+             lightagent config set platform.jev.routing_permission strict\n",
+        );
+    }
+    out
 }
 
 /// Read a small, fixed set of dotted keys.
@@ -1089,6 +1222,12 @@ fn get_key(config: &Config, key: &str) -> Option<String> {
         "platform.jev.allowed_profiles" => Some(config.platform.jev.allowed_profiles.join(",")),
         "platform.jev.timeout_secs" => Some(config.platform.jev.timeout_secs.to_string()),
         "platform.jev.routing_input" => Some(config.platform.jev.routing_input.as_str().to_owned()),
+        "platform.jev.routing_permission" => {
+            Some(config.platform.jev.routing_permission.as_str().to_owned())
+        }
+        "platform.jev.routing_allowed_profiles" => {
+            Some(config.platform.jev.routing_allowed_profiles.join(","))
+        }
         "platform.jev.classification.workflow_guidance" => Some(
             config
                 .platform
@@ -1308,6 +1447,17 @@ fn set_key(config: &mut Config, key: &str, value: &str) -> Result<(), String> {
             config.platform.jev.timeout_secs = parse_u64(value, "platform.jev.timeout_secs")?;
         }
         "platform.jev.routing_input" => config.platform.jev.routing_input = value.parse()?,
+        "platform.jev.routing_permission" => {
+            config.platform.jev.routing_permission = value.parse()?;
+        }
+        "platform.jev.routing_allowed_profiles" => {
+            config.platform.jev.routing_allowed_profiles = value
+                .split(',')
+                .map(str::trim)
+                .filter(|profile| !profile.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
         "platform.jev.classification.workflow_guidance" => {
             config.platform.jev.classification.workflow_guidance = parse_bool(value)?;
         }
@@ -1870,5 +2020,130 @@ mod tests {
                 .version_thresholds
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn routing_permission_keys_round_trip_and_reject_invalid_values() {
+        let mut config = Config::default();
+        assert_eq!(
+            get_key(&config, "platform.jev.routing_permission").as_deref(),
+            Some("strict")
+        );
+        assert_eq!(
+            get_key(&config, "platform.jev.routing_allowed_profiles").as_deref(),
+            Some("")
+        );
+        set_key(
+            &mut config,
+            "platform.jev.routing_allowed_profiles",
+            " lead , research ,",
+        )
+        .unwrap();
+        assert_eq!(
+            config.platform.jev.routing_allowed_profiles,
+            ["lead", "research"]
+        );
+        set_key(
+            &mut config,
+            "platform.jev.routing_permission",
+            "legacy_all_profiles",
+        )
+        .unwrap();
+        assert_eq!(
+            get_key(&config, "platform.jev.routing_permission").as_deref(),
+            Some("legacy_all_profiles")
+        );
+        for invalid in ["all", "", "true", "allow"] {
+            assert!(
+                set_key(&mut config, "platform.jev.routing_permission", invalid).is_err(),
+                "{invalid:?}"
+            );
+        }
+        assert_eq!(
+            config.platform.jev.routing_permission,
+            lightagent_core::JevRoutingPermission::LegacyAllProfiles,
+            "a refused value leaves the policy as it was"
+        );
+        set_key(
+            &mut config,
+            "platform.jev.routing_allowed_profiles",
+            "Bad Id!",
+        )
+        .unwrap();
+        assert!(
+            config.validate().is_err(),
+            "an invalid id is refused on save"
+        );
+        // Clearing the list revokes every profile under strict.
+        set_key(&mut config, "platform.jev.routing_allowed_profiles", "").unwrap();
+        set_key(&mut config, "platform.jev.routing_permission", "strict").unwrap();
+        assert!(config.validate().is_ok());
+        assert!(!config.platform.jev.routing_grant("lead").permits());
+    }
+
+    /// The dry-run report over a synthetic installation: an existing routing
+    /// configuration under the compatibility policy, three profiles on disk,
+    /// one of them granted ahead of the switch.
+    fn synthetic_routing_installation() -> (Config, Vec<ProfileId>) {
+        let config: Config = serde_json::from_str(
+            r#"{"platform":{"jev":{"enabled":true,"base_url":"https://jev.invalid","allowed_models":["fast"],"routing_input":"legacy_raw","routing_allowed_profiles":["lead","retired"]}}}"#,
+        )
+        .unwrap();
+        let profiles = ["lead", "research", "sensitive"]
+            .map(|id| ProfileId::new(id).unwrap())
+            .to_vec();
+        (config, profiles)
+    }
+
+    #[test]
+    fn routing_report_lists_who_strict_would_deny_and_changes_nothing() {
+        let (config, profiles) = synthetic_routing_installation();
+        let before = config.clone();
+        let report = jev_routing_report(&config, &profiles);
+        assert_eq!(config, before, "a dry run changes nothing");
+        assert_eq!(report["changes_made"], false);
+        assert_eq!(report["compatibility"], true);
+        assert_eq!(report["permission_policy"], "legacy_all_profiles");
+        assert_eq!(
+            report["denied_under_strict"],
+            serde_json::json!(["default", "research", "sensitive"])
+        );
+        assert_eq!(
+            report["allowed_profiles_not_found"],
+            serde_json::json!(["retired"])
+        );
+        assert_eq!(
+            jev_routing_report_text(&report),
+            "Jev model-routing permission (dry run; nothing was changed)\n\
+             \n\
+             Policy: legacy_all_profiles (compatibility: every profile may send task content for routing)\n\
+             Routing active: yes\n\
+             Routing input: legacy_raw\n\
+             \n\
+             Profile                        Now            Under strict\n\
+             default                        compatibility  denied\n\
+             lead                           compatibility  allowed\n\
+             research                       compatibility  denied\n\
+             sensitive                      compatibility  denied\n\
+             \n\
+             Listed but not found on disk: retired\n\
+             \n\
+             Denied under strict: default, research, sensitive\n\
+             \n\
+             To enforce, grant the profiles that should keep routing, then switch the policy:\n  \
+             lightagent config set platform.jev.routing_allowed_profiles <profile,...>\n  \
+             lightagent config set platform.jev.routing_permission strict\n"
+        );
+        // Only profile ids and fixed vocabulary: no endpoint or key.
+        assert!(!report.to_string().contains("jev.invalid"));
+
+        // After the operator switches, the report shows enforcement.
+        let mut strict = config.clone();
+        strict.platform.jev.routing_permission = lightagent_core::JevRoutingPermission::Strict;
+        let report = jev_routing_report(&strict, &profiles);
+        assert_eq!(report["compatibility"], false);
+        assert_eq!(report["profiles"][1]["now"], "allowed");
+        assert_eq!(report["profiles"][2]["now"], "denied");
+        assert!(!jev_routing_report_text(&report).contains("To enforce"));
     }
 }

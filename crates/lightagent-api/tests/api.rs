@@ -921,3 +921,178 @@ async fn classification_settings_round_trip_without_touching_routing() {
     );
     std::fs::remove_dir_all(root).ok();
 }
+
+#[tokio::test]
+async fn routing_permission_settings_round_trip_and_need_the_administrator() {
+    let root = std::env::temp_dir().join(format!(
+        "lightagent-routing-settings-{}",
+        lightagent_core::RunId::new().as_str()
+    ));
+    let config_store = ConfigStore::new(root.join("config.json"));
+    let profiles = ProfileStore::new(&root);
+    let profile = AgentProfile::new(
+        ProfileId::new("default").unwrap(),
+        "Default",
+        "Be helpful.",
+        "default",
+    );
+    profiles.save(&profile).unwrap();
+    let mut initial = lightagent_core::Config::default();
+    initial.platform.jev.allowed_models = vec!["fast".to_owned()];
+    config_store.save(&initial).unwrap();
+
+    let mut state = app_state(AuthConfig::keyed("admin", [Scope::Admin]));
+    state.config_store = Some(config_store.clone());
+    let addr = spawn_server(state).await;
+    let admin = [("Authorization", "Bearer admin")];
+    let (status, body) = http(&addr, "GET", "/api/lightagent/v1/settings", &admin, None).await;
+    assert_eq!(status, 200, "{body}");
+    let mut settings: serde_json::Value = serde_json::from_str(&body).unwrap();
+    // A fresh configuration: strict, nobody permitted.
+    assert_eq!(settings["jev"]["routing_permission"], "strict");
+    assert_eq!(
+        settings["jev"]["routing_allowed_profiles"],
+        serde_json::json!([])
+    );
+    settings["jev"]["routing_allowed_profiles"] = serde_json::json!(["default"]);
+
+    // Without the administrator scope a well-formed grant is refused and
+    // nothing is read or saved.
+    let mut state = app_state(AuthConfig::keyed("reader", [Scope::ToolsRead]));
+    state.config_store = Some(config_store.clone());
+    let reader_addr = spawn_server(state).await;
+    let grant = settings.to_string();
+    for headers in [&[][..], &[("Authorization", "Bearer reader")][..]] {
+        let (status, _) = http(
+            &reader_addr,
+            "GET",
+            "/api/lightagent/v1/settings",
+            headers,
+            None,
+        )
+        .await;
+        assert!(status == 401 || status == 403, "{status}");
+        let (status, _) = http(
+            &reader_addr,
+            "PUT",
+            "/api/lightagent/v1/settings",
+            headers,
+            Some(&grant),
+        )
+        .await;
+        assert!(status == 401 || status == 403, "{status}");
+    }
+    let unchanged = config_store.load().unwrap();
+    assert!(
+        unchanged.platform.jev.routing_allowed_profiles.is_empty(),
+        "nothing was saved"
+    );
+    assert_eq!(
+        unchanged.platform.jev.routing_grant("default"),
+        lightagent_core::JevRoutingGrant::Denied
+    );
+
+    let (status, body) = http(
+        &addr,
+        "PUT",
+        "/api/lightagent/v1/settings",
+        &admin,
+        Some(&settings.to_string()),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let loaded = config_store.load().unwrap();
+    assert_eq!(loaded.platform.jev.routing_allowed_profiles, ["default"]);
+    assert_eq!(
+        loaded.platform.jev.routing_grant("default"),
+        lightagent_core::JevRoutingGrant::Allowed
+    );
+    // Separate from both other profile lists.
+    assert!(loaded.platform.jev.allowed_profiles.is_empty());
+    assert!(
+        loaded
+            .platform
+            .jev
+            .classification
+            .allowed_profiles
+            .is_empty()
+    );
+
+    // An older client omits both fields: the saved permission is unchanged.
+    let mut older = settings.clone();
+    let jev = older["jev"].as_object_mut().unwrap();
+    jev.remove("routing_permission");
+    jev.remove("routing_allowed_profiles");
+    let (status, body) = http(
+        &addr,
+        "PUT",
+        "/api/lightagent/v1/settings",
+        &admin,
+        Some(&older.to_string()),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        config_store
+            .load()
+            .unwrap()
+            .platform
+            .jev
+            .routing_allowed_profiles,
+        ["default"]
+    );
+
+    // Invalid values are refused and never widen the permission.
+    for (field, value) in [
+        ("routing_permission", serde_json::json!("allow_all")),
+        ("routing_permission", serde_json::json!(true)),
+        ("routing_allowed_profiles", serde_json::json!(["Bad Id!"])),
+        ("routing_allowed_profiles", serde_json::json!("default")),
+    ] {
+        let mut invalid = settings.clone();
+        invalid["jev"]["routing_allowed_profiles"] = serde_json::json!([]);
+        invalid["jev"][field] = value.clone();
+        let (status, _) = http(
+            &addr,
+            "PUT",
+            "/api/lightagent/v1/settings",
+            &admin,
+            Some(&invalid.to_string()),
+        )
+        .await;
+        assert!((400..500).contains(&status), "{field}={value}: {status}");
+        let loaded = config_store.load().unwrap();
+        assert_eq!(
+            loaded.platform.jev.routing_permission,
+            lightagent_core::JevRoutingPermission::Strict,
+            "{field}={value}"
+        );
+        assert_eq!(
+            loaded.platform.jev.routing_allowed_profiles,
+            ["default"],
+            "{field}={value}"
+        );
+    }
+
+    // Revoking is saved like any other change.
+    settings["jev"]["routing_allowed_profiles"] = serde_json::json!([]);
+    let (status, _) = http(
+        &addr,
+        "PUT",
+        "/api/lightagent/v1/settings",
+        &admin,
+        Some(&settings.to_string()),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        config_store
+            .load()
+            .unwrap()
+            .platform
+            .jev
+            .routing_grant("default"),
+        lightagent_core::JevRoutingGrant::Denied
+    );
+    std::fs::remove_dir_all(root).ok();
+}

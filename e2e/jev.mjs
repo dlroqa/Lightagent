@@ -7,7 +7,7 @@
 // The stub's path prefix selects its behaviour: /ok, /low, /auth, /slow.
 
 import { createServer } from "node:http";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 
 function jevStub() {
   const server = createServer((request, response) => {
@@ -218,6 +218,90 @@ export async function checkJevStates(browser, base, outDir) {
     await api("/runs", { method: "POST", body: JSON.stringify({ message: "Compare two approaches" }) });
     await waitForClassification("low_confidence");
     await capture("12-low-confidence", ["Low confidence — not applied", "low confidence"]);
+
+    // Model routing permission, separate from classification permission.
+    const routingSection = () => page.getByTestId("jev-routing-permission");
+    const settingsNow = async () => (await api("/settings")).jev;
+    // 15. A fresh configuration: strict, no profile may send content for routing.
+    if ((await settingsNow()).routing_permission !== "strict") {
+      failures.push("routing: a fresh configuration is not strict");
+    }
+    await capture("15-routing-denied", [`Denied for ${profile}`]);
+    await open("settings");
+    await routingSection().waitFor({ timeout: 15000 });
+    if (!(await routingSection().innerText()).includes("Denied")) failures.push("routing-denied: settings lack Denied");
+
+    // 16. Granted through the checkbox, keyboard-operable and labelled.
+    await routingSection().getByRole("checkbox", { name: new RegExp(`\\(${profile}\\)`) }).check();
+    if (!(await eventually(async () => (await settingsNow()).routing_allowed_profiles?.includes(profile)))) {
+      failures.push("routing-allowed: checking the profile did not save");
+    }
+    const granted = await settingsNow();
+    if (granted.classification.allowed_profiles.join() !== [profile].join()
+      || granted.allowed_profiles.length !== 0) {
+      failures.push("routing-allowed: the routing grant changed another profile list");
+    }
+    await capture("16-routing-allowed", [`Allowed for ${profile}`]);
+
+    // 17. The compatibility policy, as an existing configuration loads it:
+    // visible, explained, and left only by choosing Strict.
+    await configure({ jev: { routing_permission: "legacy_all_profiles" } });
+    await capture("17-routing-compatibility", ["Compatibility policy: every profile"]);
+    await open("settings");
+    await page.getByTestId("jev-routing-compatibility").waitFor({ timeout: 15000 });
+    await routingSection().screenshot({ path: `${dir}/17-routing-compatibility-section.png` });
+    await page.getByLabel("Routing permission policy").selectOption("strict");
+    if (!(await eventually(async () => (await settingsNow()).routing_permission === "strict"))) {
+      failures.push("routing-compatibility: choosing Strict did not save");
+    }
+    if (!(await eventually(async () =>
+      (await page.locator('#jev-routing-permission option[value="legacy_all_profiles"]').count()) === 0))) {
+      failures.push("routing-compatibility: the screen still offers widening back to every profile");
+    }
+    await routingSection().screenshot({ path: `${dir}/17-routing-strict-after-compatibility.png` });
+    console.log("  [ok] jev routing compatibility → strict");
+
+    // 18. Configuration errors. Invalid values are refused by the API and
+    // never widen the permission.
+    for (const [field, value] of [["routing_permission", "allow_all"], ["routing_allowed_profiles", ["Not A Profile!"]]]) {
+      const current = await api("/settings");
+      const response = await fetch(`${base}/api/lightagent/v1/settings`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...current, jev: { ...current.jev, [field]: value } }),
+      });
+      if (response.status < 400 || response.status >= 500) failures.push(`routing-invalid ${field}: answered ${response.status}`);
+    }
+    const afterInvalid = await settingsNow();
+    if (afterInvalid.routing_permission !== "strict" || afterInvalid.routing_allowed_profiles.join() !== profile) {
+      failures.push(`routing-invalid: the saved permission changed ${JSON.stringify(afterInvalid)}`);
+    }
+    // A hand-edited file holding an invalid identifier: shown, matches no
+    // profile, and every save is refused with the reason until it is fixed.
+    const home = process.env.LIGHTAGENT_HOME;
+    if (!home) {
+      failures.push("routing-config-error: LIGHTAGENT_HOME is not set for the render harness");
+    } else {
+      const file = `${home}/config.json`;
+      const saved = JSON.parse(await readFile(file, "utf8"));
+      saved.platform.jev.routing_allowed_profiles = [profile, "Not A Profile!"];
+      await writeFile(file, JSON.stringify(saved, null, 2));
+      await open("settings");
+      await routingSection().getByText("not found as a profile: Not A Profile!").waitFor({ timeout: 15000 });
+      // The save is refused, so the box stays checked: click, not uncheck.
+      await routingSection().getByRole("checkbox", { name: new RegExp(`\\(${profile}\\)`) }).click();
+      await page.getByText("must contain valid profile identifiers").first().waitFor({ timeout: 10000 });
+      await page.screenshot({ path: `${dir}/18-routing-config-error.png`, fullPage: true });
+      const status = await api("/jev");
+      if (status.routing?.profile_permission !== "allowed") {
+        failures.push(`routing-config-error: a refused save changed the permission (${status.routing?.profile_permission})`);
+      }
+      console.log("  [ok] jev routing configuration errors: refused and explained");
+    }
+    // Revoke through the API; the next status read reports it at once.
+    await configure({ jev: { routing_allowed_profiles: [] } });
+    if ((await api("/jev")).routing?.profile_permission !== "denied") failures.push("routing-revoked: status still permits");
+    await capture("19-routing-revoked", [`Denied for ${profile}`]);
 
     // The controls themselves: keyboard, labels and inline errors.
     await open("settings");

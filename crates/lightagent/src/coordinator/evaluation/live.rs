@@ -438,6 +438,9 @@ async fn live_jev_contract_and_bounded_evaluation() {
             &url,
             Some(SecretRef::env(KEY_VARIABLE)),
             model.as_deref(),
+            // The policy the recorded live baseline ran under, kept for
+            // comparability; the benchmark's inputs are synthetic.
+            lightagent_core::JevRoutingPermission::LegacyAllProfiles,
             limit - used,
             |row| {
                 if row.report.invoked {

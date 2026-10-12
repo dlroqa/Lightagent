@@ -43,6 +43,10 @@ configuration changes meaning at any step.
 
 ### Step 1: routing permission (issues 1, 2)
 
+> **Implemented** as `routing_permission` and `routing_allowed_profiles`; see
+> [`jev-routing-permission.md`](jev-routing-permission.md). The sketch below
+> is kept for the record.
+
 - Add `platform.jev.routing_profiles: Option<Vec<String>>`. `None`, the
   default for every existing configuration, means today's behavior (all
   profiles). `Some(list)` permits only the listed profiles; `Some([])`

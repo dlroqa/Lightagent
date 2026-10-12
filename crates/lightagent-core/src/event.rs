@@ -47,6 +47,12 @@ pub enum AgentEvent {
         source: String,
         model: String,
         kept_default: bool,
+        /// The run profile's model-routing permission when routing checked
+        /// it: `allowed`, `compatibility` or `denied`. Fixed vocabulary only.
+        permission: Option<String>,
+        /// Why the configured model was kept, as a stable code (for example
+        /// `profile_not_permitted`). Never message text.
+        fallback: Option<String>,
     },
     /// The pre-run task classification finished, was skipped, or fell back.
     /// Sanitized and advisory: it carries no message text, key or tool output,
