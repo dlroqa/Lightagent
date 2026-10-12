@@ -269,11 +269,15 @@ export function JevClassificationSection({ endpoint, profiles, status, disabled,
           <label className="field__label" htmlFor="jev-classification-mode">Automatic classification</label>
           <select id="jev-classification-mode" className="select" value={classification.mode} disabled={locked}
             onChange={(event) => save({ mode: event.target.value as JevClassificationMode })}>
-            <option value="off">Off — no automatic requests</option>
-            <option value="shadow">Shadow — record only, never changes a run</option>
-            <option value="active">Active — accepted results may add advisory guidance</option>
+            <option value="off">Off</option>
+            <option value="shadow">Shadow (record only)</option>
+            <option value="active">Active (advisory guidance)</option>
           </select>
-          <p className="jev-hint">Separate from model routing. Lightweight&apos;s Auto model is never replaced in any mode.</p>
+          <p className="jev-hint">
+            Off makes no automatic requests. Shadow records results without changing a run. Active lets an
+            accepted result add advisory guidance. Separate from model routing; Lightweight&apos;s Auto model
+            is never replaced in any mode.
+          </p>
         </div>
         <fieldset className="jev-profiles" disabled={locked} style={{ marginTop: 10 }}>
           <legend className="field__label">Profiles permitted to send a sanitized task description</legend>
