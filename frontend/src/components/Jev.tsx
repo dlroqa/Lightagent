@@ -438,7 +438,7 @@ function RoutingPermissionSection({ endpoint, profiles, disabled, onSave }: {
           onChange={(event) => void onSave({ ...endpoint, routing_permission: event.target.value as JevRoutingPermission })}>
           <option value="strict">Strict: only the profiles checked below</option>
           {/* Offered only while it is the saved policy: this screen never widens disclosure back to every profile. */}
-          {compatibility && <option value="legacy_all_profiles">Compatibility: every profile (legacy behavior)</option>}
+          {compatibility && <option value="legacy_all_profiles">Compatibility: every profile</option>}
         </select>
         <p className="jev-hint" id="jev-routing-permission-hint">
           Controls whether a profile may send task content to Jev for model selection. Checked on the server
