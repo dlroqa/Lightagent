@@ -1,10 +1,17 @@
 # User identity and profile ownership
 
-Status: **architecture and first slice.** The slice in this PR adds the shared
-identity and authorization vocabulary (`lightagent_core::identity`) and one
-API seam (`AuthConfig::caller`), with unit tests. Nothing calls them on a
-request path yet, so runtime behavior is unchanged. Enforcement waits for
-approval of the [compatibility contract](#compatibility-contract-needs-approval).
+Status: **foundation merged (#15); run-ownership enforcement in review.**
+The foundation added the shared identity and authorization vocabulary
+(`lightagent_core::identity`). The [enforcement slice](#enforcement-slice-runs)
+connects it to API authentication and every run endpoint in **multi-user
+mode, which stays off**: `lightagent serve` has no way to enable it yet, so
+installations behave exactly as before. The compatibility contract (C1–C6)
+was decided on 2026-10-12.
+
+**Not production multi-tenant.** Sessions, Jev diagnostics, the tool catalog
+and provisioning are operator-only in multi-user mode, not yet scoped to
+profiles, and tools are configured installation-wide. See
+[readiness](#multi-user-readiness-and-blockers).
 
 This is item 3 of
 [`jev-security-implementation-plan.md`](jev-security-implementation-plan.md)
@@ -84,16 +91,21 @@ still refused to a caller who does not own it.
 
 ## Permission matrix
 
-The target, once enforced in multi-user mode. "Grantee" means the owner
-granted that capability.
+The target in multi-user mode, with C6's minimum owner bundle
+(`OWNER_DEFAULT`: `runs_read`, `runs_write`, `sessions_read`,
+`approvals_write`). "Grantee" means an operator-issued grant of that
+capability. Run rows refer to runs the caller started itself. Rows marked †
+are enforced by the enforcement slice; the rest are operator-only until their
+own PR.
 
 | Request | Operator | Owner | Grantee | Other user | No credential |
 | --- | --- | --- | --- | --- | --- |
-| Start a run as profile P (`runs_write`) | ✓ | ✓ | if granted | 403 | 401 |
-| Read or stream, or cancel, a run of P | ✓ | ✓ | if granted (`runs_read` / `runs_write`) | 403 | 401 |
-| List or decide approvals of P's runs | ✓ | ✓ | if granted `approvals_write` | not listed / 403 | 401 |
-| Read or write P's sessions | ✓ | ✓ | if granted | 403 | 401 |
-| P's Jev status and diagnostics (`tools_read`) | ✓ | ✓ | if granted | 403 | 401 |
+| Start a run as profile P (`runs_write`) † | ✓ | ✓ | if granted | 403 | 401 |
+| Read or stream, or cancel, a run they started on P † | ✓ (any run) | ✓ | if granted (`runs_read` / `runs_write`) | 404 | 401 |
+| List or answer approvals of runs they started on P † | ✓ (any run) | ✓ | if granted `approvals_write` | not listed / 404 | 401 |
+| Read P's sessions | ✓ | ✓ | if granted | 403 | 401 |
+| Change P's sessions (`sessions_write`) | ✓ | grant only | if granted | 403 | 401 |
+| P's Jev status, diagnostics and tool catalog (`tools_read`) | ✓ | grant only | if granted | 403 | 401 |
 | List profiles | all | owned + granted only | owned + granted only | own only | 401 |
 | Settings, `jev/verify`, credentials, ownership (`administer`) | ✓ | 403 | 403 | 403 | 401 |
 | Provisioning (`provision`) | ✓ (or a provisioning credential) | 403 | 403 | 403 | 401 |
@@ -101,7 +113,7 @@ granted that capability.
 In the compatibility mode every caller is the operator, so every row is ✓,
 exactly as today.
 
-## Compatibility contract (needs approval)
+## Compatibility contract (decided)
 
 **Mode 1: local compatibility (default, unchanged).** Applies when no
 identity store exists, which is every installation today. The API resolves
@@ -123,22 +135,132 @@ issues the first operator credential. Then:
   follow the authorized profile.
 - Revoking a credential or grant applies to the next request.
 
-Decisions for you before enforcement is implemented:
+Decided on 2026-10-12:
 
-| # | Decision | Recommendation |
+| # | Decision |
+| --- | --- |
+| C1 | Multi-user mode authenticates every API request, loopback included. Bind address, forwarded headers and proxy origin never stand in for a credential. Loopback stays open only while multi-user mode is off. |
+| C2 | The `--key-env` key stays as a **legacy operator credential**: its elevated authority is identified, a startup warning appears in multi-user mode, it is never logged and never converted into a user credential, and rotation and replacement are documented. |
+| C3 | Existing profiles stay unowned and operator-only. Nothing is assigned automatically; the operator assigns owners explicitly. |
+| C4 | Terminal and ACP stay operator-only local interfaces under the OS account boundary, with no network exposure. Any process running as that OS account holds local operator authority. |
+| C5 | Runs from before activation are operator-only. New runs capture the initiating principal and authorized profile at creation, immutably. Read, status, events, cancel and approvals are checked against them. |
+| C6 | Owners get a minimum bundle only: start runs; view, stream and cancel their runs; read sessions and events; answer approvals for their runs. Not administration, reassignment, provisioning, credential or membership management, cross-profile access, extra tools, server or provider configuration, or Jev controls. More only by operator grant. Tool and approval policies stay independent of ownership. |
+
+## Enforcement slice: runs
+
+Connects the foundation to the API in multi-user mode
+(`AuthConfig::multi_user(identity, legacy_operator_key)`), in this order:
+
+```
+request ─► AuthConfig::caller           bearer credential required (C1); legacy key first, constant-time (C2);
+                                        otherwise IdentityAuthority → CredentialStore::authenticate (SHA-256, constant-time)
+        ─► authorize_capability          before any lookup, so the answer never depends on a run existing
+        ─► create: ProfileId from the body, or the server's default; IdentityAuthority::authorize_profile → AuthorizedProfile
+                   → StartRun.profile = the authorized profile → RunManager::start_as(RunOwner { principal, profile })
+        ─► existing run: IdentityAuthority::authorize_run(caller, run.owner(), capability)
+                   operator: any run · user: only a run it started, while still authorized on its profile
+                   refused → 404, identical to a missing run
+        ─► SSE: a guard re-reads the credential (CredentialStore::caller_for) and ownership before every event
+                and every 2 s while idle; the stream ends when either is withdrawn
+        ─► existing runtime, unchanged: the factory receives StartRun as before (profile, message, model, cwd, history)
+```
+
+Every other route goes through the existing `deny` gate, which in multi-user
+mode admits **operators only** (`this endpoint is operator-only in
+multi-user mode`). Those routes fail closed rather than being partially
+protected.
+
+| Source | Change |
+| --- | --- |
+| `lightagent-core/src/identity/ownership.rs` | `OWNER_DEFAULT` (C6). `permits` = bundle for the owner, plus grants. A grant to the owner outside the bundle is allowed. |
+| `lightagent-core/src/identity/mod.rs` | `PrincipalSource::LegacyOperatorKey` (C2) |
+| `lightagent-core/src/identity/credential.rs` | `caller_for(key_id)`: re-read a credential for long-lived connections |
+| `lightagent-core/src/identity/audit.rs` | `AuditAction::Authenticate` |
+| `lightagent-api/src/manager.rs` | `RunOwner` (immutable, private fields), `RunState::owner`, `RunManager::start_as`. `start` = operator-only owner. |
+| `lightagent-api/src/auth.rs` | `IdentityState`, `IdentityAuthority` (`authorize_profile`, `authorize_run`, `refresh`, bounded audit log; a poisoned lock denies), `rejection`, `AuthConfig::multi_user`, `startup_notices`, a key-redacting `Debug` |
+| `lightagent-api/src/lib.rs` | `create_run`, `get_run`, `run_events`, `cancel_run`, `list_approvals`, `respond_approval`. The guarded `event_stream`. Single-user paths are unchanged. |
+| `lightagent-api/tests/ownership.rs` | Integration and adversarial tests |
+
+**How C1–C6 are shown** (tests in `lightagent-api/tests/ownership.rs`
+unless named otherwise):
+
+| Decision | Behavior | Test |
 | --- | --- | --- |
-| C1 | Loopback in multi-user mode: open or credential-required? | Credential-required. Loopback is shared by every local process and user. |
-| C2 | The existing `--key-env` key in multi-user mode | It keeps working as an operator credential, with a startup notice recommending an issued one. Removal would be a later, announced change. |
-| C3 | Existing profiles at enablement | They stay unowned (operator-only) until the operator assigns them. No guessing. |
-| C4 | Terminal and ACP | They stay the local operator (`LocalProcess`). The OS account is their boundary, and they never listen on a network. |
-| C5 | Runs started before enablement | Kept operator-only. They are in memory only and end at restart. |
-| C6 | Default grants for a new profile's owner | All non-operator capabilities. Owners grant others explicitly. |
+| C1 | 401 on every route without a valid credential on loopback, with `X-Forwarded-For`, `Forwarded` and `X-Real-IP` set | `multi_user_mode_requires_a_credential_on_loopback` |
+| C1 (compat) | Single-user loopback unchanged | `single_user_loopback_compatibility_is_unchanged`, all existing API tests |
+| C2 | The legacy key authenticates as an operator with `LegacyOperatorKey` source. The startup notice names its authority. `Debug` never prints it. | `the_legacy_key_is_an_operator_credential_and_never_a_user`, `the_policy_never_prints_a_key` |
+| C3 | Unowned (`orphan`, `default`) and nonexistent profiles are refused to users, identically | `a_user_cannot_run_another_users_or_an_unowned_profile` |
+| C4 | Terminal and ACP code unchanged. ACP-style `RunManager::start` runs are operator-only. | `runs_without_an_owner_are_operator_only` |
+| C5 | Owner captured at creation; run id knowledge gives 404; historical runs operator-only; losing ownership ends access | `a_user_runs_its_own_profile_and_the_run_records_who_and_which`, `knowing_a_run_id_never_authorizes_access_to_it`, `runs_without_an_owner_are_operator_only`, `losing_ownership_ends_access_to_earlier_runs` |
+| C6 | Owner bundle exact; tools and Jev status need a grant; operator-only never | `owning_a_profile_grants_only_the_minimum_bundle` (core), `users_never_reach_operator_or_unscoped_endpoints` |
+| Revocation | Next request 401; open SSE ends; requests racing revocation never admitted afterwards | `a_revoked_credential_is_refused_at_the_next_request_and_stream`, `revocation_racing_requests_never_admits_afterwards` |
+| Approvals | Listed and answerable only for authorized runs | `approvals_are_listed_and_answered_only_for_authorized_runs` |
+| Restriction | A read-only credential cannot start or cancel | `a_credential_restriction_limits_what_its_holder_may_do` |
+| Identity grants no tools | The factory receives the authorized profile and nothing else | `a_user_runs_its_own_profile_and_the_run_records_who_and_which` |
+| Jev independent | A Jev-permitted profile is still refused to a non-owner | `a_jev_permission_never_authorizes_a_caller` (core) |
+| Swapping and races | Profile-id swaps (other, unowned, case and whitespace variants, traversal) refused; 24 concurrent creations and cross-reads never cross | `a_user_cannot_run_another_users_or_an_unowned_profile`, `concurrent_requests_never_cross_profiles` |
+
+### Remaining endpoints in multi-user mode
+
+All of these are **operator-only** in multi-user mode (users get 403), so
+none is reachable by an ordinary user until its own PR scopes it.
+
+| Endpoint | Scope | Why not yet scoped |
+| --- | --- | --- |
+| `GET/POST /sessions`, `GET /sessions/search`, `GET/PATCH/DELETE /sessions/{id}`, `POST /sessions/{id}/attachments` | sessions | `AppState.sessions` serves one profile chosen at startup. It needs per-request stores for the authorized profile. Runs with a `session_id` are therefore operator-only too. |
+| `GET /profiles` | sessions_read | Must list only owned and granted profiles |
+| `GET /jev`, `GET /tools`, `GET /skills`, `GET /provider` | tools_read | They report the server's active profile. They need the authorized profile, and C6 grants. |
+| `GET/PUT /settings`, `POST /jev/verify` | administer | Operator-only by design |
+| Provisioning | provision | Not implemented |
+| `GET /health` | none | Public liveness only |
+
+### Multi-user readiness and blockers
+
+Multi-user mode is **not activatable** in this slice: nothing in
+`lightagent serve`, the CLI or the configuration constructs
+`AuthConfig::multi_user`. Before it can be offered:
+
+1. **Tool policy is installation-wide.** `tools.*` and `web.*` apply to every
+   profile, and `AgentProfile.toolsets` is advisory. A user's run gets the same
+   tools as the operator's, including local file and terminal tools that act
+   as the OS account. Operator authority could be reached through a
+   delegated tool, which C4 forbids. Runtime toolset enforcement (plan item 4)
+   must land first, or multi-user mode must refuse profiles with local
+   execution tools.
+2. **Identity store and CLI**: persisted `identity.json` (owner-only), and
+   `identity enable`, `credential issue/revoke/rotate`, `owner assign/reassign`
+   and `grant`. Runtime state is in memory today.
+3. **Sessions, `/profiles`, `/jev`, `/tools` scoped to the authorized
+   profile** (the inventory above).
+4. **Persistent audit log** (`logs/authz.jsonl`). The in-memory log keeps the
+   last 4,096 decisions.
+5. **Transport.** An externally reachable server must sit behind TLS, either
+   a trusted ingress that terminates TLS and forwards to a loopback bind, or
+   native TLS. Bearer credentials must never cross plain HTTP. Forwarded
+   headers are never trusted for identity.
+6. **Provisioning API** behind its own enable flag.
+7. **Rate limiting** of failed authentications.
+
+### Migration and rollback for this slice
+
+- **Migration:** none. No installation can enter multi-user mode yet. The
+  single-user API, ACP and terminal are unchanged, and runs they start are
+  recorded as operator-only.
+- **Rollback:** reverting removes the enforcement code. With multi-user mode
+  never enabled, nothing changes for any installation.
+- **Legacy key rotation (C2), once activation exists:** start the server with
+  a new `--key-env` value (the old key stops at restart). Or issue an operator
+  credential, move clients to it, and restart without `--key-env`. The key is
+  read from the environment and never written or logged by Lightagent.
 
 ## Provisioning interface (contract proposal, not implemented)
 
 For the separate Cloudflare Workers control website. It is narrow,
 authenticated, idempotent and audited. It can never give the website the
 harness's full privileges.
+
+**One identity authority.** Provisioning uses this same identity store and
+credential mechanism. It is not a second authority.
 
 **Credential.** An operator issues the website one credential with role
 `operator` and restriction `capabilities = {provision}`. That credential
@@ -155,6 +277,7 @@ over method, path, body digest and timestamp, with a ±5-minute replay window.
 | `PUT /profiles/{profile_id}` | `{ "owner": principal_id, "name": "...", "template": "..." }` plus an `Idempotency-Key` header | `201` created, `200` unchanged, `409` if owned by someone else | `OwnershipRegistry::assign`. Reassignment is not available here: it is an operator `administer` action. |
 | `GET /profiles/{profile_id}` | none | Owner and status. No sessions or content. | n/a |
 | `POST /principals/{principal_id}/credentials` | `{ "restriction": {...} }` | Token once, for the user | Open question: whether the website should ever hold user tokens, or users should obtain them directly. |
+| `DELETE /profiles/{profile_id}/owner` | none | `204`. The profile becomes unowned (operator-only), and the previous owner's access ends at its next request. | Idempotent. Re-assigning afterwards is a fresh `PUT`. |
 | `DELETE /principals/{principal_id}/credentials/{key_id}` | none | `204` | Revocation is idempotent. |
 | `POST /principals/{principal_id}/disable` | none | `204`. Every credential stops at the next request. | Idempotent. |
 

@@ -23,18 +23,32 @@ pub struct ProfileOwnership {
     pub grants: BTreeMap<PrincipalId, BTreeSet<Capability>>,
 }
 
+/// What owning a profile allows by default: start runs, view and cancel
+/// them, read the profile's sessions and events, and answer approvals for
+/// those runs. Nothing else. The tool catalog and Jev status (`tools_read`)
+/// and session changes (`sessions_write`) need an explicit grant, and the
+/// operator-only capabilities are never available. What a run's tools may do
+/// stays with the profile's tool and approval policies.
+pub const OWNER_DEFAULT: [Capability; 4] = [
+    Capability::RunsRead,
+    Capability::RunsWrite,
+    Capability::SessionsRead,
+    Capability::ApprovalsWrite,
+];
+
 impl ProfileOwnership {
     /// Whether `principal` may take `capability` on this profile: the owner
-    /// may take every capability a user may hold; anyone else needs a grant.
+    /// holds [`OWNER_DEFAULT`] plus anything granted to it; anyone else
+    /// needs a grant.
     pub fn permits(&self, principal: &PrincipalId, capability: Capability) -> bool {
         if capability.operator_only() {
             return false;
         }
-        principal == &self.owner
-            || self
-                .grants
-                .get(principal)
-                .is_some_and(|granted| granted.contains(&capability))
+        let granted = self
+            .grants
+            .get(principal)
+            .is_some_and(|granted| granted.contains(&capability));
+        granted || (principal == &self.owner && OWNER_DEFAULT.contains(&capability))
     }
 }
 
@@ -59,7 +73,7 @@ pub enum OwnershipError {
     Unowned,
     #[error("operator-only capabilities cannot be granted on a profile")]
     OperatorOnly,
-    #[error("the owner already holds every capability on its profile")]
+    #[error("the owner already holds this capability on its profile")]
     GrantToOwner,
 }
 
@@ -146,7 +160,7 @@ impl OwnershipRegistry {
             .profiles
             .get_mut(profile)
             .ok_or(OwnershipError::Unowned)?;
-        if record.owner == principal {
+        if record.owner == principal && OWNER_DEFAULT.contains(&capability) {
             return Err(OwnershipError::GrantToOwner);
         }
         record

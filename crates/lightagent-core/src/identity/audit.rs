@@ -14,6 +14,8 @@ use crate::profile::ProfileId;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditAction {
+    /// Presenting a credential, recorded when it is refused.
+    Authenticate,
     /// A profile-scoped or installation-wide request, by capability.
     Request(Capability),
     CredentialIssued,

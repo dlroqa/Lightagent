@@ -13,10 +13,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use lightagent_core::identity::PrincipalId;
 use lightagent_core::provider::ProviderMessage;
 use lightagent_core::{
-    AgentEvent, AgentEventSink, AgentLoop, AgentProvider, ApprovalDecision, ApprovalId, RunId,
-    RunOutcome, StopReason, ToolInvoker,
+    AgentEvent, AgentEventSink, AgentLoop, AgentProvider, ApprovalDecision, ApprovalId, ProfileId,
+    RunId, RunOutcome, StopReason, ToolInvoker,
 };
 use serde::Serialize;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
@@ -61,9 +62,45 @@ pub struct StartRun {
     pub cwd: Option<String>,
 }
 
+/// Who started a run and as which profile, fixed when the run is created.
+///
+/// A run with no `principal` is **operator-only**: every run started through
+/// [`RunManager::start`] (the single-user API, ACP, and any run that predates
+/// multi-user mode). Ownership is never inferred later from a profile name or
+/// from knowing the run id.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunOwner {
+    principal: Option<PrincipalId>,
+    profile: Option<ProfileId>,
+}
+
+impl RunOwner {
+    /// A run only operators may observe or control.
+    pub fn operator_only() -> Self {
+        Self::default()
+    }
+
+    /// A run started by `principal` as the authorized `profile`.
+    pub fn new(principal: PrincipalId, profile: Option<ProfileId>) -> Self {
+        Self {
+            principal: Some(principal),
+            profile,
+        }
+    }
+
+    pub fn principal(&self) -> Option<&PrincipalId> {
+        self.principal.as_ref()
+    }
+
+    pub fn profile(&self) -> Option<&ProfileId> {
+        self.profile.as_ref()
+    }
+}
+
 /// The shared state of one run, observed by HTTP handlers.
 pub struct RunState {
     id: String,
+    owner: RunOwner,
     events: Mutex<Vec<AgentEvent>>,
     status: Mutex<RunStatus>,
     pending: Mutex<Option<PendingApproval>>,
@@ -85,6 +122,11 @@ impl RunState {
     /// This run's id.
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Who started this run, as which profile. Immutable.
+    pub fn owner(&self) -> &RunOwner {
+        &self.owner
     }
 
     /// The current status.
@@ -338,10 +380,17 @@ impl RunManager {
 
     /// Start a run and return its shared state. The run drives in the background.
     pub async fn start(&self, request: StartRun) -> Arc<RunState> {
+        self.start_as(request, RunOwner::operator_only()).await
+    }
+
+    /// Start a run recording its `owner`. The caller must already have
+    /// authorized the owner for `request.profile`.
+    pub async fn start_as(&self, request: StartRun, owner: RunOwner) -> Arc<RunState> {
         let id = new_run_id();
         let (decisions_tx, decisions_rx) = mpsc::unbounded_channel();
         let state = Arc::new(RunState {
             id: id.clone(),
+            owner,
             events: Mutex::new(Vec::new()),
             status: Mutex::new(RunStatus::Running),
             pending: Mutex::new(None),
