@@ -12,6 +12,7 @@ members = [
     "crates/lightagent-acp",
     "crates/lightagent-extensions",
     "crates/lightagent-runtime",
+    "crates/lightagent-jev",
     "crates/lightagent",
     "crates/release-update",
 ]
@@ -101,6 +102,7 @@ lightagent-memory = { path = "crates/lightagent-memory" }
 lightagent-acp = { path = "crates/lightagent-acp" }
 lightagent-extensions = { path = "crates/lightagent-extensions" }
 lightagent-runtime = { path = "crates/lightagent-runtime" }
+lightagent-jev = { path = "crates/lightagent-jev" }
 
 # ---------------------------------------------------------------------------
 # Build profiles tuned for a 4-core 1.5 GHz CPU with ~2.3 GB free RAM.

@@ -1019,6 +1019,7 @@ dependencies = [
  "lightagent-api",
  "lightagent-core",
  "lightagent-extensions",
+ "lightagent-jev",
  "lightagent-mcp",
  "lightagent-memory",
  "lightagent-provider-lightweight",
@@ -1087,6 +1088,20 @@ dependencies = [
  "lightagent-core",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "lightagent-jev"
+version = "0.4.1"
+dependencies = [
+ "lightagent-core",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

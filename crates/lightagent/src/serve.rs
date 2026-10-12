@@ -42,6 +42,7 @@ async fn inference_for_request(
     store: &ProfileStore,
     profile: &lightagent_core::AgentProfile,
     request: &StartRun,
+    cancel: &CancellationToken,
 ) -> (String, String, Option<(String, bool)>) {
     let base_url = profile
         .routing
@@ -59,6 +60,7 @@ async fn inference_for_request(
         &request.message,
         default_model.clone(),
         request.model.is_some(),
+        cancel,
     )
     .await;
     let routed_profile = route
@@ -206,7 +208,7 @@ impl RunFactory for LightweightRunFactory {
         }
 
         let (model, base_url, routing_status) =
-            inference_for_request(&config, &store, &profile, &request).await;
+            inference_for_request(&config, &store, &profile, &request, &cancel).await;
         if let Some((model, kept_default)) = routing_status {
             let _ = sink.send(AgentEvent::RouteSelected {
                 source: "Jev".to_owned(),
@@ -446,14 +448,66 @@ mod routing_tests {
             model: None,
             cwd: None,
         };
-        let (model, _, status) = inference_for_request(&config, &store, &profile, &request).await;
+        let (model, _, status) = inference_for_request(
+            &config,
+            &store,
+            &profile,
+            &request,
+            &CancellationToken::new(),
+        )
+        .await;
         assert_eq!(model, "fast");
         assert_eq!(status, Some(("fast".to_owned(), false)));
         assert_eq!(profile, original);
         server.await.unwrap();
         request.model = Some("explicit".to_owned());
-        let (model, _, status) = inference_for_request(&config, &store, &profile, &request).await;
+        let (model, _, status) = inference_for_request(
+            &config,
+            &store,
+            &profile,
+            &request,
+            &CancellationToken::new(),
+        )
+        .await;
         assert_eq!(model, "explicit");
         assert_eq!(status, None);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_run_keeps_its_configured_model_without_contacting_jev() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut config = lightagent_core::Config::default();
+        config.platform.jev.endpoint.enabled = true;
+        config.platform.jev.endpoint.base_url = Some(format!("http://{address}"));
+        config.platform.jev.allowed_models = vec!["fast".to_owned()];
+        let profile = lightagent_core::AgentProfile::new(
+            lightagent_core::ProfileId::new("identity").unwrap(),
+            "Identity",
+            "Original persona",
+            "original-model",
+        );
+        let store = ProfileStore::new(std::env::temp_dir());
+        let request = StartRun {
+            message: "hello".to_owned(),
+            history: vec![],
+            profile: None,
+            model: None,
+            cwd: None,
+        };
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let (model, _, status) =
+            inference_for_request(&config, &store, &profile, &request, &cancel).await;
+        assert_eq!(model, "original-model");
+        // The existing `routing.selected` contract is unchanged: Jev was
+        // enabled and consulted for this run, and the default was kept.
+        assert_eq!(status, Some(("original-model".to_owned(), true)));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "a cancelled run must not reach Jev"
+        );
     }
 }
