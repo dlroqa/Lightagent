@@ -96,9 +96,15 @@ export async function checkJevStates(browser, base, outDir) {
   const endpointsCard = () => page.locator("section.card", {
     has: page.getByRole("heading", { name: "Platform endpoints" }),
   });
+  // A hash-only navigation to the URL already shown does not remount the SPA,
+  // so every state starts from a fresh document load.
+  const open = async (route) => {
+    await page.goto("about:blank");
+    await page.goto(`${base}/#/${route}`, { waitUntil: "domcontentloaded" });
+  };
   const capture = async (name, expectations, { settings = true } = {}) => {
     try {
-      await page.goto(`${base}/#/tools`, { waitUntil: "domcontentloaded" });
+      await open("tools");
       await toolsCard().waitFor({ timeout: 15000 });
       const text = await toolsCard().innerText();
       for (const expected of expectations) {
@@ -106,7 +112,7 @@ export async function checkJevStates(browser, base, outDir) {
       }
       await toolsCard().screenshot({ path: `${dir}/${name}-tools.png` });
       if (settings) {
-        await page.goto(`${base}/#/settings`, { waitUntil: "domcontentloaded" });
+        await open("settings");
         await page.getByTestId("jev-classification").waitFor({ timeout: 15000 });
         await endpointsCard().screenshot({ path: `${dir}/${name}-settings.png` });
       }
@@ -169,7 +175,7 @@ export async function checkJevStates(browser, base, outDir) {
       failures.push("explicit-enabled: jev.classify_task is missing from the tool catalog");
     }
     await capture("08-explicit-tool-enabled", ["jev.classify_task — available to this profile"], { settings: false });
-    await page.goto(`${base}/#/tools`, { waitUntil: "domcontentloaded" });
+    await open("tools");
     await page.getByText("jev.classify_task", { exact: true }).waitFor({ timeout: 15000 });
     await page.screenshot({ path: `${dir}/08-explicit-tool-catalog.png`, fullPage: true });
 
@@ -200,7 +206,7 @@ export async function checkJevStates(browser, base, outDir) {
     await capture("12-low-confidence", ["Low confidence — not applied", "low confidence"]);
 
     // The controls themselves: keyboard, labels and inline errors.
-    await page.goto(`${base}/#/settings`, { waitUntil: "domcontentloaded" });
+    await open("settings");
     await page.getByTestId("jev-classification").waitFor({ timeout: 15000 });
     await page.getByLabel("Automatic classification").selectOption("active");
     if (!(await eventually(async () => (await api("/settings")).jev.classification.mode === "active"))) {
