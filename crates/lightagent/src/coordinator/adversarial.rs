@@ -92,9 +92,11 @@ async fn privacy_no_marker_leaves_through_classification_or_sanitized_routing() 
             {
                 leaks.push(format!("classification:{marker}"));
             }
-            // Routing has no profile gate; only pattern-protected markers
-            // are its sanitizer's responsibility.
-            if !profile_gated && routing.iter().any(|body| body.contains(marker.as_str())) {
+            // Routing's profile permission (strict, only `permitted`) keeps
+            // every marker of a non-permitted profile out of routing; for a
+            // permitted profile, pattern-protected markers are the
+            // sanitizer's responsibility.
+            if routing.iter().any(|body| body.contains(marker.as_str())) {
                 leaks.push(format!("routing:{marker}"));
             }
         }
@@ -109,6 +111,9 @@ async fn privacy_no_marker_leaves_through_classification_or_sanitized_routing() 
         if !case.expects_send() {
             assert!(classification.is_empty(), "{} was classified", case.id);
         }
+        if profile_gated {
+            assert!(routing.is_empty(), "{} was routed", case.id);
+        }
     }
     let report = json!({
         "report": "jev-privacy-regression",
@@ -117,7 +122,7 @@ async fn privacy_no_marker_leaves_through_classification_or_sanitized_routing() 
         "cases": rows.len(),
         "failures": rows.iter().filter(|row| row["pass"] != true).count(),
         "rows": rows,
-        "note": "Redaction is minimization, not a guarantee. Routing has no per-profile gate; see the routing benchmark.",
+        "note": "Redaction is minimization, not a guarantee. Routing runs under the strict profile permission here; the compatibility policy has no per-profile gate (see the routing benchmark).",
     });
     write_report(
         "privacy-regression",
@@ -274,6 +279,7 @@ async fn injection_cannot_force_a_route_outside_the_allowlist() {
         config.platform.jev.routing_input = JevRoutingInput::LegacyRaw;
         let report = crate::jev::route_for_turn(
             &config.platform.jev,
+            "permitted",
             INJECTIONS[1],
             "configured".to_owned(),
             false,
@@ -809,11 +815,13 @@ async fn reliability_timeouts_and_cancellation_keep_the_configured_route() {
 
 #[tokio::test]
 async fn mitigation_empty_routing_allowlists_stop_routing_and_keep_the_classification_gate() {
-    // Routing has no per-profile permission. Until one exists, clearing both
-    // routing allowlists stops every routing request; classification keeps
-    // its own per-profile gate.
+    // Under the compatibility policy routing has no per-profile gate. There,
+    // clearing both routing allowlists stops every routing request;
+    // classification keeps its own per-profile gate.
     let (url, seen) = jev_stub(200, answer("research", 0.95), Duration::ZERO).await;
     let mut config = config(&url, JevClassificationMode::Shadow);
+    config.platform.jev.routing_permission =
+        lightagent_core::JevRoutingPermission::LegacyAllProfiles;
     config.platform.jev.allowed_models.clear();
     config.platform.jev.allowed_profiles.clear();
     config.platform.jev.routing_input = JevRoutingInput::LegacyRaw;

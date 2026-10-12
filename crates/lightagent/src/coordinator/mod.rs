@@ -33,7 +33,8 @@ pub(crate) mod workflow;
 use std::time::{Duration, Instant};
 
 use lightagent_core::{
-    AgentProfile, ClassificationDiagnostics, Config, JevClassificationMode, ProfileStore,
+    AgentProfile, ClassificationDiagnostics, Config, JevClassificationMode, JevRoutingGrant,
+    ProfileStore,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -79,6 +80,10 @@ pub(crate) struct Preflight {
     pub latency: Duration,
     /// The routing-input policy applied, when routing prepared an input.
     pub routing_input: Option<&'static str>,
+    /// The profile's model-routing permission, when routing checked it.
+    pub routing_permission: Option<JevRoutingGrant>,
+    /// Why routing kept the configured model, as a stable code.
+    pub routing_fallback: Option<&'static str>,
 }
 
 /// Decide the turn's inference route and, when enabled, classify the task.
@@ -104,8 +109,11 @@ pub(crate) async fn preflight(
         .map(str::to_owned)
         .unwrap_or_else(|| crate::chat::configured_model(&profile.routing.model, config));
     let report_jev = config.platform.jev.endpoint.enabled && explicit_model.is_none();
+    // The permission is bound to the profile this run resolved to, never to
+    // an identifier the caller supplied unchecked.
     let routing = crate::jev::route_for_turn(
         &config.platform.jev,
+        profile.id.as_str(),
         message,
         default_model.clone(),
         explicit_model.is_some(),
@@ -119,6 +127,8 @@ pub(crate) async fn preflight(
         decision: route,
         invoked: route_invoked,
         input: routing_input,
+        permission: routing_permission,
+        fallback: routing_fallback,
         ..
     } = report;
     let routed_profile = route
@@ -145,6 +155,8 @@ pub(crate) async fn preflight(
         jev_calls,
         latency: started.elapsed(),
         routing_input,
+        routing_permission,
+        routing_fallback,
     }
 }
 
@@ -463,6 +475,50 @@ mod tests {
         assert!(seen.lock().unwrap().len() <= 2);
     }
 
+    #[tokio::test]
+    async fn routing_permission_and_classification_permission_are_independent() {
+        // `permitted` may classify and route (the fixture); `router-only` may
+        // route but not classify; `classifier-only` may classify but not route.
+        let (url, seen) = jev_stub(200, route_answer(), Duration::ZERO).await;
+        let mut config = config(&url, JevClassificationMode::Shadow);
+        config.platform.jev.allowed_models = vec!["fast".to_owned()];
+        config.platform.jev.routing_allowed_profiles = vec!["router-only".to_owned()];
+        config.platform.jev.classification.allowed_profiles = vec!["classifier-only".to_owned()];
+        for (id, routes, classifies) in [
+            ("router-only", true, false),
+            ("classifier-only", false, true),
+            ("neither", false, false),
+        ] {
+            seen.lock().unwrap().clear();
+            let preflight = run(&config, &profile(id, "original"), None).await;
+            let requests = seen.lock().unwrap().clone();
+            let routing = requests
+                .iter()
+                .filter(|body| questions(body) == ["route"])
+                .count();
+            let classification = requests
+                .iter()
+                .filter(|body| questions(body).contains(&"task".to_owned()))
+                .count();
+            assert_eq!(routing, usize::from(routes), "{id}");
+            assert_eq!(classification, usize::from(classifies), "{id}");
+            assert_eq!(preflight.jev_calls as usize, requests.len(), "{id}");
+            if routes {
+                assert_eq!(preflight.model, "fast", "{id}");
+                assert_eq!(preflight.routing_permission, Some(JevRoutingGrant::Allowed));
+            } else {
+                assert_eq!(preflight.model, "original", "{id}");
+                assert_eq!(preflight.routing_fallback, Some("profile_not_permitted"));
+                assert_eq!(preflight.routing_permission, Some(JevRoutingGrant::Denied));
+                // The existing event still reports that the default was kept.
+                assert_eq!(
+                    preflight.routing_status,
+                    Some(("original".to_owned(), true))
+                );
+            }
+        }
+    }
+
     fn report(
         mode: JevClassificationMode,
         category: TaskCategory,
@@ -501,6 +557,8 @@ mod tests {
             jev_calls: 1,
             latency: Duration::from_millis(7),
             routing_input: None,
+            routing_permission: None,
+            routing_fallback: None,
         };
         let diagnostics = diagnostics(&preflight, true).unwrap();
         assert_eq!(diagnostics.outcome, "classified");

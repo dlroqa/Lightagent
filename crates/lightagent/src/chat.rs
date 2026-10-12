@@ -654,6 +654,7 @@ pub async fn run(
     let startup_skills = session_skills.names();
     let startup_extensions = runtime.extensions;
     let mut jev_budget = runtime.jev_budget;
+    let mut routing_notice_shown = false;
     let mut workflow_registry = runtime.workflow_registry;
     if session.approvals_unrestricted {
         agent.invoker().allow_without_restrictions();
@@ -913,8 +914,16 @@ pub async fn run(
         }
         // Decide once at the start of a fresh turn, preserving this session's
         // executor and approvals across model changes and continuations.
-        let preflight = turn_preflight(&config, &store, &profile, &line, attachment).await;
+        let turn_config = with_current_routing_permission(&config, ConfigStore::at(&paths).load());
+        let preflight = turn_preflight(&turn_config, &store, &profile, &line, attachment).await;
         jev_budget.reset(preflight.jev_calls);
+        if preflight.routing_fallback == Some("profile_not_permitted") && !routing_notice_shown {
+            routing_notice_shown = true;
+            println!(
+                "· Model routing not used: profile {} is not permitted to send content to Jev",
+                profile.id.as_str()
+            );
+        }
         let mut turn_guidance = None;
         if let Some(report) = &preflight.classification {
             println!("{}", crate::coordinator::terminal_summary(report));
@@ -2440,6 +2449,28 @@ pub(crate) fn resolve_profile(
     Ok(profile)
 }
 
+/// The terminal keeps its configuration for the session, but re-reads the
+/// Jev routing permission before each turn, so a revocation applies from the
+/// next turn without a restart. A file that cannot be read grants nothing.
+fn with_current_routing_permission(
+    config: &Config,
+    current: Result<Config, lightagent_core::ConfigError>,
+) -> Config {
+    let mut config = config.clone();
+    let jev = &mut config.platform.jev;
+    match current {
+        Ok(current) => {
+            jev.routing_permission = current.platform.jev.routing_permission;
+            jev.routing_allowed_profiles = current.platform.jev.routing_allowed_profiles;
+        }
+        Err(_) => {
+            jev.routing_permission = lightagent_core::JevRoutingPermission::Strict;
+            jev.routing_allowed_profiles.clear();
+        }
+    }
+    config
+}
+
 /// A default profile inherits the configured model; an explicit profile wins.
 /// The terminal turn's preflight: the same coordinator as API and ACP runs,
 /// with no caller-chosen model. The terminal drives its turns with
@@ -3074,6 +3105,66 @@ for line in sys.stdin:
                 .contains("Choose tools from the active catalog.")
         );
         std::fs::remove_dir_all(scratch).ok();
+    }
+
+    #[tokio::test]
+    async fn terminal_routing_obeys_the_current_profile_permission() {
+        use crate::coordinator::test_support::{answer, jev_stub};
+        let (jev, seen) = jev_stub(200, answer("research", 0.95), Duration::ZERO).await;
+        let mut config = Config::default();
+        config.platform.jev.endpoint.enabled = true;
+        config.platform.jev.endpoint.base_url = Some(jev);
+        config.platform.jev.allowed_models = vec!["fast".to_owned()];
+        config.platform.jev.routing_allowed_profiles = vec!["terminal".to_owned()];
+        let profile = AgentProfile::new(
+            ProfileId::new("terminal").unwrap(),
+            "Terminal",
+            "Persona",
+            "configured",
+        );
+        let store = ProfileStore::new(std::env::temp_dir());
+        // Permitted at session start: the turn routes.
+        let preflight = turn_preflight(&config, &store, &profile, "route this", false).await;
+        assert_eq!(preflight.jev_calls, 1);
+        assert_eq!(
+            preflight.routing_permission,
+            Some(lightagent_core::JevRoutingGrant::Allowed)
+        );
+        // Revoked on disk mid-session: the next turn reads it and sends nothing.
+        let mut revoked = config.clone();
+        revoked.platform.jev.routing_allowed_profiles.clear();
+        seen.lock().unwrap().clear();
+        let turn = with_current_routing_permission(&config, Ok(revoked));
+        let preflight = turn_preflight(&turn, &store, &profile, "route this", false).await;
+        assert_eq!(preflight.jev_calls, 0);
+        assert_eq!(preflight.routing_fallback, Some("profile_not_permitted"));
+        assert_eq!(preflight.model, "configured");
+        assert!(seen.lock().unwrap().is_empty());
+        // An unreadable file never grants: strict, no profiles.
+        let unreadable = with_current_routing_permission(
+            &config,
+            Err(lightagent_core::ConfigError::Invalid(
+                "unreadable".to_owned(),
+            )),
+        );
+        let preflight = turn_preflight(&unreadable, &store, &profile, "route this", false).await;
+        assert_eq!(preflight.jev_calls, 0);
+        assert_eq!(preflight.routing_fallback, Some("profile_not_permitted"));
+        let mut legacy = config.clone();
+        legacy.platform.jev.routing_permission =
+            lightagent_core::JevRoutingPermission::LegacyAllProfiles;
+        let unreadable = with_current_routing_permission(
+            &legacy,
+            Err(lightagent_core::ConfigError::Invalid(
+                "unreadable".to_owned(),
+            )),
+        );
+        assert_eq!(
+            unreadable.platform.jev.routing_grant("terminal"),
+            lightagent_core::JevRoutingGrant::Denied,
+            "an unreadable file never falls back to the compatibility policy"
+        );
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

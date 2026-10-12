@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Instant, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use lightagent_core::{AgentEvent, Config, RiskClass, Scope, ToolOutcome};
+use lightagent_core::{AgentEvent, Config, JevRoutingPermission, RiskClass, Scope, ToolOutcome};
 use lightagent_tools::{Tool, ToolCtx, ToolDefinition, ToolRegistry};
 use serde_json::{Value, json};
 
@@ -210,6 +210,15 @@ pub(crate) fn status(config: &Config, profile: &str, state: &JevState) -> Value 
         "enabled": jev.endpoint.enabled,
         "model": jev.model,
         "routing_input": jev.routing_input.as_str(),
+        "routing": {
+            // Whether this profile may send task content to Jev for model
+            // routing: allowed, compatibility (the legacy policy permits every
+            // profile) or denied. A profile permission, not user ownership.
+            "permission_policy": jev.routing_permission.as_str(),
+            "compatibility": jev.routing_permission == JevRoutingPermission::LegacyAllProfiles,
+            "profile_permission": jev.routing_grant(profile).as_str(),
+            "allowed_profiles": jev.routing_allowed_profiles,
+        },
         "verification": verification,
         "classification": {
             "mode": settings.mode.as_str(),
@@ -451,5 +460,26 @@ mod tests {
         assert_eq!(other["explicit_tool"]["available"], false);
         assert_eq!(other["classification"]["profile_permitted"], false);
         assert_eq!(other["last_classification"], Value::Null);
+        // Routing permission is reported apart from classification's.
+        assert_eq!(status["routing"]["permission_policy"], "strict");
+        assert_eq!(status["routing"]["compatibility"], false);
+        assert_eq!(status["routing"]["profile_permission"], "allowed");
+        assert_eq!(other["routing"]["profile_permission"], "denied");
+        let mut legacy = config.clone();
+        legacy.platform.jev.routing_permission = JevRoutingPermission::LegacyAllProfiles;
+        let legacy = super::status(&legacy, "permitted", &state);
+        assert_eq!(legacy["routing"]["compatibility"], true);
+        assert_eq!(legacy["routing"]["profile_permission"], "compatibility");
+        let mut granted = config.clone();
+        granted.platform.jev.routing_allowed_profiles = vec!["other".to_owned()];
+        assert_eq!(
+            super::status(&granted, "other", &state)["routing"]["profile_permission"],
+            "allowed"
+        );
+        assert_eq!(
+            super::status(&granted, "other", &state)["classification"]["profile_permitted"],
+            false,
+            "a routing grant is not a classification grant"
+        );
     }
 }

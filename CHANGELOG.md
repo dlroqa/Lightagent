@@ -4,6 +4,25 @@ All notable Lightagent changes are documented here.
 
 ## [Unreleased]
 
+### Security
+
+- Per-profile permission for sending task content to Jev for model routing
+  (`platform.jev.routing_permission` and
+  `platform.jev.routing_allowed_profiles`). It is checked on the server, for
+  the run's resolved profile, before any routing input is prepared, under
+  both `legacy_raw` and `sanitized`. A profile that is not permitted makes no
+  routing request and keeps its configured model (fallback
+  `profile_not_permitted`). API, ACP and terminal runs share the check.
+  Classification permission and routing permission never grant each other.
+  `Auto` is unchanged.
+- New configurations are `strict` with no profile permitted. A configuration
+  written before this release keeps routing every profile under the
+  explicitly named `legacy_all_profiles` compatibility policy. Settings, the
+  Jev status, `routing.selected` and the terminal report it. Nothing is
+  migrated automatically: `lightagent config jev-routing-report` is a dry
+  run that lists who strict enforcement would deny, and two `config set`
+  commands switch. See `docs/architecture/jev-routing-permission.md`.
+
 ### Added
 
 - Independent label-review package for the Jev benchmark: a blinded

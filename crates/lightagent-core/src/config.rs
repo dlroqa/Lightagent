@@ -639,6 +639,19 @@ pub struct JevConfig {
     /// configurations use `sanitized`.
     #[serde(default = "legacy_routing_input")]
     pub routing_input: JevRoutingInput,
+    /// How model routing decides which profiles may send task content to
+    /// Jev. A configuration written before this setting existed keeps
+    /// `legacy_all_profiles`, its original behavior; new configurations use
+    /// `strict`.
+    #[serde(default = "legacy_routing_permission")]
+    pub routing_permission: JevRoutingPermission,
+    /// Profiles permitted to send task content to Jev for model routing,
+    /// under the `strict` policy. Distinct from `allowed_profiles`, which
+    /// lists the routes Jev may choose, and from
+    /// `classification.allowed_profiles`. A profile not listed never sends
+    /// routing input. It is not a statement about which users may act
+    /// through a profile.
+    pub routing_allowed_profiles: Vec<String>,
     /// Task classification, controlled separately from model routing. It
     /// shares the endpoint, key, model and timeout above; `enabled` remains
     /// the endpoint's master switch for both.
@@ -682,6 +695,94 @@ impl std::str::FromStr for JevRoutingInput {
 /// Existing configurations keep the routing input they were written with.
 const fn legacy_routing_input() -> JevRoutingInput {
     JevRoutingInput::LegacyRaw
+}
+
+/// Which profiles legacy model routing lets send task content to Jev.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JevRoutingPermission {
+    /// The compatibility policy: every profile may route, the behavior from
+    /// before the permission existed. Kept only for configurations that
+    /// predate it, and reported as compatibility wherever routing is shown.
+    LegacyAllProfiles,
+    /// Only the profiles in `routing_allowed_profiles` may route. A missing
+    /// or empty list permits none.
+    Strict,
+}
+
+impl JevRoutingPermission {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LegacyAllProfiles => "legacy_all_profiles",
+            Self::Strict => "strict",
+        }
+    }
+}
+
+impl std::str::FromStr for JevRoutingPermission {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "legacy_all_profiles" => Ok(Self::LegacyAllProfiles),
+            "strict" => Ok(Self::Strict),
+            _ => Err("routing permission must be strict or legacy_all_profiles".to_owned()),
+        }
+    }
+}
+
+/// Existing configurations keep the routing permission they were written
+/// with: every profile, as before the setting existed.
+const fn legacy_routing_permission() -> JevRoutingPermission {
+    JevRoutingPermission::LegacyAllProfiles
+}
+
+/// A profile's model-routing permission, as policy decides it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JevRoutingGrant {
+    /// Listed in `routing_allowed_profiles` under `strict`.
+    Allowed,
+    /// Permitted only by the `legacy_all_profiles` compatibility policy.
+    Compatibility,
+    Denied,
+}
+
+impl JevRoutingGrant {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allowed => "allowed",
+            Self::Compatibility => "compatibility",
+            Self::Denied => "denied",
+        }
+    }
+
+    pub fn permits(self) -> bool {
+        !matches!(self, Self::Denied)
+    }
+}
+
+impl JevConfig {
+    /// Whether `profile`, the run's resolved profile, may send task content
+    /// to Jev for model routing. Only an exact, valid profile id in the list
+    /// is allowed under `strict`; nothing else is.
+    pub fn routing_grant(&self, profile: &str) -> JevRoutingGrant {
+        match self.routing_permission {
+            JevRoutingPermission::LegacyAllProfiles => JevRoutingGrant::Compatibility,
+            JevRoutingPermission::Strict => {
+                let valid = crate::profile::ProfileId::new(profile).is_ok();
+                if valid
+                    && self
+                        .routing_allowed_profiles
+                        .iter()
+                        .any(|allowed| allowed == profile)
+                {
+                    JevRoutingGrant::Allowed
+                } else {
+                    JevRoutingGrant::Denied
+                }
+            }
+        }
+    }
 }
 
 /// What task classification may do.
@@ -805,6 +906,8 @@ impl Default for JevConfig {
             allowed_profiles: Vec::new(),
             timeout_secs: default_jev_timeout_secs(),
             routing_input: JevRoutingInput::Sanitized,
+            routing_permission: JevRoutingPermission::Strict,
+            routing_allowed_profiles: Vec::new(),
             classification: JevClassificationConfig::default(),
         }
     }
@@ -1165,6 +1268,18 @@ impl Config {
         {
             return Err(ConfigError::Invalid(
                 "platform.jev.allowed_profiles must contain valid profile identifiers".to_owned(),
+            ));
+        }
+        if self
+            .platform
+            .jev
+            .routing_allowed_profiles
+            .iter()
+            .any(|profile| crate::profile::ProfileId::new(profile.clone()).is_err())
+        {
+            return Err(ConfigError::Invalid(
+                "platform.jev.routing_allowed_profiles must contain valid profile identifiers"
+                    .to_owned(),
             ));
         }
         let classification = &self.platform.jev.classification;
@@ -1826,6 +1941,125 @@ mod tests {
         let value = serde_json::to_value(&config).unwrap();
         assert_eq!(value["platform"]["jev"]["enabled"], true);
         assert_eq!(value["platform"]["jev"]["classification"]["mode"], "off");
+    }
+
+    /// A routing configuration written before the routing permission existed.
+    const PRE_PERMISSION_JEV: &str = r#"{"platform":{"jev":{"enabled":true,"base_url":"https://api.typesafe.ai","model":"jev-latest","confidence_threshold":0.85,"allowed_models":["fast"],"allowed_profiles":["careful"],"timeout_secs":3,"routing_input":"legacy_raw"}}}"#;
+
+    #[test]
+    fn existing_routing_configuration_loads_under_the_identified_compatibility_policy() {
+        let config: Config = serde_json::from_str(PRE_PERMISSION_JEV).unwrap();
+        let jev = &config.platform.jev;
+        assert_eq!(
+            jev.routing_permission,
+            JevRoutingPermission::LegacyAllProfiles,
+            "an existing routing configuration keeps routing every profile"
+        );
+        assert!(jev.routing_allowed_profiles.is_empty());
+        for profile in ["default", "careful", "created-later"] {
+            assert_eq!(jev.routing_grant(profile), JevRoutingGrant::Compatibility);
+            assert!(jev.routing_grant(profile).permits());
+        }
+        assert!(config.validate().is_ok());
+        // Saving writes the policy out explicitly, so it stays visible and
+        // auditable; nothing is migrated to a different meaning.
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            value["platform"]["jev"]["routing_permission"],
+            "legacy_all_profiles"
+        );
+        let reloaded: Config = serde_json::from_value(value).unwrap();
+        assert_eq!(reloaded, config);
+    }
+
+    #[test]
+    fn fresh_configuration_grants_no_profile_routing_permission() {
+        let config = Config::default();
+        let jev = &config.platform.jev;
+        assert_eq!(jev.routing_permission, JevRoutingPermission::Strict);
+        assert!(jev.routing_allowed_profiles.is_empty());
+        for profile in ["default", "careful", "new-profile"] {
+            assert_eq!(jev.routing_grant(profile), JevRoutingGrant::Denied);
+        }
+        // A file without a Jev section has never routed: it is strict too.
+        let empty: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            empty.platform.jev.routing_permission,
+            JevRoutingPermission::Strict
+        );
+        assert_eq!(
+            empty.platform.jev.routing_grant("default"),
+            JevRoutingGrant::Denied
+        );
+    }
+
+    #[test]
+    fn strict_routing_permission_allows_only_exact_listed_profiles() {
+        let mut jev = JevConfig {
+            routing_permission: JevRoutingPermission::Strict,
+            routing_allowed_profiles: vec!["lead".to_owned()],
+            ..JevConfig::default()
+        };
+        assert_eq!(jev.routing_grant("lead"), JevRoutingGrant::Allowed);
+        for other in ["Lead", " lead", "lead ", "lead2", "", "default", "../lead"] {
+            assert_eq!(
+                jev.routing_grant(other),
+                JevRoutingGrant::Denied,
+                "{other:?}"
+            );
+        }
+        // The route allowlist and the classification permission grant nothing.
+        jev.allowed_profiles = vec!["careful".to_owned()];
+        jev.classification.allowed_profiles = vec!["careful".to_owned()];
+        assert_eq!(jev.routing_grant("careful"), JevRoutingGrant::Denied);
+        // Revoking takes effect on the next check.
+        jev.routing_allowed_profiles.clear();
+        assert_eq!(jev.routing_grant("lead"), JevRoutingGrant::Denied);
+        // Nor does routing permission grant classification.
+        jev.routing_allowed_profiles = vec!["lead".to_owned()];
+        assert!(!jev.classification.permits_profile("lead"));
+        // An invalid entry, as a hand-edited file might hold, matches nothing.
+        jev.routing_allowed_profiles = vec!["Bad Id!".to_owned()];
+        assert_eq!(jev.routing_grant("Bad Id!"), JevRoutingGrant::Denied);
+    }
+
+    #[test]
+    fn invalid_routing_permission_configuration_never_allows_routing() {
+        // An unknown policy is not read as any policy: the file does not load.
+        let unknown = PRE_PERMISSION_JEV.replace(
+            r#""timeout_secs":3"#,
+            r#""timeout_secs":3,"routing_permission":"allow_all""#,
+        );
+        assert!(serde_json::from_str::<Config>(&unknown).is_err());
+        let wrong_type = PRE_PERMISSION_JEV.replace(
+            r#""timeout_secs":3"#,
+            r#""timeout_secs":3,"routing_permission":true"#,
+        );
+        assert!(serde_json::from_str::<Config>(&wrong_type).is_err());
+        let wrong_list = PRE_PERMISSION_JEV.replace(
+            r#""timeout_secs":3"#,
+            r#""timeout_secs":3,"routing_permission":"strict","routing_allowed_profiles":"lead""#,
+        );
+        assert!(serde_json::from_str::<Config>(&wrong_list).is_err());
+        // Invalid identifiers are rejected on save.
+        let mut config = Config::default();
+        for invalid in ["../escape", "Uppercase", "-leading", ""] {
+            config.platform.jev.routing_allowed_profiles = vec![invalid.to_owned()];
+            assert!(config.validate().is_err(), "{invalid:?}");
+        }
+        config.platform.jev.routing_allowed_profiles = vec!["careful-1".to_owned()];
+        assert!(config.validate().is_ok());
+        assert_eq!("strict".parse(), Ok(JevRoutingPermission::Strict));
+        assert_eq!(
+            " Legacy_All_Profiles ".parse(),
+            Ok(JevRoutingPermission::LegacyAllProfiles)
+        );
+        for invalid in ["", "all", "allow", "none", "true"] {
+            assert!(
+                invalid.parse::<JevRoutingPermission>().is_err(),
+                "{invalid:?}"
+            );
+        }
     }
 
     #[test]

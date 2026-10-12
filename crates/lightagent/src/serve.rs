@@ -232,6 +232,10 @@ impl RunFactory for LightweightRunFactory {
                 source: "Jev".to_owned(),
                 model,
                 kept_default,
+                permission: preflight
+                    .routing_permission
+                    .map(|permission| permission.as_str().to_owned()),
+                fallback: preflight.routing_fallback.map(str::to_owned),
             });
         }
         let api_key = config
@@ -502,6 +506,7 @@ pub(crate) mod routing_tests {
         config.platform.jev.endpoint.enabled = true;
         config.platform.jev.endpoint.base_url = Some(format!("http://{address}"));
         config.platform.jev.allowed_models = vec!["fast".to_owned()];
+        config.platform.jev.routing_allowed_profiles = vec!["identity".to_owned()];
         let profile = lightagent_core::AgentProfile::new(
             lightagent_core::ProfileId::new("identity").unwrap(),
             "Identity",
@@ -558,6 +563,7 @@ pub(crate) mod routing_tests {
         config.platform.jev.endpoint.enabled = true;
         config.platform.jev.endpoint.base_url = Some(format!("http://{address}"));
         config.platform.jev.allowed_models = vec!["fast".to_owned()];
+        config.platform.jev.routing_allowed_profiles = vec!["identity".to_owned()];
         let profile = lightagent_core::AgentProfile::new(
             lightagent_core::ProfileId::new("identity").unwrap(),
             "Identity",
@@ -722,6 +728,9 @@ pub(crate) mod routing_tests {
                     source: "Jev".to_owned(),
                     model: "Auto".to_owned(),
                     kept_default: true,
+                    // Auto is decided before the permission is consulted.
+                    permission: None,
+                    fallback: Some("auto_route".to_owned()),
                 }),
                 "{label}: {seen:?}"
             );
@@ -763,6 +772,121 @@ pub(crate) mod routing_tests {
             let body: serde_json::Value = serde_json::from_str(body).unwrap();
             assert!(body["questions"].get("route").is_none());
             assert!(body["questions"].get("task").is_some());
+        }
+        std::fs::remove_dir_all(scratch).ok();
+    }
+
+    /// The routing permission through the real run factory, for an API run
+    /// (no cwd) and an ACP run (an editor cwd): the same check on the profile
+    /// the run resolved to, read from the configuration at each run, so a
+    /// grant or a revocation applies to the next run without a restart.
+    #[tokio::test]
+    async fn api_and_acp_runs_route_only_for_a_currently_permitted_profile() {
+        use crate::coordinator::test_support::{answer, jev_stub};
+        let (gateway, _) = gateway_stub().await;
+        let (jev, jev_seen) = jev_stub(200, answer("research", 0.95), Duration::ZERO).await;
+        let scratch = std::env::temp_dir().join(format!(
+            "lightagent-routing-permission-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = scratch.join("acp-workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let root = scratch.join("home");
+        let paths = LightagentPaths::rooted_at(&root);
+        let mut config = lightagent_core::Config::default();
+        config.inference.base_url = gateway;
+        config.memory.inject_recent = 0;
+        config.platform.jev.endpoint.enabled = true;
+        config.platform.jev.endpoint.base_url = Some(jev);
+        config.platform.jev.allowed_models = vec!["careful".to_owned()];
+        let store = ProfileStore::new(&root);
+        let lead = lightagent_core::AgentProfile::new(
+            lightagent_core::ProfileId::new("lead").unwrap(),
+            "Lead",
+            "Persona",
+            "fast",
+        );
+        store.create(&lead).unwrap();
+        store.set_active(&lead.id).unwrap();
+        let factory = LightweightRunFactory {
+            root: root.clone(),
+            jev: crate::coordinator::JevState::new(),
+        };
+        // A private marker that must never reach Jev while denied.
+        let message = "summarize the private journal entry for lead";
+        for (step, granted) in [
+            ("strict-unlisted", false),
+            ("granted", true),
+            ("revoked", false),
+        ] {
+            config.platform.jev.routing_allowed_profiles = if granted {
+                vec!["lead".to_owned()]
+            } else {
+                Vec::new()
+            };
+            ConfigStore::at(&paths).save(&config).unwrap();
+            for (label, cwd) in [
+                ("api", None),
+                ("acp", Some(workspace.to_string_lossy().into_owned())),
+            ] {
+                jev_seen.lock().unwrap().clear();
+                let (sink, mut events) = tokio::sync::mpsc::unbounded_channel();
+                let (_decide, decisions) = tokio::sync::mpsc::unbounded_channel();
+                let status = factory
+                    .run(
+                        StartRun {
+                            message: message.to_owned(),
+                            history: vec![],
+                            profile: None,
+                            model: None,
+                            cwd,
+                        },
+                        sink,
+                        CancellationToken::new(),
+                        decisions,
+                    )
+                    .await;
+                let mut seen = Vec::new();
+                while let Ok(event) = events.try_recv() {
+                    seen.push(event);
+                }
+                assert_eq!(status, RunStatus::Completed, "{step} {label}: {seen:?}");
+                let route = seen
+                    .iter()
+                    .find_map(|event| match event {
+                        AgentEvent::RouteSelected {
+                            model,
+                            permission,
+                            fallback,
+                            ..
+                        } => Some((model.clone(), permission.clone(), fallback.clone())),
+                        _ => None,
+                    })
+                    .expect("routing.selected is reported while Jev is enabled");
+                let requests = jev_seen.lock().unwrap().clone();
+                if granted {
+                    assert_eq!(requests.len(), 1, "{step} {label}");
+                    assert_eq!(route.1.as_deref(), Some("allowed"), "{step} {label}");
+                } else {
+                    assert!(requests.is_empty(), "{step} {label}: {requests:?}");
+                    assert_eq!(
+                        route,
+                        (
+                            "fast".to_owned(),
+                            Some("denied".to_owned()),
+                            Some("profile_not_permitted".to_owned())
+                        ),
+                        "{step} {label}"
+                    );
+                    // The denial carries fixed vocabulary only.
+                    let reported = format!("{seen:?}");
+                    assert!(!reported.contains("private journal"), "{step} {label}");
+                }
+            }
         }
         std::fs::remove_dir_all(scratch).ok();
     }
@@ -973,6 +1097,7 @@ pub(crate) mod routing_tests {
         config.platform.jev.endpoint.base_url = Some(jev);
         config.platform.jev.timeout_secs = 2;
         config.platform.jev.allowed_models = vec!["fast".to_owned()];
+        config.platform.jev.routing_allowed_profiles = vec!["lead".to_owned()];
         config.platform.jev.classification.mode = lightagent_core::JevClassificationMode::Shadow;
         config.platform.jev.classification.allowed_profiles = vec!["lead".to_owned()];
         let (status, events, _) =
@@ -1015,6 +1140,7 @@ pub(crate) mod routing_tests {
             config.platform.jev.endpoint.enabled = true;
             config.platform.jev.endpoint.base_url = Some(jev);
             config.platform.jev.allowed_models = vec!["fast".to_owned()];
+            config.platform.jev.routing_allowed_profiles = vec!["lead".to_owned()];
             config.platform.jev.classification.mode = mode;
             config.platform.jev.classification.workflow_guidance = guidance;
             config.platform.jev.classification.allowed_profiles = vec!["lead".to_owned()];

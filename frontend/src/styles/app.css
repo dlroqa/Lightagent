@@ -3052,6 +3052,16 @@ textarea {
   color: var(--danger);
 }
 
+.jev-warning {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
 .jev-profiles {
   display: flex;
   flex-wrap: wrap;

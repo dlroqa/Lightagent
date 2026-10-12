@@ -36,6 +36,14 @@ parallel with 3.
 
 ## 1. Per-profile permission for legacy external routing
 
+> **Implemented** in [`jev-routing-permission.md`](jev-routing-permission.md),
+> with these changes from the sketch below, as directed for this PR: the list is
+> `routing_allowed_profiles`, under an explicit `routing_permission` policy
+> (`strict`, the default for new configurations, or the identified
+> `legacy_all_profiles` compatibility policy for existing ones) instead of an
+> `Option` whose `None` means all profiles. A dry-run report
+> (`lightagent config jev-routing-report`) shows who strict would deny.
+
 **Change.**
 - Add `platform.jev.routing_profiles: Option<Vec<String>>`.
 - `jev::route` checks it before `routing_state`, so nothing is derived from a non-permitted message.

@@ -50,11 +50,24 @@ pub fn data(event: &AgentEvent) -> serde_json::Value {
             source,
             model,
             kept_default,
-        } => json!({
-            "source": source,
-            "model": model,
-            "kept_default": kept_default,
-        }),
+            permission,
+            fallback,
+        } => {
+            // The original three fields, plus the permission and fallback
+            // code only when routing reported them.
+            let mut payload = json!({
+                "source": source,
+                "model": model,
+                "kept_default": kept_default,
+            });
+            if let Some(permission) = permission {
+                payload["permission"] = json!(permission);
+            }
+            if let Some(fallback) = fallback {
+                payload["fallback"] = json!(fallback);
+            }
+            payload
+        }
         AgentEvent::TaskClassified { diagnostics: d } => json!({
             "schema": d.schema,
             "trigger": d.trigger,
@@ -138,11 +151,26 @@ mod tests {
             source: "Jev".into(),
             model: "Auto".into(),
             kept_default: true,
+            permission: None,
+            fallback: None,
         };
         assert_eq!(name(&route), "routing.selected");
         assert_eq!(
             data(&route),
             json!({"source": "Jev", "model": "Auto", "kept_default": true})
+        );
+        let denied = AgentEvent::RouteSelected {
+            source: "Jev".into(),
+            model: "configured".into(),
+            kept_default: true,
+            permission: Some("denied".into()),
+            fallback: Some("profile_not_permitted".into()),
+        };
+        assert_eq!(name(&denied), "routing.selected");
+        assert_eq!(
+            data(&denied),
+            json!({"source": "Jev", "model": "configured", "kept_default": true,
+                   "permission": "denied", "fallback": "profile_not_permitted"})
         );
         let classified = AgentEvent::TaskClassified {
             diagnostics: Box::new(lightagent_core::ClassificationDiagnostics {

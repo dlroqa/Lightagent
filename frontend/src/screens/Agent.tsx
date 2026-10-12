@@ -288,6 +288,9 @@ export function Agent() {
       source,
       model,
       keptDefault: event.data.kept_default === true,
+      // Present only from servers that report the routing permission.
+      notPermitted: event.data.fallback === "profile_not_permitted",
+      compatibility: event.data.permission === "compatibility",
     };
   }, [events]);
   const failure = useMemo(() => {
@@ -953,9 +956,13 @@ export function Agent() {
                   ))}
                   {routingStatus && <div className="routing-status" role="status">
                     <Cpu size={14} aria-hidden="true" />
-                    <span>{routingStatus.keptDefault
-                      ? `${routingStatus.source} kept the default route: ${routingStatus.model}`
-                      : `${routingStatus.source} routed to: ${routingStatus.model}`}</span>
+                    <span>{routingStatus.notPermitted
+                      ? `${routingStatus.source} not consulted: this profile is not permitted to send content for model routing. Using ${routingStatus.model}`
+                      : routingStatus.keptDefault
+                        ? `${routingStatus.source} kept the default route: ${routingStatus.model}`
+                        : `${routingStatus.source} routed to: ${routingStatus.model}`}
+                      {routingStatus.compatibility && !routingStatus.notPermitted
+                        ? " (compatibility routing policy)" : ""}</span>
                   </div>}
                   {showLiveAnswer && answer && (
                     <AgentMessage message={{ role: "assistant", content: answer }} streaming={!done} />
