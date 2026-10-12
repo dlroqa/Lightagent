@@ -190,11 +190,14 @@ fn multi_user_caller(
     state: &AppState,
     headers: &HeaderMap,
     scope: Scope,
-) -> Result<(Arc<auth::IdentityAuthority>, Caller), Response> {
+) -> Result<(Arc<auth::IdentityAuthority>, Caller), Box<Response>> {
     let Some(identity) = state.auth.identity() else {
-        return Err(internal("multi-user identity is not configured"));
+        return Err(Box::new(internal("multi-user identity is not configured")));
     };
-    let caller = state.auth.caller(headers).map_err(refused)?;
+    let caller = state
+        .auth
+        .caller(headers)
+        .map_err(|denial| Box::new(refused(denial)))?;
     if let Err(denial) = authorize_capability(&caller, scope.into()) {
         identity.record(
             Some(&caller),
@@ -202,7 +205,7 @@ fn multi_user_caller(
             None,
             Err(denial),
         );
-        return Err(refused(denial));
+        return Err(Box::new(refused(denial)));
     }
     Ok((Arc::clone(identity), caller))
 }
@@ -219,21 +222,21 @@ async fn authorized_run(
     headers: &HeaderMap,
     id: &str,
     scope: Scope,
-) -> Result<(Arc<RunState>, Option<StreamGuard>), Response> {
+) -> Result<(Arc<RunState>, Option<StreamGuard>), Box<Response>> {
     if state.auth.identity().is_none() {
         if let Some(rejection) = deny(state, headers, scope) {
-            return Err(rejection);
+            return Err(Box::new(rejection));
         }
         return state
             .manager
             .get(id)
             .await
             .map(|run| (run, None))
-            .ok_or_else(|| not_found(id));
+            .ok_or_else(|| Box::new(not_found(id)));
     }
     let (identity, caller) = multi_user_caller(state, headers, scope)?;
     let Some(run) = state.manager.get(id).await else {
-        return Err(not_found(id));
+        return Err(Box::new(not_found(id)));
     };
     let capability: Capability = scope.into();
     let owner = run.owner().clone();
@@ -245,7 +248,7 @@ async fn authorized_run(
         decision,
     );
     if decision.is_err() {
-        return Err(not_found(id));
+        return Err(Box::new(not_found(id)));
     }
     let guard: StreamGuard = Arc::new(move || {
         identity
@@ -809,7 +812,7 @@ async fn create_run(
     if state.auth.identity().is_some() {
         let (identity, caller) = match multi_user_caller(&state, &headers, Scope::RunsWrite) {
             Ok(found) => found,
-            Err(response) => return response,
+            Err(response) => return *response,
         };
         if caller.principal.role == Role::User {
             if body.session_id.is_some() {
@@ -1014,7 +1017,7 @@ async fn get_run(
             "pending_approval": run.pending().await,
         }))
         .into_response(),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -1027,7 +1030,7 @@ async fn run_events(
         Ok((run, guard)) => Sse::new(event_stream(run, guard))
             .keep_alive(KeepAlive::default())
             .into_response(),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -1041,7 +1044,7 @@ async fn cancel_run(
             run.cancel();
             Json(json!({ "id": run.id(), "cancelled": true })).into_response()
         }
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -1330,7 +1333,7 @@ async fn list_approvals(State(state): State<Arc<AppState>>, headers: HeaderMap) 
     let multi_user = if state.auth.identity().is_some() {
         match multi_user_caller(&state, &headers, Scope::ApprovalsWrite) {
             Ok(found) => Some(found),
-            Err(response) => return response,
+            Err(response) => return *response,
         }
     } else if let Some(rejection) = deny(&state, &headers, Scope::ApprovalsWrite) {
         return rejection;
@@ -1368,7 +1371,7 @@ async fn respond_approval(
     use lightagent_core::ApprovalDecision;
     let state_run = match authorized_run(&state, &headers, &run, Scope::ApprovalsWrite).await {
         Ok((found, _)) => found,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let Some(pending) = state_run.pending().await else {
         return (
