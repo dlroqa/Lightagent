@@ -6,6 +6,14 @@ All notable Lightagent changes are documented here.
 
 ### Added
 
+- Independent label-review package for the Jev benchmark: a blinded
+  worksheet, author labels and key built in CI
+  (`scripts/jev-review-package.py`, artifact `jev-label-review-package`),
+  an annotation schema and a disagreement procedure
+  (`evaluation/jev/review/`).
+- The first live Jev baseline (run 38311407479: contract passed,
+  `jev-1.13.0`, exploratory 6/6) and a prioritized security implementation
+  plan (`docs/architecture/jev-security-implementation-plan.md`, plan only).
 - Jev live-validation readiness: the live contract records the commit and
   every resolved model version, classes each failure as transport,
   credential or API contract, stops after a failed authentication, and runs

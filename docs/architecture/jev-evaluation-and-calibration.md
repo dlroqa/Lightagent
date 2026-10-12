@@ -375,6 +375,46 @@ every mode.
 Adversarial suite: every test passed on Linux, macOS and Windows. Privacy
 regression: 14 marker-bearing cases through the full preflight, 0 leaks.
 
+## Live baseline: run 38311407479 (2026-10-12)
+
+The first live run against TypeSafe, dispatched from master `074cdb1` with
+`max_requests=12` and approved at the `jev-live` gate by the repository
+owner. Reports: artifact `jev-live-reports` of
+[run 38311407479](https://github.com/dlroqa/Lightagent/actions/runs/38311407479).
+
+**Verified: API compatibility.** These are contract facts, not estimates.
+
+| Check | Result |
+| --- | --- |
+| Requests made | 11 of 12: 3 contract probes, 6 classifications, 1 routing pair |
+| Resolved model | `jev-1.13.0` (requested `jev-latest`); the only version seen |
+| Authentication | Passed (185 ms) |
+| Schema acceptance and typed parsing | Passed: choice, noul and score answers parsed; no malformed or legacy answers |
+| Noul answers | Probability only; no confidence reported or derived |
+| Invalid-key error | `unauthorized`, with no key text in the error |
+| Token usage | Reported on every answer |
+| Failures | None: no credential, transport, contract or quality failure |
+
+**Not established: model accuracy.** These are exploratory figures on six
+benchmark cases with single-author, unreviewed labels.
+
+| Measure | Value |
+| --- | --- |
+| Category accuracy | 6/6 (Wilson 95%: 0.61 to 1.00) |
+| Accepted at 0.9 | 5/6; one correct answer below threshold (`amb-001`, confidence 0.87) |
+| Abstention / fallback | 0/6 / 1/6 |
+| Category confidence | min 0.87, median 0.99, max 1.0 |
+| Requirement errors | planning: 1 false positive (of 5 labeled); retrieval and tools: none |
+| Workflow agreement | 5/6; no eligible false positive |
+| Classification latency | median 151 ms, p95 172 ms |
+| Tokens | 4,084 in, 769 out; no cost estimated (pricing unverified) |
+| Routing pair (`amb-001`) | Identical input under both policies; both kept the configured model |
+| Calibration | Insufficient evidence (6 samples); the 0.9 default is unchanged |
+
+The six cases covered six of the twelve groups and none of the privacy,
+research, retrieval or calibration-split cases. Nothing here supports a
+threshold, routing or default change.
+
 ## Privacy threat model: updates
 
 | Threat | Control | Residual risk |

@@ -123,8 +123,9 @@ left). Markers are the exact private spans a sanitized input must not carry.
 - **Labeler:** Claude Opus 5.5 (an AI assistant), from this rubric, on
   2026-10-12, without consulting Jev.
 - **Review:** single labeler. A second, human labeler has not reviewed the
-  labels yet; until then, treat live accuracy figures as indicative and
-  review disagreements case by case before acting on them.
+  labels yet; until then, treat live accuracy figures as exploratory. The
+  blinded review procedure, annotation schema and package are in
+  [`review/`](review/README.md).
 
 ## Changing the dataset
 
