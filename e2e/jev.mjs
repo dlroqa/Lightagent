@@ -92,6 +92,8 @@ export async function checkJevStates(browser, base, outDir) {
   const themed = async (scheme, width, height) => {
     const view = await browser.newContext({ viewport: { width, height }, colorScheme: scheme });
     await view.addInitScript((theme) => {
+      // Also runs on the blank page between states, which has no storage.
+      if (window.location.protocol === "about:") return;
       window.localStorage.setItem("lightagent.web.preferences", JSON.stringify({ theme }));
     }, scheme);
     return view;
