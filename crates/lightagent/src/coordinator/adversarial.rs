@@ -429,7 +429,13 @@ fn needs(registry: &ToolRegistry, policy: &PolicyEngine) -> BTreeMap<String, Str
                 definition.scopes.clone(),
                 "{}",
             );
-            let need = format!("{:?}", policy.evaluate(&request, SystemTime::UNIX_EPOCH));
+            // The decision's kind and reason; a pending request's id is
+            // freshly generated each time and says nothing about policy.
+            let need = match policy.evaluate(&request, SystemTime::UNIX_EPOCH) {
+                ApprovalNeed::AutoApprove => "auto".to_owned(),
+                ApprovalNeed::Require(_) => "ask".to_owned(),
+                ApprovalNeed::Deny(reason) => format!("deny: {reason}"),
+            };
             (name, need)
         })
         .collect()
@@ -513,7 +519,7 @@ fn authorization_denied_retrieval_stays_denied() {
     assert!(!decision.applied);
     let registry = ToolRegistry::builtin().scoped(&["web.search".to_owned()]);
     for need in needs(&registry, &PolicyEngine::new(policy)).values() {
-        assert!(need.starts_with("Deny"), "{need}");
+        assert!(need.starts_with("deny"), "{need}");
     }
 }
 

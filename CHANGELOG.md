@@ -6,6 +6,27 @@ All notable Lightagent changes are documented here.
 
 ### Added
 
+- Jev evaluation: a versioned, synthetic, independently labeled benchmark
+  (`evaluation/jev/benchmark.v1.json`, 101 cases with a calibration split)
+  and a test-only runner over the production classifier, sanitizer, workflow
+  policy and router. It reports category accuracy, per-category precision,
+  recall and F1, a confusion matrix, abstention, fallback and coverage,
+  requirement error rates, workflow agreement, reliability curves, ECE and
+  accuracy-coverage curves, with sample sizes and intervals. Mock-contract
+  and live results are labeled separately; thresholds are only ever
+  proposed, never applied.
+- `legacy_raw` versus `sanitized` routing benchmark, an adversarial privacy,
+  prompt-injection, authorization and reliability suite, and a preflight
+  performance simulation.
+- Terminal workflow parity: terminal turns now evaluate the workflow policy.
+  In `active` mode with `workflow_guidance` on, eligible fixed guidance is
+  added to that turn only, beside the memory catalog; the session prompt and
+  stored history are unchanged.
+- CI: `jev-evaluation.yml` (deterministic, every pull request, uploads
+  reports) and `jev-live.yml` (manual dispatch, `jev-live` environment,
+  `TYPESAFE_API_KEY`, bounded requests; reports pending without the secret).
+
+
 - Jev workflow policy: a typed, read-only eligibility check that maps an
   accepted classification to an existing capability (retrieval, workspace,
   delegation) only when the run already has it, its approval policy permits
@@ -37,6 +58,8 @@ All notable Lightagent changes are documented here.
 
 ### Changed
 
+- Linux CI jobs are pinned to `ubuntu-24.04` ahead of the `ubuntu-latest`
+  move to 26.04. Required check names are unchanged.
 - Lightagent's Jev model routing no longer replaces Lightweight's `Auto`
   model; `Auto` reaches the provider unchanged so Lightweight decides the route.
 - `active` classification alone no longer adds advisory guidance; it also

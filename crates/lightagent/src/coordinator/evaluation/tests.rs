@@ -244,10 +244,12 @@ fn scripted(case: &Case, script: &Value) -> (u16, String, Option<String>) {
             .or_else(|| default[field].as_f64())
             .unwrap()
     };
+    // A case that must be refused has no label and never reaches Jev; its
+    // answer exists only so that a leak would show in the privacy check.
     let category = over["category"]
         .as_str()
         .or_else(|| case.primary())
-        .expect("a scripted answer needs a category");
+        .unwrap_or("conversation");
     let confidence = number("category_confidence");
     let mut probabilities = serde_json::Map::new();
     for other in TaskCategory::ALL {
