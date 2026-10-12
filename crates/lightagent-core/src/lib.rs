@@ -19,6 +19,7 @@
 
 pub mod config;
 pub mod event;
+pub mod identity;
 pub mod ids;
 pub mod invoker;
 pub mod limits;
