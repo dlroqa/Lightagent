@@ -274,6 +274,43 @@ extra latency beyond the slower request); they say nothing about cost or
 answer quality. No claim that Jev reduces cost or improves answers is made.
 No learned or adaptive routing is added.
 
+## Results (deterministic, `jev evaluation` workflow)
+
+All from the mock-contract run and stand-ins: they validate the pipeline and
+gates, not Jev.
+
+| Classification contract (scripted answers) | Value |
+| --- | --- |
+| Cases run / expected sent / expected refused | 101 / 93 / 8 |
+| Privacy failures (refusals that sent anything, markers on the wire) | 0 of 101 |
+| Jev requests | 93 (one per sendable case, none for refusals) |
+| Scripted failures falling back (429, 529, malformed, legacy) | 4 of 4, each with its own code |
+| Accuracy / coverage / coverage-adjusted accuracy | 86/89, 85/93, 83/85 (exactly as scripted) |
+| Workflow agreement; eligible false positives | 80/93; 0 |
+| Calibration | pending; 0.9 retained; no threshold changed |
+
+| Routing input (stand-in router) | `legacy_raw` | `sanitized` |
+| --- | --- | --- |
+| Requests | 101 | 94 |
+| Sanitizer refusals | 0 | 7 (key material 1, attachment 1, over-long 1, empty 4) |
+| Pattern-protected markers transmitted | 21 | 0 |
+| Mean characters sent | 111.9 | 70.1 |
+| Same route when both sent | 87/94 (Wilson 95%: 0.85 to 0.96) | |
+
+| Preflight (simulation, 100 ms stub, 5 runs) | off | shadow | active + guidance |
+| --- | --- | --- | --- |
+| Jev requests per run | 1 (routing) | 2 | 2 |
+| Preflight p50 | — | 114 ms | 114 ms |
+| End-to-end p50 | 125 ms | 132 ms | 132 ms |
+| Workflow eligible / applied | — | 5 / 0 | 5 / 5 |
+
+Two requests in flight together cost about one stub delay, not two (also
+proved by the barrier test). Tools offered to the provider were identical in
+every mode.
+
+Adversarial suite: every test passed on Linux, macOS and Windows. Privacy
+regression: 14 marker-bearing cases through the full preflight, 0 leaks.
+
 ## Privacy threat model: updates
 
 | Threat | Control | Residual risk |
