@@ -82,10 +82,7 @@ async fn serve(replies: Vec<Reply>) -> (String, Arc<Mutex<Vec<String>>>) {
 async fn read_request(stream: &mut tokio::net::TcpStream) -> String {
     let mut bytes = Vec::new();
     let mut buf = [0; 4096];
-    loop {
-        let Ok(count) = stream.read(&mut buf).await else {
-            break;
-        };
+    while let Ok(count) = stream.read(&mut buf).await {
         if count == 0 {
             break;
         }
