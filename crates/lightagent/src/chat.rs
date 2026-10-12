@@ -895,9 +895,16 @@ pub async fn run(
                 .base_url
                 .clone()
                 .unwrap_or_else(|| config.inference.base_url.clone());
-            let route =
-                crate::jev::select_route(&config.platform.jev, &line, default_model.clone(), false)
-                    .await;
+            let route = crate::jev::select_route(
+                &config.platform.jev,
+                &line,
+                default_model.clone(),
+                false,
+                // The terminal drives its turns with uncancellable tokens; the
+                // adapter's deadline still bounds this call.
+                &CancellationToken::new(),
+            )
+            .await;
             let routed_profile = route
                 .profile
                 .as_ref()

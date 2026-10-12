@@ -60,6 +60,31 @@ The adapter follows [TypeSafe's native API contract](https://docs.typesafe.ai/ap
 `state` plus a typed routing choice question, with allowlisted options and a
 default route, followed by validation of the corresponding choice answer.
 
+Routing goes through the shared `lightagent-jev` adapter. The routing call is
+made once per run (once per fresh turn in the terminal), is never retried, and
+is bounded by `platform.jev.timeout_secs` for the whole call. A cancelled API or
+ACP run stops waiting for Jev immediately and keeps its configured model. Every
+failure — unreachable, `401`, `422`, `429`, `529`, other statuses, oversized or
+malformed answers, low confidence, or a route outside the allowlists — keeps
+the configured route. The adapter classifies each case with a typed reason for
+diagnostics; no response body, URL or key is retained in those reasons.
+
+`platform.jev.model` accepts the `jev-latest` alias or a pinned version such as
+`jev-1.13.0`. Pin a version when tuning `confidence_threshold`: the alias moves
+with new releases, and confidence is calibrated per model version.
+
+The adapter also accepts a non-TypeSafe compatibility envelope,
+`{"output": {"model"|"route"|"choice": ..., "profile": ..., "confidence"|"score": ...}}`,
+for local adapters that predate the typed API. It is parsed as an explicitly
+separate format, carries no probabilities, model version or usage, and is
+subject to the same allowlists and threshold. A body containing `answers` is
+always read as the TypeSafe format.
+
+The routing `state` is the user's message cut to 4,096 characters. This
+exposure is unchanged by the shared adapter and is documented in
+`docs/architecture/jev-coordination-audit.md`; changing it requires a separately
+approved migration.
+
 Qdrant and Infinity each expose a request timeout (default 5 seconds, maximum
 300). Remote failures retain the profile-local RAG fallback.
 

@@ -97,6 +97,14 @@ The crate is historically named `lightagent-provider-lightweight`, but it has no
 `lightweight-*` dependency. Lightweight is a supported endpoint. The boundary is
 the wire protocol, not a shared implementation.
 
+`lightagent-jev` is the single typed client for TypeSafe Jev's SystemOne API.
+Every Jev consumer uses it, so transport, response validation, bounded retries,
+cancellation, error classification and credential handling exist once. It
+reports the answering model version and token usage, never derives a confidence
+for a Noul answer, and identifies the legacy `output` envelope as a separate
+compatibility format. It has no dependency on, and no knowledge of, the
+inference provider.
+
 `lightagent-runtime` is an optional HTTP client for providers exposing placement
 or runtime-control endpoints. Its failure cannot move model loading into the
 harness; ordinary generation remains available through the provider trait.

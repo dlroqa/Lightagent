@@ -4,6 +4,14 @@ All notable Lightagent changes are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- Moved TypeSafe Jev transport, response validation and error handling into a
+  new shared `lightagent-jev` crate used by the advisory model router. Routing
+  decisions, allowlists, thresholds and settings are unchanged.
+- A cancelled API or ACP run now stops waiting for Jev's routing answer at once
+  instead of waiting up to the routing timeout; it keeps its configured model.
+
 ## [0.4.0] - 2026-09-18
 
 ### Changed
