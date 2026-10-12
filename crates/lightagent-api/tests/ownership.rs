@@ -971,21 +971,10 @@ async fn concurrent_requests_never_cross_profiles() {
         } else {
             world.alice.as_str()
         };
+        let path = format!("/api/lightagent/v1/runs/{id}");
         let reads = tokio::join!(
-            call(
-                &world.addr,
-                "GET",
-                &format!("/api/lightagent/v1/runs/{id}"),
-                Some(token),
-                None
-            ),
-            call(
-                &world.addr,
-                "GET",
-                &format!("/api/lightagent/v1/runs/{id}"),
-                Some(other),
-                None
-            ),
+            call(&world.addr, "GET", &path, Some(token), None),
+            call(&world.addr, "GET", &path, Some(other), None),
         );
         assert_eq!((reads.0.0, reads.1.0), (200, 404), "{id}");
     }
