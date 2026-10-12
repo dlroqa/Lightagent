@@ -13,6 +13,7 @@
 mod acp;
 mod banner;
 mod chat;
+mod coordinator;
 mod extensions;
 mod import;
 mod jev;
@@ -1080,6 +1081,44 @@ fn get_key(config: &Config, key: &str) -> Option<String> {
         "platform.jev.allowed_models" => Some(config.platform.jev.allowed_models.join(",")),
         "platform.jev.allowed_profiles" => Some(config.platform.jev.allowed_profiles.join(",")),
         "platform.jev.timeout_secs" => Some(config.platform.jev.timeout_secs.to_string()),
+        "platform.jev.classification.mode" => {
+            Some(config.platform.jev.classification.mode.as_str().to_owned())
+        }
+        "platform.jev.classification.allowed_profiles" => Some(
+            config
+                .platform
+                .jev
+                .classification
+                .allowed_profiles
+                .join(","),
+        ),
+        "platform.jev.classification.max_input_chars" => Some(
+            config
+                .platform
+                .jev
+                .classification
+                .max_input_chars
+                .to_string(),
+        ),
+        "platform.jev.classification.default_threshold" => Some(
+            config
+                .platform
+                .jev
+                .classification
+                .default_threshold
+                .to_string(),
+        ),
+        "platform.jev.classification.version_thresholds" => Some(
+            config
+                .platform
+                .jev
+                .classification
+                .version_thresholds
+                .iter()
+                .map(|(version, threshold)| format!("{version}={threshold}"))
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
         "platform.qdrant.enabled" => Some(config.platform.qdrant.endpoint.enabled.to_string()),
         "platform.qdrant.base_url" => Some(
             config
@@ -1252,6 +1291,30 @@ fn set_key(config: &mut Config, key: &str, value: &str) -> Result<(), String> {
         "platform.jev.timeout_secs" => {
             config.platform.jev.timeout_secs = parse_u64(value, "platform.jev.timeout_secs")?;
         }
+        "platform.jev.classification.mode" => {
+            config.platform.jev.classification.mode = value.parse()?;
+        }
+        "platform.jev.classification.allowed_profiles" => {
+            config.platform.jev.classification.allowed_profiles = value
+                .split(',')
+                .map(str::trim)
+                .filter(|profile| !profile.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+        "platform.jev.classification.max_input_chars" => {
+            config.platform.jev.classification.max_input_chars = parse_usize(value, key)?;
+        }
+        "platform.jev.classification.default_threshold" => {
+            config.platform.jev.classification.default_threshold = value
+                .trim()
+                .parse()
+                .map_err(|_| format!("{key} must be a number"))?;
+        }
+        "platform.jev.classification.version_thresholds" => {
+            config.platform.jev.classification.version_thresholds =
+                parse_version_thresholds(value)?;
+        }
         "platform.jev.allowed_profiles" => {
             config.platform.jev.allowed_profiles = value
                 .split(',')
@@ -1319,6 +1382,27 @@ fn set_key(config: &mut Config, key: &str, value: &str) -> Result<(), String> {
 }
 
 /// Parse an optional string key: an empty value clears it.
+/// `jev-1.13.0=0.8,jev-1.14.0=0.85`; an empty value clears every entry.
+fn parse_version_thresholds(
+    value: &str,
+) -> Result<std::collections::BTreeMap<String, f32>, String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (version, threshold) = entry
+                .split_once('=')
+                .ok_or_else(|| format!("{entry:?} must be written version=threshold"))?;
+            let threshold = threshold
+                .trim()
+                .parse::<f32>()
+                .map_err(|_| format!("{entry:?} needs a numeric threshold"))?;
+            Ok((version.trim().to_owned(), threshold))
+        })
+        .collect()
+}
+
 fn parse_opt_string(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -1674,5 +1758,78 @@ mod tests {
     fn first_line_takes_only_the_first() {
         assert_eq!(first_line("a\nb\nc"), "a");
         assert_eq!(first_line(""), "");
+    }
+
+    #[test]
+    fn classification_keys_are_separate_from_routing_keys() {
+        let mut config = Config::default();
+        assert_eq!(
+            get_key(&config, "platform.jev.classification.mode").as_deref(),
+            Some("off")
+        );
+        set_key(&mut config, "platform.jev.enabled", "true").unwrap();
+        // Enabling the endpoint does not enable classification.
+        assert_eq!(
+            config.platform.jev.classification.mode,
+            lightagent_core::JevClassificationMode::Off
+        );
+        set_key(&mut config, "platform.jev.classification.mode", "Shadow").unwrap();
+        set_key(
+            &mut config,
+            "platform.jev.classification.allowed_profiles",
+            "default, research",
+        )
+        .unwrap();
+        set_key(
+            &mut config,
+            "platform.jev.classification.version_thresholds",
+            "jev-1.13.0=0.8",
+        )
+        .unwrap();
+        set_key(
+            &mut config,
+            "platform.jev.classification.max_input_chars",
+            "300",
+        )
+        .unwrap();
+        assert_eq!(
+            get_key(&config, "platform.jev.classification.mode").as_deref(),
+            Some("shadow")
+        );
+        assert_eq!(
+            get_key(&config, "platform.jev.classification.allowed_profiles").as_deref(),
+            Some("default,research")
+        );
+        assert_eq!(
+            get_key(&config, "platform.jev.classification.version_thresholds").as_deref(),
+            Some("jev-1.13.0=0.8")
+        );
+        assert!(config.validate().is_ok());
+        // Routing settings are untouched by classification settings.
+        assert!(config.platform.jev.allowed_models.is_empty());
+        assert!(config.platform.jev.allowed_profiles.is_empty());
+        assert!(set_key(&mut config, "platform.jev.classification.mode", "always").is_err());
+        assert!(
+            set_key(
+                &mut config,
+                "platform.jev.classification.version_thresholds",
+                "jev-1.13.0"
+            )
+            .is_err()
+        );
+        set_key(
+            &mut config,
+            "platform.jev.classification.version_thresholds",
+            "",
+        )
+        .unwrap();
+        assert!(
+            config
+                .platform
+                .jev
+                .classification
+                .version_thresholds
+                .is_empty()
+        );
     }
 }

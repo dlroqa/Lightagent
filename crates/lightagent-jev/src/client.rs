@@ -196,6 +196,14 @@ impl JevClient {
         self
     }
 
+    /// This client with tighter request and response bounds. The deadline is
+    /// left as configured, because the HTTP client was built with it.
+    pub fn with_size_limits(mut self, max_request_bytes: usize, max_response_bytes: usize) -> Self {
+        self.limits.max_request_bytes = max_request_bytes.min(self.limits.max_request_bytes);
+        self.limits.max_response_bytes = max_response_bytes.min(self.limits.max_response_bytes);
+        self
+    }
+
     /// The resolved `/v1/systemone` endpoint.
     pub fn endpoint(&self) -> &str {
         &self.endpoint

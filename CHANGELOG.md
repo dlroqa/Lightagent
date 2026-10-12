@@ -4,7 +4,18 @@ All notable Lightagent changes are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Optional Jev task classification (`platform.jev.classification`, off by
+  default): one sanitized, batched request per run or terminal turn, permitted
+  per profile, reported through a new `classification.completed` event. In
+  `active` mode an accepted category may add one fixed advisory instruction
+  about tools the run already has; it never grants tools, approvals or models.
+
 ### Changed
+
+- Lightagent's Jev model routing no longer replaces Lightweight's `Auto`
+  model; `Auto` reaches the provider unchanged so Lightweight decides the route.
 
 - Moved TypeSafe Jev transport, response validation and error handling into a
   new shared `lightagent-jev` crate used by the advisory model router. Routing

@@ -33,11 +33,12 @@ pub mod tool_stream;
 
 pub use config::{
     AgentConfig, ApprovalPolicy, Config, ConfigError, ConfigStore, DUCKDUCKGO_SEARCH_ENDPOINT,
-    ExtensionsConfig, InferenceConfig, InfinityConfig, JevConfig, McpConfig, McpServerEntry,
-    OpenTerminalConfig, PlatformConfig, PlatformEndpointConfig, QdrantConfig, SavedProvider,
-    SecretRef, SecurityConfig, SubagentsConfig, ToolsConfig, WebConfig, WebSearchConfig,
+    ExtensionsConfig, InferenceConfig, InfinityConfig, JevClassificationConfig,
+    JevClassificationMode, JevConfig, McpConfig, McpServerEntry, OpenTerminalConfig,
+    PlatformConfig, PlatformEndpointConfig, QdrantConfig, SavedProvider, SecretRef, SecurityConfig,
+    SubagentsConfig, ToolsConfig, WebConfig, WebSearchConfig,
 };
-pub use event::{AgentEvent, StopReason};
+pub use event::{AgentEvent, ClassificationDiagnostics, StopReason};
 pub use ids::RunId;
 pub use invoker::{NullInvoker, ToolCall, ToolInvoker, ToolOutcome, ToolSchema};
 pub use limits::RunLimits;
