@@ -384,6 +384,26 @@ async fn the_mock_contract_run_scores_the_pipeline_against_independent_labels() 
 
     // The scripted failures each fall back with their own reason.
     let outcomes = &report["outcomes"];
+    assert_eq!(
+        report["exploratory"], false,
+        "only live runs are exploratory"
+    );
+    assert_eq!(report["failures_by_class"]["transport"], 2, "429 and 529");
+    assert_eq!(
+        report["failures_by_class"]["api_contract"], 2,
+        "malformed and legacy"
+    );
+    assert_eq!(report["confidence_distribution"]["samples"], 89);
+    // The splits are scored separately and together cover every case.
+    let splits = &report["category"]["by_split"];
+    assert_eq!(splits["benchmark"]["expected_send"], 68);
+    assert_eq!(splits["calibration"]["expected_send"], 25);
+    assert_eq!(
+        splits["benchmark"]["classified"].as_u64().unwrap()
+            + splits["calibration"]["classified"].as_u64().unwrap(),
+        89
+    );
+    assert!(splits["benchmark"]["confusion_matrix"]["macro_f1"].is_number());
     for code in [
         "failed:rate_limited",
         "failed:overloaded",
@@ -538,6 +558,13 @@ fn a_live_run_proposes_thresholds_only_from_enough_evidence() {
         false,
     );
     assert_eq!(report["calibration"]["status"], "measured");
+    assert_eq!(report["exploratory"], true);
+    assert!(
+        report["disclaimer"]
+            .as_str()
+            .unwrap()
+            .starts_with("EXPLORATORY")
+    );
     assert_eq!(
         report["calibration"]["candidate_threshold"]["status"],
         "insufficient_evidence"
@@ -590,6 +617,29 @@ fn a_live_run_proposes_thresholds_only_from_enough_evidence() {
             .len(),
         40
     );
+}
+
+#[test]
+fn failures_are_classed_as_transport_credential_or_contract() {
+    for code in [
+        "connect",
+        "transport",
+        "timeout",
+        "rate_limited",
+        "overloaded",
+        "status",
+    ] {
+        assert_eq!(failure_class(code), "transport", "{code}");
+    }
+    assert_eq!(failure_class("unauthorized"), "credential");
+    for code in [
+        "rejected",
+        "malformed",
+        "unsupported_format",
+        "response_too_large",
+    ] {
+        assert_eq!(failure_class(code), "api_contract", "{code}");
+    }
 }
 
 #[test]

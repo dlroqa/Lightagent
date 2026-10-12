@@ -6,6 +6,14 @@ All notable Lightagent changes are documented here.
 
 ### Added
 
+- Jev live-validation readiness: the live contract records the commit and
+  every resolved model version, classes each failure as transport,
+  credential or API contract, stops after a failed authentication, and runs
+  only from `master`. Live classification reports are marked exploratory
+  and score the benchmark and calibration splits separately.
+- A routing-permission and profile-authorization proposal
+  (`docs/architecture/jev-routing-permission-and-profile-authorization-proposal.md`)
+  documenting five open privacy and authorization issues. Proposal only.
 - Jev evaluation: a versioned, synthetic, independently labeled benchmark
   (`evaluation/jev/benchmark.v1.json`, 101 cases with a calibration split)
   and a test-only runner over the production classifier, sanitizer, workflow

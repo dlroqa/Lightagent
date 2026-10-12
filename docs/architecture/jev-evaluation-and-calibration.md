@@ -6,6 +6,41 @@ permissions and workflow eligibility. Lightweight owns inference routing.
 Empirical evaluation decides whether classification should influence
 execution, and this PR adds that evidence without changing any default.
 
+## Open privacy and authorization issues (not solved by this work)
+
+Evaluation measures these; it does not fix them. The separately scoped
+proposal is
+[`jev-routing-permission-and-profile-authorization-proposal.md`](jev-routing-permission-and-profile-authorization-proposal.md).
+
+1. **Legacy Jev model routing has no per-profile external-processing
+   permission.** Only classification is profile-gated.
+2. **`legacy_raw` routing may transmit private-key material, attachments and
+   sensitive message content** (up to 4,096 characters).
+3. **Sanitization cannot detect every kind of private prose.** It is
+   minimization, not a privacy guarantee.
+4. **Admin-only configuration is not per-user profile ownership.** No API
+   key is bound to a profile.
+5. **`AgentProfile.toolsets` is not enforced at runtime.**
+
+For sensitive or untrusted profiles, disable external legacy Jev routing
+until a routing permission exists: set both `platform.jev.allowed_models`
+and `platform.jev.allowed_profiles` to empty. Routing then sends nothing,
+and classification keeps its per-profile gate (tested). No configuration is
+migrated automatically.
+
+## What each kind of evidence measures
+
+| Evidence | Measures | Does not measure |
+| --- | --- | --- |
+| Deterministic pipeline tests (`mock_contract`) | That the runner, gates and arithmetic behave as specified | Jev's accuracy |
+| Live contract tests (`live-contract`) | That the real endpoint accepts the schema, parses, authenticates and fails safely | Classification quality |
+| Classification-quality measurements (`classification-live`) | Jev's answers against single-author labels on 101 synthetic cases. **Exploratory** until the labels are independently reviewed | Real user tasks, agent outcomes |
+| Privacy regression tests | That known sensitive patterns never reach Jev under sanitized input, and refusals send nothing | Unknown patterns, prose |
+| Real-world agent outcome measurements | Not collected | — |
+
+No claim of improved agent accuracy, lower inference cost or better routing
+is made from any of these.
+
 ## Audit: integration points
 
 | Concern | Source | How PR 6 uses it |
@@ -252,8 +287,37 @@ adapter's timeout per request and step and job timeouts; a cost cap when
 pricing is verified; the key read through a secret reference and never
 printed or written to a report.
 
-**Status:** implemented and **pending**. The `jev-live` environment does not
-exist yet and no live run has been made.
+### Readiness and dispatch
+
+The `jev-live` environment exists with deployment allowed from `master`
+only, and holds `TYPESAFE_API_KEY`. Recommended before the first run: add a
+required reviewer to the environment, and add the pricing variables once
+TypeSafe pricing is verified (without them no cost is estimated and the cost
+cap does not apply; the request ceiling is the bound).
+
+Dispatch, once a run is authorized:
+
+```bash
+gh workflow run jev-live.yml -R dlroqa/Lightagent --ref master \
+  -f max_requests=40 -f model= -f max_cost_usd=
+gh run watch -R dlroqa/Lightagent "$(gh run list -R dlroqa/Lightagent --workflow jev-live.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
+gh run download -R dlroqa/Lightagent <run-id> -n jev-live-reports
+```
+
+Budget at `max_requests=40`: 3 contract probes; then up to 24 classification
+requests (two thirds of the remainder), interleaved across the twelve groups
+so both splits are represented; then routing pairs (two requests each) with
+what remains. Every request is sequential, uses a 10-second timeout and is
+never retried; the test step stops after 20 minutes and the job after 45.
+An authentication failure stops the run after one request.
+
+The contract report records the commit, the requested model, every resolved
+model version, requests used, and each check's area (`credential`,
+`api_contract`, `security`, `classification_quality`) with a failure class
+(`transport`, `credential`, `api_contract`) when it failed. Classification
+quality never fails the contract; it is reported as exploratory.
+
+**Status:** implemented and ready to dispatch. No live run has been made.
 
 ## Performance methodology
 
@@ -323,6 +387,21 @@ regression: 14 marker-bearing cases through the full preflight, 0 leaks.
 | Credential disclosure | Key only in the `Authorization` header; typed errors carry no body | — |
 | Extra spend | Per-run budget; no retries; live request ceiling | — |
 
+## Shadow-mode recommendation
+
+Shadow mode is appropriate as the next step, under these conditions:
+
+- only after the live contract passes;
+- only for profiles listed in `classification.allowed_profiles` that are not
+  sensitive or untrusted;
+- with routing allowlists empty for any installation serving sensitive
+  profiles, or `routing_input = sanitized` where routing must stay on;
+- `workflow_guidance` left off and `mode` not `active` until labels are
+  independently reviewed and live data supports a threshold.
+
+Shadow mode changes no run; it adds one concurrent Jev request per run and
+records diagnostics.
+
 ## Known limitations
 
 - Labels come from one AI labeler; human review is pending.
@@ -334,8 +413,9 @@ regression: 14 marker-bearing cases through the full preflight, 0 leaks.
   both are preserved here by design.
 - Sanitization is pattern-based and misses prose.
 - Performance numbers are simulations.
-- Live validation and calibration are pending until `jev-live` is
-  configured and dispatched.
+- Live validation and calibration are pending until a run is authorized and
+  dispatched. Live measurements are exploratory until the labels are
+  independently reviewed.
 - `release.yml` still uses `ubuntu-latest`; it is release machinery, not a
   gate, and is left for a release-time change.
 
