@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "purpose": "Scripted Jev answers for the deterministic contract run. They exercise the evaluation pipeline and its metrics; they are not Jev predictions and say nothing about Jev's accuracy.",
+  "default": {
+    "behavior": "answer the case's first labeled category",
+    "model": "jev-mock-1.0.0",
+    "category_confidence": 0.95,
+    "yes_probability": 0.9,
+    "no_probability": 0.1,
+    "unlabeled_probability": 0.5,
+    "complexity_score": 1.0,
+    "complexity_confidence": 0.7,
+    "usage": {"input_tokens": 200, "output_tokens": 40}
+  },
+  "overrides": {
+    "conv-007": {"category": "analysis", "category_confidence": 0.6, "why": "wrong and below threshold"},
+    "res-005": {"category": "analysis", "category_confidence": 0.93, "why": "an acceptable alternative"},
+    "code-006": {"category": "automation", "category_confidence": 0.92, "why": "an acceptable alternative"},
+    "ana-002": {"category": "conversation", "category_confidence": 0.97, "why": "an acceptable alternative"},
+    "ana-006": {"category": "conversation", "category_confidence": 0.95, "why": "a high-confidence misclassification"},
+    "ms-002": {"category": "analysis", "category_confidence": 0.91, "why": "a high-confidence misclassification"},
+    "auto-004": {"category": "coding", "category_confidence": 0.7, "why": "an acceptable alternative below threshold"},
+    "amb-001": {"category": "coding", "category_confidence": 0.5, "why": "an acceptable alternative below threshold"},
+    "amb-005": {"category": "conversation", "category_confidence": 0.4, "why": "correct but below threshold"},
+    "res-002": {"model": "jev-mock-1.1.0", "why": "a different model version"},
+    "ret-004": {"retrieval_probability": 0.2, "why": "a retrieval false negative"},
+    "none-003": {"tools_probability": 0.8, "why": "a tools false positive"},
+    "ret-003": {"status": 429, "body": "{}", "retry_after": "1", "why": "rate limited"},
+    "none-002": {"status": 529, "body": "{}", "why": "overloaded"},
+    "res-006": {"body": "{\"model\":\"jev-mock-1.0.0\",\"answers\":{\"task\":{\"type\":\"choice\",\"choice\":\"shopping\",\"confidence\":1,\"probabilities\":{\"shopping\":1}}}}", "why": "an unsupported category"},
+    "code-004": {"body": "{\"output\":{\"model\":\"fast\",\"confidence\":1}}", "why": "the legacy envelope"}
+  }
+}

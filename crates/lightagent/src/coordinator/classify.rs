@@ -33,7 +33,7 @@ pub(crate) enum TaskCategory {
 }
 
 impl TaskCategory {
-    const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Conversation,
         Self::Research,
         Self::Coding,
@@ -76,7 +76,7 @@ impl TaskCategory {
         }
     }
 
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
             .find(|category| category.as_str() == value)
@@ -396,7 +396,7 @@ pub(crate) mod tests {
         (format!("http://{address}"), seen)
     }
 
-    async fn read_request(stream: &mut tokio::net::TcpStream) -> String {
+    pub(crate) async fn read_request(stream: &mut tokio::net::TcpStream) -> String {
         let mut bytes = Vec::new();
         let mut buf = [0; 4096];
         while let Ok(count) = stream.read(&mut buf).await {

@@ -1,0 +1,66 @@
+name: jev evaluation
+
+# The deterministic Jev evaluation suite: the labeled synthetic dataset run
+# through the production classifier against scripted answers, the
+# legacy_raw-versus-sanitized routing comparison, the privacy regression and
+# the preflight performance simulation. No credential is used and nothing
+# leaves the runner. Its numbers test the pipeline; they are not Jev accuracy.
+# Live measurements come only from the manually dispatched jev-live workflow.
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: jev-evaluation-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  evaluate:
+    name: Jev deterministic evaluation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: jev-evaluation
+      - name: Run the evaluation, adversarial and performance suites
+        env:
+          LIGHTAGENT_JEV_EVAL_OUT: ${{ runner.temp }}/jev-evaluation
+        run: |
+          set -euo pipefail
+          cargo test -p lightagent --lib -- coordinator:: serve::routing_tests:: chat::model_tests::terminal_
+          for report in classification-mock confusion-matrix-mock threshold-analysis-mock \
+                        routing-mock privacy-regression performance-simulation; do
+            test -s "$LIGHTAGENT_JEV_EVAL_OUT/$report.json" || { echo "missing $report.json"; exit 1; }
+          done
+      - name: Summarize
+        if: always()
+        env:
+          LIGHTAGENT_JEV_EVAL_OUT: ${{ runner.temp }}/jev-evaluation
+        run: |
+          for summary in "$LIGHTAGENT_JEV_EVAL_OUT"/*.md; do
+            [ -f "$summary" ] && { cat "$summary"; echo; } >> "$GITHUB_STEP_SUMMARY"
+          done
+          exit 0
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: jev-evaluation-reports
+          path: ${{ runner.temp }}/jev-evaluation/
+          if-no-files-found: warn
