@@ -49,6 +49,24 @@ jobs:
                         routing-mock privacy-regression performance-simulation; do
             test -s "$LIGHTAGENT_JEV_EVAL_OUT/$report.json" || { echo "missing $report.json"; exit 1; }
           done
+      - name: Build the blinded label-review package
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/jev-label-review"
+          python3 -I scripts/jev-review-package.py evaluation/jev/benchmark.v1.json "$out"
+          for file in blind-worksheet.csv author-labels.csv review-key.csv manifest.json; do
+            test -s "$out/$file" || { echo "missing $file"; exit 1; }
+          done
+          # The worksheet must not reveal case ids: their prefixes name categories.
+          if grep -Eq '\b(conv|res|code|ana|auto|ms|amb|ret|none|unav|priv|bad)-[0-9]{3}\b' "$out/blind-worksheet.csv"; then
+            echo "the blind worksheet exposes a case id"; exit 1
+          fi
+          test "$(($(wc -l < "$out/review-key.csv") - 1))" -eq 101
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jev-label-review-package
+          path: ${{ runner.temp }}/jev-label-review/
+          if-no-files-found: error
       - name: Summarize
         if: always()
         env:

@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lightagent-jev-label-review/annotation.v1",
+  "title": "Independent label review submission",
+  "description": "One reviewer's labels for the blinded Jev benchmark worksheet. Each annotation row corresponds to one blind-worksheet.csv row; the CSV label columns carry the same values.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "dataset_version", "reviewer", "submitted", "declarations", "annotations"],
+  "properties": {
+    "schema": {"const": "annotation.v1"},
+    "dataset_version": {"type": "string", "description": "From manifest.json, e.g. 1.0.0."},
+    "reviewer": {"type": "string", "minLength": 1, "description": "A pseudonymous reviewer id, not a name or e-mail address."},
+    "submitted": {"type": "string", "format": "date"},
+    "declarations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["saw_author_labels", "saw_model_predictions", "consulted_other_reviewers"],
+      "properties": {
+        "saw_author_labels": {"const": false},
+        "saw_model_predictions": {"const": false},
+        "consulted_other_reviewers": {"const": false}
+      }
+    },
+    "annotations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["review_id", "privacy"],
+        "properties": {
+          "review_id": {"type": "string", "pattern": "^R[0-9]{3}$"},
+          "primary_category": {
+            "enum": ["conversation", "research", "coding", "analysis", "automation", "multi_step", ""],
+            "description": "Empty only when privacy is refuse."
+          },
+          "acceptable_alternatives": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"enum": ["conversation", "research", "coding", "analysis", "automation", "multi_step"]},
+            "description": "Written as a |-separated list in the CSV. Never includes the primary category."
+          },
+          "planning": {"enum": ["yes", "no", "either"]},
+          "retrieval": {"enum": ["yes", "no", "either"]},
+          "tools": {"enum": ["yes", "no", "either"]},
+          "privacy": {"enum": ["send", "refuse"]},
+          "refusal_reason": {
+            "enum": ["key_material", "attachment", "profile_not_permitted", "input_too_long", "empty_after_sanitization", "other", ""],
+            "description": "Required when privacy is refuse; empty otherwise."
+          },
+          "label_confidence": {"enum": ["high", "medium", "low"]},
+          "notes": {"type": "string", "description": "Why, especially for low confidence, alternatives or a disagreement with the task framing."}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"privacy": {"const": "send"}}},
+            "then": {"required": ["primary_category", "planning", "retrieval", "tools", "label_confidence"],
+                     "properties": {"primary_category": {"not": {"const": ""}}, "refusal_reason": {"const": ""}}}
+          },
+          {
+            "if": {"properties": {"privacy": {"const": "refuse"}}},
+            "then": {"required": ["refusal_reason"], "properties": {"refusal_reason": {"not": {"const": ""}}}}
+          }
+        ]
+      }
+    }
+  }
+}
