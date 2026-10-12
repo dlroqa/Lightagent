@@ -276,6 +276,7 @@ pub(crate) fn terminal_summary(report: &ClassificationReport) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::classify::TaskCategory;
     use super::classify::tests::{answer, config, jev_stub};
     use super::*;
     use lightagent_core::ProfileId;
