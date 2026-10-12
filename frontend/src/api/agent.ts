@@ -162,8 +162,84 @@ export interface JevSettings extends PlatformEndpointSettings {
   allowed_models: string[];
   allowed_profiles: string[];
   timeout_secs: number;
+  /** Task classification, separate from model routing. Absent from older servers. */
+  classification?: JevClassificationSettings;
   /** Write-only: submitted to the server but never returned in settings responses. */
   api_key?: string;
+}
+
+export type JevClassificationMode = "off" | "shadow" | "active";
+
+export interface JevClassificationSettings {
+  mode: JevClassificationMode;
+  allowed_profiles: string[];
+  max_input_chars: number;
+  default_threshold: number;
+  version_thresholds: Record<string, number>;
+  explicit_tool: boolean;
+  max_calls_per_run: number;
+}
+
+/** A sanitized classification record: fixed vocabulary, numbers and the Jev version only. */
+export interface JevDiagnostics {
+  schema: number;
+  trigger: "preflight" | "explicit";
+  mode: JevClassificationMode;
+  outcome: "classified" | "low_confidence" | "skipped" | "failed";
+  source: string | null;
+  category: string | null;
+  category_confidence: number | null;
+  confidence_available: boolean;
+  threshold: number | null;
+  planning_probability: number | null;
+  retrieval_probability: number | null;
+  tools_probability: number | null;
+  complexity: string | null;
+  complexity_confidence: number | null;
+  model_version: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  jev_calls: number;
+  classification_latency_ms: number | null;
+  preflight_latency_ms: number;
+  fallback_reason: string | null;
+  influenced: boolean;
+  recorded_at_unix?: number;
+}
+
+export interface JevVerification {
+  ok: boolean;
+  checked_at_unix: number;
+  model_version: string | null;
+  latency_ms: number;
+  error: string | null;
+}
+
+/** The server's privacy-safe Jev status for the active profile. */
+export interface JevStatus {
+  name: string;
+  provider: string;
+  kind: string;
+  description: string;
+  profile: string;
+  endpoint_configured: boolean;
+  api_key_configured: boolean;
+  api_key_resolvable: boolean;
+  configured: boolean;
+  enabled: boolean;
+  model: string;
+  verification: JevVerification | null;
+  classification: {
+    mode: JevClassificationMode;
+    profile_permitted: boolean;
+    max_input_chars: number;
+    default_threshold: number;
+    version_thresholds: Record<string, number>;
+    max_calls_per_run: number;
+  };
+  explicit_tool: { name: string; enabled: boolean; available: boolean };
+  permissions: { risk: string; requirements: string[] };
+  last_classification: JevDiagnostics | null;
 }
 
 export interface QdrantSettings extends PlatformEndpointSettings {
@@ -225,6 +301,8 @@ export const agentApi = {
       body: JSON.stringify(settings),
     }),
   provider: () => jsonRequest<ProviderCapabilities>("/provider"),
+  jevStatus: () => jsonRequest<JevStatus>("/jev"),
+  verifyJev: () => jsonRequest<JevVerification>("/jev/verify", { method: "POST", body: "{}" }),
   profiles: () => jsonRequest<ProfileCatalog>("/profiles"),
   createRun: (message: string, profile?: string, sessionId?: string, model?: string) =>
     jsonRequest<{ id: string; status: string; session_id: string | null }>("/runs", {

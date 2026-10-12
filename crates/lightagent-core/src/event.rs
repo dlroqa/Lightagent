@@ -93,6 +93,9 @@ pub enum AgentEvent {
 pub struct ClassificationDiagnostics {
     /// The schema of this record, so consumers can evolve with it.
     pub schema: u32,
+    /// `preflight` for the automatic classification, `explicit` for a call
+    /// of the `jev.classify_task` tool.
+    pub trigger: String,
     /// `shadow` or `active`.
     pub mode: String,
     /// `classified`, `low_confidence`, `skipped` or `failed`.

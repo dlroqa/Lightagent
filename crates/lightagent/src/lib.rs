@@ -718,8 +718,15 @@ async fn tools_list(json: bool) -> Result<(), String> {
     let profile_dir = profiles.handle(&profile.id).dir().to_path_buf();
     let extensions = chat::load_extensions(paths.root(), &profile_dir);
     let skills = chat::load_skills(paths.root(), &profile_dir, &extensions, &config);
-    let registry =
+    let mut registry =
         chat::configured_registry(&config, &profile_dir, &extensions, !skills.is_empty()).await;
+    coordinator::add_explicit_tool(
+        &mut registry,
+        &config,
+        profile.id.as_str(),
+        coordinator::JevBudget::new(config.platform.jev.classification.max_calls_per_run),
+        coordinator::JevState::new(),
+    );
     let policy = lightagent_core::PolicyEngine::new(profile.approval_policy.into());
     let mut rows = Vec::new();
     for name in registry.names() {

@@ -188,19 +188,33 @@ is not off. It reports:
 ACP and the session store ignore it, as they ignore other informational
 events.
 
-## Compatibility and rollback
+## Disabling versus rolling back
 
-- Rollback without a rebuild:
-  `lightagent config set platform.jev.classification.mode off`.
-- Rollback of the code: revert the PR. The configuration field is additive;
-  an older build ignores it.
-- The one behavior change for existing users: a configured `Auto` model is
-  no longer replaced by legacy routing. Non-`Auto` routing is unchanged.
+These are different operations with different effects.
+
+**Operational disablement** keeps the code and changes configuration only. No
+rebuild or data migration is needed:
+
+| Setting | Effect |
+| --- | --- |
+| `platform.jev.classification.mode = off` | No automatic classification requests and no `classification.completed` events. Model routing is unaffected, and **the Auto guard stays in force**. |
+| `platform.jev.classification.explicit_tool = false` | `jev.classify_task` leaves every profile's catalog. |
+| `platform.jev.classification.allowed_profiles = []` | No profile may send anything for classification. |
+| `platform.jev.enabled = false` | Disables the Jev endpoint for every path: routing, automatic classification, and the explicit tool. A configured `Auto` model is still sent unchanged. |
+
+**Full code rollback** reverts the PRs. Only reverting PR 3 removes the Auto
+guard, so legacy routing could again replace a configured `Auto` model
+(the pre-PR-3 behavior). The configuration fields are additive and ignored by
+older builds, and no persisted session or run data changes shape.
+
+The single behavior change for existing users is the Auto guard: a
+configured `Auto` model is no longer replaced by legacy routing. Non-`Auto`
+routing is unchanged.
 
 ## Subsequent work
 
 - PR 4: settings and Tools-screen controls, the explicit `jev.classify_task`
-  tool, and recent sanitized results.
+  tool, and recent sanitized results (see `jev-tool-and-ui.md`).
 - PR 5: wider workflow integration (planning or delegation policy) built on
   existing mechanisms only.
 - PR 6: the protected `jev-live` contract, labeled evaluation and

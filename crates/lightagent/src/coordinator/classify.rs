@@ -164,9 +164,9 @@ pub(crate) struct ClassificationReport {
 
 /// Classify `message` for `profile` under `config`, or report why not.
 ///
-/// Returns `None` when classification is off: no request, no diagnostics. The
-/// message is the current user turn only; `attachment` marks a turn whose text
-/// includes a file's contents, which is never sent.
+/// Returns `None` when automatic classification is off: no request, no
+/// diagnostics. The message is the current user turn only; `attachment` marks
+/// a turn whose text includes a file's contents, which is never sent.
 pub(crate) async fn classify(
     config: &Config,
     profile: &str,
@@ -178,13 +178,28 @@ pub(crate) async fn classify(
     if settings.mode == JevClassificationMode::Off {
         return None;
     }
-    let report = |outcome, invoked, latency| ClassificationReport {
+    let (outcome, invoked, latency) = evaluate(config, profile, message, attachment, cancel).await;
+    Some(ClassificationReport {
         mode: settings.mode,
         outcome,
         invoked,
         latency,
-    };
-    let skip = |code| Some(report(Outcome::Skipped(code), false, None));
+    })
+}
+
+/// One classification attempt, whatever triggered it. Every gate that
+/// protects external disclosure is checked here, so the automatic preflight
+/// and the explicit tool cannot diverge. Returns the outcome, whether a Jev
+/// request was made, and how long it took.
+pub(crate) async fn evaluate(
+    config: &Config,
+    profile: &str,
+    message: &str,
+    attachment: bool,
+    cancel: &CancellationToken,
+) -> (Outcome, bool, Option<Duration>) {
+    let settings = &config.platform.jev.classification;
+    let skip = |code| (Outcome::Skipped(code), false, None);
     if !config.platform.jev.endpoint.enabled {
         return skip("endpoint_disabled");
     }
@@ -224,7 +239,7 @@ pub(crate) async fn classify(
             }
         }
     };
-    Some(report(outcome, true, latency))
+    (outcome, true, latency)
 }
 
 /// The one batched request: a category choice, three independent yes/no

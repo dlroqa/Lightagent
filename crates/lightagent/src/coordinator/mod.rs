@@ -20,6 +20,8 @@
 
 mod classify;
 mod sanitize;
+mod state;
+mod tool;
 
 use std::time::{Duration, Instant};
 
@@ -30,6 +32,8 @@ use lightagent_tools::ToolRegistry;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use classify::{ClassificationReport, Outcome, TaskCategory};
+pub(crate) use state::{JevBudget, JevState, Trigger};
+pub(crate) use tool::{add_explicit_tool, status};
 
 /// Jev stubs shared with the run-level tests in `serve`.
 #[cfg(test)]
@@ -173,9 +177,32 @@ pub(crate) fn diagnostics(
     influenced: bool,
 ) -> Option<ClassificationDiagnostics> {
     let report = preflight.classification.as_ref()?;
+    Some(build_diagnostics(
+        Trigger::Preflight,
+        report.mode,
+        &report.outcome,
+        report.latency,
+        preflight.jev_calls,
+        preflight.latency,
+        influenced,
+    ))
+}
+
+/// The record shared by the preflight and the explicit tool: fixed vocabulary,
+/// numbers and the answering model version only.
+pub(crate) fn build_diagnostics(
+    trigger: Trigger,
+    mode: JevClassificationMode,
+    outcome: &Outcome,
+    classification_latency: Option<Duration>,
+    jev_calls: u32,
+    total_latency: Duration,
+    influenced: bool,
+) -> ClassificationDiagnostics {
     let mut diagnostics = ClassificationDiagnostics {
         schema: 1,
-        mode: report.mode.as_str().to_owned(),
+        trigger: trigger.as_str().to_owned(),
+        mode: mode.as_str().to_owned(),
         outcome: String::new(),
         source: None,
         category: None,
@@ -190,15 +217,13 @@ pub(crate) fn diagnostics(
         model_version: None,
         input_tokens: None,
         output_tokens: None,
-        jev_calls: preflight.jev_calls,
-        classification_latency_ms: report
-            .latency
-            .map(|latency| u64::try_from(latency.as_millis()).unwrap_or(u64::MAX)),
-        preflight_latency_ms: u64::try_from(preflight.latency.as_millis()).unwrap_or(u64::MAX),
+        jev_calls,
+        classification_latency_ms: classification_latency.map(state::millis),
+        preflight_latency_ms: state::millis(total_latency),
         fallback_reason: None,
         influenced,
     };
-    match &report.outcome {
+    match outcome {
         Outcome::Classified(classification) => {
             let accepted = classification.accepted();
             diagnostics.outcome = if accepted {
@@ -231,7 +256,7 @@ pub(crate) fn diagnostics(
             diagnostics.fallback_reason = Some((*reason).to_owned());
         }
     }
-    Some(diagnostics)
+    diagnostics
 }
 
 /// One terminal line describing the classification, or `None` when off.

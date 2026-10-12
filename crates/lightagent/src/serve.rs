@@ -35,6 +35,8 @@ use crate::chat::{
 /// Builds and drives a real run with the Lightweight provider per request.
 struct LightweightRunFactory {
     root: PathBuf,
+    /// Jev diagnostics and connection checks, held in memory for this server.
+    jev: Arc<crate::coordinator::JevState>,
 }
 
 /// The run's pre-dispatch decisions, through the shared coordinator. API and
@@ -71,13 +73,46 @@ impl RunFactory for LightweightRunFactory {
         let profile_dir = profiles.handle(&profile.id).dir().to_path_buf();
         let extensions = load_extensions(&self.root, &profile_dir);
         let skills = load_skills(&self.root, &profile_dir, &extensions, &config);
-        let registry =
+        let mut registry =
             configured_registry(&config, &profile_dir, &extensions, !skills.is_empty()).await;
+        crate::coordinator::add_explicit_tool(
+            &mut registry,
+            &config,
+            profile.id.as_str(),
+            crate::coordinator::JevBudget::new(
+                config.platform.jev.classification.max_calls_per_run,
+            ),
+            Arc::clone(&self.jev),
+        );
         Ok(registry
             .names()
             .iter()
             .filter_map(|name| registry.get(name).map(|tool| tool.definition().clone()))
             .collect())
+    }
+
+    async fn jev_status(&self) -> Result<serde_json::Value, String> {
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let config = ConfigStore::at(&paths)
+            .load()
+            .map_err(|error| error.to_string())?;
+        let profile = resolve_profile(&ProfileStore::new(&self.root), &config, None)?;
+        Ok(crate::coordinator::status(
+            &config,
+            profile.id.as_str(),
+            &self.jev,
+        ))
+    }
+
+    async fn verify_jev(&self) -> Result<serde_json::Value, String> {
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let config = ConfigStore::at(&paths)
+            .load()
+            .map_err(|error| error.to_string())?;
+        self.jev.verify(&config.platform.jev).await;
+        self.jev_status()
+            .await
+            .map(|status| status["verification"].clone())
     }
 
     async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
@@ -236,8 +271,20 @@ impl RunFactory for LightweightRunFactory {
         );
         delegation.delegate_timeout = Duration::from_secs(config.subagents.delegate_timeout_secs);
         delegation.subagents = crate::chat::subagent_policy(&config);
-        let registry =
+        let mut registry =
             configured_registry(&config, &profile_dir, &extensions, !skills.is_empty()).await;
+        // One Jev budget per run covers the preflight and every explicit call.
+        let budget = crate::coordinator::JevBudget::new(
+            config.platform.jev.classification.max_calls_per_run,
+        );
+        budget.record(preflight.jev_calls);
+        crate::coordinator::add_explicit_tool(
+            &mut registry,
+            &config,
+            profile.id.as_str(),
+            budget,
+            Arc::clone(&self.jev),
+        );
         // Classification only advises: the registry and policy below are
         // built exactly as without it.
         if preflight.classification.is_some() {
@@ -249,6 +296,7 @@ impl RunFactory for LightweightRunFactory {
                 profile.persona.push_str(&format!("\n\n{hint}"));
             }
             if let Some(diagnostics) = crate::coordinator::diagnostics(&preflight, hint.is_some()) {
+                self.jev.record(profile.id.as_str(), diagnostics.clone());
                 let _ = sink.send(AgentEvent::TaskClassified {
                     diagnostics: Box::new(diagnostics),
                 });
@@ -333,6 +381,7 @@ pub(crate) async fn build_run_manager() -> Result<RunManager, String> {
     let paths = LightagentPaths::resolve().map_err(|error| error.to_string())?;
     let factory = Arc::new(LightweightRunFactory {
         root: paths.root().to_path_buf(),
+        jev: crate::coordinator::JevState::new(),
     });
     Ok(RunManager::new(factory))
 }
@@ -372,6 +421,7 @@ pub async fn run(
     let context_limit = config.runtime.n_ctx.unwrap_or(4_096) as usize;
     let factory = Arc::new(LightweightRunFactory {
         root: paths.root().to_path_buf(),
+        jev: crate::coordinator::JevState::new(),
     });
     let state = AppState {
         manager: RunManager::new(factory),
@@ -622,7 +672,10 @@ mod routing_tests {
             );
             store.create(&lead).unwrap();
             store.set_active(&lead.id).unwrap();
-            let factory = LightweightRunFactory { root: root.clone() };
+            let factory = LightweightRunFactory {
+                root: root.clone(),
+                jev: crate::coordinator::JevState::new(),
+            };
             let (sink, mut events) = tokio::sync::mpsc::unbounded_channel();
             let (_decide, decisions) = tokio::sync::mpsc::unbounded_channel();
             let status = factory

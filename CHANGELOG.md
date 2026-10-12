@@ -6,6 +6,16 @@ All notable Lightagent changes are documented here.
 
 ### Added
 
+- Jev in the Tools catalog and Settings: a Decision services card (configured,
+  enabled and verified shown separately), classification controls, an
+  administrator-only connection check, and the profile's latest sanitized
+  classification. New endpoints: `GET /api/lightagent/v1/jev` and
+  `POST /api/lightagent/v1/jev/verify`.
+- Optional explicit `jev.classify_task` tool for permitted profiles
+  (`platform.jev.classification.explicit_tool`, off by default), sharing the
+  sanitizer and gates of automatic classification and bounded by a run-level
+  Jev request budget (`max_calls_per_run`).
+
 - Optional Jev task classification (`platform.jev.classification`, off by
   default): one sanitized, batched request per run or terminal turn, permitted
   per profile, reported through a new `classification.completed` event. In

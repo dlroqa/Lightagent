@@ -5,12 +5,15 @@ import {
   agentApi,
   type InfinitySettings,
   type JevSettings,
+  type JevStatus,
   type LightagentSettings,
   type OpenTerminalSettings,
   type PlatformEndpointSettings,
+  type ProfileSummary,
   type QdrantSettings,
 } from "../api/agent";
 import { Switch } from "../components/Bits";
+import { JevClassificationSection } from "../components/Jev";
 import { Card } from "../components/Card";
 import { TopBar } from "../components/Shell";
 import { usePoll } from "../hooks/usePoll";
@@ -22,6 +25,7 @@ export function SettingsScreen() {
   const profiles = usePoll(agentApi.profiles, 0);
   const tools = usePoll(() => agentApi.tools().then((body) => body.tools), 0);
   const provider = usePoll(agentApi.provider, 0);
+  const jev = usePoll(agentApi.jevStatus, 0);
   const [current, setCurrent] = useState<LightagentSettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -38,6 +42,7 @@ export function SettingsScreen() {
       const saved = await agentApi.saveSettings({ ...current, ...patch });
       setCurrent(saved);
       setMessage("Saved. New runs use these settings.");
+      jev.refresh();
     } catch (cause) {
       setMessage(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -193,7 +198,9 @@ export function SettingsScreen() {
             </p>
             <JevSettingsRow endpoint={value?.jev} disabled={!value || saving}
               models={availableModels} modelsError={provider.error?.message}
-              onSave={(jev) => persist({ jev })} />
+              profiles={profiles.data?.profiles ?? []} status={jev.data}
+              onChecked={jev.refresh}
+              onSave={(next) => persist({ jev: next })} />
             <QdrantSettingsRow endpoint={value?.qdrant} disabled={!value || saving}
               onSave={(qdrant) => persist({ qdrant })} />
             <InfinitySettingsRow endpoint={value?.infinity} disabled={!value || saving}
@@ -365,11 +372,14 @@ function PlatformEndpointRow<E extends PlatformEndpointSettings>({ label, hint, 
   );
 }
 
-function JevSettingsRow({ endpoint, disabled, models, modelsError, onSave }: {
+function JevSettingsRow({ endpoint, disabled, models, modelsError, profiles, status, onChecked, onSave }: {
   endpoint: JevSettings | undefined;
   disabled: boolean;
   models: string[];
   modelsError?: string;
+  profiles: ProfileSummary[];
+  status: JevStatus | null;
+  onChecked: () => void;
   onSave: (settings: JevSettings) => Promise<void>;
 }) {
   const [apiKey, setApiKey] = useState("");
@@ -380,7 +390,7 @@ function JevSettingsRow({ endpoint, disabled, models, modelsError, onSave }: {
     setApiKey("");
   };
   return (
-    <PlatformEndpointRow label="Jev" hint="Routing and confidence decisions before a run is dispatched."
+    <PlatformEndpointRow label="Jev" hint="TypeSafe Jev: optional model routing and task classification. Both are advisory and never grant tools or approvals."
       endpoint={endpoint} disabled={disabled} onSave={onSave}>
       <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 10 }}>
         Use either the TypeSafe service root (<code>https://api.typesafe.ai</code>) or the full <code>/v1/systemone</code> endpoint.
@@ -413,9 +423,11 @@ function JevSettingsRow({ endpoint, disabled, models, modelsError, onSave }: {
           onChange={(allowed_models) => void onSave({ ...endpoint, allowed_models })} />
         <TextPlatformSetting label="Permitted inference profiles (comma-separated)" value={endpoint.allowed_profiles.join(", ")}
           disabled={disabled || !endpoint.enabled} onSave={(value) => onSave({ ...endpoint, allowed_profiles: splitRoutes(value) })} />
-        <NumberPlatformSetting label="Routing timeout (seconds)" value={endpoint.timeout_secs}
+        <NumberPlatformSetting label="Request timeout (seconds)" value={endpoint.timeout_secs}
           min={1} max={300} step={1} disabled={disabled || !endpoint.enabled}
           onSave={(timeout_secs) => onSave({ ...endpoint, timeout_secs })} />
+        <JevClassificationSection endpoint={endpoint} profiles={profiles} status={status}
+          disabled={disabled} onSave={onSave} onChecked={onChecked} />
       </>}
     </PlatformEndpointRow>
   );

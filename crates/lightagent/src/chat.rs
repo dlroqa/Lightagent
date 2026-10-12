@@ -417,6 +417,8 @@ struct ChatRuntime {
     tools: Vec<String>,
     tool_permissions: Vec<String>,
     extensions: Vec<String>,
+    /// Jev requests this turn may still make; reset at each fresh turn.
+    jev_budget: Arc<crate::coordinator::JevBudget>,
 }
 
 /// Build a fresh runtime from the installed extension set. The same path is
@@ -476,7 +478,17 @@ async fn build_chat_runtime(
             })
             .collect::<BTreeMap<_, _>>(),
     };
-    let registry = configured_registry(config, profile_dir, &extensions, !skills.is_empty()).await;
+    let mut registry =
+        configured_registry(config, profile_dir, &extensions, !skills.is_empty()).await;
+    let jev_budget =
+        crate::coordinator::JevBudget::new(config.platform.jev.classification.max_calls_per_run);
+    crate::coordinator::add_explicit_tool(
+        &mut registry,
+        config,
+        profile.id.as_str(),
+        Arc::clone(&jev_budget),
+        crate::coordinator::JevState::new(),
+    );
     let tools = registry.names();
     let permission_policy = PolicyEngine::new(profile.approval_policy.into());
     let tool_permissions = tools
@@ -545,6 +557,7 @@ async fn build_chat_runtime(
         tools,
         tool_permissions,
         extensions: active_extensions,
+        jev_budget,
     }
 }
 
@@ -635,6 +648,7 @@ pub async fn run(
     let mut tool_permissions = runtime.tool_permissions;
     let startup_skills = session_skills.names();
     let startup_extensions = runtime.extensions;
+    let mut jev_budget = runtime.jev_budget;
     if session.approvals_unrestricted {
         agent.invoker().allow_without_restrictions();
     }
@@ -825,6 +839,7 @@ pub async fn run(
                 session_skills = runtime.skills;
                 startup_tools = runtime.tools;
                 tool_permissions = runtime.tool_permissions;
+                jev_budget = runtime.jev_budget;
                 config = new_config;
                 profile = new_profile;
                 if let Err(error) = operation {
@@ -892,6 +907,7 @@ pub async fn run(
         // Decide once at the start of a fresh turn, preserving this session's
         // executor and approvals across model changes and continuations.
         let preflight = turn_preflight(&config, &store, &profile, &line, attachment).await;
+        jev_budget.reset(preflight.jev_calls);
         if let Some(report) = &preflight.classification {
             println!("{}", crate::coordinator::terminal_summary(report));
         }

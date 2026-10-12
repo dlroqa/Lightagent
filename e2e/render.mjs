@@ -4,6 +4,7 @@
 
 import { mkdir } from "node:fs/promises";
 import { chromium } from "playwright";
+import { checkJevStates } from "./jev.mjs";
 
 const BASE = (process.env.PANEL_BASE ?? "http://127.0.0.1:8735").replace(/\/+$/, "");
 const OUT_DIR = process.env.OUT_DIR ?? "screens";
@@ -341,6 +342,13 @@ async function main() {
   }
 
   await context.close();
+
+  // Last: these states change the server's Jev settings.
+  try {
+    failures.push(...(await checkJevStates(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`jev states: ${err instanceof Error ? err.message : String(err)}`);
+  }
   await browser.close();
 
   console.log(`\nScreenshots written to ${OUT_DIR}/`);

@@ -203,6 +203,17 @@ pub trait RunFactory: Send + Sync + 'static {
         Err("provider capability discovery is not available in this embedding".to_owned())
     }
 
+    /// The privacy-safe Jev status for the active profile: what is configured,
+    /// enabled and verified, and that profile's latest classification record.
+    async fn jev_status(&self) -> Result<serde_json::Value, String> {
+        Err("Jev status is not available in this embedding".to_owned())
+    }
+
+    /// Run the operator's Jev connection check with a synthetic request.
+    async fn verify_jev(&self) -> Result<serde_json::Value, String> {
+        Err("Jev verification is not available in this embedding".to_owned())
+    }
+
     /// Drive `request` to a terminal [`RunStatus`], emitting events to `sink`,
     /// obeying `cancel`, and taking approval decisions from `decisions`.
     async fn run(
@@ -313,6 +324,16 @@ impl RunManager {
     /// Discover the selected provider's current model catalog and capabilities.
     pub async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
         self.factory.provider_capabilities().await
+    }
+
+    /// The active profile's Jev status.
+    pub async fn jev_status(&self) -> Result<serde_json::Value, String> {
+        self.factory.jev_status().await
+    }
+
+    /// Run the Jev connection check.
+    pub async fn verify_jev(&self) -> Result<serde_json::Value, String> {
+        self.factory.verify_jev().await
     }
 
     /// Start a run and return its shared state. The run drives in the background.
