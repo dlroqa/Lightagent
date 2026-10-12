@@ -265,8 +265,10 @@ fn a_credential_restriction_only_narrows() {
 fn a_jev_permission_never_authorizes_a_caller() {
     // bob-bot may send content to Jev for routing and classification; alice
     // is still refused bob-bot.
-    let mut jev = JevConfig::default();
-    jev.routing_allowed_profiles = vec!["bob-bot".to_owned()];
+    let mut jev = JevConfig {
+        routing_allowed_profiles: vec!["bob-bot".to_owned()],
+        ..JevConfig::default()
+    };
     jev.classification.allowed_profiles = vec!["bob-bot".to_owned()];
     assert!(jev.routing_grant("bob-bot").permits());
     assert!(jev.classification.permits_profile("bob-bot"));
