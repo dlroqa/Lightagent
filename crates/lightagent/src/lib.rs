@@ -1768,6 +1768,12 @@ mod tests {
             Some("off")
         );
         set_key(&mut config, "platform.jev.enabled", "true").unwrap();
+        set_key(
+            &mut config,
+            "platform.jev.base_url",
+            "https://api.typesafe.ai",
+        )
+        .unwrap();
         // Enabling the endpoint does not enable classification.
         assert_eq!(
             config.platform.jev.classification.mode,
