@@ -15,4 +15,5 @@ tokio = { workspace = true }
 tokio-util.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
+sha2.workspace = true
 directories.workspace = true

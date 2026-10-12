@@ -11,6 +11,7 @@
 use std::collections::HashSet;
 
 use axum::http::{HeaderMap, StatusCode};
+use lightagent_core::identity::{Caller, Capability, Denial, PrincipalSource};
 
 /// A capability a route requires.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -23,6 +24,20 @@ pub enum Scope {
     ApprovalsWrite,
     /// Grants every scope.
     Admin,
+}
+
+impl From<Scope> for Capability {
+    fn from(scope: Scope) -> Self {
+        match scope {
+            Scope::RunsRead => Capability::RunsRead,
+            Scope::RunsWrite => Capability::RunsWrite,
+            Scope::SessionsRead => Capability::SessionsRead,
+            Scope::SessionsWrite => Capability::SessionsWrite,
+            Scope::ToolsRead => Capability::ToolsRead,
+            Scope::ApprovalsWrite => Capability::ApprovalsWrite,
+            Scope::Admin => Capability::Administer,
+        }
+    }
 }
 
 /// The API's authentication policy.
@@ -54,6 +69,30 @@ impl AuthConfig {
         self.key.is_some()
     }
 
+    /// The caller this policy establishes for `headers`, in the shared
+    /// identity vocabulary. Today's API has one identity: the local operator,
+    /// reached through the open loopback bind or the single configured key
+    /// (the compatibility mode). A key's scopes become the caller's
+    /// capability restriction, so [`lightagent_core::identity::authorize`]
+    /// agrees with [`AuthConfig::authorize`] for every scope. Handlers do not
+    /// call this yet; it is the seam profile ownership will use.
+    pub fn caller(&self, headers: &HeaderMap) -> Result<Caller, Denial> {
+        let Some(expected) = &self.key else {
+            return Ok(Caller::local_operator(PrincipalSource::LocalCompatibility));
+        };
+        match bearer(headers) {
+            Some(token) if constant_time_eq(token.as_bytes(), expected.as_bytes()) => {
+                let mut caller = Caller::local_operator(PrincipalSource::LocalCompatibility);
+                if !self.scopes.contains(&Scope::Admin) {
+                    caller.restriction.capabilities =
+                        Some(self.scopes.iter().copied().map(Capability::from).collect());
+                }
+                Ok(caller)
+            }
+            _ => Err(Denial::Unauthenticated),
+        }
+    }
+
     /// Authorize a request carrying `headers` for a route needing `required`.
     pub fn authorize(
         &self,
@@ -63,18 +102,7 @@ impl AuthConfig {
         let Some(expected) = &self.key else {
             return Ok(()); // open policy: loopback is the boundary
         };
-        let provided = headers
-            .get("authorization")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| {
-                // The auth scheme is case-insensitive per RFC 7235, and clients
-                // vary — accept `Bearer`, `bearer`, `BEARER`.
-                let (scheme, token) = value.split_once(' ')?;
-                scheme
-                    .eq_ignore_ascii_case("bearer")
-                    .then_some(token.trim())
-            });
-        match provided {
+        match bearer(headers) {
             // Constant-time compare, so a key sharing a prefix with the real one
             // is not rejected measurably slower than one differing at the first
             // byte — the same protection the inference gateway gives its keys.
@@ -94,6 +122,21 @@ impl AuthConfig {
             )),
         }
     }
+}
+
+/// The bearer token in `headers`, if any. The auth scheme is
+/// case-insensitive per RFC 7235, and clients vary — accept `Bearer`,
+/// `bearer`, `BEARER`.
+fn bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            let (scheme, token) = value.split_once(' ')?;
+            scheme
+                .eq_ignore_ascii_case("bearer")
+                .then_some(token.trim())
+        })
 }
 
 /// Compare two byte strings without leaking their contents through timing.
@@ -192,5 +235,70 @@ mod tests {
         assert!(!constant_time_eq(b"secret", b"secre")); // shorter
         assert!(!constant_time_eq(b"secret", b"secrets")); // longer
         assert!(constant_time_eq(b"", b""));
+    }
+
+    const ALL_SCOPES: [Scope; 7] = [
+        Scope::RunsRead,
+        Scope::RunsWrite,
+        Scope::SessionsRead,
+        Scope::SessionsWrite,
+        Scope::ToolsRead,
+        Scope::ApprovalsWrite,
+        Scope::Admin,
+    ];
+
+    /// The shared identity seam agrees with today's gate for every policy,
+    /// presented key and required scope, so adopting it changes nothing.
+    #[test]
+    fn the_identity_caller_agrees_with_the_scope_gate() {
+        use lightagent_core::identity::{LOCAL_OPERATOR, Role, authorize_capability};
+        let mut policies = vec![
+            AuthConfig::open(),
+            AuthConfig::keyed("secret", [Scope::Admin]),
+        ];
+        for scope in ALL_SCOPES {
+            policies.push(AuthConfig::keyed("secret", [scope]));
+        }
+        policies.push(AuthConfig::keyed(
+            "secret",
+            [Scope::RunsRead, Scope::SessionsRead],
+        ));
+        for policy in &policies {
+            for headers in [
+                HeaderMap::new(),
+                headers_with("wrong"),
+                headers_with("secret"),
+            ] {
+                for required in ALL_SCOPES {
+                    let gate = policy.authorize(&headers, required);
+                    let seam = policy
+                        .caller(&headers)
+                        .and_then(|caller| authorize_capability(&caller, required.into()));
+                    match (&gate, &seam) {
+                        (Ok(()), Ok(())) => {}
+                        (Err((StatusCode::UNAUTHORIZED, _)), Err(Denial::Unauthenticated)) => {}
+                        (Err((StatusCode::FORBIDDEN, _)), Err(Denial::MissingCapability)) => {}
+                        _ => panic!("{policy:?} {required:?}: gate {gate:?} vs seam {seam:?}"),
+                    }
+                }
+                if let Ok(caller) = policy.caller(&headers) {
+                    assert_eq!(caller.principal.id.as_str(), LOCAL_OPERATOR);
+                    assert_eq!(caller.principal.role, Role::Operator);
+                    assert_eq!(caller.principal.source, PrincipalSource::LocalCompatibility);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_scope_maps_to_its_own_capability() {
+        let mapped: std::collections::BTreeSet<Capability> =
+            ALL_SCOPES.into_iter().map(Capability::from).collect();
+        assert_eq!(mapped.len(), ALL_SCOPES.len());
+        assert_eq!(Capability::from(Scope::Admin), Capability::Administer);
+        assert!(
+            !mapped.contains(&Capability::Provision),
+            "no API scope provisions today"
+        );
     }
 }

@@ -6,6 +6,16 @@ All notable Lightagent changes are documented here.
 
 ### Security
 
+- Identity and profile-ownership foundation (`lightagent_core::identity`):
+  principals and roles, capabilities, credential-limited callers, an
+  ownership registry with idempotent and conflict-detecting assignment,
+  hashed credentials (`la_<key id>_<secret>`, SHA-256 at rest,
+  constant-time), content-free audit records, and `authorize`, which alone
+  produces an `AuthorizedProfile`. `AuthConfig::caller` maps today's API
+  authentication onto it. Nothing calls either on a request path yet, so
+  behavior is unchanged. Architecture, audit, permission matrix, provisioning
+  contract and threat model:
+  `docs/architecture/profile-ownership-architecture.md`.
 - Per-profile permission for sending task content to Jev for model routing
   (`platform.jev.routing_permission` and
   `platform.jev.routing_allowed_profiles`). It is checked on the server, for

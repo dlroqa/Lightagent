@@ -58,7 +58,7 @@ impl From<String> for RunId {
 }
 
 /// Render bytes as lowercase hex, no separators.
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         // Two hex digits per byte; `char::from_digit` never fails for < 16.
