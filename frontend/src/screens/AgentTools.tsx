@@ -5,6 +5,7 @@ import { Wrench } from "lucide-react";
 import { agentApi, type SkillInfo, type ToolInfo } from "../api/agent";
 import { Card } from "../components/Card";
 import { Empty, Pill } from "../components/Bits";
+import { JevToolCard } from "../components/Jev";
 import { TopBar } from "../components/Shell";
 
 type Tone = "ok" | "warn" | "danger" | "info" | "accent" | "neutral";
@@ -56,6 +57,9 @@ export function AgentTools() {
     <>
       <TopBar title="Tools" subtitle="What the agent can call, and how each is gated" />
       <div className="page">
+        <Card title="Decision services">
+          <JevToolCard />
+        </Card>
         <Card title="Enabled tools">
           {error ? (
             <div role="alert">

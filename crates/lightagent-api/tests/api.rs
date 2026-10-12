@@ -777,3 +777,147 @@ async fn scoped_auth_refuses_cross_capability_access() {
     .await;
     assert_eq!(status, 404);
 }
+
+#[tokio::test]
+async fn jev_status_and_verification_use_the_existing_scopes() {
+    // A tool-catalog reader may see the Jev status but may not spend a Jev
+    // request on a connection check, and nothing reaches either without a key.
+    let auth = AuthConfig::keyed("reader", [Scope::ToolsRead]);
+    let addr = spawn_server(app_state(auth)).await;
+    for (method, path) in [
+        ("GET", "/api/lightagent/v1/jev"),
+        ("POST", "/api/lightagent/v1/jev/verify"),
+    ] {
+        let (status, _) = http(&addr, method, path, &[], None).await;
+        assert_eq!(status, 401, "{method} {path} without a key");
+    }
+    let reader = [("Authorization", "Bearer reader")];
+    // Past the auth gate: this embedding has no Jev status, so 503 JSON.
+    let (status, body) = http(&addr, "GET", "/api/lightagent/v1/jev", &reader, None).await;
+    assert_eq!(status, 503);
+    assert!(body.contains("not available"));
+    let (status, _) = http(
+        &addr,
+        "POST",
+        "/api/lightagent/v1/jev/verify",
+        &reader,
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "verification needs the administrator scope");
+
+    let admin = AuthConfig::keyed("admin", [Scope::Admin]);
+    let addr = spawn_server(app_state(admin)).await;
+    let (status, _) = http(
+        &addr,
+        "POST",
+        "/api/lightagent/v1/jev/verify",
+        &[("Authorization", "Bearer admin")],
+        None,
+    )
+    .await;
+    assert_eq!(status, 503, "an administrator passes the gate");
+}
+
+#[tokio::test]
+async fn classification_settings_round_trip_without_touching_routing() {
+    let root = std::env::temp_dir().join(format!(
+        "lightagent-jev-settings-{}",
+        lightagent_core::RunId::new().as_str()
+    ));
+    let config_store = ConfigStore::new(root.join("config.json"));
+    let profiles = ProfileStore::new(&root);
+    let profile = AgentProfile::new(
+        ProfileId::new("default").unwrap(),
+        "Default",
+        "Be helpful.",
+        "default",
+    );
+    profiles.save(&profile).unwrap();
+    let mut initial = lightagent_core::Config::default();
+    initial.platform.jev.allowed_models = vec!["fast".to_owned()];
+    config_store.save(&initial).unwrap();
+    let mut state = app_state(AuthConfig::open());
+    state.config_store = Some(config_store.clone());
+    let addr = spawn_server(state).await;
+
+    let (status, body) = http(&addr, "GET", "/api/lightagent/v1/settings", &[], None).await;
+    assert_eq!(status, 200, "{body}");
+    let mut settings: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(settings["jev"]["classification"]["mode"], "off");
+    assert_eq!(settings["jev"]["classification"]["explicit_tool"], false);
+
+    // An older client that does not know classification leaves it unchanged.
+    let mut older = settings.clone();
+    older["jev"]
+        .as_object_mut()
+        .unwrap()
+        .remove("classification");
+    let (status, body) = http(
+        &addr,
+        "PUT",
+        "/api/lightagent/v1/settings",
+        &[],
+        Some(&older.to_string()),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    settings["jev"]["classification"] = serde_json::json!({
+        "mode": "shadow",
+        "allowed_profiles": ["default"],
+        "max_input_chars": 300,
+        "default_threshold": 0.92,
+        "version_thresholds": {"jev-1.13.0": 0.8},
+        "explicit_tool": true,
+        "max_calls_per_run": 5
+    });
+    let (status, body) = http(
+        &addr,
+        "PUT",
+        "/api/lightagent/v1/settings",
+        &[],
+        Some(&settings.to_string()),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let loaded = config_store.load().unwrap();
+    let classification = &loaded.platform.jev.classification;
+    assert_eq!(
+        classification.mode,
+        lightagent_core::JevClassificationMode::Shadow
+    );
+    assert_eq!(classification.allowed_profiles, ["default"]);
+    assert_eq!(classification.max_input_chars, 300);
+    assert_eq!(classification.version_thresholds["jev-1.13.0"], 0.8);
+    assert!(classification.explicit_tool);
+    assert_eq!(classification.max_calls_per_run, 5);
+    assert_eq!(
+        loaded.platform.jev.allowed_models,
+        ["fast"],
+        "routing untouched"
+    );
+
+    // Invalid values are refused and nothing is saved.
+    settings["jev"]["classification"]["max_calls_per_run"] = 1.into();
+    let (status, _) = http(
+        &addr,
+        "PUT",
+        "/api/lightagent/v1/settings",
+        &[],
+        Some(&settings.to_string()),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(
+        config_store
+            .load()
+            .unwrap()
+            .platform
+            .jev
+            .classification
+            .max_calls_per_run,
+        5
+    );
+    std::fs::remove_dir_all(root).ok();
+}

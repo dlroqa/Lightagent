@@ -696,10 +696,20 @@ pub struct JevClassificationConfig {
     /// The confidence needed when the answering version has no calibrated
     /// threshold. Deliberately conservative.
     pub default_threshold: f32,
+    /// Offer the explicit `jev.classify_task` tool to permitted profiles. It
+    /// is independent of `mode`, which governs only automatic classification.
+    pub explicit_tool: bool,
+    /// Jev requests one run (or terminal turn) may make, counting the
+    /// automatic preflight (at most two) and every explicit tool call.
+    pub max_calls_per_run: u32,
 }
 
 pub const DEFAULT_CLASSIFICATION_INPUT_CHARS: usize = 400;
 pub const DEFAULT_CLASSIFICATION_THRESHOLD: f32 = 0.9;
+pub const DEFAULT_JEV_CALLS_PER_RUN: u32 = 4;
+/// Bounds for `max_calls_per_run`. The lower bound leaves room for both
+/// preflight requests, so the automatic preflight is never refused.
+pub const JEV_CALLS_PER_RUN: std::ops::RangeInclusive<u32> = 2..=16;
 /// Bounds for `max_input_chars`.
 pub const CLASSIFICATION_INPUT_CHARS: std::ops::RangeInclusive<usize> = 32..=2_000;
 
@@ -711,6 +721,8 @@ impl Default for JevClassificationConfig {
             max_input_chars: DEFAULT_CLASSIFICATION_INPUT_CHARS,
             version_thresholds: BTreeMap::new(),
             default_threshold: DEFAULT_CLASSIFICATION_THRESHOLD,
+            explicit_tool: false,
+            max_calls_per_run: DEFAULT_JEV_CALLS_PER_RUN,
         }
     }
 }
@@ -1112,6 +1124,11 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "platform.jev.classification.max_input_chars must be between 32 and 2000"
                     .to_owned(),
+            ));
+        }
+        if !JEV_CALLS_PER_RUN.contains(&classification.max_calls_per_run) {
+            return Err(ConfigError::Invalid(
+                "platform.jev.classification.max_calls_per_run must be between 2 and 16".to_owned(),
             ));
         }
         let unit = |value: f32| value.is_finite() && (0.0..=1.0).contains(&value);
@@ -1737,6 +1754,11 @@ mod tests {
         assert_eq!(jev.allowed_profiles, vec!["careful".to_owned()]);
         assert_eq!(jev.classification, JevClassificationConfig::default());
         assert_eq!(jev.classification.mode, JevClassificationMode::Off);
+        assert!(!jev.classification.explicit_tool);
+        assert_eq!(
+            jev.classification.max_calls_per_run,
+            DEFAULT_JEV_CALLS_PER_RUN
+        );
         assert!(!jev.classification.permits_profile("careful"));
         assert!(config.validate().is_ok());
         // Round-trips additively: the old fields are unchanged.
@@ -1771,7 +1793,9 @@ mod tests {
             DEFAULT_CLASSIFICATION_THRESHOLD
         );
         assert!(config.validate().is_ok());
-        let mutations: [fn(&mut JevClassificationConfig); 6] = [
+        let mutations: [fn(&mut JevClassificationConfig); 8] = [
+            |c: &mut JevClassificationConfig| c.max_calls_per_run = 1,
+            |c: &mut JevClassificationConfig| c.max_calls_per_run = 17,
             |c: &mut JevClassificationConfig| c.max_input_chars = 10,
             |c: &mut JevClassificationConfig| c.max_input_chars = 10_000,
             |c: &mut JevClassificationConfig| c.default_threshold = 1.5,

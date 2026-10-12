@@ -72,6 +72,8 @@ pub fn router(state: AppState) -> Router {
             "/api/lightagent/v1/provider",
             get(get_provider_capabilities),
         )
+        .route("/api/lightagent/v1/jev", get(get_jev_status))
+        .route("/api/lightagent/v1/jev/verify", post(verify_jev))
         .route("/api/lightagent/v1/skills", get(list_skills))
         .route("/api/lightagent/v1/profiles", get(list_profiles))
         .route(
@@ -238,6 +240,38 @@ async fn list_skills(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
         .collect();
     Json(json!({ "skills": skills })).into_response()
 }
+/// The Jev status the Tools and Settings screens show. Readable with the
+/// tool-catalog scope; it holds no credential, secret reference or message.
+async fn get_jev_status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::ToolsRead) {
+        return rejection;
+    }
+    match state.manager.jev_status().await {
+        Ok(status) => Json(status).into_response(),
+        Err(error) => unavailable(&error),
+    }
+}
+
+/// The operator's connection check. It spends one Jev request, so it needs the
+/// same administrator scope as changing settings.
+async fn verify_jev(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    match state.manager.verify_jev().await {
+        Ok(verification) => Json(verification).into_response(),
+        Err(error) => unavailable(&error),
+    }
+}
+
+fn unavailable(message: &str) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({ "error": message })),
+    )
+        .into_response()
+}
+
 async fn get_provider_capabilities(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -312,10 +346,27 @@ struct UiJevSettings {
     allowed_profiles: Option<Vec<String>>,
     #[serde(default)]
     timeout_secs: Option<u64>,
+    /// Task classification. Absent from an older client's request, which then
+    /// leaves the saved classification settings unchanged.
+    #[serde(default)]
+    classification: Option<UiJevClassification>,
     /// Write-only credential submitted from the Settings screen. It is never
     /// serialized in a settings response.
     #[serde(default, skip_serializing)]
     api_key: Option<String>,
+}
+
+/// Task-classification settings, separate from model routing.
+#[derive(Clone, Deserialize, Serialize)]
+struct UiJevClassification {
+    mode: lightagent_core::JevClassificationMode,
+    allowed_profiles: Vec<String>,
+    max_input_chars: usize,
+    default_threshold: f32,
+    #[serde(default)]
+    version_thresholds: std::collections::BTreeMap<String, f32>,
+    explicit_tool: bool,
+    max_calls_per_run: u32,
 }
 
 /// Non-sensitive settings for Qdrant's retrieval adapter.
@@ -394,6 +445,20 @@ fn ui_settings(config: &lightagent_core::Config) -> UiSettings {
             allowed_models: Some(config.platform.jev.allowed_models.clone()),
             allowed_profiles: Some(config.platform.jev.allowed_profiles.clone()),
             timeout_secs: Some(config.platform.jev.timeout_secs),
+            classification: Some(UiJevClassification {
+                mode: config.platform.jev.classification.mode,
+                allowed_profiles: config.platform.jev.classification.allowed_profiles.clone(),
+                max_input_chars: config.platform.jev.classification.max_input_chars,
+                default_threshold: config.platform.jev.classification.default_threshold,
+                version_thresholds: config
+                    .platform
+                    .jev
+                    .classification
+                    .version_thresholds
+                    .clone(),
+                explicit_tool: config.platform.jev.classification.explicit_tool,
+                max_calls_per_run: config.platform.jev.classification.max_calls_per_run,
+            }),
             api_key: None,
         },
         qdrant: UiQdrantSettings {
@@ -545,6 +610,16 @@ async fn save_settings(
     }
     if let Some(value) = settings.jev.timeout_secs {
         config.platform.jev.timeout_secs = value;
+    }
+    if let Some(value) = settings.jev.classification {
+        let classification = &mut config.platform.jev.classification;
+        classification.mode = value.mode;
+        classification.allowed_profiles = value.allowed_profiles;
+        classification.max_input_chars = value.max_input_chars;
+        classification.default_threshold = value.default_threshold;
+        classification.version_thresholds = value.version_thresholds;
+        classification.explicit_tool = value.explicit_tool;
+        classification.max_calls_per_run = value.max_calls_per_run;
     }
     if let Err(error) = apply_jev_api_key(&mut config, store, settings.jev.api_key) {
         return internal(&error);

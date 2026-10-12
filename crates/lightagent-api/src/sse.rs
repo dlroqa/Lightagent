@@ -57,6 +57,7 @@ pub fn data(event: &AgentEvent) -> serde_json::Value {
         }),
         AgentEvent::TaskClassified { diagnostics: d } => json!({
             "schema": d.schema,
+            "trigger": d.trigger,
             "mode": d.mode,
             "outcome": d.outcome,
             "source": d.source,
@@ -137,6 +138,7 @@ mod tests {
         let classified = AgentEvent::TaskClassified {
             diagnostics: Box::new(lightagent_core::ClassificationDiagnostics {
                 schema: 1,
+                trigger: "preflight".into(),
                 mode: "shadow".into(),
                 outcome: "classified".into(),
                 source: Some("jev".into()),
@@ -164,7 +166,8 @@ mod tests {
         assert_eq!(payload["schema"], 1);
         assert_eq!(payload["category"], "research");
         assert_eq!(payload["fallback_reason"], serde_json::Value::Null);
-        assert_eq!(payload.as_object().unwrap().len(), 21);
+        assert_eq!(payload["trigger"], "preflight");
+        assert_eq!(payload.as_object().unwrap().len(), 22);
     }
 
     #[test]
