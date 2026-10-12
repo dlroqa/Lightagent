@@ -4,7 +4,9 @@ name: jev live contract
 #
 # * Manual dispatch only: paid API calls never run on a push or pull request,
 #   and dispatch requires write access to this repository, so untrusted forks
-#   can neither start it nor read its secret.
+#   can neither start it nor read its secret. It runs only from master (the
+#   environment's deployment-branch policy and the first step both enforce
+#   it) and records the exact commit in its report.
 # * The credential lives in the `jev-live` GitHub Environment as
 #   TYPESAFE_API_KEY. Configure required reviewers on that environment where
 #   the repository plan supports it. Without the secret the run stops and
@@ -61,6 +63,11 @@ jobs:
           MAX_REQUESTS: ${{ inputs.max_requests }}
         run: |
           set -euo pipefail
+          # The environment allows only master; this states it in the run too.
+          if [ "$GITHUB_REF" != "refs/heads/master" ]; then
+            echo "The live contract runs only from the reviewed master branch, not $GITHUB_REF."
+            exit 1
+          fi
           if [ -z "${TYPESAFE_API_KEY:-}" ]; then
             echo "status=pending" >> "$GITHUB_OUTPUT"
             {
@@ -103,6 +110,7 @@ jobs:
           JEV_PRICE_OUTPUT_PER_MTOK: ${{ vars.JEV_PRICE_OUTPUT_PER_MTOK }}
           JEV_PRICING_SOURCE: ${{ vars.JEV_PRICING_SOURCE }}
           LIGHTAGENT_JEV_EVAL_OUT: ${{ runner.temp }}/jev-live
+          LIGHTAGENT_JEV_LIVE_COMMIT: ${{ github.sha }}
         run: >-
           cargo test -p lightagent --lib live_jev_contract_and_bounded_evaluation
           -- --ignored --test-threads=1

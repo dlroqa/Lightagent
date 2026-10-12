@@ -337,7 +337,7 @@ impl Measurement {
                 "Deterministic contract run against scripted answers. These numbers test the evaluation pipeline and say nothing about Jev's accuracy."
             }
             Self::LiveJev => {
-                "Live TypeSafe Jev answers on a small synthetic dataset labeled by a single labeler. Treat every rate with its sample size and interval."
+                "EXPLORATORY. Live TypeSafe Jev answers on a small synthetic dataset whose labels have a single author and have not been independently reviewed. Treat every rate with its sample size and interval; do not change thresholds or defaults from it."
             }
         }
     }
@@ -478,6 +478,7 @@ pub(crate) fn score(
     let mut correct = 0u32;
     let mut accepted = 0u32;
     let mut accepted_correct = 0u32;
+    let mut accepted_by_split: BTreeMap<String, (u32, u32)> = BTreeMap::new();
     let mut high_confidence_errors = Vec::new();
     let mut planning = Binary::default();
     let mut retrieval = Binary::default();
@@ -543,6 +544,9 @@ pub(crate) fn score(
         if prediction.accepted() {
             accepted += 1;
             accepted_correct += u32::from(is_correct);
+            let split = accepted_by_split.entry(case.split.clone()).or_default();
+            split.0 += 1;
+            split.1 += u32::from(is_correct);
             if !is_correct {
                 high_confidence_errors.push(json!({
                     "id": case.id,
@@ -615,19 +619,48 @@ pub(crate) fn score(
         value["reliability"] = metrics::bins_json(&metrics::reliability(points, 5));
         value
     };
-    let per_split: BTreeMap<&String, Value> = confusion_by_split
+    // Each split is scored on its own; nothing is pooled across them.
+    let per_split: BTreeMap<&String, Value> = send_by_split
         .iter()
-        .map(|(split, confusion)| {
+        .map(|(split, sent)| {
+            let empty = Confusion::with_labels(categories.iter().copied());
+            let confusion = confusion_by_split.get(split).unwrap_or(&empty);
+            let (taken, taken_correct) = accepted_by_split.get(split).copied().unwrap_or((0, 0));
+            let classified = confusion.total();
             (
                 split,
                 json!({
-                    "classified": confusion.total(),
-                    "accuracy": Ratio::new(confusion.correct(), confusion.total()).json(),
+                    "expected_send": sent,
+                    "classified": classified,
+                    "accuracy": Ratio::new(confusion.correct(), classified).json(),
+                    "abstention_rate": Ratio::new(sent - classified, *sent).json(),
+                    "fallback_rate": Ratio::new(sent - taken, *sent).json(),
+                    "accepted_coverage": Ratio::new(taken, *sent).json(),
+                    "coverage_adjusted_accuracy": Ratio::new(taken_correct, taken).json(),
                     "macro_f1": confusion.macro_f1().map(round),
+                    "confusion_matrix": confusion.json(),
                 }),
             )
         })
         .collect();
+    let mut failures_by_class: BTreeMap<&str, u32> = BTreeMap::new();
+    for result in &send {
+        if let Outcome::Failed(code) = &result.outcome {
+            *failures_by_class.entry(failure_class(code)).or_default() += 1;
+        }
+    }
+    let mut confidences: Vec<f64> = points.iter().map(|(confidence, _)| *confidence).collect();
+    confidences.sort_by(f64::total_cmp);
+    let confidence_distribution = json!({
+        "samples": confidences.len(),
+        "min": confidences.first().map(|value| round(*value)),
+        "median": confidences.get(confidences.len() / 2).map(|value| round(*value)),
+        "max": confidences.last().map(|value| round(*value)),
+        "histogram_bins": bins.iter().map(|bin| json!({
+            "range": [round(bin.low), round(bin.high)],
+            "count": bin.count,
+        })).collect::<Vec<_>>(),
+    });
     let mut version_rows = BTreeMap::new();
     for (version, (n, right, taken)) in &versions {
         version_rows.insert(
@@ -655,7 +688,11 @@ pub(crate) fn score(
             "by_split": send_by_split,
             "provenance": dataset.provenance,
         },
+        "exploratory": measurement == Measurement::LiveJev,
+        "label_review": "single_author_unreviewed",
         "outcomes": outcomes,
+        "failures_by_class": failures_by_class,
+        "confidence_distribution": confidence_distribution,
         "category": {
             "classified": classified,
             "accuracy": Ratio::new(correct, classified).json(),
@@ -778,6 +815,19 @@ fn calibration_json(
         "candidate_threshold": candidate,
         "calibration_split_curve": calibration_curve.iter().map(|point| point.json()).collect::<Vec<_>>(),
     })
+}
+
+/// What kind of failure a stable Jev error code is: the network or service
+/// (`transport`), the credential (`credential`), or the request/response
+/// contract (`api_contract`). Classification quality is never a failure
+/// code; it is measured against labels.
+pub(crate) fn failure_class(code: &str) -> &'static str {
+    match code {
+        "connect" | "transport" | "timeout" | "cancelled" | "status" | "overloaded"
+        | "rate_limited" => "transport",
+        "unauthorized" => "credential",
+        _ => "api_contract",
+    }
 }
 
 fn count(value: usize) -> u32 {

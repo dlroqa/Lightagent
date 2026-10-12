@@ -804,3 +804,40 @@ async fn reliability_timeouts_and_cancellation_keep_the_configured_route() {
         Outcome::Skipped("cancelled")
     );
 }
+
+// --- documented mitigation ----------------------------------------------
+
+#[tokio::test]
+async fn mitigation_empty_routing_allowlists_stop_routing_and_keep_the_classification_gate() {
+    // Routing has no per-profile permission. Until one exists, clearing both
+    // routing allowlists stops every routing request; classification keeps
+    // its own per-profile gate.
+    let (url, seen) = jev_stub(200, answer("research", 0.95), Duration::ZERO).await;
+    let mut config = config(&url, JevClassificationMode::Shadow);
+    config.platform.jev.allowed_models.clear();
+    config.platform.jev.allowed_profiles.clear();
+    config.platform.jev.routing_input = JevRoutingInput::LegacyRaw;
+    let store = ProfileStore::new(std::env::temp_dir());
+    for (profile_id, expected) in [("permitted", 1), ("sensitive", 0)] {
+        seen.lock().unwrap().clear();
+        let result = preflight(
+            PreflightRequest {
+                config: &config,
+                store: &store,
+                profile: &profile(profile_id, "configured"),
+                message: "my diagnosis notes are in /srv/private/notes.md",
+                explicit_model: None,
+                attachment: false,
+            },
+            &CancellationToken::new(),
+        )
+        .await;
+        let bodies = seen.lock().unwrap().clone();
+        assert_eq!(bodies.len(), expected, "{profile_id}");
+        assert!(
+            bodies.iter().all(|body| is_classification(body)),
+            "no routing request is made"
+        );
+        assert_eq!(result.model, "configured");
+    }
+}

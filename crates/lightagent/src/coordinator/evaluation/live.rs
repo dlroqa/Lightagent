@@ -22,8 +22,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::routing::{routing_summary, run_routing, score_routing};
 use super::{
-    Case, Dataset, Endpoint, Measurement, Pricing, config_for, dataset, run_cases, sanitize, score,
-    summary, thresholds, write_report, write_threshold_analysis,
+    Case, Dataset, Endpoint, Measurement, Pricing, config_for, dataset, failure_class, run_cases,
+    sanitize, score, summary, thresholds, write_report, write_threshold_analysis,
 };
 use crate::coordinator::JevState;
 use crate::coordinator::classify::Outcome;
@@ -63,8 +63,105 @@ fn interleaved(dataset: &Dataset) -> Vec<&Case> {
         .collect()
 }
 
+/// What a check verifies: the credential, the API contract, secret safety,
+/// or classification quality, which is measured against labels and is never
+/// a contract failure on its own.
+fn area(name: &str) -> &'static str {
+    match name {
+        "authentication" => "credential",
+        "error_secret_safe" => "security",
+        "bounded_quality_evaluation" | "routing_benchmark" => "classification_quality",
+        _ => "api_contract",
+    }
+}
+
 fn check(name: &str, status: &str, detail: impl Into<String>) -> Value {
-    json!({"name": name, "status": status, "detail": detail.into()})
+    json!({"name": name, "area": area(name), "status": status, "detail": detail.into()})
+}
+
+/// A check that failed because of a Jev error, classified by that error as a
+/// transport, credential or API-contract failure.
+fn failed_with(name: &str, kind: &str, detail: impl Into<String>) -> Value {
+    let mut value = check(name, "failed", detail);
+    value["failure_class"] = json!(failure_class(kind));
+    value
+}
+
+/// The checks a live run must pass.
+const REQUIRED: [&str; 8] = [
+    "authentication",
+    "schema_accepted",
+    "typed_response_parses",
+    "noul_without_confidence",
+    "error_secret_safe",
+    "category_confidence",
+    "adapter_compatibility",
+    "bounded_quality_evaluation",
+];
+
+/// Write the contract report and return the required checks that failed.
+fn finish_contract(
+    checks: &[Value],
+    endpoint: &str,
+    model_requested: &str,
+    (used, limit): (u32, u32),
+    versions: &BTreeSet<String>,
+) -> Vec<String> {
+    let failed: Vec<String> = checks
+        .iter()
+        .filter(|check| {
+            REQUIRED.contains(&check["name"].as_str().unwrap_or_default())
+                && check["status"] != "passed"
+        })
+        .map(|check| check["name"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    let mut failures_by_class: BTreeMap<String, u32> = BTreeMap::new();
+    for check in checks.iter().filter(|check| check["status"] == "failed") {
+        let class = check["failure_class"]
+            .as_str()
+            .or_else(|| check["area"].as_str())
+            .unwrap_or("unknown");
+        *failures_by_class.entry(class.to_owned()).or_default() += 1;
+    }
+    let status = if failed.is_empty() {
+        "passed"
+    } else {
+        "failed"
+    };
+    let commit = env("LIGHTAGENT_JEV_LIVE_COMMIT").unwrap_or_else(|| "unknown".to_owned());
+    let contract = json!({
+        "report": "jev-live-contract",
+        "measurement": Measurement::LiveJev.as_str(),
+        "commit": commit,
+        "endpoint": endpoint,
+        "model_requested": model_requested,
+        "resolved_model_versions": versions,
+        "requests": {"limit": limit, "used": used},
+        "status": status,
+        "failures_by_class": failures_by_class,
+        "classification_quality": "exploratory: measured in classification-live.json against single-author labels; never a pass/fail criterion",
+        "checks": checks,
+    });
+    let mut text = format!(
+        "# Jev live contract: {status}\n\nCommit {commit}. Model requested {model_requested}; resolved {}. Requests used: {used} of {limit}.\n\n| Check | Area | Status | Failure class | Detail |\n|---|---|---|---|---|\n",
+        if versions.is_empty() {
+            "not reported".to_owned()
+        } else {
+            versions.iter().cloned().collect::<Vec<_>>().join(", ")
+        },
+    );
+    for check in checks {
+        text.push_str(&format!(
+            "| {} | {} | {} | {} | {} |\n",
+            check["name"].as_str().unwrap_or_default(),
+            check["area"].as_str().unwrap_or_default(),
+            check["status"].as_str().unwrap_or_default(),
+            check["failure_class"].as_str().unwrap_or("-"),
+            check["detail"].as_str().unwrap_or_default()
+        ));
+    }
+    write_report("live-contract", &contract, &text);
+    failed
 }
 
 fn passed(ok: bool) -> &'static str {
@@ -102,18 +199,31 @@ async fn live_jev_contract_and_bounded_evaluation() {
     let jev = &config.platform.jev;
     let mut checks = Vec::new();
     let mut used = 0u32;
+    let mut versions: BTreeSet<String> = BTreeSet::new();
+    let mut usage_seen = false;
 
-    // 1. Authentication: the operator's connection check.
+    // 1. Authentication: the operator's connection check. A failure here
+    // stops the run before any dataset request is spent.
     let verification = JevState::new().verify(jev).await;
     used += 1;
-    checks.push(check(
-        "authentication",
-        passed(verification.ok),
-        format!(
-            "error={:?}, model_version={:?}, latency_ms={}",
-            verification.error, verification.model_version, verification.latency_ms
-        ),
-    ));
+    let detail = format!(
+        "error={:?}, model_version={:?}, latency_ms={}",
+        verification.error, verification.model_version, verification.latency_ms
+    );
+    checks.push(match verification.error {
+        Some(kind) if !verification.ok => failed_with("authentication", kind, detail),
+        _ => check("authentication", passed(verification.ok), detail),
+    });
+    if let Some(version) = &verification.model_version {
+        versions.insert(version.clone());
+    }
+    if !verification.ok {
+        let failed = finish_contract(&checks, &url, &jev.model, (used, limit), &versions);
+        panic!(
+            "authentication failed ({:?}); no dataset request was made: {failed:?}",
+            verification.error
+        );
+    }
 
     // 2-5, 7. One typed probe through the shared adapter.
     let client = JevClient::from_config(jev).expect("the live client builds");
@@ -139,8 +249,6 @@ async fn live_jev_contract_and_bounded_evaluation() {
     );
     let response = client.evaluate(&probe, &CancellationToken::new()).await;
     used += 1;
-    let mut versions: BTreeSet<String> = BTreeSet::new();
-    let mut usage_seen = false;
     match &response {
         Ok(Response::TypeSafe(evaluation)) => {
             checks.push(check(
@@ -178,7 +286,7 @@ async fn live_jev_contract_and_bounded_evaluation() {
             ));
         }
         Err(error) => {
-            checks.push(check("schema_accepted", "failed", error.kind()));
+            checks.push(failed_with("schema_accepted", error.kind(), error.kind()));
         }
     }
 
@@ -363,51 +471,7 @@ async fn live_jev_contract_and_bounded_evaluation() {
         used <= limit,
         "the request budget was exceeded: {used} > {limit}"
     );
-    let required = [
-        "authentication",
-        "schema_accepted",
-        "typed_response_parses",
-        "noul_without_confidence",
-        "error_secret_safe",
-        "category_confidence",
-        "adapter_compatibility",
-        "bounded_quality_evaluation",
-    ];
-    let failed: Vec<String> = checks
-        .iter()
-        .filter(|check| {
-            required.contains(&check["name"].as_str().unwrap_or_default())
-                && check["status"] != "passed"
-        })
-        .map(|check| check["name"].as_str().unwrap_or_default().to_owned())
-        .collect();
-    let status = if failed.is_empty() {
-        "passed"
-    } else {
-        "failed"
-    };
-    let contract = json!({
-        "report": "jev-live-contract",
-        "measurement": Measurement::LiveJev.as_str(),
-        "endpoint": url,
-        "model_requested": jev.model,
-        "requests": {"limit": limit, "used": used},
-        "status": status,
-        "checks": checks,
-    });
-    let mut text = format!(
-        "# Jev live contract: {}\n\nRequests used: {used} of {limit}.\n\n| Check | Status | Detail |\n|---|---|---|\n",
-        contract["status"].as_str().unwrap_or_default()
-    );
-    for check in contract["checks"].as_array().into_iter().flatten() {
-        text.push_str(&format!(
-            "| {} | {} | {} |\n",
-            check["name"].as_str().unwrap_or_default(),
-            check["status"].as_str().unwrap_or_default(),
-            check["detail"].as_str().unwrap_or_default()
-        ));
-    }
-    write_report("live-contract", &contract, &text);
+    let failed = finish_contract(&checks, &url, &jev.model, (used, limit), &versions);
     assert!(failed.is_empty(), "live contract checks failed: {failed:?}");
 }
 
