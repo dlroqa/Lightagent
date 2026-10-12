@@ -232,9 +232,15 @@ export async function checkJevStates(browser, base, outDir) {
     if (!(await routingSection().innerText()).includes("Denied")) failures.push("routing-denied: settings lack Denied");
 
     // 16. Granted through the checkbox, keyboard-operable and labelled.
-    await routingSection().getByRole("checkbox", { name: new RegExp(`\\(${profile}\\)`) }).check();
+    // The box is controlled: it shows checked only once the save returns,
+    // so click and wait for the saved state rather than asserting at once.
+    const routingBox = routingSection().getByRole("checkbox", { name: new RegExp(`\\(${profile}\\)`) });
+    await routingBox.click();
     if (!(await eventually(async () => (await settingsNow()).routing_allowed_profiles?.includes(profile)))) {
       failures.push("routing-allowed: checking the profile did not save");
+    }
+    if (!(await eventually(async () => await routingBox.isChecked()))) {
+      failures.push("routing-allowed: the saved grant is not shown as checked");
     }
     const granted = await settingsNow();
     if (granted.classification.allowed_profiles.join() !== [profile].join()
