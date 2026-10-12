@@ -69,6 +69,11 @@ malformed answers, low confidence, or a route outside the allowlists — keeps
 the configured route. The adapter classifies each case with a typed reason for
 diagnostics; no response body, URL or key is retained in those reasons.
 
+When the effective model is Lightweight's `Auto`, routing is skipped entirely:
+`Auto` is sent unchanged and Lightweight chooses the route. Optional task
+classification is configured separately under `platform.jev.classification`
+and is off by default; see `docs/architecture/jev-classification-coordinator.md`.
+
 `platform.jev.model` accepts the `jev-latest` alias or a pinned version such as
 `jev-1.13.0`. Pin a version when tuning `confidence_threshold`: the alias moves
 with new releases, and confidence is calibrated per model version.

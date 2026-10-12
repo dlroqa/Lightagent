@@ -48,6 +48,13 @@ pub enum AgentEvent {
         model: String,
         kept_default: bool,
     },
+    /// The pre-run task classification finished, was skipped, or fell back.
+    /// Sanitized and advisory: it carries no message text, key or tool output,
+    /// and it never grants a tool, an approval or a model. Emitted only when
+    /// classification is not `off`.
+    TaskClassified {
+        diagnostics: Box<ClassificationDiagnostics>,
+    },
     /// The model asked for a tool.
     ToolCallRequested { call: ToolCall },
     /// A requested tool began executing.
@@ -76,4 +83,51 @@ pub enum AgentEvent {
     /// [`RunCompleted`](AgentEvent::RunCompleted) with
     /// [`StopReason::Error`].
     Error { message: String },
+}
+
+/// The privacy-safe record of one run's classification preflight.
+///
+/// Every string is either a fixed vocabulary value or the versioned Jev model
+/// id; nothing derived from the user's text is included.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClassificationDiagnostics {
+    /// The schema of this record, so consumers can evolve with it.
+    pub schema: u32,
+    /// `shadow` or `active`.
+    pub mode: String,
+    /// `classified`, `low_confidence`, `skipped` or `failed`.
+    pub outcome: String,
+    /// `jev` when Jev answered; absent otherwise.
+    pub source: Option<String>,
+    /// The primary task category, when Jev answered validly.
+    pub category: Option<String>,
+    /// TypeSafe's confidence for the category choice.
+    pub category_confidence: Option<f64>,
+    /// Whether any reported decision carried a TypeSafe confidence.
+    pub confidence_available: bool,
+    /// The threshold applied to `category_confidence`.
+    pub threshold: Option<f32>,
+    /// Yes-probabilities of the independent noul questions. They carry no
+    /// confidence of their own and none is derived.
+    pub planning_probability: Option<f64>,
+    pub retrieval_probability: Option<f64>,
+    pub tools_probability: Option<f64>,
+    /// `simple`, `moderate` or `complex`, with its own confidence.
+    pub complexity: Option<String>,
+    pub complexity_confidence: Option<f64>,
+    /// The versioned Jev model that answered.
+    pub model_version: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    /// Jev requests made in this run's preflight, routing included.
+    pub jev_calls: u32,
+    /// Duration of the classification request, when one was made.
+    pub classification_latency_ms: Option<u64>,
+    /// Duration of the whole preflight (routing and classification run
+    /// concurrently).
+    pub preflight_latency_ms: u64,
+    /// Why the classification was not applied, as a stable code.
+    pub fallback_reason: Option<String>,
+    /// Whether the classification changed anything about the run.
+    pub influenced: bool,
 }

@@ -867,9 +867,12 @@ pub async fn run(
             }
             continue;
         }
+        // A dropped file's contents are never sent for classification.
+        let mut attachment = false;
         if let Some(path) = crate::markdown::dropped_path(&line) {
             match crate::markdown::read(&path) {
                 Ok(contents) => {
+                    attachment = true;
                     println!("Read Markdown file {}.", path.display());
                     line = format!(
                         "I dropped this Markdown file into the terminal. Read it and respond to its contents.\n\nFile: {}\n\n{}",
@@ -886,36 +889,15 @@ pub async fn run(
         if let Some(run) = paused.take() {
             drop_paused(run, &mut session, &session_store);
         }
-        // Route only at the start of a fresh turn, preserving this session's
+        // Decide once at the start of a fresh turn, preserving this session's
         // executor and approvals across model changes and continuations.
+        let preflight = turn_preflight(&config, &store, &profile, &line, attachment).await;
+        if let Some(report) = &preflight.classification {
+            println!("{}", crate::coordinator::terminal_summary(report));
+        }
         if config.platform.jev.endpoint.enabled {
             let default_model = configured_model(&profile.routing.model, &config);
-            let default_url = profile
-                .routing
-                .base_url
-                .clone()
-                .unwrap_or_else(|| config.inference.base_url.clone());
-            let route = crate::jev::select_route(
-                &config.platform.jev,
-                &line,
-                default_model.clone(),
-                false,
-                // The terminal drives its turns with uncancellable tokens; the
-                // adapter's deadline still bounds this call.
-                &CancellationToken::new(),
-            )
-            .await;
-            let routed_profile = route
-                .profile
-                .as_ref()
-                .and_then(|name| resolve_profile(&store, &config, Some(name.clone())).ok());
-            let (model, url) = crate::jev::inference_route(
-                route,
-                routed_profile.as_ref(),
-                &config,
-                default_model.clone(),
-                default_url,
-            );
+            let (model, url) = (preflight.model, preflight.base_url);
             if model != current_route_model {
                 for candidate_model in [model, default_model] {
                     let mut routed_config =
@@ -2429,6 +2411,30 @@ pub(crate) fn resolve_profile(
 }
 
 /// A default profile inherits the configured model; an explicit profile wins.
+/// The terminal turn's preflight: the same coordinator as API and ACP runs,
+/// with no caller-chosen model. The terminal drives its turns with
+/// uncancellable tokens; the adapter's deadline still bounds each Jev call.
+async fn turn_preflight(
+    config: &Config,
+    store: &ProfileStore,
+    profile: &AgentProfile,
+    line: &str,
+    attachment: bool,
+) -> crate::coordinator::Preflight {
+    crate::coordinator::preflight(
+        crate::coordinator::PreflightRequest {
+            config,
+            store,
+            profile,
+            message: line,
+            explicit_model: None,
+            attachment,
+        },
+        &CancellationToken::new(),
+    )
+    .await
+}
+
 pub(crate) fn configured_model(profile_model: &str, config: &Config) -> String {
     if profile_model.trim().is_empty() || profile_model == "default" {
         config
@@ -2999,5 +3005,37 @@ for line in sys.stdin:
                 .contains("Choose tools from the active catalog.")
         );
         std::fs::remove_dir_all(scratch).ok();
+    }
+
+    #[tokio::test]
+    async fn terminal_turns_keep_auto_and_never_send_attachments() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut config = Config::default();
+        config.platform.jev.endpoint.enabled = true;
+        config.platform.jev.endpoint.base_url = Some(format!("http://{address}"));
+        config.platform.jev.allowed_models = vec!["fast".to_owned()];
+        config.platform.jev.classification.mode = lightagent_core::JevClassificationMode::Shadow;
+        config.platform.jev.classification.allowed_profiles = vec!["terminal".to_owned()];
+        let profile = AgentProfile::new(
+            ProfileId::new("terminal").unwrap(),
+            "Terminal",
+            "Persona",
+            "Auto",
+        );
+        let store = ProfileStore::new(std::env::temp_dir());
+        let preflight = turn_preflight(&config, &store, &profile, "summarize this", true).await;
+        assert_eq!(preflight.model, "Auto");
+        assert_eq!(preflight.jev_calls, 0);
+        assert_eq!(
+            preflight.classification.unwrap().outcome,
+            crate::coordinator::Outcome::Skipped("attachment")
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "neither routing nor classification may contact Jev"
+        );
     }
 }

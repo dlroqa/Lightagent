@@ -37,45 +37,28 @@ struct LightweightRunFactory {
     root: PathBuf,
 }
 
+/// The run's pre-dispatch decisions, through the shared coordinator. API and
+/// ACP runs both arrive here; an ACP run's `model` is always `None`.
 async fn inference_for_request(
     config: &lightagent_core::Config,
     store: &ProfileStore,
     profile: &lightagent_core::AgentProfile,
     request: &StartRun,
     cancel: &CancellationToken,
-) -> (String, String, Option<(String, bool)>) {
-    let base_url = profile
-        .routing
-        .base_url
-        .clone()
-        .unwrap_or_else(|| config.inference.base_url.clone());
-    let default_model = request
-        .model
-        .clone()
-        .unwrap_or_else(|| configured_model(&profile.routing.model, config));
-    let report_jev = config.platform.jev.endpoint.enabled && request.model.is_none();
+) -> crate::coordinator::Preflight {
     // The saved session's profile identifies context, not a model override.
-    let route = crate::jev::select_route(
-        &config.platform.jev,
-        &request.message,
-        default_model.clone(),
-        request.model.is_some(),
+    crate::coordinator::preflight(
+        crate::coordinator::PreflightRequest {
+            config,
+            store,
+            profile,
+            message: &request.message,
+            explicit_model: request.model.as_deref(),
+            attachment: false,
+        },
         cancel,
     )
-    .await;
-    let routed_profile = route
-        .profile
-        .as_ref()
-        .and_then(|name| resolve_profile(store, config, Some(name.clone())).ok());
-    let (model, base_url) = crate::jev::inference_route(
-        route,
-        routed_profile.as_ref(),
-        config,
-        default_model.clone(),
-        base_url,
-    );
-    let routing_status = report_jev.then(|| (model.clone(), model == default_model));
-    (model, base_url, routing_status)
+    .await
 }
 
 #[async_trait]
@@ -207,9 +190,9 @@ impl RunFactory for LightweightRunFactory {
             return RunStatus::Failed;
         }
 
-        let (model, base_url, routing_status) =
-            inference_for_request(&config, &store, &profile, &request, &cancel).await;
-        if let Some((model, kept_default)) = routing_status {
+        let preflight = inference_for_request(&config, &store, &profile, &request, &cancel).await;
+        let (model, base_url) = (preflight.model.clone(), preflight.base_url.clone());
+        if let Some((model, kept_default)) = preflight.routing_status.clone() {
             let _ = sink.send(AgentEvent::RouteSelected {
                 source: "Jev".to_owned(),
                 model,
@@ -255,6 +238,22 @@ impl RunFactory for LightweightRunFactory {
         delegation.subagents = crate::chat::subagent_policy(&config);
         let registry =
             configured_registry(&config, &profile_dir, &extensions, !skills.is_empty()).await;
+        // Classification only advises: the registry and policy below are
+        // built exactly as without it.
+        if preflight.classification.is_some() {
+            let hint = preflight
+                .classification
+                .as_ref()
+                .and_then(|report| crate::coordinator::workflow_hint(report, &registry));
+            if let Some(hint) = hint {
+                profile.persona.push_str(&format!("\n\n{hint}"));
+            }
+            if let Some(diagnostics) = crate::coordinator::diagnostics(&preflight, hint.is_some()) {
+                let _ = sink.send(AgentEvent::TaskClassified {
+                    diagnostics: Box::new(diagnostics),
+                });
+            }
+        }
         let mut executor = BoundedExecutor::new(
             registry,
             PolicyEngine::new(profile.approval_policy.into()),
@@ -448,7 +447,11 @@ mod routing_tests {
             model: None,
             cwd: None,
         };
-        let (model, _, status) = inference_for_request(
+        let crate::coordinator::Preflight {
+            model,
+            routing_status: status,
+            ..
+        } = inference_for_request(
             &config,
             &store,
             &profile,
@@ -461,7 +464,11 @@ mod routing_tests {
         assert_eq!(profile, original);
         server.await.unwrap();
         request.model = Some("explicit".to_owned());
-        let (model, _, status) = inference_for_request(
+        let crate::coordinator::Preflight {
+            model,
+            routing_status: status,
+            ..
+        } = inference_for_request(
             &config,
             &store,
             &profile,
@@ -497,8 +504,11 @@ mod routing_tests {
         };
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let (model, _, status) =
-            inference_for_request(&config, &store, &profile, &request, &cancel).await;
+        let crate::coordinator::Preflight {
+            model,
+            routing_status: status,
+            ..
+        } = inference_for_request(&config, &store, &profile, &request, &cancel).await;
         assert_eq!(model, "original-model");
         // The existing `routing.selected` contract is unchanged: Jev was
         // enabled and consulted for this run, and the default was kept.
@@ -509,5 +519,178 @@ mod routing_tests {
                 .is_err(),
             "a cancelled run must not reach Jev"
         );
+    }
+
+    /// An OpenAI-compatible gateway advertising Lightweight's `Auto` beside a
+    /// concrete model, recording each chat-completion body it receives.
+    async fn gateway_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let chats = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = std::sync::Arc::clone(&chats);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let log = std::sync::Arc::clone(&log);
+                tokio::spawn(async move {
+                    let mut bytes = Vec::new();
+                    let mut buf = [0; 8192];
+                    while let Ok(count) = stream.read(&mut buf).await {
+                        if count == 0 {
+                            break;
+                        }
+                        bytes.extend_from_slice(&buf[..count]);
+                        let Some(offset) = bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
+                            continue;
+                        };
+                        let head = String::from_utf8_lossy(&bytes[..offset]).to_ascii_lowercase();
+                        let length = head
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if bytes.len() >= offset + 4 + length {
+                            break;
+                        }
+                    }
+                    let request = String::from_utf8_lossy(&bytes).into_owned();
+                    let response = if request.starts_with("GET /v1/models") {
+                        let body = r#"{"object":"list","data":[{"id":"Auto"},{"id":"fast"}]}"#;
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                    } else {
+                        let body = request
+                            .split_once("\r\n\r\n")
+                            .map(|(_, body)| body.to_owned())
+                            .unwrap_or_default();
+                        log.lock().unwrap().push(body);
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n\
+                         data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"}}]}\n\n\
+                         data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                         data: [DONE]\n\n"
+                            .to_owned()
+                    };
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        (format!("http://{address}"), chats)
+    }
+
+    #[tokio::test]
+    async fn api_and_acp_runs_send_auto_to_the_provider_unchanged() {
+        use crate::coordinator::test_support::{answer, jev_stub};
+        let (gateway, chats) = gateway_stub().await;
+        let (jev, jev_seen) = jev_stub(200, answer("research", 0.95), Duration::ZERO).await;
+        let message = "find recent papers on batteries";
+        let scratch = std::env::temp_dir().join(format!(
+            "lightagent-auto-guard-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = scratch.join("acp-workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        // An API run has no cwd; an ACP session supplies its editor's cwd.
+        for (label, cwd) in [
+            ("api", None),
+            ("acp", Some(workspace.to_string_lossy().into_owned())),
+        ] {
+            let root = scratch.join(label);
+            let mut config = lightagent_core::Config::default();
+            config.inference.base_url = gateway.clone();
+            config.memory.inject_recent = 0;
+            config.platform.jev.endpoint.enabled = true;
+            config.platform.jev.endpoint.base_url = Some(jev.clone());
+            config.platform.jev.allowed_models = vec!["fast".to_owned()];
+            config.platform.jev.classification.mode =
+                lightagent_core::JevClassificationMode::Shadow;
+            config.platform.jev.classification.allowed_profiles = vec!["lead".to_owned()];
+            ConfigStore::at(&LightagentPaths::rooted_at(&root))
+                .save(&config)
+                .unwrap();
+            let store = ProfileStore::new(&root);
+            let lead = lightagent_core::AgentProfile::new(
+                lightagent_core::ProfileId::new("lead").unwrap(),
+                "Lead",
+                "Persona",
+                "Auto",
+            );
+            store.create(&lead).unwrap();
+            store.set_active(&lead.id).unwrap();
+            let factory = LightweightRunFactory { root: root.clone() };
+            let (sink, mut events) = tokio::sync::mpsc::unbounded_channel();
+            let (_decide, decisions) = tokio::sync::mpsc::unbounded_channel();
+            let status = factory
+                .run(
+                    StartRun {
+                        message: message.to_owned(),
+                        history: vec![],
+                        profile: None,
+                        model: None,
+                        cwd,
+                    },
+                    sink,
+                    CancellationToken::new(),
+                    decisions,
+                )
+                .await;
+            let mut seen = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                seen.push(event);
+            }
+            assert_eq!(status, RunStatus::Completed, "{label}: {seen:?}");
+            assert!(
+                seen.contains(&AgentEvent::RouteSelected {
+                    source: "Jev".to_owned(),
+                    model: "Auto".to_owned(),
+                    kept_default: true,
+                }),
+                "{label}: {seen:?}"
+            );
+            let diagnostics = seen
+                .iter()
+                .find_map(|event| match event {
+                    AgentEvent::TaskClassified { diagnostics } => Some(diagnostics.clone()),
+                    _ => None,
+                })
+                .expect("shadow mode records one classification");
+            assert_eq!(diagnostics.mode, "shadow");
+            assert_eq!(diagnostics.category.as_deref(), Some("research"));
+            assert!(!diagnostics.influenced, "shadow never influences the run");
+            assert_eq!(diagnostics.jev_calls, 1, "routing skipped for Auto");
+            assert!(!format!("{diagnostics:?}").contains("batteries"));
+            assert_eq!(
+                seen.iter()
+                    .filter(|event| matches!(event, AgentEvent::TaskClassified { .. }))
+                    .count(),
+                1
+            );
+        }
+        let chats = chats.lock().unwrap().clone();
+        assert_eq!(chats.len(), 2, "one model turn per run");
+        for body in &chats {
+            let body: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(
+                body["model"], "Auto",
+                "the provider receives Auto unchanged"
+            );
+        }
+        let jev_bodies = jev_seen.lock().unwrap().clone();
+        assert_eq!(
+            jev_bodies.len(),
+            2,
+            "one classification per run, no routing"
+        );
+        for body in &jev_bodies {
+            let body: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert!(body["questions"].get("route").is_none());
+            assert!(body["questions"].get("task").is_some());
+        }
+        std::fs::remove_dir_all(scratch).ok();
     }
 }

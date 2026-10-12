@@ -634,6 +634,102 @@ pub struct JevConfig {
     /// delays a normal agent run for long.
     #[serde(default = "default_jev_timeout_secs")]
     pub timeout_secs: u64,
+    /// Task classification, controlled separately from model routing. It
+    /// shares the endpoint, key, model and timeout above; `enabled` remains
+    /// the endpoint's master switch for both.
+    #[serde(default)]
+    pub classification: JevClassificationConfig,
+}
+
+/// What task classification may do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JevClassificationMode {
+    /// No classification request is ever made. The default.
+    #[default]
+    Off,
+    /// Classify eligible tasks and record sanitized diagnostics; nothing about
+    /// the run changes.
+    Shadow,
+    /// Accepted classifications may apply the explicitly mapped, advisory
+    /// coordination behaviors. Nothing grants a tool, approval or model.
+    Active,
+}
+
+impl JevClassificationMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Shadow => "shadow",
+            Self::Active => "active",
+        }
+    }
+}
+
+impl std::str::FromStr for JevClassificationMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" => Ok(Self::Off),
+            "shadow" => Ok(Self::Shadow),
+            "active" => Ok(Self::Active),
+            _ => Err("classification mode must be off, shadow or active".to_owned()),
+        }
+    }
+}
+
+/// Task classification settings. Every default is the conservative one: off,
+/// no profile permitted to send anything, and an uncalibrated threshold.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JevClassificationConfig {
+    pub mode: JevClassificationMode,
+    /// Profiles permitted to send a sanitized task description to Jev.
+    /// External classification is denied for every profile not listed.
+    pub allowed_profiles: Vec<String>,
+    /// The longest sanitized task description sent, in characters.
+    pub max_input_chars: usize,
+    /// Confidence the primary task category needs, keyed by the versioned
+    /// Jev model that answered (e.g. `jev-1.13.0`), once calibrated.
+    pub version_thresholds: BTreeMap<String, f32>,
+    /// The confidence needed when the answering version has no calibrated
+    /// threshold. Deliberately conservative.
+    pub default_threshold: f32,
+}
+
+pub const DEFAULT_CLASSIFICATION_INPUT_CHARS: usize = 400;
+pub const DEFAULT_CLASSIFICATION_THRESHOLD: f32 = 0.9;
+/// Bounds for `max_input_chars`.
+pub const CLASSIFICATION_INPUT_CHARS: std::ops::RangeInclusive<usize> = 32..=2_000;
+
+impl Default for JevClassificationConfig {
+    fn default() -> Self {
+        Self {
+            mode: JevClassificationMode::Off,
+            allowed_profiles: Vec::new(),
+            max_input_chars: DEFAULT_CLASSIFICATION_INPUT_CHARS,
+            version_thresholds: BTreeMap::new(),
+            default_threshold: DEFAULT_CLASSIFICATION_THRESHOLD,
+        }
+    }
+}
+
+impl JevClassificationConfig {
+    /// The threshold for an answer from `model_version`.
+    pub fn threshold_for(&self, model_version: Option<&str>) -> f32 {
+        model_version
+            .and_then(|version| self.version_thresholds.get(version))
+            .copied()
+            .unwrap_or(self.default_threshold)
+    }
+
+    /// Whether `profile` may send a sanitized task description to Jev.
+    pub fn permits_profile(&self, profile: &str) -> bool {
+        self.allowed_profiles
+            .iter()
+            .any(|allowed| allowed == profile)
+    }
 }
 
 const fn default_jev_timeout_secs() -> u64 {
@@ -649,6 +745,7 @@ impl Default for JevConfig {
             allowed_models: Vec::new(),
             allowed_profiles: Vec::new(),
             timeout_secs: default_jev_timeout_secs(),
+            classification: JevClassificationConfig::default(),
         }
     }
 }
@@ -1008,6 +1105,44 @@ impl Config {
         {
             return Err(ConfigError::Invalid(
                 "platform.jev.allowed_profiles must contain valid profile identifiers".to_owned(),
+            ));
+        }
+        let classification = &self.platform.jev.classification;
+        if !CLASSIFICATION_INPUT_CHARS.contains(&classification.max_input_chars) {
+            return Err(ConfigError::Invalid(
+                "platform.jev.classification.max_input_chars must be between 32 and 2000"
+                    .to_owned(),
+            ));
+        }
+        let unit = |value: f32| value.is_finite() && (0.0..=1.0).contains(&value);
+        if !unit(classification.default_threshold)
+            || !classification
+                .version_thresholds
+                .values()
+                .all(|value| unit(*value))
+        {
+            return Err(ConfigError::Invalid(
+                "platform.jev.classification thresholds must be between 0 and 1".to_owned(),
+            ));
+        }
+        if classification
+            .version_thresholds
+            .keys()
+            .any(|version| version.trim().is_empty())
+        {
+            return Err(ConfigError::Invalid(
+                "platform.jev.classification.version_thresholds needs a model version for each threshold"
+                    .to_owned(),
+            ));
+        }
+        if classification
+            .allowed_profiles
+            .iter()
+            .any(|profile| crate::profile::ProfileId::new(profile.clone()).is_err())
+        {
+            return Err(ConfigError::Invalid(
+                "platform.jev.classification.allowed_profiles must contain valid profile identifiers"
+                    .to_owned(),
             ));
         }
         if self.platform.qdrant.endpoint.enabled
@@ -1587,6 +1722,73 @@ mod tests {
             config.validate().is_err(),
             "default choice counts toward native 255-choice limit"
         );
+    }
+
+    #[test]
+    fn existing_jev_settings_load_with_classification_off() {
+        // A configuration written before task classification existed.
+        let config: Config = serde_json::from_str(
+            r#"{"platform":{"jev":{"enabled":true,"base_url":"https://api.typesafe.ai","model":"jev-latest","confidence_threshold":0.85,"allowed_models":["fast"],"allowed_profiles":["careful"],"timeout_secs":3}}}"#,
+        )
+        .unwrap();
+        let jev = &config.platform.jev;
+        assert!(jev.endpoint.enabled);
+        assert_eq!(jev.allowed_models, vec!["fast".to_owned()]);
+        assert_eq!(jev.allowed_profiles, vec!["careful".to_owned()]);
+        assert_eq!(jev.classification, JevClassificationConfig::default());
+        assert_eq!(jev.classification.mode, JevClassificationMode::Off);
+        assert!(!jev.classification.permits_profile("careful"));
+        assert!(config.validate().is_ok());
+        // Round-trips additively: the old fields are unchanged.
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(value["platform"]["jev"]["enabled"], true);
+        assert_eq!(value["platform"]["jev"]["classification"]["mode"], "off");
+    }
+
+    #[test]
+    fn classification_settings_are_validated_and_version_aware() {
+        let mut config = Config::default();
+        config.platform.jev.classification.mode = "shadow".parse().unwrap();
+        assert_eq!(
+            config.platform.jev.classification.mode,
+            JevClassificationMode::Shadow
+        );
+        assert!("sometimes".parse::<JevClassificationMode>().is_err());
+        config
+            .platform
+            .jev
+            .classification
+            .version_thresholds
+            .insert("jev-1.13.0".to_owned(), 0.7);
+        let classification = &config.platform.jev.classification;
+        assert_eq!(classification.threshold_for(Some("jev-1.13.0")), 0.7);
+        assert_eq!(
+            classification.threshold_for(Some("jev-2.0.0")),
+            DEFAULT_CLASSIFICATION_THRESHOLD
+        );
+        assert_eq!(
+            classification.threshold_for(None),
+            DEFAULT_CLASSIFICATION_THRESHOLD
+        );
+        assert!(config.validate().is_ok());
+        let mutations: [fn(&mut JevClassificationConfig); 6] = [
+            |c: &mut JevClassificationConfig| c.max_input_chars = 10,
+            |c: &mut JevClassificationConfig| c.max_input_chars = 10_000,
+            |c: &mut JevClassificationConfig| c.default_threshold = 1.5,
+            |c: &mut JevClassificationConfig| {
+                c.version_thresholds
+                    .insert("jev-1.13.0".to_owned(), f32::NAN);
+            },
+            |c: &mut JevClassificationConfig| {
+                c.version_thresholds.insert(" ".to_owned(), 0.5);
+            },
+            |c: &mut JevClassificationConfig| c.allowed_profiles = vec!["bad id!".to_owned()],
+        ];
+        for invalid in mutations {
+            let mut broken = config.clone();
+            invalid(&mut broken.platform.jev.classification);
+            assert!(broken.validate().is_err());
+        }
     }
 
     #[test]
