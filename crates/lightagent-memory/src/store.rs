@@ -583,8 +583,15 @@ mod tests {
     }
 
     fn scratch() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // A process-wide counter makes each call's directory unique regardless
+        // of clock resolution: on Windows two tests running in parallel could
+        // read the same timestamp and share one memories.jsonl. The pid keeps
+        // concurrent test binaries apart and the timestamp keeps runs apart.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "lightagent-mem-{}-{}/memories.jsonl",
+            "lightagent-mem-{}-{}-{unique}/memories.jsonl",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
