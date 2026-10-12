@@ -246,6 +246,12 @@ export async function checkJevStates(browser, base, outDir) {
       failures.push("controls: the workflow guidance switch did not save");
     }
     const check = page.getByRole("button", { name: "Test connection" });
+    // The button is disabled while the settings save above is in flight; the
+    // API can report the new value before the panel re-enables it. Pressing
+    // Enter on a disabled button does nothing, so wait until it can act.
+    if (!(await eventually(async () => await check.isEnabled()))) {
+      failures.push("controls: Test connection stayed disabled after the settings saved");
+    }
     await check.focus();
     await page.keyboard.press("Enter");
     await page.getByRole("status").filter({ hasText: "Connection verified" }).waitFor({ timeout: 10000 });
