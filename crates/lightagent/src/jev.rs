@@ -734,6 +734,7 @@ mod tests {
             allowed_models: vec!["fast".to_owned(), "careful".to_owned()],
             allowed_profiles: Vec::new(),
             timeout_secs: 3,
+            routing_input: JevRoutingInput::LegacyRaw,
             classification: Default::default(),
         };
         assert_eq!(

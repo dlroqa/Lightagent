@@ -33,7 +33,7 @@ use lightagent_core::{
 };
 use tokio_util::sync::CancellationToken;
 
-pub(crate) use classify::{ClassificationReport, Outcome, TaskCategory};
+pub(crate) use classify::{ClassificationReport, Outcome};
 pub(crate) use state::{JevBudget, JevState, Trigger};
 pub(crate) use tool::{add_explicit_tool, status};
 
