@@ -163,11 +163,11 @@ pub(crate) const RESEARCH_GUIDANCE: &str = "# Task assessment (advisory)\n\
     This request appears to need current or external information. Where it helps, gather \
     evidence with the retrieval tools you already have before answering, and cite the sources \
     you used. This assessment grants no additional permissions.";
-const CODING_GUIDANCE: &str = "# Task assessment (advisory)\n\
+pub(crate) const CODING_GUIDANCE: &str = "# Task assessment (advisory)\n\
     This request appears to involve code or configuration in the workspace. Inspect the \
     relevant files with the workspace tools you already have before proposing changes. Running \
     commands and changing files remain subject to the usual approval.";
-const MULTI_STEP_GUIDANCE: &str = "# Task assessment (advisory)\n\
+pub(crate) const MULTI_STEP_GUIDANCE: &str = "# Task assessment (advisory)\n\
     This request appears to have several distinct parts. Outline the steps before acting, and \
     delegate a part only where delegation is already permitted and clearly helps. Delegation \
     limits and approvals still apply.";

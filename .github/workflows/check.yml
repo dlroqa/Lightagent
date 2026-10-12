@@ -16,6 +16,12 @@ permissions:
 env:
   CARGO_INCREMENTAL: '0'
 
+# Linux jobs are pinned to ubuntu-24.04, the image `ubuntu-latest` resolves to
+# today. GitHub moves `ubuntu-latest` to 26.04 between 2026-10-19 and
+# 2026-11-19; pinning keeps these gates on a known toolchain until a separate
+# change validates the new image. Job names, and so required checks, are
+# unchanged.
+
 jobs:
   check:
     name: check (${{ matrix.label }})
@@ -27,7 +33,7 @@ jobs:
         include:
           - { os: macos-15, label: macos-arm64 }
           - { os: windows-latest, label: windows-x64 }
-          - { os: ubuntu-latest, label: linux-x64 }
+          - { os: ubuntu-24.04, label: linux-x64 }
     defaults:
       run:
         shell: bash
@@ -51,7 +57,7 @@ jobs:
 
   open-terminal-live:
     name: Open Terminal live contract
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -89,7 +95,7 @@ jobs:
 
   web-render:
     name: standalone Web UI render
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:
       run:
@@ -119,7 +125,7 @@ jobs:
 
   paired-lightweight-e2e:
     name: paired Lightweight contract E2E
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     defaults:
       run:
@@ -148,7 +154,7 @@ jobs:
 
   platform-rag-contract:
     name: Qdrant + Infinity live contract
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Model download and first CPU inference can be slow on a cold runner.
     timeout-minutes: 60
     defaults:
@@ -182,7 +188,7 @@ jobs:
 
   package:
     name: package smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     defaults:
       run:

@@ -1,0 +1,123 @@
+name: jev live contract
+
+# The genuine TypeSafe Jev contract and a bounded, synthetic-only evaluation.
+#
+# * Manual dispatch only: paid API calls never run on a push or pull request,
+#   and dispatch requires write access to this repository, so untrusted forks
+#   can neither start it nor read its secret.
+# * The credential lives in the `jev-live` GitHub Environment as
+#   TYPESAFE_API_KEY. Configure required reviewers on that environment where
+#   the repository plan supports it. Without the secret the run stops and
+#   reports the live validation as PENDING, never as passed.
+# * Every request is counted against max_requests (hard ceiling 150), sent one
+#   at a time, with the production adapter's timeout and no retries. A cost
+#   cap applies only when verified pricing is configured as environment
+#   variables JEV_PRICE_INPUT_PER_MTOK, JEV_PRICE_OUTPUT_PER_MTOK and
+#   JEV_PRICING_SOURCE.
+# * Inputs are the synthetic benchmark only. Reports hold fixed vocabulary,
+#   numbers and case ids; the key is never printed or uploaded.
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_requests:
+        description: Maximum Jev requests for the whole run (1-150)
+        required: true
+        default: '40'
+      model:
+        description: Jev model to request (blank for the configured default, jev-latest)
+        required: false
+        default: ''
+      max_cost_usd:
+        description: Stop before routing once estimated cost reaches this (needs verified pricing)
+        required: false
+        default: ''
+
+concurrency:
+  group: jev-live
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  live:
+    name: Jev live contract
+    if: github.repository == 'dlroqa/Lightagent'
+    runs-on: ubuntu-24.04
+    environment: jev-live
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check the credential and inputs
+        id: gate
+        env:
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          MAX_REQUESTS: ${{ inputs.max_requests }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TYPESAFE_API_KEY:-}" ]; then
+            echo "status=pending" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Jev live contract: PENDING"
+              echo
+              echo "TYPESAFE_API_KEY is not configured in the jev-live environment, so no live request was made."
+              echo "This is not a pass. Configure the secret and dispatch again."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          case "$MAX_REQUESTS" in
+            ''|*[!0-9]*) echo "max_requests must be a whole number"; exit 1 ;;
+          esac
+          if [ "$MAX_REQUESTS" -lt 9 ] || [ "$MAX_REQUESTS" -gt 150 ]; then
+            echo "max_requests must be between 9 and 150"; exit 1
+          fi
+          echo "status=ready" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        if: steps.gate.outputs.status == 'ready'
+        with:
+          persist-credentials: false
+      - if: steps.gate.outputs.status == 'ready'
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        if: steps.gate.outputs.status == 'ready'
+        with:
+          key: jev-live
+      - name: Build the test binary without the credential
+        if: steps.gate.outputs.status == 'ready'
+        run: cargo test -p lightagent --lib --no-run
+      - name: Run the live contract and bounded evaluation
+        if: steps.gate.outputs.status == 'ready'
+        timeout-minutes: 20
+        env:
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          LIGHTAGENT_JEV_LIVE_MAX_REQUESTS: ${{ inputs.max_requests }}
+          LIGHTAGENT_JEV_LIVE_MODEL: ${{ inputs.model }}
+          LIGHTAGENT_JEV_LIVE_MAX_COST_USD: ${{ inputs.max_cost_usd }}
+          JEV_PRICE_INPUT_PER_MTOK: ${{ vars.JEV_PRICE_INPUT_PER_MTOK }}
+          JEV_PRICE_OUTPUT_PER_MTOK: ${{ vars.JEV_PRICE_OUTPUT_PER_MTOK }}
+          JEV_PRICING_SOURCE: ${{ vars.JEV_PRICING_SOURCE }}
+          LIGHTAGENT_JEV_EVAL_OUT: ${{ runner.temp }}/jev-live
+        run: >-
+          cargo test -p lightagent --lib live_jev_contract_and_bounded_evaluation
+          -- --ignored --test-threads=1
+      - name: Summarize
+        if: always() && steps.gate.outputs.status == 'ready'
+        env:
+          LIGHTAGENT_JEV_EVAL_OUT: ${{ runner.temp }}/jev-live
+        run: |
+          for summary in "$LIGHTAGENT_JEV_EVAL_OUT"/*.md; do
+            [ -f "$summary" ] && { cat "$summary"; echo; } >> "$GITHUB_STEP_SUMMARY"
+          done
+          exit 0
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.gate.outputs.status == 'ready'
+        with:
+          name: jev-live-reports
+          path: ${{ runner.temp }}/jev-live/
+          if-no-files-found: warn

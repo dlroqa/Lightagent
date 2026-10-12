@@ -20,7 +20,11 @@
 //! concurrently, so the preflight takes as long as the slower of the two, and
 //! both stop the moment the run is cancelled.
 
+#[cfg(test)]
+mod adversarial;
 mod classify;
+#[cfg(test)]
+pub(crate) mod evaluation;
 pub(crate) mod sanitize;
 mod state;
 mod tool;
@@ -42,6 +46,10 @@ pub(crate) use tool::{add_explicit_tool, status};
 pub(crate) mod test_support {
     pub(crate) use super::classify::tests::{answer, jev_stub};
 }
+
+/// Read one stub request; shared with the run-level tests in `serve`.
+#[cfg(test)]
+pub(crate) use classify::tests::read_request as classify_read_request;
 
 /// What a turn asks the preflight to decide about.
 pub(crate) struct PreflightRequest<'a> {
@@ -111,6 +119,7 @@ pub(crate) async fn preflight(
         decision: route,
         invoked: route_invoked,
         input: routing_input,
+        ..
     } = report;
     let routed_profile = route
         .profile
@@ -272,6 +281,22 @@ pub(crate) fn terminal_summary(report: &ClassificationReport) -> String {
             reason.replace('_', " ")
         ),
     }
+}
+
+/// One terminal line describing a turn's workflow decision, or `None` when
+/// there was no valid classification to decide on.
+pub(crate) fn terminal_workflow_summary(decision: &workflow::WorkflowDecision) -> Option<String> {
+    let workflow = decision.workflow?;
+    let effect = if decision.applied {
+        "fixed guidance added to this turn only"
+    } else {
+        "advisory only, this turn is unchanged"
+    };
+    Some(format!(
+        "· Workflow: {} ({}), {effect}",
+        workflow.as_str(),
+        decision.eligibility.as_str().replace('_', " ")
+    ))
 }
 
 #[cfg(test)]

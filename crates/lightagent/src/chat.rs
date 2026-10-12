@@ -419,6 +419,9 @@ struct ChatRuntime {
     extensions: Vec<String>,
     /// Jev requests this turn may still make; reset at each fresh turn.
     jev_budget: Arc<crate::coordinator::JevBudget>,
+    /// A read-only view of the session's tools, for the per-turn workflow
+    /// decision. The executor owns the tools that actually run.
+    workflow_registry: ToolRegistry,
 }
 
 /// Build a fresh runtime from the installed extension set. The same path is
@@ -490,6 +493,7 @@ async fn build_chat_runtime(
         crate::coordinator::JevState::new(),
     );
     let tools = registry.names();
+    let workflow_registry = registry.clone();
     let permission_policy = PolicyEngine::new(profile.approval_policy.into());
     let tool_permissions = tools
         .iter()
@@ -558,6 +562,7 @@ async fn build_chat_runtime(
         tool_permissions,
         extensions: active_extensions,
         jev_budget,
+        workflow_registry,
     }
 }
 
@@ -649,6 +654,7 @@ pub async fn run(
     let startup_skills = session_skills.names();
     let startup_extensions = runtime.extensions;
     let mut jev_budget = runtime.jev_budget;
+    let mut workflow_registry = runtime.workflow_registry;
     if session.approvals_unrestricted {
         agent.invoker().allow_without_restrictions();
     }
@@ -840,6 +846,7 @@ pub async fn run(
                 startup_tools = runtime.tools;
                 tool_permissions = runtime.tool_permissions;
                 jev_budget = runtime.jev_budget;
+                workflow_registry = runtime.workflow_registry;
                 config = new_config;
                 profile = new_profile;
                 if let Err(error) = operation {
@@ -908,8 +915,14 @@ pub async fn run(
         // executor and approvals across model changes and continuations.
         let preflight = turn_preflight(&config, &store, &profile, &line, attachment).await;
         jev_budget.reset(preflight.jev_calls);
+        let mut turn_guidance = None;
         if let Some(report) = &preflight.classification {
             println!("{}", crate::coordinator::terminal_summary(report));
+            let decision = turn_workflow(report, &workflow_registry, &profile, &config);
+            if let Some(summary) = crate::coordinator::terminal_workflow_summary(&decision) {
+                println!("{summary}");
+            }
+            turn_guidance = decision.guidance.filter(|_| decision.applied);
         }
         if config.platform.jev.endpoint.enabled {
             let default_model = configured_model(&profile.routing.model, &config);
@@ -949,6 +962,7 @@ pub async fn run(
             Err(error) => eprintln!("· could not load durable memory: {error}"),
             _ => {}
         }
+        with_turn_guidance(&mut history, turn_guidance);
         session.push_message(StoredMessage::new("user", &line));
         session_store
             .save(&session)
@@ -2451,6 +2465,45 @@ async fn turn_preflight(
     .await
 }
 
+/// The terminal turn's workflow decision. Like an API run, it inspects the
+/// session's tools against the profile's approval policy and limits without
+/// changing any of them; a session-wide approval relaxation is not consulted,
+/// so eligibility is never wider than for the same profile over the API.
+fn turn_workflow(
+    report: &crate::coordinator::ClassificationReport,
+    registry: &ToolRegistry,
+    profile: &AgentProfile,
+    config: &Config,
+) -> crate::coordinator::workflow::WorkflowDecision {
+    let policy = PolicyEngine::new(profile.approval_policy.into());
+    crate::coordinator::workflow::evaluate(&crate::coordinator::workflow::WorkflowInputs {
+        report,
+        registry,
+        policy: &policy,
+        limits: &profile.limits,
+        config,
+        cancelled: false,
+    })
+}
+
+/// Add this turn's fixed workflow guidance, when active mode applied one, as
+/// a system message after the leading system messages (the memory catalog)
+/// and before the conversation.
+///
+/// The terminal's session-wide system prompt belongs to the agent loop and is
+/// never changed. The history is rebuilt from the session at every turn and
+/// the session stores only user and assistant text, so the guidance reaches
+/// this turn's requests and no later turn.
+fn with_turn_guidance(history: &mut Vec<ProviderMessage>, guidance: Option<&'static str>) {
+    if let Some(guidance) = guidance {
+        let position = history
+            .iter()
+            .take_while(|message| message.role == lightagent_core::provider::Role::System)
+            .count();
+        history.insert(position, ProviderMessage::system(guidance));
+    }
+}
+
 pub(crate) fn configured_model(profile_model: &str, config: &Config) -> String {
     if profile_model.trim().is_empty() || profile_model == "default" {
         config
@@ -3052,6 +3105,167 @@ for line in sys.stdin:
                 .await
                 .is_err(),
             "neither routing nor classification may contact Jev"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_workflow_follows_each_mode_and_never_touches_the_session() {
+        use crate::coordinator::test_support::{answer, jev_stub};
+        use lightagent_core::JevClassificationMode::{Active, Off, Shadow};
+        let (jev, _) = jev_stub(200, answer("research", 0.95), Duration::ZERO).await;
+        let registry = ToolRegistry::builtin().scoped(&[
+            "web.search".to_owned(),
+            "web.fetch".to_owned(),
+            "fs.read".to_owned(),
+        ]);
+        let names_before = registry.names();
+        let profile = AgentProfile::new(
+            ProfileId::new("terminal").unwrap(),
+            "Terminal",
+            "Persona",
+            "fast",
+        );
+        let store = ProfileStore::new(std::env::temp_dir());
+        let mut session = Session::new("terminal", "chat");
+        session.push_message(StoredMessage::new("user", "earlier question"));
+        session.push_message(StoredMessage::new("assistant", "earlier answer"));
+        let stored_before = session.messages.len();
+        for (mode, guidance, applied) in [
+            (Off, true, false),
+            (Shadow, true, false),
+            (Active, false, false),
+            (Active, true, true),
+        ] {
+            let mut config = Config::default();
+            config.platform.jev.endpoint.enabled = true;
+            config.platform.jev.endpoint.base_url = Some(jev.clone());
+            config.platform.jev.classification.mode = mode;
+            config.platform.jev.classification.workflow_guidance = guidance;
+            config.platform.jev.classification.allowed_profiles = vec!["terminal".to_owned()];
+            let line = "find recent papers on solid-state batteries";
+            let preflight = turn_preflight(&config, &store, &profile, line, false).await;
+            let turn_guidance = preflight.classification.as_ref().and_then(|report| {
+                let decision = turn_workflow(report, &registry, &profile, &config);
+                assert_eq!(
+                    decision.eligibility.as_str(),
+                    "eligible",
+                    "{mode:?}: evaluated in every mode that classifies"
+                );
+                assert_eq!(decision.applied, applied, "{mode:?} guidance={guidance}");
+                assert!(
+                    crate::coordinator::terminal_workflow_summary(&decision)
+                        .unwrap()
+                        .contains("research")
+                );
+                decision.guidance.filter(|_| decision.applied)
+            });
+            if mode == Off {
+                assert!(preflight.classification.is_none(), "off evaluates nothing");
+            }
+            let mut history = model_history(&session, line, Some(4_096));
+            history.insert(0, ProviderMessage::system("memory catalog"));
+            with_turn_guidance(&mut history, turn_guidance);
+            let systems: Vec<&str> = history
+                .iter()
+                .filter(|message| message.role == lightagent_core::provider::Role::System)
+                .map(|message| message.content.as_str())
+                .collect();
+            if applied {
+                assert_eq!(
+                    systems,
+                    [
+                        "memory catalog",
+                        crate::coordinator::workflow::RESEARCH_GUIDANCE
+                    ]
+                );
+                assert_eq!(
+                    history[2],
+                    ProviderMessage::user("earlier question"),
+                    "the guidance precedes the conversation"
+                );
+            } else {
+                assert_eq!(systems, ["memory catalog"]);
+            }
+            // Nothing about the decision is stored: the next turn's history
+            // is rebuilt from the session alone.
+            assert_eq!(session.messages.len(), stored_before);
+            assert!(
+                model_history(&session, "next", Some(4_096))
+                    .iter()
+                    .all(|message| !message.content.contains("Task assessment"))
+            );
+        }
+        assert_eq!(
+            registry.names(),
+            names_before,
+            "no tool is added or removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_guidance_reaches_only_its_own_turn_and_keeps_the_session_prompt() {
+        let (gateway, chats) = crate::serve::routing_tests::gateway_stub().await;
+        let provider = LightweightProvider::new(ProviderConfig::new(gateway, "fast")).unwrap();
+        let profile = AgentProfile::new(
+            ProfileId::new("terminal").unwrap(),
+            "Terminal",
+            "Session persona",
+            "fast",
+        );
+        let agent = AgentLoop::from_profile(provider, lightagent_core::NullInvoker, &profile);
+        let system_before = agent.config().system.clone();
+        let guidance = crate::coordinator::workflow::RESEARCH_GUIDANCE;
+
+        let mut first = Vec::new();
+        with_turn_guidance(&mut first, Some(guidance));
+        agent
+            .run_with_history(first, "turn one", CancellationToken::new())
+            .await
+            .unwrap();
+        // The next turn is rebuilt from what a session stores: text only.
+        let second = vec![
+            ProviderMessage::user("turn one"),
+            ProviderMessage::assistant("ok"),
+        ];
+        agent
+            .run_with_history(second, "turn two", CancellationToken::new())
+            .await
+            .unwrap();
+
+        let bodies: Vec<serde_json::Value> = chats
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|body| serde_json::from_str(body).unwrap())
+            .collect();
+        assert_eq!(bodies.len(), 2);
+        let messages = |body: &serde_json::Value| -> Vec<(String, String)> {
+            body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|message| {
+                    (
+                        message["role"].as_str().unwrap_or_default().to_owned(),
+                        message["content"].as_str().unwrap_or_default().to_owned(),
+                    )
+                })
+                .collect()
+        };
+        let one = messages(&bodies[0]);
+        assert_eq!(one[0], ("system".to_owned(), "Session persona".to_owned()));
+        assert_eq!(one[1], ("system".to_owned(), guidance.to_owned()));
+        assert_eq!(one.last().unwrap().1, "turn one");
+        let two = messages(&bodies[1]);
+        assert_eq!(two[0], ("system".to_owned(), "Session persona".to_owned()));
+        assert!(
+            two.iter().all(|(_, content)| content != guidance),
+            "the earlier turn's guidance never reaches a later turn"
+        );
+        assert_eq!(
+            agent.config().system,
+            system_before,
+            "the session prompt is unchanged"
         );
     }
 }

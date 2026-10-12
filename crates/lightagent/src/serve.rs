@@ -482,7 +482,7 @@ pub async fn run(
 }
 
 #[cfg(test)]
-mod routing_tests {
+pub(crate) mod routing_tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -593,7 +593,7 @@ mod routing_tests {
 
     /// An OpenAI-compatible gateway advertising Lightweight's `Auto` beside a
     /// concrete model, recording each chat-completion body it receives.
-    async fn gateway_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    pub(crate) async fn gateway_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let chats = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -937,5 +937,168 @@ mod routing_tests {
         assert!(!unconfigured.workflow_applied);
         assert!(!system_prompt(&bodies[0]).contains("Task assessment"));
         assert!(!tool_names(&bodies[0]).contains(&"web.search".to_owned()));
+    }
+
+    /// A Jev stub that answers nothing until two requests are waiting, then
+    /// answers both. A preflight that sent its two requests one after the
+    /// other would time out on the first.
+    async fn barrier_jev(body: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let barrier = std::sync::Arc::clone(&barrier);
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let _ = crate::coordinator::classify_read_request(&mut stream).await;
+                    barrier.wait().await;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn routing_and_classification_run_concurrently_in_the_preflight() {
+        use crate::coordinator::test_support::answer;
+        let jev = barrier_jev(answer("research", 0.95)).await;
+        let mut config = lightagent_core::Config::default();
+        config.platform.jev.endpoint.enabled = true;
+        config.platform.jev.endpoint.base_url = Some(jev);
+        config.platform.jev.timeout_secs = 2;
+        config.platform.jev.allowed_models = vec!["fast".to_owned()];
+        config.platform.jev.classification.mode = lightagent_core::JevClassificationMode::Shadow;
+        config.platform.jev.classification.allowed_profiles = vec!["lead".to_owned()];
+        let (status, events, _) =
+            run_through_factory(config, "find recent papers on solid-state batteries").await;
+        assert_eq!(status, RunStatus::Completed);
+        let diagnostics = classification(&events).unwrap();
+        assert_eq!(
+            diagnostics.outcome, "classified",
+            "both requests were in flight together; sequential sends would time out"
+        );
+        assert_eq!(diagnostics.jev_calls, 2);
+        assert!(
+            diagnostics.preflight_latency_ms < 2_000,
+            "sequential sends would wait out the first request's timeout"
+        );
+    }
+
+    /// Off, shadow and active-with-guidance under identical stubs: the same
+    /// gateway, a Jev stub with a fixed delay, five runs each. A simulation of
+    /// the preflight's overhead, not a measurement of real agent outcomes.
+    #[tokio::test]
+    async fn preflight_overhead_by_mode_is_measured_under_fixed_stubs() {
+        use crate::coordinator::evaluation::metrics::{Ratio, latency_json};
+        use crate::coordinator::test_support::{answer, jev_stub};
+        use lightagent_core::JevClassificationMode::{Active, Off, Shadow};
+        const RUNS: usize = 5;
+        const JEV_DELAY: Duration = Duration::from_millis(100);
+        let message = "find recent papers on solid-state batteries";
+        let mut modes = serde_json::Map::new();
+        let mut tool_lists = Vec::new();
+        for (label, mode, guidance) in [
+            ("off", Off, false),
+            ("shadow", Shadow, false),
+            ("active_with_guidance", Active, true),
+        ] {
+            let (jev, seen) = jev_stub(200, answer("research", 0.95), JEV_DELAY).await;
+            let mut config = lightagent_core::Config::default();
+            config.web.enabled = true;
+            config.web.search.endpoint = Some("http://127.0.0.1:9/search".to_owned());
+            config.platform.jev.endpoint.enabled = true;
+            config.platform.jev.endpoint.base_url = Some(jev);
+            config.platform.jev.allowed_models = vec!["fast".to_owned()];
+            config.platform.jev.classification.mode = mode;
+            config.platform.jev.classification.workflow_guidance = guidance;
+            config.platform.jev.classification.allowed_profiles = vec!["lead".to_owned()];
+            let (mut wall, mut preflight, mut tokens_in, mut tokens_out) =
+                (Vec::new(), Vec::new(), 0u64, 0u64);
+            let (mut eligible, mut applied, mut fallbacks, mut provider_requests) =
+                (0u32, 0u32, 0u32, 0usize);
+            for _ in 0..RUNS {
+                let started = std::time::Instant::now();
+                let (status, events, bodies) = run_through_factory(config.clone(), message).await;
+                wall.push(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+                assert_eq!(status, RunStatus::Completed);
+                provider_requests += bodies.len();
+                tool_lists.push(tool_names(&bodies[0]));
+                match classification(&events) {
+                    Some(diagnostics) => {
+                        assert_ne!(mode, Off);
+                        preflight.push(diagnostics.preflight_latency_ms);
+                        tokens_in += diagnostics.input_tokens.unwrap_or(0);
+                        tokens_out += diagnostics.output_tokens.unwrap_or(0);
+                        eligible += u32::from(
+                            diagnostics.workflow_eligibility.as_deref() == Some("eligible"),
+                        );
+                        applied += u32::from(diagnostics.workflow_applied);
+                        fallbacks += u32::from(diagnostics.fallback_reason.is_some());
+                    }
+                    None => assert_eq!(mode, Off, "off records nothing"),
+                }
+            }
+            let requests = seen.lock().unwrap().len();
+            let expected = if mode == Off { RUNS } else { 2 * RUNS };
+            assert_eq!(
+                requests, expected,
+                "{label}: routing always, classification only when on"
+            );
+            let runs = u32::try_from(RUNS).unwrap();
+            match mode {
+                Off => assert_eq!(applied, 0),
+                Shadow => assert_eq!((eligible, applied), (runs, 0)),
+                Active => assert_eq!((eligible, applied), (runs, runs)),
+            }
+            modes.insert(
+                label.to_owned(),
+                serde_json::json!({
+                    "runs": RUNS,
+                    "jev_requests": requests,
+                    "jev_requests_per_run": requests as f64 / RUNS as f64,
+                    "provider_requests": provider_requests,
+                    "tool_calls": 0,
+                    "end_to_end_latency": latency_json(&wall),
+                    "preflight_latency": latency_json(&preflight),
+                    "fallback_rate": Ratio::new(fallbacks, runs).json(),
+                    "workflow_eligible": Ratio::new(eligible, runs).json(),
+                    "workflow_applied": Ratio::new(applied, runs).json(),
+                    "jev_tokens": {"input": tokens_in, "output": tokens_out},
+                }),
+            );
+        }
+        assert!(
+            tool_lists.windows(2).all(|pair| pair[0] == pair[1]),
+            "no mode changes the tools offered to the provider"
+        );
+        let report = serde_json::json!({
+            "report": "jev-preflight-performance",
+            "measurement": "simulation",
+            "disclaimer": "Local stubs with a fixed 100 ms Jev delay and an instant gateway. These numbers show the shape of the preflight's overhead and request count; they are not real latency, cost or answer quality.",
+            "jev_stub_delay_ms": JEV_DELAY.as_millis() as u64,
+            "routing": "enabled with one allowlisted model; the stub's answer is not a route, so routing falls back and keeps the configured model",
+            "modes": modes,
+            "cost": "Not estimated: stub usage is synthetic and TypeSafe pricing is unverified.",
+        });
+        let mut summary = String::from(
+            "# Jev preflight performance (simulation)\n\n> Local stubs; not real latency, cost or answer quality.\n\n| Mode | Jev requests/run | Preflight p50 ms | End-to-end p50 ms | Eligible | Applied |\n|---|---|---|---|---|---|\n",
+        );
+        for (label, row) in report["modes"].as_object().unwrap() {
+            summary.push_str(&format!(
+                "| {label} | {} | {} | {} | {} | {} |\n",
+                row["jev_requests_per_run"],
+                row["preflight_latency"]["p50_ms"],
+                row["end_to_end_latency"]["p50_ms"],
+                row["workflow_eligible"]["numerator"],
+                row["workflow_applied"]["numerator"],
+            ));
+        }
+        crate::coordinator::evaluation::write_report("performance-simulation", &report, &summary);
     }
 }
