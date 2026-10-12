@@ -53,7 +53,7 @@ pub enum AgentEvent {
     /// and it never grants a tool, an approval or a model. Emitted only when
     /// classification is not `off`.
     TaskClassified {
-        diagnostics: ClassificationDiagnostics,
+        diagnostics: Box<ClassificationDiagnostics>,
     },
     /// The model asked for a tool.
     ToolCallRequested { call: ToolCall },

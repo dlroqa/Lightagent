@@ -249,7 +249,9 @@ impl RunFactory for LightweightRunFactory {
                 profile.persona.push_str(&format!("\n\n{hint}"));
             }
             if let Some(diagnostics) = crate::coordinator::diagnostics(&preflight, hint.is_some()) {
-                let _ = sink.send(AgentEvent::TaskClassified { diagnostics });
+                let _ = sink.send(AgentEvent::TaskClassified {
+                    diagnostics: Box::new(diagnostics),
+                });
             }
         }
         let mut executor = BoundedExecutor::new(

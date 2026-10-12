@@ -135,7 +135,7 @@ mod tests {
             json!({"source": "Jev", "model": "Auto", "kept_default": true})
         );
         let classified = AgentEvent::TaskClassified {
-            diagnostics: lightagent_core::ClassificationDiagnostics {
+            diagnostics: Box::new(lightagent_core::ClassificationDiagnostics {
                 schema: 1,
                 mode: "shadow".into(),
                 outcome: "classified".into(),
@@ -157,7 +157,7 @@ mod tests {
                 preflight_latency_ms: 43,
                 fallback_reason: None,
                 influenced: false,
-            },
+            }),
         };
         assert_eq!(name(&classified), "classification.completed");
         let payload = data(&classified);
