@@ -345,7 +345,8 @@ function PlatformEndpointRow<E extends PlatformEndpointSettings>({ label, hint, 
     void onSave({ ...endpoint, base_url: next, enabled });
   };
   return (
-    <div style={{ padding: "14px 0", borderBottom: "1px solid var(--rule)" }}>
+    <div style={{ padding: "14px 0", borderBottom: "1px solid var(--rule)" }}
+      data-testid={`platform-${label.toLowerCase().replaceAll(" ", "-")}`}>
       <ToggleRow label={label} hint={hint} checked={endpoint.enabled} disabled={disabled}
         onChange={saveEnabled} />
       <div className="field" style={{ marginTop: 10 }}>

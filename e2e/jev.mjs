@@ -85,17 +85,27 @@ export async function checkJevStates(browser, base, outDir) {
     throw new Error(`no ${outcome} classification was recorded`);
   };
 
+  // The panel keeps its own theme preference (dark by default), so each
+  // context states the theme it captures rather than relying on the media
+  // query alone. Tall viewports keep each captured element fully on screen:
+  // the panel scrolls an inner container, not the window.
+  const themed = async (scheme, width, height) => {
+    const view = await browser.newContext({ viewport: { width, height }, colorScheme: scheme });
+    await view.addInitScript((theme) => {
+      window.localStorage.setItem("lightagent.web.preferences", JSON.stringify({ theme }));
+    }, scheme);
+    return view;
+  };
+
   const failures = [];
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: "dark" });
+  const context = await themed("dark", 1440, 3200);
   await context.tracing.start({ screenshots: true, snapshots: true });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (error) => errors.push(String(error)));
 
   const toolsCard = () => page.getByTestId("jev-tool");
-  const endpointsCard = () => page.locator("section.card", {
-    has: page.getByRole("heading", { name: "Platform endpoints" }),
-  });
+  const endpointsCard = () => page.getByTestId("platform-jev");
   // A hash-only navigation to the URL already shown does not remount the SPA,
   // so every state starts from a fresh document load.
   const open = async (route) => {
@@ -236,8 +246,8 @@ export async function checkJevStates(browser, base, outDir) {
   }
 
   // Light appearance and a phone-width layout of the same, final state.
-  for (const [scheme, width, height] of [["light", 1440, 900], ["dark", 390, 844], ["light", 390, 844]]) {
-    const view = await browser.newContext({ viewport: { width, height }, colorScheme: scheme });
+  for (const [scheme, width, height] of [["light", 1440, 3200], ["dark", 390, 4200], ["light", 390, 4200]]) {
+    const view = await themed(scheme, width, height);
     const viewPage = await view.newPage();
     viewPage.on("pageerror", (error) => errors.push(String(error)));
     try {
@@ -245,8 +255,10 @@ export async function checkJevStates(browser, base, outDir) {
         await viewPage.goto(`${base}/#/${route}`, { waitUntil: "domcontentloaded" });
         const target = route === "tools"
           ? viewPage.getByTestId("jev-tool")
-          : viewPage.getByTestId("jev-classification");
+          : viewPage.getByTestId("platform-jev");
         await target.waitFor({ timeout: 15000 });
+        const applied = await viewPage.evaluate(() => document.documentElement.getAttribute("data-theme"));
+        if (applied !== scheme) failures.push(`${route} ${scheme}: the panel rendered the ${applied} theme`);
         const overflow = await viewPage.evaluate(() =>
           document.documentElement.scrollWidth - document.documentElement.clientWidth);
         if (overflow > 1) failures.push(`${route} ${scheme} ${width}px: page overflows horizontally by ${overflow}px`);
