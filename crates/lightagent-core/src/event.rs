@@ -88,8 +88,9 @@ pub enum AgentEvent {
 /// The privacy-safe record of one run's classification preflight.
 ///
 /// Every string is either a fixed vocabulary value or the versioned Jev model
-/// id; nothing derived from the user's text is included.
-#[derive(Clone, Debug, PartialEq)]
+/// id; nothing derived from the user's text is included. Schema 2 added the
+/// workflow and routing-input fields; every schema-1 field is unchanged.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClassificationDiagnostics {
     /// The schema of this record, so consumers can evolve with it.
     pub schema: u32,
@@ -133,4 +134,24 @@ pub struct ClassificationDiagnostics {
     pub fallback_reason: Option<String>,
     /// Whether the classification changed anything about the run.
     pub influenced: bool,
+    /// Whether the category cleared its confidence threshold.
+    pub accepted: Option<bool>,
+    /// The workflow the category maps to.
+    pub workflow: Option<String>,
+    /// `eligible`, `default_behavior`, `advisory_only`, `unsupported`,
+    /// `not_configured`, `unauthorized`, `insufficient_budget`, `uncertain`,
+    /// `not_classified` or `cancelled`.
+    pub workflow_eligibility: Option<String>,
+    /// The existing capability the workflow relies on.
+    pub workflow_capability: Option<String>,
+    /// Whether the workflow's guidance was applied (otherwise advisory only).
+    pub workflow_applied: bool,
+    /// Supporting tools present in the run and not refused by its policy.
+    pub available_tools: Option<u32>,
+    /// Whether any supporting tool would still ask for approval.
+    pub approval_required: Option<bool>,
+    /// Time spent deciding the workflow, in microseconds.
+    pub workflow_selection_us: Option<u64>,
+    /// The routing-input policy used when routing consulted Jev.
+    pub routing_input: Option<String>,
 }

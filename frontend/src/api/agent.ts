@@ -164,11 +164,14 @@ export interface JevSettings extends PlatformEndpointSettings {
   timeout_secs: number;
   /** Task classification, separate from model routing. Absent from older servers. */
   classification?: JevClassificationSettings;
+  /** What model routing sends to Jev. Absent from older servers. */
+  routing_input?: JevRoutingInput;
   /** Write-only: submitted to the server but never returned in settings responses. */
   api_key?: string;
 }
 
 export type JevClassificationMode = "off" | "shadow" | "active";
+export type JevRoutingInput = "legacy_raw" | "sanitized";
 
 export interface JevClassificationSettings {
   mode: JevClassificationMode;
@@ -178,6 +181,7 @@ export interface JevClassificationSettings {
   version_thresholds: Record<string, number>;
   explicit_tool: boolean;
   max_calls_per_run: number;
+  workflow_guidance?: boolean;
 }
 
 /** A sanitized classification record: fixed vocabulary, numbers and the Jev version only. */
@@ -204,6 +208,16 @@ export interface JevDiagnostics {
   preflight_latency_ms: number;
   fallback_reason: string | null;
   influenced: boolean;
+  /** Schema 2. */
+  accepted?: boolean | null;
+  workflow?: string | null;
+  workflow_eligibility?: string | null;
+  workflow_capability?: string | null;
+  workflow_applied?: boolean;
+  available_tools?: number | null;
+  approval_required?: boolean | null;
+  workflow_selection_us?: number | null;
+  routing_input?: string | null;
   recorded_at_unix?: number;
 }
 
@@ -228,6 +242,7 @@ export interface JevStatus {
   configured: boolean;
   enabled: boolean;
   model: string;
+  routing_input?: JevRoutingInput;
   verification: JevVerification | null;
   classification: {
     mode: JevClassificationMode;
@@ -236,6 +251,7 @@ export interface JevStatus {
     default_threshold: number;
     version_thresholds: Record<string, number>;
     max_calls_per_run: number;
+    workflow_guidance?: boolean;
   };
   explicit_tool: { name: string; enabled: boolean; available: boolean };
   permissions: { risk: string; requirements: string[] };

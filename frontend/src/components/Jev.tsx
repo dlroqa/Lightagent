@@ -7,6 +7,7 @@ import {
   type JevClassificationMode,
   type JevClassificationSettings,
   type JevDiagnostics,
+  type JevRoutingInput,
   type JevSettings,
   type JevStatus,
   type ProfileSummary,
@@ -91,6 +92,18 @@ export function JevDiagnosticsView({ diagnostics }: { diagnostics: JevDiagnostic
     ["Fallback reason", diagnostics.fallback_reason ? readable(diagnostics.fallback_reason) : "None"],
     ["Influenced the run", diagnostics.influenced ? "Yes" : "No"],
   ];
+  if (diagnostics.workflow_eligibility) {
+    facts.push(
+      ["Workflow", diagnostics.workflow ? readable(diagnostics.workflow) : "None"],
+      ["Workflow eligibility", readable(diagnostics.workflow_eligibility)],
+      ["Workflow guidance", diagnostics.workflow_applied ? "Applied" : "Advisory only"],
+      ["Capability", diagnostics.workflow_capability ? readable(diagnostics.workflow_capability) : "—"],
+      ["Usable supporting tools", diagnostics.available_tools == null ? "—" : String(diagnostics.available_tools)],
+      ["Approval still required", diagnostics.approval_required == null ? "—" : diagnostics.approval_required ? "Yes" : "No"],
+      ["Workflow selection", diagnostics.workflow_selection_us == null ? "—" : `${diagnostics.workflow_selection_us} µs`],
+    );
+  }
+  if (diagnostics.routing_input) facts.push(["Routing input", readable(diagnostics.routing_input)]);
   return (
     <dl className="jev-facts" aria-label="Last classification">
       {facts.map(([term, detail]) => (
@@ -162,6 +175,14 @@ export function JevToolCard() {
             : status.model}</dd>
         </div>
         <div><dt>Requests per run</dt><dd className="tnum">{status.classification.max_calls_per_run}</dd></div>
+        <div>
+          <dt>Workflow guidance</dt>
+          <dd>{status.classification.workflow_guidance ? "On (active mode only)" : "Off"}</dd>
+        </div>
+        <div>
+          <dt>Routing input</dt>
+          <dd>{status.routing_input === "legacy_raw" ? "Legacy raw message" : "Sanitized task"}</dd>
+        </div>
         <div><dt>Risk class</dt><dd>{status.permissions.risk}</dd></div>
       </dl>
       <div className="jev-section">
@@ -262,6 +283,23 @@ export function JevClassificationSection({ endpoint, profiles, status, disabled,
           role={checkMessage.startsWith("Connection verified") ? "status" : "alert"}>{checkMessage}</p>}
       </div>
 
+      {endpoint.routing_input && <div className="jev-section">
+        <h4 className="jev-section__title">Model routing input</h4>
+        <div className="field">
+          <label className="field__label" htmlFor="jev-routing-input">What model routing sends to Jev</label>
+          <select id="jev-routing-input" className="select" value={endpoint.routing_input} disabled={disabled}
+            onChange={(event) => void onSave({ ...endpoint, routing_input: event.target.value as JevRoutingInput })}>
+            <option value="sanitized">Sanitized task (recommended)</option>
+            <option value="legacy_raw">Legacy raw message</option>
+          </select>
+          <p className="jev-hint">
+            Sanitized routing removes code, paths, URLs, addresses and credentials and never sends attachments;
+            a message that cannot be minimized is not sent. Legacy raw sends the message itself, cut to 4,096
+            characters. Routing decisions may differ between the two. Lightweight&apos;s Auto is never routed.
+          </p>
+        </div>
+      </div>}
+
       <div className="jev-section">
         <h4 className="jev-section__title">Task classification</h4>
         {!endpoint.classification && <p className="jev-hint">This server does not support task classification settings.</p>}
@@ -322,6 +360,15 @@ export function JevClassificationSection({ endpoint, profiles, status, disabled,
             Used when that version answers; otherwise the default threshold applies.
           </p>
           {thresholdError && <p className="jev-error" role="alert">{thresholdError}</p>}
+        </div>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16, paddingTop: 12 }}>
+          <div>
+            <div style={{ fontSize: 13.5, fontWeight: 500 }}>Workflow guidance</div>
+            <div className="jev-hint">In Active mode, let an eligible workflow add one fixed advisory instruction. Never grants tools, approvals or budget.</div>
+          </div>
+          <Switch label="Workflow guidance" checked={classification.workflow_guidance ?? false}
+            disabled={locked || classification.workflow_guidance === undefined}
+            onChange={(workflow_guidance) => save({ workflow_guidance })} />
         </div>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16, paddingTop: 12 }}>
           <div>

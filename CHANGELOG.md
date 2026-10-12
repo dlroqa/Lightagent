@@ -6,6 +6,19 @@ All notable Lightagent changes are documented here.
 
 ### Added
 
+- Jev workflow policy: a typed, read-only eligibility check that maps an
+  accepted classification to an existing capability (retrieval, workspace,
+  delegation) only when the run already has it, its approval policy permits
+  it and its limits allow it. Analysis is unsupported and automation advisory
+  only. Guidance is applied only with `active` mode and the new
+  `classification.workflow_guidance` setting (off by default).
+- `platform.jev.routing_input` (`legacy_raw` | `sanitized`): sanitized model
+  routing sends the minimized task and never an attachment or key material.
+  Existing Jev configurations keep `legacy_raw`; new configurations use
+  `sanitized`.
+- `classification.completed` schema 2: workflow eligibility, applied versus
+  advisory, usable tools, approval, selection overhead and routing input.
+
 - Jev in the Tools catalog and Settings: a Decision services card (configured,
   enabled and verified shown separately), classification controls, an
   administrator-only connection check, and the profile's latest sanitized
@@ -26,6 +39,8 @@ All notable Lightagent changes are documented here.
 
 - Lightagent's Jev model routing no longer replaces Lightweight's `Auto`
   model; `Auto` reaches the provider unchanged so Lightweight decides the route.
+- `active` classification alone no longer adds advisory guidance; it also
+  requires `classification.workflow_guidance` (unreleased behavior narrowed).
 
 - Moved TypeSafe Jev transport, response validation and error handling into a
   new shared `lightagent-jev` crate used by the advisory model router. Routing

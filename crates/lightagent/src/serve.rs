@@ -285,17 +285,37 @@ impl RunFactory for LightweightRunFactory {
             budget,
             Arc::clone(&self.jev),
         );
-        // Classification only advises: the registry and policy below are
-        // built exactly as without it.
-        if preflight.classification.is_some() {
-            let hint = preflight
-                .classification
-                .as_ref()
-                .and_then(|report| crate::coordinator::workflow_hint(report, &registry));
-            if let Some(hint) = hint {
-                profile.persona.push_str(&format!("\n\n{hint}"));
+        // Classification only advises. The workflow policy inspects the
+        // registry, the approval policy and the limits without changing them;
+        // the executor below is built exactly as without Jev.
+        if let Some(report) = preflight.classification.as_ref() {
+            let selection = std::time::Instant::now();
+            let inspection = PolicyEngine::new(profile.approval_policy.into());
+            let decision = crate::coordinator::workflow::evaluate(
+                &crate::coordinator::workflow::WorkflowInputs {
+                    report,
+                    registry: &registry,
+                    policy: &inspection,
+                    limits: &profile.limits,
+                    config: &config,
+                    cancelled: cancel.is_cancelled(),
+                },
+            );
+            let selection = selection.elapsed();
+            if decision.applied
+                && let Some(guidance) = decision.guidance
+            {
+                profile.persona.push_str(&format!("\n\n{guidance}"));
             }
-            if let Some(diagnostics) = crate::coordinator::diagnostics(&preflight, hint.is_some()) {
+            if let Some(mut diagnostics) =
+                crate::coordinator::diagnostics(&preflight, decision.applied)
+            {
+                crate::coordinator::annotate(
+                    &mut diagnostics,
+                    &decision,
+                    selection,
+                    preflight.routing_input,
+                );
                 self.jev.record(profile.id.as_str(), diagnostics.clone());
                 let _ = sink.send(AgentEvent::TaskClassified {
                     diagnostics: Box::new(diagnostics),
@@ -745,5 +765,177 @@ mod routing_tests {
             assert!(body["questions"].get("task").is_some());
         }
         std::fs::remove_dir_all(scratch).ok();
+    }
+
+    /// One real run through the factory against a stub gateway, returning its
+    /// status, events and the bodies the provider received.
+    async fn run_through_factory(
+        mut config: lightagent_core::Config,
+        message: &str,
+    ) -> (RunStatus, Vec<AgentEvent>, Vec<serde_json::Value>) {
+        let (gateway, chats) = gateway_stub().await;
+        let root = std::env::temp_dir().join(format!(
+            "lightagent-workflow-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        config.inference.base_url = gateway;
+        config.memory.inject_recent = 0;
+        ConfigStore::at(&LightagentPaths::rooted_at(&root))
+            .save(&config)
+            .unwrap();
+        let store = ProfileStore::new(&root);
+        let lead = lightagent_core::AgentProfile::new(
+            lightagent_core::ProfileId::new("lead").unwrap(),
+            "Lead",
+            "Persona",
+            "fast",
+        );
+        store.create(&lead).unwrap();
+        store.set_active(&lead.id).unwrap();
+        let factory = LightweightRunFactory {
+            root: root.clone(),
+            jev: crate::coordinator::JevState::new(),
+        };
+        let (sink, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let (_decide, decisions) = tokio::sync::mpsc::unbounded_channel();
+        let status = factory
+            .run(
+                StartRun {
+                    message: message.to_owned(),
+                    history: vec![],
+                    profile: None,
+                    model: None,
+                    cwd: None,
+                },
+                sink,
+                CancellationToken::new(),
+                decisions,
+            )
+            .await;
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            seen.push(event);
+        }
+        let bodies = chats
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|body| serde_json::from_str(body).unwrap())
+            .collect();
+        std::fs::remove_dir_all(root).ok();
+        (status, seen, bodies)
+    }
+
+    fn system_prompt(body: &serde_json::Value) -> String {
+        body["messages"][0]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    fn tool_names(body: &serde_json::Value) -> Vec<String> {
+        let mut names: Vec<String> = body["tools"]
+            .as_array()
+            .map(|tools| {
+                tools
+                    .iter()
+                    .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    fn classification(events: &[AgentEvent]) -> Option<lightagent_core::ClassificationDiagnostics> {
+        events.iter().find_map(|event| match event {
+            AgentEvent::TaskClassified { diagnostics } => Some((**diagnostics).clone()),
+            _ => None,
+        })
+    }
+
+    #[tokio::test]
+    async fn workflow_guidance_reaches_the_provider_only_when_active_eligible_and_enabled() {
+        use crate::coordinator::test_support::{answer, jev_stub};
+        let (jev, _) = jev_stub(200, answer("research", 0.95), Duration::ZERO).await;
+        let message = "find recent papers on solid-state batteries";
+        let with_web = |mode, guidance, web: bool| {
+            let mut config = lightagent_core::Config::default();
+            config.web.enabled = web;
+            config.web.search.endpoint = Some("http://127.0.0.1:9/search".to_owned());
+            config.platform.jev.endpoint.enabled = true;
+            config.platform.jev.endpoint.base_url = Some(jev.clone());
+            config.platform.jev.classification.mode = mode;
+            config.platform.jev.classification.workflow_guidance = guidance;
+            config.platform.jev.classification.allowed_profiles = vec!["lead".to_owned()];
+            config
+        };
+        use lightagent_core::JevClassificationMode::{Active, Off, Shadow};
+
+        // Baseline: Jev classification off.
+        let (status, events, bodies) =
+            run_through_factory(with_web(Off, true, true), message).await;
+        assert_eq!(status, RunStatus::Completed);
+        assert!(classification(&events).is_none(), "off records nothing");
+        let baseline_prompt = system_prompt(&bodies[0]);
+        let baseline_tools = tool_names(&bodies[0]);
+        assert!(!baseline_prompt.contains("Task assessment"));
+        assert!(baseline_tools.contains(&"web.search".to_owned()));
+
+        // Shadow: evaluated, never applied, run unchanged.
+        let (_, events, bodies) = run_through_factory(with_web(Shadow, true, true), message).await;
+        let shadow = classification(&events).unwrap();
+        assert_eq!(shadow.workflow_eligibility.as_deref(), Some("eligible"));
+        assert!(!shadow.workflow_applied && !shadow.influenced);
+        assert_eq!(system_prompt(&bodies[0]), baseline_prompt);
+        assert_eq!(tool_names(&bodies[0]), baseline_tools);
+
+        // Active without workflow_guidance: still advisory only.
+        let (_, events, bodies) = run_through_factory(with_web(Active, false, true), message).await;
+        assert!(!classification(&events).unwrap().workflow_applied);
+        assert_eq!(system_prompt(&bodies[0]), baseline_prompt);
+
+        // Active with workflow_guidance: one fixed instruction, same tools.
+        let (_, events, bodies) = run_through_factory(with_web(Active, true, true), message).await;
+        let applied = classification(&events).unwrap();
+        assert!(applied.workflow_applied && applied.influenced);
+        assert_eq!(applied.workflow.as_deref(), Some("research"));
+        assert_eq!(
+            applied.workflow_capability.as_deref(),
+            Some("retrieval_tools")
+        );
+        assert!(applied.workflow_selection_us.is_some());
+        let prompt = system_prompt(&bodies[0]);
+        let guidance = crate::coordinator::workflow::RESEARCH_GUIDANCE;
+        assert!(prompt.contains(guidance));
+        assert_eq!(
+            prompt.replacen(&format!("\n\n{guidance}"), "", 1),
+            baseline_prompt,
+            "the only difference from the run without Jev is the fixed guidance"
+        );
+        assert!(
+            !prompt.contains("batteries"),
+            "nothing from the message is interpolated"
+        );
+        assert_eq!(
+            tool_names(&bodies[0]),
+            baseline_tools,
+            "no tool is added or removed"
+        );
+
+        // Without retrieval tools, research guidance has nothing to point at.
+        let (_, events, bodies) = run_through_factory(with_web(Active, true, false), message).await;
+        let unconfigured = classification(&events).unwrap();
+        assert_eq!(
+            unconfigured.workflow_eligibility.as_deref(),
+            Some("not_configured")
+        );
+        assert!(!unconfigured.workflow_applied);
+        assert!(!system_prompt(&bodies[0]).contains("Task assessment"));
+        assert!(!tool_names(&bodies[0]).contains(&"web.search".to_owned()));
     }
 }

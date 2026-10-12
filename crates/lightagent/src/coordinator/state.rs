@@ -244,6 +244,7 @@ mod tests {
             preflight_latency_ms: 3,
             fallback_reason: None,
             influenced: false,
+            ..ClassificationDiagnostics::default()
         }
     }
 

@@ -634,11 +634,54 @@ pub struct JevConfig {
     /// delays a normal agent run for long.
     #[serde(default = "default_jev_timeout_secs")]
     pub timeout_secs: u64,
+    /// What model routing sends to Jev. A configuration written before this
+    /// setting existed keeps `legacy_raw`, its original behavior; new
+    /// configurations use `sanitized`.
+    #[serde(default = "legacy_routing_input")]
+    pub routing_input: JevRoutingInput,
     /// Task classification, controlled separately from model routing. It
     /// shares the endpoint, key, model and timeout above; `enabled` remains
     /// the endpoint's master switch for both.
     #[serde(default)]
     pub classification: JevClassificationConfig,
+}
+
+/// The input legacy model routing sends to Jev.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JevRoutingInput {
+    /// The user's message cut to 4,096 characters: the original behavior.
+    LegacyRaw,
+    /// The task description produced by the classification sanitizer. A
+    /// message that cannot be minimized safely is not sent; routing keeps the
+    /// configured model.
+    Sanitized,
+}
+
+impl JevRoutingInput {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LegacyRaw => "legacy_raw",
+            Self::Sanitized => "sanitized",
+        }
+    }
+}
+
+impl std::str::FromStr for JevRoutingInput {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "legacy_raw" => Ok(Self::LegacyRaw),
+            "sanitized" => Ok(Self::Sanitized),
+            _ => Err("routing input must be legacy_raw or sanitized".to_owned()),
+        }
+    }
+}
+
+/// Existing configurations keep the routing input they were written with.
+const fn legacy_routing_input() -> JevRoutingInput {
+    JevRoutingInput::LegacyRaw
 }
 
 /// What task classification may do.
@@ -702,6 +745,9 @@ pub struct JevClassificationConfig {
     /// Jev requests one run (or terminal turn) may make, counting the
     /// automatic preflight (at most two) and every explicit tool call.
     pub max_calls_per_run: u32,
+    /// In `active` mode, let an eligible workflow decision add its fixed
+    /// advisory guidance to the run. Off by default; `shadow` never applies it.
+    pub workflow_guidance: bool,
 }
 
 pub const DEFAULT_CLASSIFICATION_INPUT_CHARS: usize = 400;
@@ -723,6 +769,7 @@ impl Default for JevClassificationConfig {
             default_threshold: DEFAULT_CLASSIFICATION_THRESHOLD,
             explicit_tool: false,
             max_calls_per_run: DEFAULT_JEV_CALLS_PER_RUN,
+            workflow_guidance: false,
         }
     }
 }
@@ -757,6 +804,7 @@ impl Default for JevConfig {
             allowed_models: Vec::new(),
             allowed_profiles: Vec::new(),
             timeout_secs: default_jev_timeout_secs(),
+            routing_input: JevRoutingInput::Sanitized,
             classification: JevClassificationConfig::default(),
         }
     }
@@ -1755,6 +1803,19 @@ mod tests {
         assert_eq!(jev.classification, JevClassificationConfig::default());
         assert_eq!(jev.classification.mode, JevClassificationMode::Off);
         assert!(!jev.classification.explicit_tool);
+        assert!(!jev.classification.workflow_guidance);
+        assert_eq!(
+            jev.routing_input,
+            JevRoutingInput::LegacyRaw,
+            "an existing routing configuration keeps sending what it sent before"
+        );
+        assert_eq!(
+            JevConfig::default().routing_input,
+            JevRoutingInput::Sanitized,
+            "new configurations minimize what routing sends"
+        );
+        assert_eq!("sanitized".parse(), Ok(JevRoutingInput::Sanitized));
+        assert!("raw".parse::<JevRoutingInput>().is_err());
         assert_eq!(
             jev.classification.max_calls_per_run,
             DEFAULT_JEV_CALLS_PER_RUN

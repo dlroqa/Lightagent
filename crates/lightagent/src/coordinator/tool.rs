@@ -209,6 +209,7 @@ pub(crate) fn status(config: &Config, profile: &str, state: &JevState) -> Value 
         "configured": endpoint_configured && api_key_resolvable,
         "enabled": jev.endpoint.enabled,
         "model": jev.model,
+        "routing_input": jev.routing_input.as_str(),
         "verification": verification,
         "classification": {
             "mode": settings.mode.as_str(),
@@ -217,6 +218,7 @@ pub(crate) fn status(config: &Config, profile: &str, state: &JevState) -> Value 
             "default_threshold": settings.default_threshold,
             "version_thresholds": settings.version_thresholds,
             "max_calls_per_run": settings.max_calls_per_run,
+            "workflow_guidance": settings.workflow_guidance,
         },
         "explicit_tool": {
             "name": ClassifyTaskTool::NAME,
