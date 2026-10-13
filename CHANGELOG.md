@@ -6,6 +6,24 @@ All notable Lightagent changes are documented here.
 
 ### Security
 
+- Durable identity store (`lightagent_core::identity::store`), not activated.
+  Principals, credentials, profile ownership, grants, reassignment history
+  and idempotency keys are kept in one versioned document,
+  `<home>/identity/state.json`:
+  - every change is a cross-process-locked, `fsync`ed atomic transaction,
+    with the previous generation kept;
+  - corruption and newer schemas fail closed;
+  - changes are operator-only (`provision` / `administer`);
+  - ownership counts only while the profile exists and carries its binding
+    marker;
+  - audit is a bounded, rotated `identity/audit.jsonl`.
+
+  Credentials gain expiry, rotation and a domain-separated `v1:` verifier,
+  and the plaintext is never stored. `IdentityAuthority::persistent` re-reads
+  the store at every check, so revocations from another process apply at
+  the next request. Nothing is read or written for existing installations,
+  and multi-user mode stays unavailable. Details:
+  `docs/architecture/persistent-identity-store.md`.
 - Remote tool egress hardening (`lightagent_tools::egress`), effective
   immediately for every run:
   - `web.fetch` vets every resolved address of every hop, **including
