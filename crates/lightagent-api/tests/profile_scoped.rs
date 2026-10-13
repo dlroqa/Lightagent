@@ -593,7 +593,8 @@ async fn users_enumerate_only_accessible_profiles() {
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    let listed: Vec<&str> = json_of(&body)["profiles"]
+    let parsed = json_of(&body);
+    let listed: Vec<&str> = parsed["profiles"]
         .as_array()
         .unwrap()
         .iter()
@@ -643,7 +644,8 @@ async fn the_tool_catalog_is_profile_scoped() {
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    let names: Vec<&str> = json_of(&body)["tools"]
+    let parsed = json_of(&body);
+    let names: Vec<&str> = parsed["tools"]
         .as_array()
         .unwrap()
         .iter()

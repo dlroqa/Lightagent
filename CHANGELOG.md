@@ -6,6 +6,23 @@ All notable Lightagent changes are documented here.
 
 ### Security
 
+- Profile-scoped API endpoints, not activated. In multi-user mode an
+  ordinary user reaches profile-specific data only through a server-verified
+  authorization of the profile, decided by current ownership.
+  - Sessions: users see, search, create, change, delete and continue only
+    their own, within authorized profiles. Sessions gain an additive,
+    server-written `owner`; sessions without one, which is every existing
+    session, stay operator-only. Another user's, an unowned and a missing
+    session are answered identically.
+  - `/profiles` lists only accessible profiles.
+  - `/tools` and `/skills` show the profile's effective catalog for an
+    untrusted run.
+  - `/jev` shows only the profile's own permissions and latest outcome.
+  - `/provider` withholds the endpoint and catalogs.
+
+  Settings and Jev verification stay operator-only. Single-user mode, the
+  terminal and ACP are unchanged. Details:
+  `docs/architecture/profile-scoped-api.md`.
 - Bounded revalidation of active runs, not activated. One shared monitor in
   `RunManager` re-checks every active revocable run on a bounded interval:
   the default is 5 s, clamped to 100 ms–300 s
