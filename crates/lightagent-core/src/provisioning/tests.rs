@@ -799,12 +799,15 @@ fn an_identity_store_failure_leaves_no_usable_orphan() {
             .join(MARKER_FILE)
             .exists()
     );
+    // Authenticated before the store breaks, as a request already in flight.
+    let site = world.site();
     let state = world.root().join("identity").join("state.json");
     let saved = std::fs::read(&state).unwrap();
     std::fs::write(&state, b"{ not json").unwrap();
     assert_eq!(
         world
-            .provision("key-00000040", &request(SUBJECT, "alice-research"))
+            .service
+            .provision(&site, "key-00000040", &request(SUBJECT, "alice-research"))
             .err(),
         Some(ProvisioningError::Unavailable)
     );
