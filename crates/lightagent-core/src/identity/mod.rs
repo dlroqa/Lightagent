@@ -21,6 +21,7 @@
 mod audit;
 mod credential;
 mod ownership;
+pub mod store;
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -249,6 +250,8 @@ pub enum Denial {
     Unauthenticated,
     /// The credential was valid once and has been revoked.
     Revoked,
+    /// The credential was valid once and has expired.
+    Expired,
     /// The role or the credential does not allow this capability.
     MissingCapability,
     /// The credential is limited to other profiles.
@@ -264,6 +267,7 @@ impl Denial {
         match self {
             Self::Unauthenticated => "unauthenticated",
             Self::Revoked => "revoked",
+            Self::Expired => "expired",
             Self::MissingCapability => "missing_capability",
             Self::ProfileOutsideCredential => "profile_outside_credential",
             Self::ProfileUnowned => "profile_unowned",
@@ -276,7 +280,7 @@ impl Denial {
     /// exists beyond what the caller may already see.
     pub fn http_status(self) -> u16 {
         match self {
-            Self::Unauthenticated | Self::Revoked => 401,
+            Self::Unauthenticated | Self::Revoked | Self::Expired => 401,
             _ => 403,
         }
     }
