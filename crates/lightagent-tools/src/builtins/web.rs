@@ -6,17 +6,19 @@
 //! return a controlled result the model is shown, never a panic — the same shape
 //! `agent.delegate` uses when delegation is off.
 //!
-//! `web.fetch` is guarded: the URL scheme must be http(s), the host must clear
-//! the allow-list, and — unless the host is explicitly allow-listed — every
-//! address it resolves to must be global, re-checked on each manual redirect
-//! hop, so a fetch cannot be steered onto a loopback or private service (an SSRF
-//! guard). HTML is reduced to readable text without an HTML dependency.
+//! `web.fetch` is guarded by [`crate::egress`]: the URL scheme must be http(s),
+//! the host must clear the run's destination scope, and every address it
+//! resolves to must be permitted, an allow-listed host included. The connection
+//! is pinned to the vetted addresses with no proxy, and every redirect is
+//! validated and vetted again, so a fetch cannot be steered onto a loopback,
+//! private or management service (an SSRF guard). HTML is reduced to readable
+//! text without an HTML dependency.
 //!
 //! `web.search` sends the query to the configured endpoint. It supports
 //! DuckDuckGo's HTML results directly and JSON endpoints with a `results`
 //! array, such as SearXNG; it reports cleanly when no backend is configured.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use async_trait::async_trait;
 use lightagent_core::{RiskClass, Scope, ToolOutcome};
@@ -24,8 +26,9 @@ use reqwest::header::{CONTENT_TYPE, LOCATION};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::context::{ToolCtx, WebContext, WebPolicy};
+use crate::context::{ToolCtx, WebContext};
 use crate::definition::{Tool, ToolDefinition};
+use crate::egress;
 
 /// The most redirect hops `web.fetch` follows, each re-guarded.
 const MAX_REDIRECTS: u32 = 5;
@@ -103,46 +106,42 @@ impl Tool for WebFetch {
 /// Composite tools such as realtime RAG use this typed entry point rather than
 /// calling `web.fetch` and reparsing its rendered [`ToolOutcome`].
 pub async fn fetch_text(web: &WebContext, start: &str) -> Result<String, String> {
-    let mut url = reqwest::Url::parse(start).map_err(|error| format!("invalid URL: {error}"))?;
-    let mut hops = 0;
+    let mut url = reqwest::Url::parse(start).map_err(|_| "invalid URL".to_owned())?;
+    let rules = web.policy.egress_rules();
+    // web.fetch carries no credential, but redirects are still validated:
+    // http(s) only, no userinfo, no downgrade, no loop, a bounded count.
+    let mut redirects = egress::Redirects::new(&url, MAX_REDIRECTS, false);
     loop {
-        let pins = guard_url(&web.policy, &url).await?;
-        // When the guard resolved a name, connect only to the addresses it
-        // vetted. Without this the client would resolve the name a second time,
-        // and a hostile resolver could answer the guard with a public address
-        // and the connection with a private one (DNS rebinding). An empty set
-        // means there is nothing to rebind — a literal IP, or a trusted
-        // allow-listed host — so the shared client is used as before.
-        let client = if pins.is_empty() {
-            web.client.clone()
-        } else {
-            pinned_client(&web.policy, &url, &pins)?
-        };
+        // Messages name the host only: never a path, query or userinfo.
+        let host = egress::display_host(&url);
+        // Every hop is vetted on its resolved addresses and the connection is
+        // pinned to them, with no proxy and no automatic redirect, so neither
+        // a second DNS answer (rebinding) nor a proxy can move it elsewhere.
+        let vetted = egress::vet(&rules, &url, web.resolver.as_ref())
+            .await
+            .map_err(|denial| format!("refused to fetch from {host}: {denial}"))?;
+        let client = egress::pinned_client(&vetted, web.policy.timeout)?;
         let mut response = client
             .get(url.clone())
             .send()
             .await
-            .map_err(|error| format!("could not fetch {url}: {error}"))?;
+            .map_err(|error| format!("could not fetch from {host}: {}", error.without_url()))?;
 
         if response.status().is_redirection() {
-            hops += 1;
-            if hops > MAX_REDIRECTS {
-                return Err(format!("too many redirects (more than {MAX_REDIRECTS})"));
-            }
             let location = response
                 .headers()
                 .get(LOCATION)
                 .and_then(|value| value.to_str().ok())
                 .ok_or_else(|| "redirect without a Location header".to_owned())?;
-            url = url
-                .join(location)
-                .map_err(|error| format!("invalid redirect target {location:?}: {error}"))?;
+            url = redirects
+                .next(&url, location)
+                .map_err(|denial| format!("refused a redirect from {host}: {denial}"))?;
             continue;
         }
 
         if !response.status().is_success() {
             return Err(format!(
-                "{url} returned HTTP {}",
+                "{host} returned HTTP {}",
                 response.status().as_u16()
             ));
         }
@@ -289,8 +288,20 @@ pub async fn search_results(
     let ceiling = policy.search_max_results.max(1);
     let limit = requested.unwrap_or(ceiling).clamp(1, ceiling);
 
+    // An installation-wide search key is never used, and the query never
+    // sent anonymously in its place, for a profile not granted it.
+    if policy.search_credential_withheld {
+        return Err("the search credential is not granted to this profile".to_owned());
+    }
     let mut url = reqwest::Url::parse(endpoint)
         .map_err(|error| format!("invalid search endpoint: {error}"))?;
+    if let Some(authorized) = &policy.untrusted_destinations
+        && !url
+            .host_str()
+            .is_some_and(|host| egress::host_matches(host, authorized))
+    {
+        return Err("the search endpoint is not authorized for this profile".to_owned());
+    }
     url.query_pairs_mut()
         .append_pair(&policy.search_query_param, query);
 
@@ -301,7 +312,7 @@ pub async fn search_results(
     let mut response = request
         .send()
         .await
-        .map_err(|error| format!("search request failed: {error}"))?;
+        .map_err(|error| format!("search request failed: {}", error.without_url()))?;
     if !response.status().is_success() {
         return Err(format!(
             "search endpoint returned HTTP {}",
@@ -459,113 +470,6 @@ async fn read_bounded(response: &mut reqwest::Response, cap: usize) -> Result<Ve
         }
     }
     Ok(buffer)
-}
-
-/// Refuse a URL whose scheme is not http(s), whose host is not allow-listed, or
-/// — unless the host is allow-listed — that resolves to a non-global address.
-///
-/// Returns the concrete addresses the fetch must be **pinned** to (see
-/// [`fetch`]): the vetted results of the guard's own DNS lookup, so the
-/// connection uses exactly what was checked and cannot be steered elsewhere by a
-/// second resolution. Empty means "no pinning" — an allow-listed host trusted
-/// without resolving, a literal-IP host that needs no DNS, or a policy that does
-/// not block private addresses.
-async fn guard_url(policy: &WebPolicy, url: &reqwest::Url) -> Result<Vec<SocketAddr>, String> {
-    match url.scheme() {
-        "http" | "https" => {}
-        other => {
-            return Err(format!(
-                "unsupported URL scheme {other:?}; use http or https"
-            ));
-        }
-    }
-    let host = url
-        .host_str()
-        .ok_or_else(|| "the URL has no host".to_owned())?;
-    let host = host
-        .strip_prefix('[')
-        .and_then(|inner| inner.strip_suffix(']'))
-        .unwrap_or(host);
-
-    let listed = host_matches_list(host, &policy.allow_domains);
-    if !policy.allow_domains.is_empty() && !listed {
-        return Err(format!("host {host:?} is not in web.allow_domains"));
-    }
-    if policy.block_private_addresses && !listed {
-        let port = url.port_or_known_default().unwrap_or(0);
-        return guard_host(host, port).await;
-    }
-    Ok(Vec::new())
-}
-
-/// Reject `host` if it is, or resolves to, any non-global address; otherwise
-/// return the vetted addresses to pin the connection to.
-///
-/// A literal IP is validated and returns an empty set: it needs no DNS, so the
-/// connection reaches exactly that vetted address with nothing to rebind. A name
-/// is resolved here, every address checked, and the whole vetted set returned so
-/// the connection is pinned to it — closing the window in which a second, hostile
-/// resolution at connect time could return a private address the guard never saw.
-async fn guard_host(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return if is_public_ip(ip) {
-            Ok(Vec::new())
-        } else {
-            Err(format!("{host} is a non-global address"))
-        };
-    }
-    let mut vetted = Vec::new();
-    let addresses = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|error| format!("could not resolve {host}: {error}"))?;
-    for address in addresses {
-        if !is_public_ip(address.ip()) {
-            return Err(format!(
-                "{host} resolves to the non-global address {}",
-                address.ip()
-            ));
-        }
-        vetted.push(address);
-    }
-    if vetted.is_empty() {
-        return Err(format!("{host} did not resolve to any address"));
-    }
-    Ok(vetted)
-}
-
-/// Build a client that resolves this hop's host only to the guard's vetted
-/// addresses, so the connection cannot land anywhere the guard did not check.
-///
-/// A fresh client per guarded hop is cheap here — a fetch is a cold, model-driven
-/// call, not a hot path — and it carries the same redirect-off, timed settings as
-/// the injected one. The rustls provider is already installed process-wide: a
-/// [`WebContext`] only exists because its own client was built, which cannot
-/// happen until the provider is installed, so this build cannot hit the missing
-/// provider panic.
-fn pinned_client(
-    policy: &WebPolicy,
-    url: &reqwest::Url,
-    addrs: &[SocketAddr],
-) -> Result<reqwest::Client, String> {
-    let host = url
-        .host_str()
-        .ok_or_else(|| "the URL has no host".to_owned())?;
-    reqwest::Client::builder()
-        .timeout(policy.timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent(concat!("lightagent/", env!("CARGO_PKG_VERSION")))
-        .resolve_to_addrs(host, addrs)
-        .build()
-        .map_err(|error| format!("could not build a pinned client: {error}"))
-}
-
-/// Whether `host` equals, or is a subdomain of, one of `domains` (ASCII-folded).
-fn host_matches_list(host: &str, domains: &[String]) -> bool {
-    let host = host.to_ascii_lowercase();
-    domains.iter().any(|domain| {
-        let domain = domain.trim().trim_start_matches('.').to_ascii_lowercase();
-        !domain.is_empty() && (host == domain || host.ends_with(&format!(".{domain}")))
-    })
 }
 
 /// Whether an address is globally routable — the negation of the SSRF guard.
@@ -944,54 +848,73 @@ mod tests {
         assert!(embedded_v4(v6([0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111])).is_none());
     }
 
+    /// Replaces the former `guard_returns_pins_for_ips_and_skips_trusted_hosts`,
+    /// which asserted that an allow-listed host was trusted *without* being
+    /// resolved: the private-address bypass this change closes. Literals are
+    /// still judged without DNS; an allow-listed name is now resolved and
+    /// every address checked.
     #[tokio::test]
-    async fn guard_returns_pins_for_ips_and_skips_trusted_hosts() {
-        // A literal public IP is allowed with no pins (it needs no DNS, so there
-        // is nothing to rebind).
-        let policy = WebPolicy {
-            allow_domains: Vec::new(),
-            block_private_addresses: true,
-            max_fetch_bytes: 1024,
-            timeout: std::time::Duration::from_secs(5),
-            search_endpoint: None,
-            search_query_param: "q".to_owned(),
-            search_api_key: None,
-            search_max_results: 5,
-        };
-        // The addresses are built numerically, not written as dotted quads, so
-        // scripts/check-secrets.sh has no committed machine address to flag.
-        let public = format!("http://{}/", Ipv4Addr::new(8, 8, 8, 8));
-        let url = reqwest::Url::parse(&public).unwrap();
-        assert_eq!(guard_url(&policy, &url).await.unwrap(), Vec::new());
+    async fn the_guard_vets_literals_and_resolves_allow_listed_hosts() {
+        struct Fixed(Vec<std::net::SocketAddr>);
+        #[async_trait]
+        impl egress::Resolver for Fixed {
+            async fn resolve(
+                &self,
+                _host: &str,
+                _port: u16,
+            ) -> std::io::Result<Vec<std::net::SocketAddr>> {
+                Ok(self.0.clone())
+            }
+        }
+        let rules = egress::EgressRules::default();
+        let none = Fixed(Vec::new());
+        // Built numerically so scripts/check-secrets.sh sees no machine address.
+        let public = Ipv4Addr::new(8, 8, 8, 8);
+        let url = reqwest::Url::parse(&format!("http://{public}/")).unwrap();
+        let vetted = egress::vet(&rules, &url, &none).await.unwrap();
+        assert_eq!(vetted.addrs, vec![std::net::SocketAddr::from((public, 80))]);
+        assert!(!vetted.named);
 
-        // A literal private IP is refused before any connection.
         let private = format!("http://{}/", Ipv4Addr::new(127, 0, 0, 1));
         let url = reqwest::Url::parse(&private).unwrap();
-        assert!(guard_url(&policy, &url).await.is_err());
+        assert_eq!(
+            egress::vet(&rules, &url, &none).await,
+            Err(egress::EgressDenial::NonPublicAddress)
+        );
 
-        // An allow-listed host is trusted without resolving (no pins), even
-        // though it is not an IP — the guard must not do a DNS lookup here.
-        let listed = WebPolicy {
+        let listed = egress::EgressRules {
             allow_domains: vec!["example.com".to_owned()],
-            ..policy
+            ..egress::EgressRules::default()
         };
         let url = reqwest::Url::parse("https://docs.example.com/page").unwrap();
-        assert_eq!(guard_url(&listed, &url).await.unwrap(), Vec::new());
+        let to_loopback = Fixed(vec![std::net::SocketAddr::from((
+            Ipv4Addr::new(127, 0, 0, 1),
+            443,
+        ))]);
+        assert_eq!(
+            egress::vet(&listed, &url, &to_loopback).await,
+            Err(egress::EgressDenial::NonPublicAddress),
+            "an allow-listed name resolving privately is refused"
+        );
+        let to_public = Fixed(vec![std::net::SocketAddr::from((public, 443))]);
+        assert!(egress::vet(&listed, &url, &to_public).await.unwrap().named);
 
-        // A host outside the allow-list is refused by the list, not the network.
         let url = reqwest::Url::parse("https://elsewhere.test/").unwrap();
-        assert!(guard_url(&listed, &url).await.is_err());
+        assert_eq!(
+            egress::vet(&listed, &url, &to_public).await,
+            Err(egress::EgressDenial::NotInAllowList)
+        );
     }
 
     #[test]
     fn allow_list_matches_domain_and_subdomains() {
         let list = vec!["example.com".to_owned()];
-        assert!(host_matches_list("example.com", &list));
-        assert!(host_matches_list("docs.example.com", &list));
-        assert!(host_matches_list("EXAMPLE.com", &list));
-        assert!(!host_matches_list("notexample.com", &list));
-        assert!(!host_matches_list("example.com.evil.com", &list));
-        assert!(!host_matches_list("anything.org", &[]));
+        assert!(egress::host_matches("example.com", &list));
+        assert!(egress::host_matches("docs.example.com", &list));
+        assert!(egress::host_matches("EXAMPLE.com", &list));
+        assert!(!egress::host_matches("notexample.com", &list));
+        assert!(!egress::host_matches("example.com.evil.com", &list));
+        assert!(!egress::host_matches("anything.org", &[]));
     }
 
     #[test]

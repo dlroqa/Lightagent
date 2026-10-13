@@ -202,15 +202,26 @@ impl Delegation {
 /// A plain, resolved view — the caller translates the persisted `WebConfig` into
 /// this once (resolving the search key's [`SecretRef`](lightagent_core::SecretRef)
 /// to a value held only in memory), so this crate never learns the config format
-/// and never re-reads a secret. `allow_domains`, when non-empty, is both a fetch
-/// allow-list and the set of hosts exempt from the private-address guard.
+/// and never re-reads a secret. `allow_domains`, when non-empty, is a fetch
+/// allow-list; an allow-listed host must still resolve to a permitted address
+/// (see [`crate::egress`]).
 #[derive(Clone)]
 pub struct WebPolicy {
     /// When non-empty, a fetch host must match one of these (exactly or as a
-    /// subdomain); such a host is also exempt from `block_private_addresses`.
+    /// subdomain). Never an exemption from the address checks.
     pub allow_domains: Vec<String>,
-    /// Refuse a fetch whose host resolves to a non-global address.
+    /// Refuse a fetch whose host resolves to a non-global address. Only an
+    /// operator run can turn this off; management endpoints stay refused.
     pub block_private_addresses: bool,
+    /// Operator-approved networks a non-public address may be reached in.
+    /// Never applied to an untrusted run.
+    pub trusted_networks: Vec<crate::egress::Network>,
+    /// `Some` for an untrusted run: the hosts its profile may reach (fetch and
+    /// search). `None` for an operator run.
+    pub untrusted_destinations: Option<Vec<String>>,
+    /// A search key is configured but this run's profile is not granted it:
+    /// `web.search` refuses rather than send the query with or without it.
+    pub search_credential_withheld: bool,
     /// The most bytes a single fetch reads before truncating.
     pub max_fetch_bytes: usize,
     /// The per-request timeout.
@@ -243,7 +254,43 @@ impl std::fmt::Debug for WebPolicy {
                 &self.search_api_key.as_ref().map(|_| "<redacted>"),
             )
             .field("search_max_results", &self.search_max_results)
+            .field("trusted_networks", &self.trusted_networks)
+            .field("untrusted_destinations", &self.untrusted_destinations)
+            .field(
+                "search_credential_withheld",
+                &self.search_credential_withheld,
+            )
             .finish()
+    }
+}
+
+impl Default for WebPolicy {
+    fn default() -> Self {
+        Self {
+            allow_domains: Vec::new(),
+            block_private_addresses: true,
+            trusted_networks: Vec::new(),
+            untrusted_destinations: None,
+            search_credential_withheld: false,
+            max_fetch_bytes: 1_000_000,
+            timeout: Duration::from_secs(20),
+            search_endpoint: None,
+            search_query_param: "q".to_owned(),
+            search_api_key: None,
+            search_max_results: 5,
+        }
+    }
+}
+
+impl WebPolicy {
+    /// The destination scope [`crate::egress::vet`] applies to this run.
+    pub fn egress_rules(&self) -> crate::egress::EgressRules {
+        crate::egress::EgressRules {
+            allow_domains: self.allow_domains.clone(),
+            trusted_networks: self.trusted_networks.clone(),
+            block_private_addresses: self.block_private_addresses,
+            untrusted_destinations: self.untrusted_destinations.clone(),
+        }
     }
 }
 
@@ -256,6 +303,20 @@ pub struct WebContext {
     pub client: reqwest::Client,
     /// The effective web policy.
     pub policy: Arc<WebPolicy>,
+    /// Resolves fetch hosts for the destination checks; the system resolver
+    /// unless a test injects one.
+    pub resolver: Arc<dyn crate::egress::Resolver>,
+}
+
+impl WebContext {
+    /// A context over `client` and `policy` with the system resolver.
+    pub fn new(client: reqwest::Client, policy: Arc<WebPolicy>) -> Self {
+        Self {
+            client,
+            policy,
+            resolver: Arc::new(crate::egress::SystemResolver),
+        }
+    }
 }
 
 /// The effective filesystem/terminal settings the workspace tools enforce.

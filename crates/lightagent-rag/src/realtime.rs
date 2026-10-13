@@ -325,23 +325,25 @@ mod tests {
             }
         });
 
-        let web = WebContext {
-            client: reqwest::Client::builder()
+        // The local stub is reached through an explicit, operator-style
+        // trusted network: an allow-listed name no longer bypasses the
+        // private-address check by itself.
+        let web = WebContext::new(
+            reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(2))
                 .build()
                 .unwrap(),
-            policy: Arc::new(WebPolicy {
+            Arc::new(WebPolicy {
                 allow_domains: vec!["localhost".to_owned()],
-                block_private_addresses: true,
+                trusted_networks: vec!["127.0.0.1/32".parse().unwrap(), "::1/128".parse().unwrap()],
                 max_fetch_bytes: 100_000,
                 timeout: Duration::from_secs(2),
                 search_endpoint: Some(format!("http://localhost:{port}/search")),
-                search_query_param: "q".to_owned(),
-                search_api_key: None,
                 search_max_results: 2,
+                ..WebPolicy::default()
             }),
-        };
+        );
         let tool = RealtimeRag::new(None, 2, 2, 500, 80);
         let output = tool
             .call(

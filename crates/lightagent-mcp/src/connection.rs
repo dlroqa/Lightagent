@@ -253,8 +253,16 @@ impl Connection for HttpConnection {
             .builder(&body)
             .send()
             .await
-            .map_err(|error| McpError::Transport(error.to_string()))?;
+            .map_err(|error| McpError::Transport(error.without_url().to_string()))?;
         self.capture_session(&response);
+        if response.status().is_redirection() {
+            // Never followed: credentials and headers stay with the
+            // configured origin.
+            return Err(McpError::Transport(format!(
+                "redirect refused (HTTP {}); configure the server's final URL",
+                response.status().as_u16()
+            )));
+        }
         if !response.status().is_success() {
             return Err(McpError::Transport(format!(
                 "HTTP {}",
@@ -286,7 +294,7 @@ impl Connection for HttpConnection {
             .builder(&body)
             .send()
             .await
-            .map_err(|error| McpError::Transport(error.to_string()))?;
+            .map_err(|error| McpError::Transport(error.without_url().to_string()))?;
         self.capture_session(&response);
         Ok(())
     }
@@ -312,7 +320,7 @@ async fn read_bounded_text(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|error| McpError::Transport(error.to_string()))?
+        .map_err(|error| McpError::Transport(error.without_url().to_string()))?
     {
         if buffer.len() + chunk.len() > cap {
             return Err(McpError::Protocol(format!(

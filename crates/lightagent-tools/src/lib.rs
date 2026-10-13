@@ -29,6 +29,7 @@
 pub mod builtins;
 pub mod context;
 pub mod definition;
+pub mod egress;
 pub mod executor;
 pub mod output;
 pub mod policy;

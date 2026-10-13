@@ -83,6 +83,44 @@ pub(crate) fn autonomous_subagent_instructions(config: &Config) -> Option<String
 /// configured per-request timeout. The search key is resolved here and held only
 /// in memory. `None` when web is disabled or the client cannot be built.
 pub(crate) fn web_context(config: &Config) -> Option<WebContext> {
+    web_context_for(config, RemoteAccess::Operator)
+}
+
+/// Whose remote requests a run makes: an operator run, or an untrusted run of
+/// one profile. Decides which destinations and credentials the remote tools
+/// may use; it never adds a tool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemoteAccess<'a> {
+    /// The terminal, ACP, the single-user API and operators: today's
+    /// behavior, with the installation's credentials.
+    Operator,
+    /// An untrusted (multi-user) run of this profile: only destinations and
+    /// credentials the operator granted the profile.
+    Untrusted(&'a ProfileId),
+}
+
+impl<'a> RemoteAccess<'a> {
+    pub(crate) fn for_run(
+        trust: lightagent_core::identity::RunTrust,
+        profile: &'a ProfileId,
+    ) -> Self {
+        match trust {
+            lightagent_core::identity::RunTrust::LocalOperator => Self::Operator,
+            lightagent_core::identity::RunTrust::RemoteUser => Self::Untrusted(profile),
+        }
+    }
+
+    /// Whether a credential granted to `profiles` may be used.
+    fn may_use(self, profiles: &[String]) -> bool {
+        match self {
+            Self::Operator => true,
+            Self::Untrusted(profile) => profiles.iter().any(|granted| granted == profile.as_str()),
+        }
+    }
+}
+
+/// [`web_context`] for a run of `access`.
+pub(crate) fn web_context_for(config: &Config, access: RemoteAccess<'_>) -> Option<WebContext> {
     if !config.web.enabled {
         return None;
     }
@@ -94,25 +132,44 @@ pub(crate) fn web_context(config: &Config) -> Option<WebContext> {
         .user_agent(concat!("lightagent/", env!("CARGO_PKG_VERSION")))
         .build()
         .ok()?;
+    let credential_granted = access.may_use(&config.web.search.credential_profiles);
     let policy = WebPolicy {
         allow_domains: config.web.allow_domains.clone(),
         block_private_addresses: config.web.block_private_addresses,
+        // Validated at load; an entry that does not parse is never trusted.
+        trusted_networks: config
+            .web
+            .trusted_networks
+            .iter()
+            .filter_map(|network| network.parse().ok())
+            .collect(),
+        untrusted_destinations: match access {
+            RemoteAccess::Operator => None,
+            RemoteAccess::Untrusted(profile) => Some(
+                config
+                    .web
+                    .untrusted_destinations
+                    .get(profile.as_str())
+                    .cloned()
+                    .unwrap_or_default(),
+            ),
+        },
+        search_credential_withheld: !credential_granted && config.web.search.api_key.is_some(),
         max_fetch_bytes: config.web.max_fetch_bytes,
         timeout,
         search_endpoint: config.web.search.endpoint.clone(),
         search_query_param: config.web.search.query_param.clone(),
+        // Resolved only for a run allowed to use it.
         search_api_key: config
             .web
             .search
             .api_key
             .as_ref()
+            .filter(|_| credential_granted)
             .and_then(|key| key.resolve()),
         search_max_results: config.web.search.max_results,
     };
-    Some(WebContext {
-        client,
-        policy: Arc::new(policy),
-    })
+    Some(WebContext::new(client, Arc::new(policy)))
 }
 
 /// Build the workspace context for a run when the filesystem/terminal tools are
@@ -232,8 +289,28 @@ pub(crate) async fn configured_registry(
     extensions: &ExtensionStore,
     has_skills: bool,
 ) -> ToolRegistry {
+    configured_registry_for(
+        config,
+        profile_dir,
+        extensions,
+        has_skills,
+        RemoteAccess::Operator,
+    )
+    .await
+}
+
+/// [`configured_registry`] for a run of `access`: an untrusted run connects
+/// only the HTTP MCP servers granted to its profile, without credentials
+/// unless granted too, and never starts a local (stdio) MCP server.
+pub(crate) async fn configured_registry_for(
+    config: &Config,
+    profile_dir: &Path,
+    extensions: &ExtensionStore,
+    has_skills: bool,
+    access: RemoteAccess<'_>,
+) -> ToolRegistry {
     let mut registry = configured_builtin_registry(config, has_skills);
-    for tool in mcp_tools(config, extensions).await {
+    for tool in mcp_tools(config, extensions, access).await {
         registry.insert(tool);
     }
     if let Some(tool) = crate::rag::rag_tool(profile_dir, config) {
@@ -379,7 +456,11 @@ pub(crate) fn web_research_instructions(config: &Config) -> Option<&'static str>
 /// merged with the configured servers but, like them, are only contacted when the
 /// MCP subsystem is enabled — an extension widens what is available, not what is
 /// permitted.
-pub(crate) async fn mcp_tools(config: &Config, extensions: &ExtensionStore) -> Vec<Arc<dyn Tool>> {
+pub(crate) async fn mcp_tools(
+    config: &Config,
+    extensions: &ExtensionStore,
+    access: RemoteAccess<'_>,
+) -> Vec<Arc<dyn Tool>> {
     if !config.mcp.enabled {
         return Vec::new();
     }
@@ -387,11 +468,11 @@ pub(crate) async fn mcp_tools(config: &Config, extensions: &ExtensionStore) -> V
         .mcp
         .servers
         .iter()
-        .map(|entry| to_mcp_spec(entry, None))
+        .filter_map(|entry| to_mcp_spec(entry, None, access))
         .chain(extensions.active(&config.extensions).flat_map(|ext| {
             ext.mcp_servers
                 .iter()
-                .map(move |entry| to_mcp_spec(entry, Some(&ext.dir)))
+                .filter_map(move |entry| to_mcp_spec(entry, Some(&ext.dir), access))
         }))
         .collect();
     if specs.is_empty() {
@@ -399,7 +480,15 @@ pub(crate) async fn mcp_tools(config: &Config, extensions: &ExtensionStore) -> V
     }
     let timeout = Duration::from_secs(config.mcp.timeout_secs.max(1));
     lightagent_provider_lightweight::ensure_provider();
-    let client = match reqwest::Client::builder().timeout(timeout).build() {
+    // No automatic redirects: reqwest would re-send the configured custom
+    // headers to whatever origin a server redirects to (it strips only
+    // Authorization and cookies). A streamable-HTTP endpoint has a fixed
+    // URL, so a redirect is refused and the final URL belongs in config.
+    let client = match reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
         Ok(client) => client,
         Err(error) => {
             eprintln!("· could not build the MCP HTTP client: {error}");
@@ -413,11 +502,57 @@ pub(crate) async fn mcp_tools(config: &Config, extensions: &ExtensionStore) -> V
     if !hub.connected.is_empty() {
         eprintln!("· MCP connected: {}", hub.connected.join(", "));
     }
-    hub.tools
+    match access {
+        RemoteAccess::Operator => hub.tools,
+        // A server's annotations (`readOnlyHint`) are its own claims: an
+        // untrusted run asks before every call, whatever the server says.
+        RemoteAccess::Untrusted(_) => hub
+            .tools
+            .into_iter()
+            .map(|tool| Arc::new(ApprovalRequired::new(tool)) as Arc<dyn Tool>)
+            .collect(),
+    }
 }
 
-fn to_mcp_spec(entry: &McpServerEntry, cwd: Option<&Path>) -> McpServerSpec {
-    match entry {
+/// A remote tool whose every call needs approval: its risk is raised to at
+/// least [`lightagent_core::RiskClass::Executable`]. Never lowers a risk.
+struct ApprovalRequired {
+    inner: Arc<dyn Tool>,
+    definition: lightagent_tools::ToolDefinition,
+}
+
+impl ApprovalRequired {
+    fn new(inner: Arc<dyn Tool>) -> Self {
+        let mut definition = inner.definition().clone();
+        definition.risk = definition.risk.max(lightagent_core::RiskClass::Executable);
+        Self { inner, definition }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for ApprovalRequired {
+    fn definition(&self) -> &lightagent_tools::ToolDefinition {
+        &self.definition
+    }
+
+    async fn call(
+        &self,
+        args: &serde_json::Value,
+        ctx: &lightagent_tools::ToolCtx,
+    ) -> lightagent_core::ToolOutcome {
+        self.inner.call(args, ctx).await
+    }
+}
+
+fn to_mcp_spec(
+    entry: &McpServerEntry,
+    cwd: Option<&Path>,
+    access: RemoteAccess<'_>,
+) -> Option<McpServerSpec> {
+    Some(match entry {
+        // A local process as the server's OS account: never started for an
+        // untrusted run (its tools are withheld by the tool policy too).
+        McpServerEntry::Stdio { .. } if access != RemoteAccess::Operator => return None,
         McpServerEntry::Stdio {
             name,
             command,
@@ -433,22 +568,39 @@ fn to_mcp_spec(entry: &McpServerEntry, cwd: Option<&Path>) -> McpServerSpec {
             },
         },
         McpServerEntry::Http {
+            untrusted_profiles, ..
+        } if !access.may_use(untrusted_profiles) => return None,
+        McpServerEntry::Http {
             name,
             url,
             headers,
             auth,
-        } => McpServerSpec {
-            name: name.clone(),
-            transport: McpTransportSpec::Http {
-                url: url.clone(),
-                headers: headers
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-                bearer: auth.as_ref().and_then(|secret| secret.resolve()),
-            },
-        },
-    }
+            credential_profiles,
+            ..
+        } => {
+            // Custom headers may carry secrets as much as `auth` does: both
+            // are the installation's, and both need the profile's grant.
+            let granted = access.may_use(credential_profiles);
+            McpServerSpec {
+                name: name.clone(),
+                transport: McpTransportSpec::Http {
+                    url: url.clone(),
+                    headers: if granted {
+                        headers
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
+                    bearer: auth
+                        .as_ref()
+                        .filter(|_| granted)
+                        .and_then(|secret| secret.resolve()),
+                },
+            }
+        }
+    })
 }
 
 /// Load the extensions for a run: the global set plus the profile's own.
@@ -3514,5 +3666,338 @@ for line in sys.stdin:
         assert!(
             serde_json::from_str::<Config>(r#"{"tools":{"profile_policy":"allow_all"}}"#).is_err()
         );
+    }
+
+    /// A streamable-HTTP MCP stub. It answers the handshake and lists three
+    /// tools: read-only, destructive and unannotated. It records every
+    /// request's headers. With `redirect`, it answers every request with a 307
+    /// to that URL instead.
+    async fn mcp_http_stub(
+        redirect: Option<String>,
+    ) -> (String, Arc<std::sync::Mutex<Vec<BTreeMap<String, String>>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&log);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let (seen, redirect) = (Arc::clone(&seen), redirect.clone());
+                tokio::spawn(async move {
+                    let mut bytes = Vec::new();
+                    let mut buf = [0u8; 8192];
+                    let (head, body) = loop {
+                        match stream.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => bytes.extend_from_slice(&buf[..n]),
+                        }
+                        let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
+                            continue;
+                        };
+                        let head = String::from_utf8_lossy(&bytes[..end]).into_owned();
+                        let length = head
+                            .to_ascii_lowercase()
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if bytes.len() >= end + 4 + length {
+                            let body = String::from_utf8_lossy(&bytes[end + 4..end + 4 + length])
+                                .into_owned();
+                            break (head, body);
+                        }
+                    };
+                    let headers: BTreeMap<String, String> = head
+                        .lines()
+                        .skip(1)
+                        .filter_map(|line| line.split_once(':'))
+                        .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_owned()))
+                        .collect();
+                    seen.lock().unwrap().push(headers);
+                    let reply = |status: &str, body: String| {
+                        format!(
+                            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                    };
+                    let response = if let Some(target) = redirect {
+                        format!(
+                            "HTTP/1.1 307 Temporary Redirect\r\nlocation: {target}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        )
+                    } else {
+                        let request: serde_json::Value =
+                            serde_json::from_str(&body).unwrap_or_default();
+                        let id = request["id"].clone();
+                        let result = match request["method"].as_str() {
+                            Some("initialize") => serde_json::json!({
+                                "protocolVersion": "2025-06-18",
+                                "capabilities": {"tools": {}},
+                                "serverInfo": {"name": "stub", "version": "1"}
+                            }),
+                            Some("tools/list") => serde_json::json!({"tools": [
+                                {"name": "lookup", "description": "read", "inputSchema": {"type": "object"},
+                                 "annotations": {"readOnlyHint": true}},
+                                {"name": "erase", "description": "delete", "inputSchema": {"type": "object"},
+                                 "annotations": {"destructiveHint": true}},
+                                {"name": "opaque", "description": "?", "inputSchema": {"type": "object"}}
+                            ]}),
+                            _ => serde_json::json!({}),
+                        };
+                        if id.is_null() {
+                            reply("202 Accepted", String::new())
+                        } else {
+                            reply(
+                                "200 OK",
+                                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result})
+                                    .to_string(),
+                            )
+                        }
+                    };
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        (format!("http://{address}/mcp"), log)
+    }
+
+    const MCP_TOKEN: &str = "synthetic-mcp-bearer-not-a-secret";
+    const MCP_HEADER: &str = "synthetic-mcp-header-not-a-secret";
+
+    fn mcp_config(url: &str, untrusted: &[&str], credentials: &[&str]) -> (Config, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "lightagent-mcp-grant-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let token = dir.join("token");
+        std::fs::write(&token, MCP_TOKEN).unwrap();
+        let mut config = Config::default();
+        config.mcp.enabled = true;
+        config.mcp.timeout_secs = 5;
+        config.mcp.servers.push(McpServerEntry::Http {
+            name: "docs".to_owned(),
+            url: url.to_owned(),
+            headers: BTreeMap::from([("X-Api-Key".to_owned(), MCP_HEADER.to_owned())]),
+            auth: Some(lightagent_core::SecretRef::File { path: token }),
+            untrusted_profiles: untrusted.iter().map(|p| (*p).to_owned()).collect(),
+            credential_profiles: credentials.iter().map(|p| (*p).to_owned()).collect(),
+        });
+        (config, dir)
+    }
+
+    fn sent_credentials(requests: &[BTreeMap<String, String>]) -> (bool, bool) {
+        let bearer = requests.iter().any(|h| {
+            h.get("authorization")
+                .is_some_and(|v| v.contains(MCP_TOKEN))
+        });
+        let header = requests
+            .iter()
+            .any(|h| h.get("x-api-key").is_some_and(|v| v == MCP_HEADER));
+        (bearer, header)
+    }
+
+    #[tokio::test]
+    async fn http_mcp_servers_and_credentials_follow_profile_grants() {
+        lightagent_provider_lightweight::ensure_provider();
+        let research = ProfileId::new("research").unwrap();
+        let billing = ProfileId::new("billing").unwrap();
+        let none = ExtensionStore::load(&[]);
+
+        // Operator: unchanged, credentials sent.
+        let (url, log) = mcp_http_stub(None).await;
+        let (config, dir) = mcp_config(&url, &[], &[]);
+        let tools = mcp_tools(&config, &none, RemoteAccess::Operator).await;
+        assert_eq!(tools.len(), 3);
+        assert_eq!(sent_credentials(&log.lock().unwrap()), (true, true));
+        std::fs::remove_dir_all(dir).ok();
+
+        // Untrusted, profile not granted the server: never contacted.
+        let (url, log) = mcp_http_stub(None).await;
+        let (config, dir) = mcp_config(&url, &["research"], &["research"]);
+        assert!(
+            mcp_tools(&config, &none, RemoteAccess::Untrusted(&billing))
+                .await
+                .is_empty()
+        );
+        assert!(log.lock().unwrap().is_empty());
+        // Granted the server and its credentials.
+        assert_eq!(
+            mcp_tools(&config, &none, RemoteAccess::Untrusted(&research))
+                .await
+                .len(),
+            3
+        );
+        assert_eq!(sent_credentials(&log.lock().unwrap()), (true, true));
+        std::fs::remove_dir_all(dir).ok();
+
+        // Granted the server but not its credentials: neither the bearer nor
+        // the custom header is sent.
+        let (url, log) = mcp_http_stub(None).await;
+        let (config, dir) = mcp_config(&url, &["billing"], &["research"]);
+        assert_eq!(
+            mcp_tools(&config, &none, RemoteAccess::Untrusted(&billing))
+                .await
+                .len(),
+            3
+        );
+        let requests = log.lock().unwrap().clone();
+        assert!(!requests.is_empty());
+        assert_eq!(sent_credentials(&requests), (false, false));
+        std::fs::remove_dir_all(dir).ok();
+
+        // Revocation: removing the grant denies the next run.
+        let (url, log) = mcp_http_stub(None).await;
+        let (config, dir) = mcp_config(&url, &[], &[]);
+        assert!(
+            mcp_tools(&config, &none, RemoteAccess::Untrusted(&research))
+                .await
+                .is_empty()
+        );
+        assert!(log.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_http_mcp_redirect_is_refused_and_no_header_follows_it() {
+        lightagent_provider_lightweight::ensure_provider();
+        let (elsewhere, elsewhere_log) = mcp_http_stub(None).await;
+        for target in [elsewhere.clone(), elsewhere.replace("/mcp", "/other")] {
+            let (url, log) = mcp_http_stub(Some(target)).await;
+            let (config, dir) = mcp_config(&url, &[], &[]);
+            let tools =
+                mcp_tools(&config, &ExtensionStore::load(&[]), RemoteAccess::Operator).await;
+            assert!(tools.is_empty(), "a redirecting server offers no tools");
+            assert_eq!(log.lock().unwrap().len(), 1, "one request, not followed");
+            std::fs::remove_dir_all(dir).ok();
+        }
+        assert!(
+            elsewhere_log.lock().unwrap().is_empty(),
+            "the redirect target never saw the bearer or the custom header"
+        );
+        // The refusal is reported without the URL.
+        let connection = lightagent_mcp::HttpConnection::new(
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+            format!(
+                "{}?token=synthetic-query-secret",
+                mcp_http_stub(Some(elsewhere)).await.0
+            ),
+            Vec::new(),
+            None,
+        );
+        let error =
+            lightagent_mcp::Connection::request(&connection, "initialize", serde_json::json!({}))
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("redirect refused"), "{error}");
+        assert!(!error.contains("synthetic-query-secret") && !error.contains("127.0.0.1"));
+    }
+
+    #[tokio::test]
+    async fn untrusted_runs_need_approval_for_every_mcp_tool_whatever_its_annotations() {
+        use lightagent_core::ToolInvoker as _;
+        lightagent_provider_lightweight::ensure_provider();
+        let research = ProfileId::new("research").unwrap();
+        let none = ExtensionStore::load(&[]);
+        let (url, _) = mcp_http_stub(None).await;
+        let (config, dir) = mcp_config(&url, &["research"], &[]);
+        let call = |name: &str| lightagent_core::ToolCall {
+            id: format!("call-{name}"),
+            name: format!("mcp.docs.{name}"),
+            arguments: "{}".to_owned(),
+        };
+        let needs = |tools: Vec<Arc<dyn Tool>>, name: &str| {
+            let mut registry = ToolRegistry::new();
+            for tool in tools {
+                registry.insert(tool);
+            }
+            let executor = BoundedExecutor::new(
+                registry,
+                PolicyEngine::new(lightagent_core::permissions::ApprovalPolicy::balanced()),
+                Duration::from_secs(5),
+                65_536,
+            );
+            matches!(
+                executor.approval_for(&call(name)),
+                lightagent_core::ApprovalNeed::Require(_)
+            )
+        };
+        // Operator (unchanged): the server's read-only claim is honored.
+        let operator = mcp_tools(&config, &none, RemoteAccess::Operator).await;
+        assert!(!needs(operator.clone(), "lookup"));
+        assert!(needs(operator.clone(), "erase"));
+        assert!(needs(operator, "opaque"));
+        // Untrusted: every call asks.
+        for name in ["lookup", "erase", "opaque"] {
+            let tools = mcp_tools(&config, &none, RemoteAccess::Untrusted(&research)).await;
+            assert!(needs(tools, name), "{name}");
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn an_untrusted_run_never_starts_a_local_mcp_server() {
+        let research = ProfileId::new("research").unwrap();
+        let stdio = McpServerEntry::Stdio {
+            name: "shell".to_owned(),
+            command: "server".to_owned(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+        };
+        assert!(to_mcp_spec(&stdio, None, RemoteAccess::Operator).is_some());
+        assert!(to_mcp_spec(&stdio, None, RemoteAccess::Untrusted(&research)).is_none());
+    }
+
+    #[test]
+    fn the_web_context_grants_search_credentials_and_destinations_per_profile() {
+        let research = ProfileId::new("research").unwrap();
+        let billing = ProfileId::new("billing").unwrap();
+        let dir = std::env::temp_dir().join(format!("lightagent-web-grant-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("key");
+        std::fs::write(&key, "synthetic-search-key-not-a-secret").unwrap();
+        let mut config = Config::default();
+        config.web.enabled = true;
+        config.web.search.endpoint = Some("https://search.example.com/q".to_owned());
+        config.web.search.api_key = Some(lightagent_core::SecretRef::File { path: key });
+        config.web.search.credential_profiles = vec!["research".to_owned()];
+        config.web.trusted_networks = vec!["127.0.0.1/32".to_owned()];
+        config
+            .web
+            .untrusted_destinations
+            .insert("research".to_owned(), vec!["search.example.com".to_owned()]);
+
+        // Operator: today's behavior, with the trusted network applied.
+        let operator = web_context_for(&config, RemoteAccess::Operator).unwrap();
+        assert!(operator.policy.search_api_key.is_some());
+        assert!(!operator.policy.search_credential_withheld);
+        assert_eq!(operator.policy.untrusted_destinations, None);
+        assert_eq!(operator.policy.trusted_networks.len(), 1);
+        // Granted profile.
+        let granted = web_context_for(&config, RemoteAccess::Untrusted(&research)).unwrap();
+        assert!(granted.policy.search_api_key.is_some());
+        assert_eq!(
+            granted.policy.untrusted_destinations,
+            Some(vec!["search.example.com".to_owned()])
+        );
+        // Not granted: the key is never even resolved into the run.
+        let other = web_context_for(&config, RemoteAccess::Untrusted(&billing)).unwrap();
+        assert!(other.policy.search_api_key.is_none());
+        assert!(other.policy.search_credential_withheld);
+        assert_eq!(other.policy.untrusted_destinations, Some(Vec::new()));
+        // Revocation takes effect at the next run.
+        config.web.search.credential_profiles.clear();
+        let revoked = web_context_for(&config, RemoteAccess::Untrusted(&research)).unwrap();
+        assert!(revoked.policy.search_api_key.is_none());
+        assert!(revoked.policy.search_credential_withheld);
+        std::fs::remove_dir_all(dir).ok();
     }
 }
