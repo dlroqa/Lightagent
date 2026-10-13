@@ -338,6 +338,8 @@ processes per running execution.
 
 ## 12. Remote web and MCP tools (assessment only; behavior unchanged)
 
+> Addressed by [`remote-tool-egress.md`](remote-tool-egress.md).
+
 Sandboxing a local process does nothing for these: they run in the server
 process with the installation's credentials and network position.
 
