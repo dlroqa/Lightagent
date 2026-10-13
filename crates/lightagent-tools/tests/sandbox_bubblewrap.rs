@@ -330,7 +330,14 @@ for key in ('CapEff', 'CapPrm', 'CapBnd', 'NoNewPrivs'):
 print('pids', len([p for p in os.listdir('/proc') if p.isdigit()]))
 print('root', ','.join(sorted(os.listdir('/'))))
 print('work', ','.join(sorted(os.listdir('/work'))))
-print('session_leader', os.getsid(0) == os.getpid())
+# A session whose leader is outside the PID namespace reads as 0.
+sid = os.getsid(0)
+print('session_in_sandbox', sid != 0 and os.path.exists('/proc/%d' % sid))
+try:
+    os.open('/dev/tty', os.O_RDWR)
+    print('controlling_tty', 'present')
+except OSError as e:
+    print('controlling_tty', 'none')
 print('hostname', os.uname().nodename)
 "#;
     let out = results(&python(&backend, &context("research", grants()), script, &[]).await);
@@ -343,7 +350,8 @@ print('hostname', os.uname().nodename)
     );
     let pids: usize = out["pids"].parse().unwrap();
     assert!(pids <= 3, "a private PID namespace, saw {pids} processes");
-    assert_eq!(out["session_leader"], "True", "a new session");
+    assert_eq!(out["session_in_sandbox"], "True", "a new session");
+    assert_eq!(out["controlling_tty"], "none");
     assert_eq!(out["hostname"], "sandbox");
     assert_eq!(out["work"], "reference,workspace");
     let allowed: BTreeSet<&str> = [
@@ -388,16 +396,20 @@ async fn no_server_secret_or_socket_reaches_the_sandbox() {
     ));
     assert_eq!(
         vars.keys().copied().collect::<BTreeSet<_>>(),
-        BTreeSet::from(["HOME", "PATH", "REPORT_TOKEN"])
+        BTreeSet::from(["HOME", "PATH", "PWD", "REPORT_TOKEN"])
     );
     assert_eq!(vars["REPORT_TOKEN"], GRANTED);
+    assert_eq!(
+        vars["PWD"], "/work/workspace",
+        "a sandbox path, never a host one"
+    );
     for name in SERVER_SECRETS {
         let value = std::env::var(name).unwrap();
         assert!(!env.stdout.contains(&value), "{name}'s value leaked");
     }
     assert!(!env.stdout.contains("must-never-reach-a-child"));
 
-    // Without grants, nothing but the fixed PATH and HOME.
+    // Without grants, nothing but the fixed PATH, HOME and PWD.
     let mut none = grants();
     none.secrets.clear();
     let bare = run(
@@ -407,7 +419,7 @@ async fn no_server_secret_or_socket_reaches_the_sandbox() {
     )
     .await
     .unwrap();
-    assert_eq!(bare.stdout.lines().count(), 2, "{}", bare.stdout);
+    assert_eq!(bare.stdout.lines().count(), 3, "{}", bare.stdout);
 
     let ssh = std::env::var("SSH_AUTH_SOCK").unwrap();
     let home = std::env::var("HOME").unwrap_or_default();
@@ -690,9 +702,15 @@ print('spawned')
     assert!(none_left(&timed).await, "timed-out process survived");
 
     // Cancellation during execution, and during startup.
-    for (name, delay) in [("cancel-run", 500u64), ("cancel-startup", 1)] {
-        for attempt in 0..3 {
-            let mark = marker(&format!("{name}-{attempt}"));
+    let delays = [500u64, 0, 1, 2, 3, 5, 8, 13, 20, 50];
+    for (attempt, delay) in delays.iter().copied().cycle().take(30).enumerate() {
+        let name = if delay >= 100 {
+            "cancel-run"
+        } else {
+            "cancel-startup"
+        };
+        {
+            let mark = marker(&format!("{name}-{delay}ms-{attempt}"));
             let ctx = context("research", grants());
             let cancel = ctx.cancel().clone();
             tokio::spawn(async move {
@@ -705,8 +723,8 @@ print('spawned')
                 &request(PYTHON, &["-c", sleeper, mark.as_str()]),
             )
             .await;
-            assert_eq!(outcome, Err(BackendFault::Cancelled), "{name}");
-            assert!(none_left(&mark).await, "{name}: process survived");
+            assert_eq!(outcome, Err(BackendFault::Cancelled), "{name} {delay}ms");
+            assert!(none_left(&mark).await, "{name} {delay}ms: process survived");
         }
     }
     // Already cancelled: nothing starts.

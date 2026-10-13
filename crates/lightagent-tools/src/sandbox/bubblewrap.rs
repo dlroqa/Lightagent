@@ -22,12 +22,14 @@
 //!   `/dev` and `/tmp`, the per-run `/scratch`, and each granted root of the
 //!   run's own profile under `/work/<label>`, read-only unless granted
 //!   read-write. No home directory, `/etc`, `/run`, `/var` or socket.
-//! - The child's environment is exactly `PATH`, `HOME=/scratch` and the
-//!   run's granted secrets, passed through the process environment (never
-//!   the command line, where other host processes could read them).
+//! - The child's environment is exactly `PATH`, `HOME=/scratch`, the
+//!   sandbox working directory as `PWD` (set by `bwrap`), and the run's
+//!   granted secrets, passed through the process environment (never the
+//!   command line, where other host processes could read them).
 //! - Wall clock and output are bounded here; on timeout or cancellation the
-//!   outer `bwrap` is killed, which kills the namespace's init and with it
-//!   every process in the sandbox.
+//!   outer `bwrap` is stopped, its descendants (the namespace's init among
+//!   them) are killed, ending every process in the PID namespace, and then
+//!   `bwrap` itself is killed.
 //!
 //! What it does **not** provide is listed by [`unsupported`]: the sandbox
 //! runs as the server's own host user id (an unprivileged user namespace
@@ -57,6 +59,10 @@ use super::{
 
 /// The trusted location of `bwrap` on Debian, Ubuntu and Fedora.
 pub const DEFAULT_BWRAP: &str = "/usr/bin/bwrap";
+
+/// The `kill` program used to end a sandbox's process tree. Required, and
+/// held to the same trust checks as `bwrap`.
+const KILL: &str = "/usr/bin/kill";
 
 /// Where granted roots, the per-run scratch and the program search path sit
 /// inside the sandbox.
@@ -103,8 +109,8 @@ pub fn unsupported() -> BTreeSet<Guarantee> {
 pub enum Unavailable {
     /// The server runs as root; the backend refuses.
     RunningAsRoot,
-    /// `bwrap` is missing, not root-owned, writable by others, setuid, or not
-    /// at a canonical absolute path.
+    /// `bwrap` or `kill` is missing, not root-owned, writable by others,
+    /// setuid, or not at a canonical absolute path.
     UntrustedBinary,
     /// The kernel offers no user namespaces.
     NoUserNamespaces,
@@ -396,7 +402,7 @@ pub async fn probe(bwrap: &Path) -> HostReport {
         report.launch = Some(Unavailable::RunningAsRoot);
         return report;
     }
-    if !report.bwrap_trusted {
+    if !report.bwrap_trusted || !trusted_binary(Path::new(KILL)) {
         report.launch = Some(Unavailable::UntrustedBinary);
         return report;
     }
@@ -501,6 +507,70 @@ impl BubblewrapBackend {
             })
             .collect()
     }
+}
+
+/// The parent pid of `pid`, from `/proc/<pid>/stat` (after the command
+/// name, which may itself hold spaces and parentheses).
+fn parent_of(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, after) = stat.rsplit_once(')')?;
+    after.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Every live descendant of `root`, as the host sees them.
+fn descendants(root: u32) -> Vec<u32> {
+    let parents: HashMap<u32, u32> = std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
+            Some((pid, parent_of(pid)?))
+        })
+        .collect();
+    let mut found = Vec::new();
+    let mut frontier = vec![root];
+    while let Some(parent) = frontier.pop() {
+        for (&pid, &of) in &parents {
+            if of == parent && !found.contains(&pid) {
+                found.push(pid);
+                frontier.push(pid);
+            }
+        }
+    }
+    found
+}
+
+async fn signal(signal: &str, pids: &[u32]) {
+    if pids.is_empty() {
+        return;
+    }
+    let mut command = tokio::process::Command::new(KILL);
+    command.args(["-s", signal, "--"]);
+    command.args(pids.iter().map(u32::to_string));
+    command
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .ok();
+}
+
+/// End the whole sandbox started as `outer`, the bwrap process we spawned.
+///
+/// Killing `outer` alone is not enough: `--die-with-parent` arms the inner
+/// process's parent-death signal only after it is cloned, so an `outer`
+/// killed inside that window leaves the namespace's init running (observed
+/// on the CI runner when cancelling within a millisecond of start). So
+/// `outer` is first stopped, which keeps it from creating anything more;
+/// then every descendant is killed (the namespace's init among them, which
+/// ends every process in the PID namespace); then `outer` itself is killed
+/// by the caller.
+async fn kill_tree(outer: u32) {
+    signal("STOP", &[outer]).await;
+    signal("KILL", &descendants(outer)).await;
 }
 
 /// Read a pipe to the end, keeping at most `cap` bytes.
@@ -657,9 +727,9 @@ impl SandboxBackend for BubblewrapBackend {
         let status = match waited {
             Waited::Exited(status) => Some(status),
             _ => {
-                // Killing the outer bwrap kills the namespace's init
-                // (`--die-with-parent`), and the kernel then kills every
-                // process left in the PID namespace.
+                if let Some(pid) = child.id() {
+                    kill_tree(pid).await;
+                }
                 child.start_kill().ok();
                 child.wait().await.ok();
                 None
