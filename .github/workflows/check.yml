@@ -131,10 +131,24 @@ jobs:
             echo "apparmor bwrap profile: $(ls /etc/apparmor.d 2>/dev/null | grep -i bwrap || echo none)"
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Fail closed on the stock runner
+        # Ubuntu 24.04 restricts unprivileged user namespaces through
+        # AppArmor and ships no profile for bwrap: the backend must refuse.
+        run: cargo test -p lightagent-tools --test sandbox_bubblewrap -- --ignored --nocapture --exact a_host_that_denies_user_namespaces_leaves_the_backend_unavailable
+      - name: Grant user namespaces to bwrap only
+        # The Ubuntu-documented, per-binary alternative to disabling
+        # kernel.apparmor_restrict_unprivileged_userns, which stays 1. This is
+        # the deployment prerequisite the backend documents.
+        run: |
+          printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' \
+            'profile bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '}' \
+            | sudo tee /etc/apparmor.d/lightagent-bwrap
+          sudo apparmor_parser -r /etc/apparmor.d/lightagent-bwrap
+          echo "apparmor_restrict_unprivileged_userns: $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Live sandbox tests
         env:
           LIGHTAGENT_SANDBOX_LIVE: '1'
-        run: cargo test -p lightagent-tools --test sandbox_bubblewrap -- --ignored --nocapture --test-threads=1
+        run: cargo test -p lightagent-tools --test sandbox_bubblewrap -- --ignored --nocapture --test-threads=1 --skip a_host_that_denies_user_namespaces
 
   web-render:
     name: standalone Web UI render

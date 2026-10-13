@@ -154,7 +154,17 @@ pub struct BubblewrapConfig {
     /// There is no production list; tests supply fixed synthetic ones.
     pub programs: BTreeSet<String>,
     /// Resolves a granted secret name to its value.
-    pub secrets: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>,
+    pub secrets: SecretSource,
+}
+
+/// Resolves a granted secret name to its value, at execution.
+pub type SecretSource = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// Why [`BubblewrapBackend::detect`] failed, with what the host offers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DetectError {
+    pub reason: Unavailable,
+    pub report: HostReport,
 }
 
 /// The read-only system layout, as found on this host.
@@ -442,10 +452,10 @@ pub struct BubblewrapBackend {
 
 impl BubblewrapBackend {
     /// Probe the host and build the backend, or say why it is unavailable.
-    pub async fn detect(config: BubblewrapConfig) -> Result<Self, (Unavailable, HostReport)> {
+    pub async fn detect(config: BubblewrapConfig) -> Result<Self, Box<DetectError>> {
         let report = probe(&config.bwrap).await;
         if let Some(reason) = report.launch {
-            return Err((reason, report));
+            return Err(Box::new(DetectError { reason, report }));
         }
         let private_base = config.scratch_base.is_absolute()
             && std::fs::canonicalize(&config.scratch_base)
@@ -453,7 +463,10 @@ impl BubblewrapBackend {
             && std::fs::metadata(&config.scratch_base)
                 .is_ok_and(|meta| meta.is_dir() && meta.mode() & 0o077 == 0);
         if !private_base {
-            return Err((Unavailable::ScratchUnavailable, report));
+            return Err(Box::new(DetectError {
+                reason: Unavailable::ScratchUnavailable,
+                report,
+            }));
         }
         Ok(Self {
             layout: Layout::detect(&report),

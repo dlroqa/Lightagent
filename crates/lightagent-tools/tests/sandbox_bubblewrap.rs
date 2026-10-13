@@ -155,12 +155,37 @@ fn config(fixture: &Fixture) -> BubblewrapConfig {
 async fn backend(config: BubblewrapConfig) -> BubblewrapBackend {
     match BubblewrapBackend::detect(config).await {
         Ok(backend) => backend,
-        Err((reason, report)) => panic!(
+        Err(error) => panic!(
             "INFRASTRUCTURE LIMITATION: the bubblewrap backend cannot run on this host \
-             ({reason:?}). This is reported, not skipped. Host report: {}",
-            serde_json::to_string(&report).unwrap()
+             ({:?}). This is reported, not skipped. Host report: {}",
+            error.reason,
+            serde_json::to_string(&error.report).unwrap()
         ),
     }
+}
+
+/// Run only on a host that denies unprivileged user namespaces to `bwrap`
+/// (the stock Ubuntu 24.04 runner, before the job grants them): the backend
+/// must refuse to come up, and say why.
+#[tokio::test]
+#[ignore = "live: run by the sandbox CI job before user namespaces are granted"]
+async fn a_host_that_denies_user_namespaces_leaves_the_backend_unavailable() {
+    let fixture = fixture();
+    let error = match BubblewrapBackend::detect(config(&fixture)).await {
+        Ok(_) => panic!("the backend came up on a host expected to deny user namespaces"),
+        Err(error) => error,
+    };
+    summary(&format!(
+        "fail-closed on the stock runner: {:?}, detail {:?}, apparmor restriction {:?}",
+        error.reason,
+        error.report.launch_detail,
+        error.report.apparmor_restrict_unprivileged_userns
+    ));
+    assert_eq!(
+        error.reason,
+        lightagent_tools::sandbox::bubblewrap::Unavailable::LaunchFailed
+    );
+    assert_eq!(std::fs::read_dir(&fixture.scratch).unwrap().count(), 0);
 }
 
 fn grants() -> Grants {
