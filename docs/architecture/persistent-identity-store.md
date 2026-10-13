@@ -285,9 +285,9 @@ and Windows.
   - `AuditAction` gains change codes.
   - `IdentityAuthority::persistent` added; `IdentityAuthority::new` is
     unchanged.
-- **Rollback.** Revert the PR. An `identity/` directory left behind is
-  ignored by older builds. Its verifiers are unreadable to the old
-  `secret_sha256` field, so those credentials fail closed rather than open.
+- **Rollback.** Revert the PR. Older builds have no identity store and
+  never read `identity/`, so a directory left behind is inert. Nothing else
+  was written, and no configuration key was added.
 - **Recovery.**
   - From a corrupt or partial `state.json`: stop the server, copy
     `state.prev.json` (or a backup) over `state.json`, and restart.
