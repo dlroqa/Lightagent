@@ -6,6 +6,20 @@ All notable Lightagent changes are documented here.
 
 ### Security
 
+- Run-ownership enforcement for a multi-user API mode that stays **off**
+  (`lightagent serve` cannot enable it yet). In that mode:
+  - Every request needs a credential, loopback included.
+  - The `--key-env` key is a legacy operator credential.
+  - A user may start runs only on a profile it owns, under C6's minimum
+    bundle; unowned profiles are refused.
+  - Each run records its initiating principal and profile immutably. Read,
+    status, events, cancel and approvals are checked against them; run-id
+    knowledge alone gives 404.
+  - Event streams end on revocation.
+  - Every other route is operator-only.
+
+  Single-user behavior is unchanged. `AuthConfig`'s `Debug` no longer prints
+  the key.
 - Identity and profile-ownership foundation (`lightagent_core::identity`):
   principals and roles, capabilities, credential-limited callers, an
   ownership registry with idempotent and conflict-detecting assignment,

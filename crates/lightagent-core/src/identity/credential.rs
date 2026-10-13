@@ -129,6 +129,18 @@ impl CredentialStore {
         if !constant_time_eq(digest(secret).as_bytes(), record.secret_sha256.as_bytes()) {
             return Err(Denial::Unauthenticated);
         }
+        Self::caller_from(record)
+    }
+
+    /// The caller for an already-authenticated credential, read afresh: a
+    /// long-lived connection calls this to notice revocation or a changed
+    /// restriction. A missing or revoked record is `Revoked`.
+    pub fn caller_for(&self, key_id: &str) -> Result<Caller, Denial> {
+        let record = self.credentials.get(key_id).ok_or(Denial::Revoked)?;
+        Self::caller_from(record)
+    }
+
+    fn caller_from(record: &CredentialRecord) -> Result<Caller, Denial> {
         if record.revoked_unix.is_some() {
             return Err(Denial::Revoked);
         }

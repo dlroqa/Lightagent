@@ -31,7 +31,9 @@ use crate::profile::ProfileId;
 
 pub use audit::{AuditAction, AuditOutcome, AuditRecord};
 pub use credential::{CredentialError, CredentialRecord, CredentialStore, IssuedToken};
-pub use ownership::{Assignment, OwnershipError, OwnershipRegistry, ProfileOwnership};
+pub use ownership::{
+    Assignment, OWNER_DEFAULT, OwnershipError, OwnershipRegistry, ProfileOwnership,
+};
 
 /// A server-verified identity. Never derived from a profile id.
 ///
@@ -105,6 +107,10 @@ pub enum PrincipalSource {
     LocalProcess,
     /// A credential issued by this installation, identified by its public id.
     Credential { key_id: String },
+    /// The pre-existing `--key-env` key, kept in multi-user mode as a legacy
+    /// **operator** credential: it holds every capability on every profile.
+    /// Never converted into a user credential.
+    LegacyOperatorKey,
 }
 
 /// An authenticated caller's identity.

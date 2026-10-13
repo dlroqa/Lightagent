@@ -28,6 +28,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
+use lightagent_core::identity::{AuditAction, Caller, Capability, Role, authorize_capability};
 use lightagent_core::{
     AgentEvent, ApprovalPolicy, ConfigStore, LightagentPaths, PlatformEndpointConfig, ProfileId,
     ProfileStore, SecretRef, SkillStore, skill_dirs,
@@ -37,8 +38,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Mutex;
 
-pub use auth::{AuthConfig, Scope};
-pub use manager::{RunFactory, RunManager, RunState, RunStatus, StartRun};
+pub use auth::{AuthConfig, IdentityAuthority, IdentityState, Scope};
+pub use manager::{RunFactory, RunManager, RunOwner, RunState, RunStatus, StartRun};
 
 /// The shared state every handler reads.
 #[derive(Clone)]
@@ -176,6 +177,86 @@ fn deny(state: &AppState, headers: &HeaderMap, scope: Scope) -> Option<Response>
         Ok(()) => None,
         Err((status, message)) => Some((status, Json(json!({ "error": message }))).into_response()),
     }
+}
+
+fn refused(denial: lightagent_core::identity::Denial) -> Response {
+    let (status, message) = auth::rejection(denial);
+    (status, Json(json!({ "error": message }))).into_response()
+}
+
+/// A multi-user caller holding `scope`, checked before any run is looked up
+/// so the answer never depends on whether a run exists.
+fn multi_user_caller(
+    state: &AppState,
+    headers: &HeaderMap,
+    scope: Scope,
+) -> Result<(Arc<auth::IdentityAuthority>, Caller), Box<Response>> {
+    let Some(identity) = state.auth.identity() else {
+        return Err(Box::new(internal("multi-user identity is not configured")));
+    };
+    let caller = state
+        .auth
+        .caller(headers)
+        .map_err(|denial| Box::new(refused(denial)))?;
+    if let Err(denial) = authorize_capability(&caller, scope.into()) {
+        identity.record(
+            Some(&caller),
+            AuditAction::Request(scope.into()),
+            None,
+            Err(denial),
+        );
+        return Err(Box::new(refused(denial)));
+    }
+    Ok((Arc::clone(identity), caller))
+}
+
+/// Re-checks, during an event stream, that the subscriber may still see it.
+type StreamGuard = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// The run `id`, if the caller may take `scope` on it. In multi-user mode a
+/// run the caller may not act on is answered exactly like a missing one, and
+/// the returned guard re-checks the credential and ownership while a stream
+/// stays open. The single-user path is unchanged.
+async fn authorized_run(
+    state: &AppState,
+    headers: &HeaderMap,
+    id: &str,
+    scope: Scope,
+) -> Result<(Arc<RunState>, Option<StreamGuard>), Box<Response>> {
+    if state.auth.identity().is_none() {
+        if let Some(rejection) = deny(state, headers, scope) {
+            return Err(Box::new(rejection));
+        }
+        return state
+            .manager
+            .get(id)
+            .await
+            .map(|run| (run, None))
+            .ok_or_else(|| Box::new(not_found(id)));
+    }
+    let (identity, caller) = multi_user_caller(state, headers, scope)?;
+    let Some(run) = state.manager.get(id).await else {
+        return Err(Box::new(not_found(id)));
+    };
+    let capability: Capability = scope.into();
+    let owner = run.owner().clone();
+    let decision = identity.authorize_run(&caller, &owner, capability);
+    identity.record(
+        Some(&caller),
+        AuditAction::Request(capability),
+        owner.profile(),
+        decision,
+    );
+    if decision.is_err() {
+        return Err(Box::new(not_found(id)));
+    }
+    let guard: StreamGuard = Arc::new(move || {
+        identity
+            .refresh(&caller)
+            .and_then(|current| identity.authorize_run(&current, &owner, capability))
+            .is_ok()
+    });
+    Ok((run, Some(guard)))
 }
 
 async fn health() -> Response {
@@ -722,9 +803,46 @@ struct CreateRunBody {
 async fn create_run(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(body): Json<CreateRunBody>,
+    Json(mut body): Json<CreateRunBody>,
 ) -> Response {
-    if let Some(rejection) = deny(&state, &headers, Scope::RunsWrite) {
+    // Multi-user mode authorizes the caller for the profile, resolved on the
+    // server, before anything profile-specific is built. `owner` records who
+    // started the run and as which profile; it never changes afterwards.
+    let mut owner: Option<(lightagent_core::identity::PrincipalId, Option<ProfileId>)> = None;
+    if state.auth.identity().is_some() {
+        let (identity, caller) = match multi_user_caller(&state, &headers, Scope::RunsWrite) {
+            Ok(found) => found,
+            Err(response) => return *response,
+        };
+        if caller.principal.role == Role::User {
+            if body.session_id.is_some() {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({"error": "sessions are operator-only in multi-user mode"})),
+                )
+                    .into_response();
+            }
+            let requested = body
+                .profile
+                .clone()
+                .unwrap_or_else(|| state.session_profile.clone());
+            let Ok(requested) = ProfileId::new(requested) else {
+                return bad_request("invalid profile id");
+            };
+            match identity.authorize_profile(&caller, Capability::RunsWrite, &requested) {
+                Ok(authorized) => {
+                    body.profile = Some(authorized.profile().as_str().to_owned());
+                    owner = Some((
+                        authorized.principal().clone(),
+                        Some(authorized.profile().clone()),
+                    ));
+                }
+                Err(denial) => return refused(denial),
+            }
+        } else {
+            owner = Some((caller.principal.id.clone(), None));
+        }
+    } else if let Some(rejection) = deny(&state, &headers, Scope::RunsWrite) {
         return rejection;
     }
     let mut history = Vec::new();
@@ -770,16 +888,29 @@ async fn create_run(
         }
         session_id = Some(id);
     }
-    let run = state
-        .manager
-        .start(StartRun {
-            message: body.message,
-            history,
-            profile,
-            cwd: None,
-            model: body.model,
-        })
-        .await;
+    let request = StartRun {
+        message: body.message,
+        history,
+        profile,
+        cwd: None,
+        model: body.model,
+    };
+    let run = match owner {
+        Some((principal, authorized)) => {
+            // An operator's run records the profile it named, if valid.
+            let profile = authorized.or_else(|| {
+                request
+                    .profile
+                    .as_deref()
+                    .and_then(|id| ProfileId::new(id).ok())
+            });
+            state
+                .manager
+                .start_as(request, RunOwner::new(principal, profile))
+                .await
+        }
+        None => state.manager.start(request).await,
+    };
     if let Some(id) = &session_id {
         let state = Arc::clone(&state);
         let run = Arc::clone(&run);
@@ -878,18 +1009,15 @@ async fn get_run(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    if let Some(rejection) = deny(&state, &headers, Scope::RunsRead) {
-        return rejection;
-    }
-    match state.manager.get(&id).await {
-        Some(run) => Json(json!({
+    match authorized_run(&state, &headers, &id, Scope::RunsRead).await {
+        Ok((run, _)) => Json(json!({
             "id": run.id(),
             "status": run.status().await,
             "events": run.events().await.len(),
             "pending_approval": run.pending().await,
         }))
         .into_response(),
-        None => not_found(&id),
+        Err(response) => *response,
     }
 }
 
@@ -898,14 +1026,11 @@ async fn run_events(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    if let Some(rejection) = deny(&state, &headers, Scope::RunsRead) {
-        return rejection;
-    }
-    match state.manager.get(&id).await {
-        Some(run) => Sse::new(event_stream(run))
+    match authorized_run(&state, &headers, &id, Scope::RunsRead).await {
+        Ok((run, guard)) => Sse::new(event_stream(run, guard))
             .keep_alive(KeepAlive::default())
             .into_response(),
-        None => not_found(&id),
+        Err(response) => *response,
     }
 }
 
@@ -914,15 +1039,12 @@ async fn cancel_run(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    if let Some(rejection) = deny(&state, &headers, Scope::RunsWrite) {
-        return rejection;
-    }
-    match state.manager.get(&id).await {
-        Some(run) => {
+    match authorized_run(&state, &headers, &id, Scope::RunsWrite).await {
+        Ok((run, _)) => {
             run.cancel();
             Json(json!({ "id": run.id(), "cancelled": true })).into_response()
         }
-        None => not_found(&id),
+        Err(response) => *response,
     }
 }
 
@@ -1207,11 +1329,26 @@ async fn delete_session(
 }
 
 async fn list_approvals(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Some(rejection) = deny(&state, &headers, Scope::ApprovalsWrite) {
+    // Multi-user mode lists only the runs the caller may answer for.
+    let multi_user = if state.auth.identity().is_some() {
+        match multi_user_caller(&state, &headers, Scope::ApprovalsWrite) {
+            Ok(found) => Some(found),
+            Err(response) => return *response,
+        }
+    } else if let Some(rejection) = deny(&state, &headers, Scope::ApprovalsWrite) {
         return rejection;
-    }
+    } else {
+        None
+    };
     let mut waiting = Vec::new();
     for run in state.manager.awaiting_approval().await {
+        if let Some((identity, caller)) = &multi_user
+            && identity
+                .authorize_run(caller, run.owner(), Capability::ApprovalsWrite)
+                .is_err()
+        {
+            continue;
+        }
         waiting.push(json!({ "run": run.id(), "pending": run.pending().await }));
     }
     Json(json!({ "approvals": waiting })).into_response()
@@ -1231,12 +1368,10 @@ async fn respond_approval(
     Path(run): Path<String>,
     Json(body): Json<RespondBody>,
 ) -> Response {
-    if let Some(rejection) = deny(&state, &headers, Scope::ApprovalsWrite) {
-        return rejection;
-    }
     use lightagent_core::ApprovalDecision;
-    let Some(state_run) = state.manager.get(&run).await else {
-        return not_found(&run);
+    let state_run = match authorized_run(&state, &headers, &run, Scope::ApprovalsWrite).await {
+        Ok((found, _)) => found,
+        Err(response) => return *response,
     };
     let Some(pending) = state_run.pending().await else {
         return (
@@ -1276,14 +1411,22 @@ fn internal(message: &str) -> Response {
         .into_response()
 }
 
+/// How often a guarded event stream re-checks authorization while no event
+/// arrives.
+const STREAM_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// A run's events as an SSE stream: buffered history first, then the live tail,
 /// ending when the run reaches a terminal state.
-fn event_stream(run: Arc<RunState>) -> impl Stream<Item = Result<Event, Infallible>> {
+fn event_stream(
+    run: Arc<RunState>,
+    guard: Option<StreamGuard>,
+) -> impl Stream<Item = Result<Event, Infallible>> {
     struct Cursor {
         run: Arc<RunState>,
         seen: usize,
         queue: VecDeque<AgentEvent>,
         finished: bool,
+        guard: Option<StreamGuard>,
     }
     stream::unfold(
         Cursor {
@@ -1291,16 +1434,32 @@ fn event_stream(run: Arc<RunState>) -> impl Stream<Item = Result<Event, Infallib
             seen: 0,
             queue: VecDeque::new(),
             finished: false,
+            guard,
         },
         |mut cursor| async move {
             loop {
+                // A guarded (multi-user) stream ends as soon as the
+                // subscriber's credential or ownership no longer allows it.
+                if cursor.guard.as_ref().is_some_and(|allowed| !allowed()) {
+                    return None;
+                }
                 if let Some(event) = cursor.queue.pop_front() {
                     return Some((Ok(sse::to_sse(&event)), cursor));
                 }
                 if cursor.finished {
                     return None;
                 }
-                let (new_events, status) = cursor.run.wait_from(cursor.seen).await;
+                let (new_events, status) = if cursor.guard.is_some() {
+                    // Wake periodically to re-check while the run is quiet.
+                    match tokio::time::timeout(STREAM_RECHECK, cursor.run.wait_from(cursor.seen))
+                        .await
+                    {
+                        Ok(next) => next,
+                        Err(_) => continue,
+                    }
+                } else {
+                    cursor.run.wait_from(cursor.seen).await
+                };
                 cursor.seen += new_events.len();
                 cursor.queue.extend(new_events);
                 if status.is_terminal() {

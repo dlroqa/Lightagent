@@ -88,13 +88,53 @@ fn a_user_acts_on_its_own_profile_only() {
     let registry = registry();
     let alice = user("alice");
     for capability in PROFILE_CAPABILITIES {
-        assert!(authorize(&alice, capability, &profile("alice-bot"), &registry).is_ok());
         assert_eq!(
             authorize(&alice, capability, &profile("bob-bot"), &registry),
             Err(Denial::ProfileNotGranted),
             "{capability:?}: another user's profile, including its sessions, run events, Jev diagnostics and approvals"
         );
     }
+}
+
+#[test]
+fn owning_a_profile_grants_only_the_minimum_bundle() {
+    let mut registry = registry();
+    let alice = user("alice");
+    let owned = profile("alice-bot");
+    // Start, view and cancel runs; read sessions and events; answer approvals.
+    for capability in OWNER_DEFAULT {
+        assert!(
+            authorize(&alice, capability, &owned, &registry).is_ok(),
+            "{capability:?}"
+        );
+    }
+    // Not the tool catalog or Jev status, not session changes, never the
+    // operator-only capabilities.
+    for capability in [
+        Capability::ToolsRead,
+        Capability::SessionsWrite,
+        Capability::Administer,
+        Capability::Provision,
+    ] {
+        assert!(
+            authorize(&alice, capability, &owned, &registry).is_err(),
+            "{capability:?}"
+        );
+    }
+    // An explicit grant adds a capability to the owner, too.
+    registry
+        .grant(&owned, principal("alice"), Capability::ToolsRead)
+        .unwrap();
+    assert!(authorize(&alice, Capability::ToolsRead, &owned, &registry).is_ok());
+    assert_eq!(
+        registry.grant(&owned, principal("alice"), Capability::RunsWrite),
+        Err(OwnershipError::GrantToOwner),
+        "already in the owner's bundle"
+    );
+    assert_eq!(
+        registry.grant(&owned, principal("alice"), Capability::Provision),
+        Err(OwnershipError::OperatorOnly)
+    );
 }
 
 #[test]
@@ -648,4 +688,20 @@ fn principal_ids_are_validated_and_denials_map_to_statuses() {
     ] {
         assert_eq!(denial.http_status(), 403, "{denial:?}");
     }
+}
+
+#[test]
+fn a_connection_rereads_its_credential_by_key_id() {
+    let mut store = CredentialStore::default();
+    let token = store
+        .issue(principal("alice"), Role::User, Restriction::default(), 1)
+        .unwrap();
+    let caller = store.authenticate(token.expose()).unwrap();
+    let PrincipalSource::Credential { key_id } = &caller.principal.source else {
+        panic!("a credential caller");
+    };
+    assert_eq!(store.caller_for(key_id), Ok(caller.clone()));
+    store.revoke(key_id, 2).unwrap();
+    assert_eq!(store.caller_for(key_id), Err(Denial::Revoked));
+    assert_eq!(store.caller_for("0123456789abcdef"), Err(Denial::Revoked));
 }
