@@ -6,6 +6,23 @@ All notable Lightagent changes are documented here.
 
 ### Security
 
+- Experimental Linux sandbox backend (`lightagent_tools::sandbox::bubblewrap`,
+  Linux only). It runs a fixed allowlist of programs under bubblewrap, with:
+  - new user, mount, PID, network, IPC, UTS and cgroup namespaces;
+  - a new session, all capabilities dropped, `no_new_privs` and no nested
+    user namespaces;
+  - a minimal read-only filesystem, the run's own profile roots only, and a
+    per-run scratch;
+  - no network and an environment of granted secrets only;
+  - wall-clock and output bounds, and whole-tree cleanup.
+
+  It refuses a setuid `bwrap`, running as root and untrusted contexts. Its
+  assurance is the new `Assurance::Experimental`, which no gate accepts.
+  CPU, memory and process limits, separate identity and link-escape
+  protection are unsupported and not claimed. Nothing constructs it outside
+  tests; a new, non-required CI job runs its live tests on `ubuntu-24.04`.
+  Findings, including the remote web and MCP tool assessment and the
+  Proxmox guidance: `docs/architecture/sandbox-linux-bubblewrap.md`.
 - Execution-isolation foundation (`lightagent_tools::sandbox`): a typed
   `SandboxBackend` interface with a capability description (14 isolation
   guarantees), per-run and per-profile `ExecutionContext` (logical root
