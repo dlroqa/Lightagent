@@ -322,6 +322,13 @@ pub async fn search_results(
     {
         return Err("the search endpoint is not authorized for this profile".to_owned());
     }
+    // A profile's own credential is re-checked before every request; a
+    // refusal sends nothing, with this key or any other.
+    if let Some(credential) = &policy.search_credential {
+        credential
+            .authorize(Some("web.search"), url.as_str())
+            .map_err(|denial| format!("the search credential was refused ({})", denial.code()))?;
+    }
     url.query_pairs_mut()
         .append_pair(&policy.search_query_param, query);
 

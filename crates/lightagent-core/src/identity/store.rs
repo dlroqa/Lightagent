@@ -601,7 +601,7 @@ fn migrate(_value: serde_json::Value, from: u32) -> Result<serde_json::Value, Id
 }
 
 /// Open (creating) a file only this user can read: `0600` on Unix.
-fn open_private(path: &Path, append: bool) -> io::Result<File> {
+pub(crate) fn open_private(path: &Path, append: bool) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.create(true);
     if append {
@@ -619,7 +619,7 @@ fn open_private(path: &Path, append: bool) -> io::Result<File> {
 
 /// Replace `path` with `bytes` durably: temporary sibling, `fsync`, rename,
 /// directory `fsync`.
-fn write_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut temporary = path.as_os_str().to_os_string();
     temporary.push(".tmp");
     let temporary = PathBuf::from(temporary);

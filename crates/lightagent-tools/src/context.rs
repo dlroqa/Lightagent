@@ -233,6 +233,10 @@ pub struct WebPolicy {
     pub search_query_param: String,
     /// The resolved search bearer key, held only in memory; never logged.
     pub search_api_key: Option<String>,
+    /// When the key is a profile's own grant (an untrusted run), the grant
+    /// re-checked before every search request: revoked, expired, rotated,
+    /// over budget or to another origin means the request is not sent.
+    pub search_credential: Option<Arc<lightagent_core::credentials::CredentialUse>>,
     /// The most results a single search returns.
     pub search_max_results: usize,
 }
@@ -261,6 +265,13 @@ impl std::fmt::Debug for WebPolicy {
                 "search_credential_withheld",
                 &self.search_credential_withheld,
             )
+            .field(
+                "search_credential",
+                &self
+                    .search_credential
+                    .as_ref()
+                    .map(|credential| credential.id()),
+            )
             .finish()
     }
 }
@@ -278,6 +289,7 @@ impl Default for WebPolicy {
             search_endpoint: None,
             search_query_param: "q".to_owned(),
             search_api_key: None,
+            search_credential: None,
             search_max_results: 5,
         }
     }

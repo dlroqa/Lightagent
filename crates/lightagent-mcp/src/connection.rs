@@ -185,6 +185,9 @@ pub struct HttpConnection {
     url: String,
     headers: Vec<(String, String)>,
     bearer: Option<String>,
+    /// When the bearer is a profile's own grant, re-checked before every
+    /// request: a refusal sends nothing.
+    credential: Option<std::sync::Arc<lightagent_core::credentials::CredentialUse>>,
     session: StdMutex<Option<String>>,
     next_id: AtomicI64,
 }
@@ -203,9 +206,35 @@ impl HttpConnection {
             url,
             headers,
             bearer,
+            credential: None,
             session: StdMutex::new(None),
             next_id: AtomicI64::new(1),
         }
+    }
+
+    /// Re-check `credential` (the grant the bearer came from) before every
+    /// request.
+    pub fn with_credential(
+        mut self,
+        credential: std::sync::Arc<lightagent_core::credentials::CredentialUse>,
+    ) -> Self {
+        self.credential = Some(credential);
+        self
+    }
+
+    /// Refuse a request the grant no longer covers, before anything is sent.
+    /// A tool call is checked against the grant's operations by tool name.
+    fn permitted(&self, method: &str, params: &Value) -> Result<(), McpError> {
+        let Some(credential) = &self.credential else {
+            return Ok(());
+        };
+        let operation = (method == "tools/call")
+            .then(|| params.get("name").and_then(Value::as_str).unwrap_or(""));
+        credential
+            .authorize(operation, &self.url)
+            .map_err(|denial| {
+                McpError::Transport(format!("credential refused ({})", denial.code()))
+            })
     }
 
     fn builder(&self, body: &Value) -> reqwest::RequestBuilder {
@@ -247,6 +276,7 @@ impl HttpConnection {
 #[async_trait]
 impl Connection for HttpConnection {
     async fn request(&self, method: &str, params: Value) -> Result<Value, McpError> {
+        self.permitted(method, &params)?;
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let body = jsonrpc::request(id, method, params);
         let response = self
@@ -289,6 +319,7 @@ impl Connection for HttpConnection {
     }
 
     async fn notify(&self, method: &str, params: Value) -> Result<(), McpError> {
+        self.permitted(method, &params)?;
         let body = jsonrpc::notification(method, params);
         let response = self
             .builder(&body)

@@ -31,6 +31,8 @@ pub enum McpTransportSpec {
         url: String,
         headers: Vec<(String, String)>,
         bearer: Option<String>,
+        /// The profile grant `bearer` came from, re-checked per request.
+        credential: Option<std::sync::Arc<lightagent_core::credentials::CredentialUse>>,
     },
 }
 
@@ -99,12 +101,19 @@ async fn connect_one(
             url,
             headers,
             bearer,
-        } => Box::new(HttpConnection::new(
-            http_client.clone(),
-            url.clone(),
-            headers.clone(),
-            bearer.clone(),
-        )),
+            credential,
+        } => {
+            let connection = HttpConnection::new(
+                http_client.clone(),
+                url.clone(),
+                headers.clone(),
+                bearer.clone(),
+            );
+            Box::new(match credential {
+                Some(credential) => connection.with_credential(std::sync::Arc::clone(credential)),
+                None => connection,
+            })
+        }
     };
     let client = McpClient::new(connection);
     client.initialize().await?;
