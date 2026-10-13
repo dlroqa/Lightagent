@@ -29,6 +29,7 @@ use lightagent_core::identity::store::{IdentityStore, StoredAudit};
 use lightagent_core::identity::{
     AuditAction, AuditRecord, AuthorizedProfile, Caller, Capability, CredentialStore, Denial,
     OwnershipRegistry, PrincipalSource, RevocationCheck, Role, authorize, authorize_capability,
+    current_sweep,
 };
 
 use crate::manager::RunOwner;
@@ -94,6 +95,11 @@ pub struct IdentityAuthority {
     /// Counts in-memory changes, standing in for the store's generation.
     changes: AtomicU64,
     now: Clock,
+    /// The sweep whose store read the state reflects, and that read's
+    /// outcome: every check inside the same sweep answers from it.
+    swept: Mutex<(u64, Result<(), Denial>)>,
+    /// How many times the durable store was read (diagnostics).
+    reads: AtomicU64,
 }
 
 impl fmt::Debug for IdentityAuthority {
@@ -110,7 +116,14 @@ impl IdentityAuthority {
             store: None,
             changes: AtomicU64::new(0),
             now: Arc::new(system_now),
+            swept: Mutex::new((0, Err(Denial::Unauthenticated))),
+            reads: AtomicU64::new(0),
         }
+    }
+
+    /// How many times the durable store has been read.
+    pub fn store_reads(&self) -> u64 {
+        self.reads.load(Ordering::Relaxed)
     }
 
     /// Judge credential expiry by `now` instead of the system clock (tests,
@@ -141,15 +154,36 @@ impl IdentityAuthority {
             store: Some(store),
             changes: AtomicU64::new(0),
             now: Arc::new(system_now),
+            swept: Mutex::new((0, Err(Denial::Unauthenticated))),
+            reads: AtomicU64::new(0),
         }
     }
 
     /// Reload from the store, if any. On a store that cannot be read the
     /// state is emptied, so every credential and grant is refused.
+    ///
+    /// Inside a supervisor's [`sweep`](lightagent_core::identity::sweep)
+    /// the store is read once and every check of that sweep answers from
+    /// that read, failure included. Outside a sweep, every check reads.
     fn sync(&self) -> Result<(), Denial> {
+        if self.store.is_none() {
+            return Ok(());
+        }
+        let Some(epoch) = current_sweep() else {
+            return self.reload();
+        };
+        let mut swept = self.swept.lock().map_err(|_| Denial::Unauthenticated)?;
+        if swept.0 != epoch {
+            *swept = (epoch, self.reload());
+        }
+        swept.1
+    }
+
+    fn reload(&self) -> Result<(), Denial> {
         let Some(store) = &self.store else {
             return Ok(());
         };
+        self.reads.fetch_add(1, Ordering::Relaxed);
         let fresh = store.load().map(|document| IdentityState {
             credentials: document.credentials().clone(),
             ownership: store.effective_ownership(&document),

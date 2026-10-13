@@ -150,6 +150,23 @@ jobs:
           LIGHTAGENT_SANDBOX_LIVE: '1'
         run: cargo test -p lightagent-tools --test sandbox_bubblewrap -- --ignored --nocapture --test-threads=1 --skip a_host_that_denies_user_namespaces
 
+  revocation-latency:
+    # A measurement, not a required check: how long the bounded
+    # revalidation monitor takes to observe a revocation, and what one sweep
+    # costs, on a GitHub-hosted runner. Results go to the job summary. The
+    # same monitor is exercised deterministically by the test suites above.
+    name: Revocation detection latency (measurement)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: revocation-latency
+      - name: Measure detection latency and sweep overhead
+        run: cargo test -p lightagent-api --test revocation_monitor -- --ignored --nocapture --exact measure_detection_latency_and_sweep_overhead
+
   web-render:
     name: standalone Web UI render
     runs-on: ubuntu-24.04

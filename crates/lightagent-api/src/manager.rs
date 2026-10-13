@@ -17,14 +17,24 @@
 //! re-check every active run at once ([`RunManager::revalidate`]). A run
 //! started with [`RunManager::start`] or [`RunManager::start_as`] is not
 //! revocable and behaves exactly as before.
+//!
+//! While revocable runs are active, one shared **monitor** task re-checks
+//! them on a bounded interval ([`RunManager::with_revalidation`]), so a
+//! revocation reaches a run that is waiting on a long model stream, tool,
+//! worker or approval without waiting for its next action. Each sweep reads
+//! the identity store once, however many runs it checks. The monitor exists
+//! only while a revocable run is active, so trusted single-user runs never
+//! start it.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use lightagent_core::identity::{
     Caller, Capability, Denial, PrincipalId, RevocationCheck, RevocationScope, Role,
-    RunAuthorization, RunTrust, authorize_capability, revoked_message,
+    RunAuthorization, RunTrust, authorize_capability, revoked_message, sweep,
 };
 use lightagent_core::provider::ProviderMessage;
 use lightagent_core::{
@@ -34,6 +44,7 @@ use lightagent_core::{
 use serde::Serialize;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::sync::{Mutex, Notify, watch};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 /// The lifecycle state of a run.
@@ -518,11 +529,149 @@ fn status_from_events(events: &[AgentEvent]) -> RunStatus {
     }
 }
 
+/// How often the monitor re-checks active revocable runs by default: the
+/// longest a revocation waits to reach a run that takes no action, plus one
+/// check.
+pub const DEFAULT_REVALIDATION_INTERVAL: Duration = Duration::from_secs(5);
+/// The shortest interval accepted: the monitor never spins.
+pub const MIN_REVALIDATION_INTERVAL: Duration = Duration::from_millis(100);
+/// The longest interval accepted: a revocation is always observed.
+pub const MAX_REVALIDATION_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Paces the revalidation monitor: each `tick` returns when the next sweep
+/// is due.
+#[async_trait]
+pub trait RevalidationClock: Send + Sync + 'static {
+    async fn tick(&self);
+}
+
+/// A fixed interval, clamped to
+/// [`MIN_REVALIDATION_INTERVAL`]..=[`MAX_REVALIDATION_INTERVAL`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RevalidationInterval(Duration);
+
+impl RevalidationInterval {
+    pub fn new(period: Duration) -> Self {
+        Self(period.clamp(MIN_REVALIDATION_INTERVAL, MAX_REVALIDATION_INTERVAL))
+    }
+
+    pub fn period(&self) -> Duration {
+        self.0
+    }
+}
+
+#[async_trait]
+impl RevalidationClock for RevalidationInterval {
+    async fn tick(&self) {
+        tokio::time::sleep(self.0).await;
+    }
+}
+
+/// What the monitor has done, for diagnostics and tests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MonitorState {
+    /// Whether the monitor task is running.
+    pub running: bool,
+    /// How many times a monitor task was started.
+    pub started: u64,
+    /// Sweeps completed.
+    pub sweeps: u64,
+    /// Run checks made by those sweeps.
+    pub checks: u64,
+    /// Runs those sweeps revoked.
+    pub revoked: u64,
+}
+
+/// The shared revalidation monitor of one manager.
+struct Monitor {
+    clock: Arc<dyn RevalidationClock>,
+    /// The monitor task, while one runs. Changed only under this lock, so a
+    /// run starting while the monitor stops is never left unwatched.
+    task: StdMutex<Option<JoinHandle<()>>>,
+    /// Revocable runs not yet terminal.
+    active: AtomicUsize,
+    state: watch::Sender<MonitorState>,
+}
+
+impl Monitor {
+    fn new(clock: Arc<dyn RevalidationClock>) -> Arc<Self> {
+        Arc::new(Self {
+            clock,
+            task: StdMutex::new(None),
+            active: AtomicUsize::new(0),
+            state: watch::Sender::new(MonitorState::default()),
+        })
+    }
+}
+
+type Runs = Mutex<HashMap<String, Arc<RunState>>>;
+
+/// Re-check every active revocable run in one sweep (one identity-store
+/// read), then ask every open event stream to re-check its subscriber.
+/// Returns how many runs were checked and which were revoked now.
+async fn sweep_runs(runs: &Runs) -> (u64, Vec<(String, Denial)>) {
+    let all: Vec<Arc<RunState>> = runs.lock().await.values().cloned().collect();
+    let mut active = Vec::new();
+    for run in &all {
+        if run.authorization.is_revocable()
+            && run.authorization.revoked().is_none()
+            && !run.status().await.is_terminal()
+        {
+            active.push(Arc::clone(run));
+        }
+    }
+    let revoked = sweep(|| {
+        active
+            .iter()
+            .filter_map(|run| {
+                run.authorization
+                    .verify()
+                    .err()
+                    .map(|denial| (run.id.clone(), denial))
+            })
+            .collect::<Vec<_>>()
+    });
+    for run in &all {
+        run.request_recheck();
+    }
+    (active.len() as u64, revoked)
+}
+
+/// The monitor task: sweep on every tick until no revocable run is active
+/// (or the manager is gone), then stop.
+async fn watch_runs(runs: Weak<Runs>, monitor: Arc<Monitor>) {
+    loop {
+        monitor.clock.tick().await;
+        let Some(strong) = runs.upgrade() else {
+            break;
+        };
+        let (checked, revoked) = sweep_runs(&strong).await;
+        drop(strong);
+        monitor.state.send_modify(|state| {
+            state.sweeps += 1;
+            state.checks += checked;
+            state.revoked += revoked.len() as u64;
+        });
+        if let Ok(mut task) = monitor.task.lock()
+            && monitor.active.load(Ordering::SeqCst) == 0
+        {
+            *task = None;
+            monitor.state.send_modify(|state| state.running = false);
+            return;
+        }
+    }
+    if let Ok(mut task) = monitor.task.lock() {
+        *task = None;
+        monitor.state.send_modify(|state| state.running = false);
+    }
+}
+
 /// Owns the runs and starts new ones.
 #[derive(Clone)]
 pub struct RunManager {
     factory: Arc<dyn RunFactory>,
-    runs: Arc<Mutex<HashMap<String, Arc<RunState>>>>,
+    runs: Arc<Runs>,
+    monitor: Arc<Monitor>,
 }
 
 impl RunManager {
@@ -531,7 +680,45 @@ impl RunManager {
         Self {
             factory,
             runs: Arc::new(Mutex::new(HashMap::new())),
+            monitor: Monitor::new(Arc::new(RevalidationInterval::new(
+                DEFAULT_REVALIDATION_INTERVAL,
+            ))),
         }
+    }
+
+    /// Pace the revalidation monitor with `clock` (an interval, or a test's
+    /// controlled clock). Set it before starting runs.
+    pub fn with_revalidation(mut self, clock: Arc<dyn RevalidationClock>) -> Self {
+        self.monitor = Monitor::new(clock);
+        self
+    }
+
+    /// Re-check active revocable runs every `period` (clamped).
+    pub fn with_revalidation_interval(self, period: Duration) -> Self {
+        self.with_revalidation(Arc::new(RevalidationInterval::new(period)))
+    }
+
+    /// The monitor's state, updated after every sweep.
+    pub fn monitor_state(&self) -> watch::Receiver<MonitorState> {
+        self.monitor.state.subscribe()
+    }
+
+    /// Start the monitor unless one is running.
+    fn ensure_monitor(&self) {
+        let Ok(mut task) = self.monitor.task.lock() else {
+            return;
+        };
+        if task.as_ref().is_some_and(|running| !running.is_finished()) {
+            return;
+        }
+        self.monitor.state.send_modify(|state| {
+            state.running = true;
+            state.started += 1;
+        });
+        *task = Some(tokio::spawn(watch_runs(
+            Arc::downgrade(&self.runs),
+            Arc::clone(&self.monitor),
+        )));
     }
 
     /// The tools the factory currently offers to the active target.
@@ -610,6 +797,11 @@ impl RunManager {
             recheck: watch::Sender::new(0),
         });
         self.runs.lock().await.insert(id, state.clone());
+        if supervised {
+            self.monitor.active.fetch_add(1, Ordering::SeqCst);
+            self.ensure_monitor();
+        }
+        let monitor = Arc::clone(&self.monitor);
 
         let factory = self.factory.clone();
         let run_state = state.clone();
@@ -659,6 +851,11 @@ impl RunManager {
                     .run_as(request, trust, sink_tx, cancel, decisions_rx)
                     .await
             };
+            // No longer active for the monitor once the run is over; done
+            // before the terminal status is visible to anyone waiting on it.
+            if supervised {
+                monitor.active.fetch_sub(1, Ordering::SeqCst);
+            }
             let _ = forwarder.await;
             run_state.set_pending(None).await;
             run_state.set_status(status).await;
@@ -725,19 +922,7 @@ impl RunManager {
     /// per active run; nothing polls. Returns the runs revoked now, with
     /// why.
     pub async fn revalidate(&self) -> Vec<(String, Denial)> {
-        let mut revoked = Vec::new();
-        for run in self.active().await {
-            if run.authorization.is_revocable()
-                && run.authorization.revoked().is_none()
-                && let Err(denial) = run.authorization.verify()
-            {
-                revoked.push((run.id.clone(), denial));
-            }
-        }
-        for run in self.runs.lock().await.values() {
-            run.request_recheck();
-        }
-        revoked
+        sweep_runs(&self.runs).await.1
     }
 
     /// The runs currently awaiting an approval decision.
