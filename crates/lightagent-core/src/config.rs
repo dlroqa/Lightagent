@@ -249,6 +249,10 @@ pub struct WebSearchConfig {
     pub api_key: Option<SecretRef>,
     /// The most results a single search returns.
     pub max_results: usize,
+    /// Profiles whose **untrusted** (multi-user) runs may use `api_key`. An
+    /// operator run always may; an untrusted run of any other profile has
+    /// `web.search` refused rather than borrow the installation's key.
+    pub credential_profiles: Vec<String>,
 }
 
 impl Default for WebSearchConfig {
@@ -258,6 +262,7 @@ impl Default for WebSearchConfig {
             query_param: "q".to_owned(),
             api_key: None,
             max_results: 5,
+            credential_profiles: Vec::new(),
         }
     }
 }
@@ -267,9 +272,9 @@ impl Default for WebSearchConfig {
 /// Off by default: `web.fetch` and `web.search` are declared to the model but
 /// refuse to run until `enabled` is set, so a fresh install reaches no network.
 /// `allow_domains`, when non-empty, is an allow-list a fetch host must match
-/// (exactly or as a subdomain); it also opts a host past the private-address
-/// guard, so an operator can reach a named internal service without opening the
-/// guard for everything.
+/// (exactly or as a subdomain). It is **not** an exemption from the address
+/// checks: an internal service is reached by naming its network in
+/// `trusted_networks`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebConfig {
@@ -280,9 +285,17 @@ pub struct WebConfig {
     /// The per-request timeout, in seconds.
     pub timeout_secs: u64,
     /// Refuse a fetch whose host resolves to a loopback, private, link-local or
-    /// otherwise non-global address (an SSRF guard), unless the host is named in
-    /// `allow_domains`.
+    /// otherwise non-global address (an SSRF guard). Turning it off affects
+    /// operator runs only; cloud metadata and host management endpoints stay
+    /// refused. Prefer `trusted_networks`.
     pub block_private_addresses: bool,
+    /// Operator-approved networks, in CIDR form (`10.20.0.0/16`), where an
+    /// operator run may fetch a non-public address. Never applied to
+    /// untrusted runs.
+    pub trusted_networks: Vec<String>,
+    /// For untrusted (multi-user) runs only: the hosts each profile may reach
+    /// with `web.fetch` and `web.search`. A profile not listed reaches none.
+    pub untrusted_destinations: BTreeMap<String, Vec<String>>,
     /// The `web.search` backend.
     pub search: WebSearchConfig,
 }
@@ -295,6 +308,8 @@ impl Default for WebConfig {
             max_fetch_bytes: 1_000_000,
             timeout_secs: 20,
             block_private_addresses: true,
+            trusted_networks: Vec::new(),
+            untrusted_destinations: BTreeMap::new(),
             search: WebSearchConfig::default(),
         }
     }
@@ -323,7 +338,58 @@ pub enum McpServerEntry {
         headers: BTreeMap<String, String>,
         #[serde(default)]
         auth: Option<SecretRef>,
+        /// Profiles whose **untrusted** runs may use this server at all. An
+        /// operator run always may.
+        #[serde(default)]
+        untrusted_profiles: Vec<String>,
+        /// Profiles whose untrusted runs may send this server's `auth` and
+        /// `headers`. Others connect without them.
+        #[serde(default)]
+        credential_profiles: Vec<String>,
     },
+}
+
+/// Whether an http(s) URL carries userinfo (`user:pass@`) in its authority.
+fn url_has_userinfo(url: &str) -> bool {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    authority.contains('@')
+}
+
+/// An IP address or `address/prefix` with a prefix within the family's width.
+fn valid_network(text: &str) -> bool {
+    let (address, prefix) = match text.trim().split_once('/') {
+        Some((address, prefix)) => (address, Some(prefix)),
+        None => (text.trim(), None),
+    };
+    let Ok(ip) = address.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    let width = if ip.is_ipv4() { 32 } else { 128 };
+    prefix.is_none_or(|prefix| prefix.parse::<u8>().is_ok_and(|bits| bits <= width))
+}
+
+/// A host name or IP for a destination list: no scheme, path, port or
+/// wildcard.
+fn valid_destination_host(host: &str) -> bool {
+    let host = host.trim();
+    !host.is_empty() && !host.contains(['/', ':', '@', '*', ' '])
+        || host.parse::<std::net::IpAddr>().is_ok()
+}
+
+/// Every entry must be a valid profile id.
+fn check_profiles<'a>(
+    field: &str,
+    profiles: impl IntoIterator<Item = &'a String>,
+) -> Result<(), ConfigError> {
+    for profile in profiles {
+        if crate::profile::ProfileId::new(profile.clone()).is_err() {
+            return Err(ConfigError::Invalid(format!(
+                "{field} entry {profile:?} is not a valid profile id"
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl McpServerEntry {
@@ -1153,6 +1219,28 @@ impl Config {
                 "agent.wall_clock_secs must be at least 1, or null for no time limit".to_owned(),
             ));
         }
+        for network in &self.web.trusted_networks {
+            if !valid_network(network) {
+                return Err(ConfigError::Invalid(format!(
+                    "web.trusted_networks entry {network:?} is not an IP network in CIDR form"
+                )));
+            }
+        }
+        check_profiles(
+            "web.untrusted_destinations",
+            self.web.untrusted_destinations.keys(),
+        )?;
+        for (profile, hosts) in &self.web.untrusted_destinations {
+            if let Some(host) = hosts.iter().find(|host| !valid_destination_host(host)) {
+                return Err(ConfigError::Invalid(format!(
+                    "web.untrusted_destinations.{profile} entry {host:?} must be a bare host name"
+                )));
+            }
+        }
+        check_profiles(
+            "web.search.credential_profiles",
+            &self.web.search.credential_profiles,
+        )?;
         if self.web.enabled {
             if self.web.max_fetch_bytes == 0 {
                 return Err(ConfigError::Invalid(
@@ -1211,13 +1299,32 @@ impl Config {
                             )));
                         }
                     }
-                    McpServerEntry::Http { url, name, .. } => {
+                    McpServerEntry::Http {
+                        url,
+                        name,
+                        untrusted_profiles,
+                        credential_profiles,
+                        ..
+                    } => {
                         let url = url.trim();
                         if !(url.starts_with("http://") || url.starts_with("https://")) {
                             return Err(ConfigError::Invalid(format!(
                                 "mcp server {name:?} url must be an http(s) URL"
                             )));
                         }
+                        if url_has_userinfo(url) {
+                            return Err(ConfigError::Invalid(format!(
+                                "mcp server {name:?} url must not carry credentials; use auth"
+                            )));
+                        }
+                        check_profiles(
+                            &format!("mcp server {name:?} untrusted_profiles"),
+                            untrusted_profiles,
+                        )?;
+                        check_profiles(
+                            &format!("mcp server {name:?} credential_profiles"),
+                            credential_profiles,
+                        )?;
                     }
                 }
             }
@@ -1852,6 +1959,109 @@ mod tests {
     }
 
     #[test]
+    fn egress_settings_are_validated_and_old_configs_still_load() {
+        // A configuration written before these settings existed loads with
+        // them empty: no trusted network, no untrusted grant.
+        let old: Config = serde_json::from_str(
+            r#"{"web":{"enabled":true,"allow_domains":["example.com"]},
+                "mcp":{"enabled":true,"servers":[{"transport":"http","name":"docs","url":"https://mcp.example.com/mcp"}]}}"#,
+        )
+        .unwrap();
+        old.validate().unwrap();
+        assert!(old.web.trusted_networks.is_empty());
+        assert!(old.web.untrusted_destinations.is_empty());
+        assert!(old.web.search.credential_profiles.is_empty());
+        match &old.mcp.servers[0] {
+            McpServerEntry::Http {
+                untrusted_profiles,
+                credential_profiles,
+                ..
+            } => assert!(untrusted_profiles.is_empty() && credential_profiles.is_empty()),
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let valid = |change: &dyn Fn(&mut Config)| {
+            let mut config = Config::default();
+            config.mcp.enabled = true;
+            change(&mut config);
+            config.validate()
+        };
+        assert!(
+            valid(&|c| c.web.trusted_networks = vec!["127.0.0.1/32".to_owned(), "::1".to_owned()])
+                .is_ok()
+        );
+        for bad in ["wiki.corp", "127.0.0.1/33", "::1/200", ""] {
+            assert!(
+                valid(&|c| c.web.trusted_networks = vec![bad.to_owned()]).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(
+            valid(&|c| {
+                c.web
+                    .untrusted_destinations
+                    .insert("Not A Profile".to_owned(), Vec::new());
+            })
+            .is_err()
+        );
+        for bad in [
+            "https://example.com",
+            "example.com/path",
+            "*.example.com",
+            "user@example.com",
+        ] {
+            assert!(
+                valid(&|c| {
+                    c.web
+                        .untrusted_destinations
+                        .insert("research".to_owned(), vec![bad.to_owned()]);
+                })
+                .is_err(),
+                "{bad}"
+            );
+        }
+        assert!(valid(&|c| c.web.search.credential_profiles = vec!["../x".to_owned()]).is_err());
+        let http = |url: &str, untrusted: &str, credentials: &str| McpServerEntry::Http {
+            name: "docs".to_owned(),
+            url: url.to_owned(),
+            headers: BTreeMap::new(),
+            auth: None,
+            untrusted_profiles: vec![untrusted.to_owned()],
+            credential_profiles: vec![credentials.to_owned()],
+        };
+        assert!(
+            valid(&|c| c.mcp.servers.push(http(
+                "https://mcp.example.com/",
+                "research",
+                "research"
+            )))
+            .is_ok()
+        );
+        assert!(
+            valid(&|c| c.mcp.servers.push(http(
+                "https://user:pw@mcp.example.com/",
+                "research",
+                "research"
+            )))
+            .is_err()
+        );
+        assert!(
+            valid(&|c| c
+                .mcp
+                .servers
+                .push(http("https://mcp.example.com/", "bad id", "research")))
+            .is_err()
+        );
+        assert!(
+            valid(&|c| c
+                .mcp
+                .servers
+                .push(http("https://mcp.example.com/", "research", "bad id")))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn mcp_validation_checks_servers_when_enabled() {
         let mut config = Config::default();
         config.mcp.servers.push(McpServerEntry::Http {
@@ -1859,6 +2069,8 @@ mod tests {
             url: "not-a-url".to_owned(),
             headers: BTreeMap::new(),
             auth: None,
+            untrusted_profiles: Vec::new(),
+            credential_profiles: Vec::new(),
         });
         config
             .validate()

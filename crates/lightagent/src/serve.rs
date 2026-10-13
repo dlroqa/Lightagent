@@ -29,8 +29,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::chat::{
     LightweightFactory, configured_model, configured_registry, load_extensions, load_skills,
-    open_terminal_context, resolve_profile, web_context, web_research_instructions,
-    workspace_context,
+    open_terminal_context, resolve_profile, web_research_instructions, workspace_context,
 };
 
 /// Builds and drives a real run with the Lightweight provider per request.
@@ -300,8 +299,14 @@ impl RunFactory for LightweightRunFactory {
         );
         delegation.delegate_timeout = Duration::from_secs(config.subagents.delegate_timeout_secs);
         delegation.subagents = crate::chat::subagent_policy(&config);
-        let mut registry =
-            configured_registry(&config, &profile_dir, &extensions, !skills.is_empty()).await;
+        let mut registry = crate::chat::configured_registry_for(
+            &config,
+            &profile_dir,
+            &extensions,
+            !skills.is_empty(),
+            crate::chat::RemoteAccess::for_run(trust, &profile.id),
+        )
+        .await;
         // One Jev budget per run covers the preflight and every explicit call.
         let budget = crate::coordinator::JevBudget::new(
             config.platform.jev.classification.max_calls_per_run,
@@ -383,7 +388,10 @@ impl RunFactory for LightweightRunFactory {
                 registry_snapshot,
             ));
         }
-        if let Some(web) = web_context(&config) {
+        if let Some(web) = crate::chat::web_context_for(
+            &config,
+            crate::chat::RemoteAccess::for_run(trust, &profile.id),
+        ) {
             executor = executor.with_web(web);
         }
         if let Some(workspace) = workspace_context(&config, workspace_dir) {

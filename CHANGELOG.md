@@ -6,6 +6,27 @@ All notable Lightagent changes are documented here.
 
 ### Security
 
+- Remote tool egress hardening (`lightagent_tools::egress`), effective
+  immediately for every run:
+  - `web.fetch` vets every resolved address of every hop, **including
+    allow-listed hosts**, which no longer bypass the private-address check.
+    It connects only to the vetted addresses, with no environment or system
+    proxy.
+  - Cloud metadata and host management endpoints (including the Azure
+    WireServer) are refused even with `block_private_addresses = false`.
+  - Userinfo URLs, HTTPS-to-HTTP redirects and redirect loops are refused.
+  - HTTP MCP no longer follows redirects, which forwarded custom headers and
+    request bodies to the redirect target.
+  - Remote errors name the host only.
+
+  Internal services are reached through the new operator setting
+  `web.trusted_networks` (CIDR). For untrusted (multi-user) runs, still
+  unactivatable, the installation's search key and MCP credentials are
+  used only by profiles granted them. Destinations are limited to the
+  profile's `web.untrusted_destinations`. HTTP MCP servers are offered only
+  when granted, and their tools always require approval. Stdio MCP servers
+  are never started. Details, compatibility and migration:
+  `docs/architecture/remote-tool-egress.md`.
 - Experimental Linux sandbox backend (`lightagent_tools::sandbox::bubblewrap`,
   Linux only). It runs a fixed allowlist of programs under bubblewrap, with:
   - new user, mount, PID, network, IPC, UTS and cgroup namespaces;
