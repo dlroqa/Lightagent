@@ -5,7 +5,7 @@
 //! returned, tool activity is shown on stderr, and a tool call that needs
 //! approval pauses for a numbered decision at the prompt before the run resumes.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::io::{BufRead as _, IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -246,6 +246,73 @@ pub(crate) async fn configured_registry(
         registry.insert(tool);
     }
     registry
+}
+
+/// The MCP servers this configuration reaches over HTTP, by configured name.
+/// Tool policy treats every other MCP server's tools as local commands.
+pub(crate) fn network_mcp_servers(
+    config: &Config,
+    extensions: &ExtensionStore,
+) -> BTreeSet<String> {
+    config
+        .mcp
+        .servers
+        .iter()
+        .chain(
+            extensions
+                .active(&config.extensions)
+                .flat_map(|extension| extension.mcp_servers.iter()),
+        )
+        .filter_map(|entry| match entry {
+            McpServerEntry::Http { name, .. } => Some(name.clone()),
+            McpServerEntry::Stdio { .. } => None,
+        })
+        .collect()
+}
+
+/// The run's tool policy over `registry`: what the profile's `toolsets` keep
+/// of the enabled tools, under `tools.profile_policy` and the run's trust.
+pub(crate) fn tool_policy(
+    config: &Config,
+    extensions: &ExtensionStore,
+    registry: &ToolRegistry,
+    profile: &AgentProfile,
+    trust: lightagent_core::identity::RunTrust,
+) -> lightagent_tools::policy::ToolPolicy {
+    lightagent_tools::policy::resolve(
+        registry,
+        &profile.toolsets,
+        config.tools.profile_policy,
+        trust,
+        &network_mcp_servers(config, extensions),
+    )
+}
+
+/// A guard that re-reads the profile's current tool policy before each call,
+/// so tightening `toolsets` or `tools.profile_policy` applies to a run already
+/// in progress. Installed for enforced policies. An unreadable configuration
+/// or profile refuses the call.
+pub(crate) fn tool_policy_guard(
+    root: PathBuf,
+    profile: ProfileId,
+    trust: lightagent_core::identity::RunTrust,
+    registry: ToolRegistry,
+) -> lightagent_tools::CallGuard {
+    Arc::new(move |name: &str| {
+        let paths = LightagentPaths::rooted_at(&root);
+        let Ok(config) = ConfigStore::at(&paths).load() else {
+            return false;
+        };
+        let store = ProfileStore::new(&root);
+        let Ok(current) = resolve_profile(&store, &config, Some(profile.as_str().to_owned()))
+        else {
+            return false;
+        };
+        let extensions = load_extensions(&root, store.handle(&profile).dir());
+        tool_policy(&config, &extensions, &registry, &current, trust)
+            .allowed
+            .contains(name)
+    })
 }
 
 /// Teach a tool-capable model to research iteratively when web access is active.
@@ -492,6 +559,24 @@ async fn build_chat_runtime(
         Arc::clone(&jev_budget),
         crate::coordinator::JevState::new(),
     );
+    // The terminal is the local operator; the profile's tool policy applies
+    // exactly as it does to an operator's API run.
+    let tool_policy = tool_policy(
+        config,
+        &extensions,
+        &registry,
+        profile,
+        lightagent_core::identity::RunTrust::LocalOperator,
+    );
+    if let Some(line) = tool_policy.summary(profile.id.as_str()) {
+        eprintln!("· {line}");
+    }
+    let registry = tool_policy.apply(&registry);
+    if tool_policy.enforced {
+        delegation.worker_registry = tool_policy.worker_registry(&ToolRegistry::worker_default());
+        delegation.limit_ceiling = Some(profile.limits);
+        delegation.approval_floor = Some(profile.approval_policy);
+    }
     let tools = registry.names();
     let workflow_registry = registry.clone();
     let permission_policy = PolicyEngine::new(profile.approval_policy.into());
@@ -515,6 +600,7 @@ async fn build_chat_runtime(
             format!("{} [{permission}]", definition.name)
         })
         .collect();
+    let guarded_registry = registry.clone();
     let mut executor = BoundedExecutor::new(
         registry,
         PolicyEngine::new(profile.approval_policy.into()),
@@ -523,6 +609,14 @@ async fn build_chat_runtime(
     )
     .with_run(RunId::new())
     .with_delegation(delegation);
+    if tool_policy.enforced {
+        executor = executor.with_call_guard(tool_policy_guard(
+            home.to_path_buf(),
+            profile.id.clone(),
+            lightagent_core::identity::RunTrust::LocalOperator,
+            guarded_registry,
+        ));
+    }
     if let Some(web) = web_context(config) {
         executor = executor.with_web(web);
     }
@@ -3357,6 +3451,68 @@ for line in sys.stdin:
             agent.config().system,
             system_before,
             "the session prompt is unchanged"
+        );
+    }
+
+    #[test]
+    fn the_tool_policy_guard_follows_the_current_profile_and_fails_closed() {
+        let root =
+            std::env::temp_dir().join(format!("lightagent-tool-guard-{}", RunId::new().as_str()));
+        let paths = LightagentPaths::rooted_at(&root);
+        let mut config = Config::default();
+        config.tools.profile_policy = lightagent_core::ToolPolicyMode::Enforce;
+        ConfigStore::at(&paths).save(&config).unwrap();
+        let store = ProfileStore::new(&root);
+        let mut lead = AgentProfile::new(ProfileId::new("lead").unwrap(), "Lead", "Persona", "m");
+        lead.toolsets = vec!["datetime.now".to_owned(), "web.fetch".to_owned()];
+        store.create(&lead).unwrap();
+        let registry = ToolRegistry::builtin();
+        let guard = tool_policy_guard(
+            root.clone(),
+            lead.id.clone(),
+            lightagent_core::identity::RunTrust::LocalOperator,
+            registry,
+        );
+        assert!(guard("datetime.now"));
+        assert!(guard("web.fetch"));
+        assert!(!guard("terminal.run"));
+        // The operator narrows the profile mid-run: the next call is refused.
+        lead.toolsets = vec!["datetime.now".to_owned()];
+        store.save(&lead).unwrap();
+        assert!(guard("datetime.now"));
+        assert!(!guard("web.fetch"));
+        // A configuration that cannot be read refuses every call.
+        std::fs::write(paths.config_file(), b"{not json").unwrap();
+        assert!(!guard("datetime.now"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn the_tool_policy_mode_key_round_trips_and_rejects_unknown_values() {
+        let mut config = Config::default();
+        assert_eq!(
+            config.tools.profile_policy,
+            lightagent_core::ToolPolicyMode::Off
+        );
+        for value in ["report_only", "enforce", "strict", "off"] {
+            config.tools.profile_policy = value.parse().unwrap();
+            assert_eq!(config.tools.profile_policy.as_str(), value);
+        }
+        for invalid in ["", "on", "allow", "Strict!"] {
+            assert!(
+                invalid.parse::<lightagent_core::ToolPolicyMode>().is_err(),
+                "{invalid:?}"
+            );
+        }
+        // A configuration written before the setting existed loads as off.
+        let legacy: Config =
+            serde_json::from_str(r#"{"tools":{"enabled":true,"allow_terminal":true}}"#).unwrap();
+        assert_eq!(
+            legacy.tools.profile_policy,
+            lightagent_core::ToolPolicyMode::Off
+        );
+        assert!(
+            serde_json::from_str::<Config>(r#"{"tools":{"profile_policy":"allow_all"}}"#).is_err()
         );
     }
 }

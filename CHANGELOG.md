@@ -6,6 +6,22 @@ All notable Lightagent changes are documented here.
 
 ### Security
 
+- Per-profile tool policy (`tools.profile_policy`: `off` (default),
+  `report_only`, `enforce`, `strict`) over `AgentProfile.toolsets`. Effective
+  tools are the enabled tools, narrowed by the profile's list and the run's
+  trust, and applied to the model's tools, the executor, the workflow policy
+  and delegated workers in the server, terminal, ACP and `tools list`:
+  - A withheld tool cannot be invoked by name.
+  - Enforced runs re-check each call, so a tool withdrawn mid-run is refused.
+  - Approvals are unchanged.
+  - Delegated workers never exceed their run's tools, limits or approval
+    policy.
+  - Untrusted (multi-user) runs are always strict and never receive local
+    files, commands, stdio MCP or delegation, because tools run as the
+    server's OS account.
+
+  Existing installations are unchanged. Design, audit and the sandboxing
+  plan: `docs/architecture/profile-tool-policy.md`.
 - Run-ownership enforcement for a multi-user API mode that stays **off**
   (`lightagent serve` cannot enable it yet). In that mode:
   - Every request needs a credential, loopback included.

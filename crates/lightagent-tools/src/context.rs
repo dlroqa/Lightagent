@@ -14,7 +14,9 @@ use std::sync::{
 };
 use std::time::{Duration, SystemTime};
 
-use lightagent_core::{ProfileStore, ProviderFactory, RunId, SkillStore};
+use lightagent_core::{
+    ApprovalPolicy, ProfileStore, ProviderFactory, RunId, RunLimits, SkillStore,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::registry::ToolRegistry;
@@ -63,6 +65,14 @@ pub struct Delegation {
     /// Extra, opt-in controls for named hierarchical workers. When disabled,
     /// legacy profile delegation remains deliberately one level deep.
     pub subagents: SubagentPolicy,
+    /// When set, a worker's limits never exceed these: the originating run's
+    /// own limits. Nested delegation inherits it. `None` keeps the worker
+    /// profile's limits, as before.
+    pub limit_ceiling: Option<RunLimits>,
+    /// When set, a worker runs under the stricter of its profile's approval
+    /// policy and this one, the originating run's. Nested delegation inherits
+    /// it. `None` keeps the worker profile's policy, as before.
+    pub approval_floor: Option<ApprovalPolicy>,
     /// Depth of this execution in the delegation tree. The lead is zero.
     pub depth: u8,
     /// Number of direct children this execution has reserved. This is shared
@@ -131,6 +141,8 @@ impl Delegation {
             delegate_timeout: Duration::from_secs(60),
             worker_max_output_bytes,
             subagents: SubagentPolicy::default(),
+            limit_ceiling: None,
+            approval_floor: None,
             depth: 0,
             children: Arc::new(AtomicU8::new(0)),
         }
@@ -177,6 +189,8 @@ impl Delegation {
             delegate_timeout: self.delegate_timeout,
             worker_max_output_bytes: self.worker_max_output_bytes,
             subagents: self.subagents.clone(),
+            limit_ceiling: self.limit_ceiling,
+            approval_floor: self.approval_floor,
             depth: self.depth.saturating_add(1),
             children: Arc::new(AtomicU8::new(0)),
         }

@@ -169,10 +169,17 @@ impl Tool for AgentDelegate {
             registry = registry.with(std::sync::Arc::new(AgentDelegate::new()));
         }
 
-        let limits = intersect_caps(&worker.limits, args.max_turns, args.max_seconds);
+        let mut limits = intersect_caps(&worker.limits, args.max_turns, args.max_seconds);
+        if let Some(ceiling) = &delegation.limit_ceiling {
+            limits = within_ceiling(limits, ceiling);
+        }
+        let approval = match delegation.approval_floor {
+            Some(floor) => worker.approval_policy.stricter(floor),
+            None => worker.approval_policy,
+        };
         let mut executor = BoundedExecutor::new(
             registry,
-            PolicyEngine::new(worker.approval_policy.into()),
+            PolicyEngine::new(approval.into()),
             delegation.worker_per_call,
             delegation.worker_max_output_bytes,
         )
@@ -202,6 +209,19 @@ impl Tool for AgentDelegate {
             Err(error) => ToolOutcome::error(format!("worker '{profile_name}' failed: {error}")),
         }
     }
+}
+
+/// Bound a worker's limits by the originating run's: the tighter of each.
+fn within_ceiling(limits: RunLimits, ceiling: &RunLimits) -> RunLimits {
+    let mut bounded = limits;
+    bounded.max_turns = bounded.max_turns.min(ceiling.max_turns);
+    bounded.max_tool_calls = bounded.max_tool_calls.min(ceiling.max_tool_calls);
+    bounded.wall_clock_secs = match (bounded.wall_clock_secs, ceiling.wall_clock_secs) {
+        (Some(own), Some(cap)) => Some(own.min(cap)),
+        (None, cap) => cap,
+        (own, None) => own,
+    };
+    bounded
 }
 
 /// Intersect the worker's own limits with the caller's optional caps, taking the

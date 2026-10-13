@@ -808,7 +808,11 @@ async fn create_run(
     // Multi-user mode authorizes the caller for the profile, resolved on the
     // server, before anything profile-specific is built. `owner` records who
     // started the run and as which profile; it never changes afterwards.
-    let mut owner: Option<(lightagent_core::identity::PrincipalId, Option<ProfileId>)> = None;
+    let mut owner: Option<(
+        lightagent_core::identity::PrincipalId,
+        Option<ProfileId>,
+        lightagent_core::identity::RunTrust,
+    )> = None;
     if state.auth.identity().is_some() {
         let (identity, caller) = match multi_user_caller(&state, &headers, Scope::RunsWrite) {
             Ok(found) => found,
@@ -835,12 +839,17 @@ async fn create_run(
                     owner = Some((
                         authorized.principal().clone(),
                         Some(authorized.profile().clone()),
+                        caller.principal.role.run_trust(),
                     ));
                 }
                 Err(denial) => return refused(denial),
             }
         } else {
-            owner = Some((caller.principal.id.clone(), None));
+            owner = Some((
+                caller.principal.id.clone(),
+                None,
+                caller.principal.role.run_trust(),
+            ));
         }
     } else if let Some(rejection) = deny(&state, &headers, Scope::RunsWrite) {
         return rejection;
@@ -896,7 +905,7 @@ async fn create_run(
         model: body.model,
     };
     let run = match owner {
-        Some((principal, authorized)) => {
+        Some((principal, authorized, trust)) => {
             // An operator's run records the profile it named, if valid.
             let profile = authorized.or_else(|| {
                 request
@@ -906,7 +915,7 @@ async fn create_run(
             });
             state
                 .manager
-                .start_as(request, RunOwner::new(principal, profile))
+                .start_as(request, RunOwner::new(principal, profile, trust))
                 .await
         }
         None => state.manager.start(request).await,

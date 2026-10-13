@@ -731,6 +731,21 @@ async fn tools_list(json: bool) -> Result<(), String> {
         coordinator::JevBudget::new(config.platform.jev.classification.max_calls_per_run),
         coordinator::JevState::new(),
     );
+    // What a run of the active profile receives under its tool policy. In
+    // report-only mode every tool is listed and the summary says what
+    // enforcement would withhold. The summary goes to stderr, so the JSON
+    // output keeps its shape.
+    let tool_policy = chat::tool_policy(
+        &config,
+        &extensions,
+        &registry,
+        &profile,
+        lightagent_core::identity::RunTrust::LocalOperator,
+    );
+    if let Some(line) = tool_policy.summary(profile.id.as_str()) {
+        eprintln!("{line}");
+    }
+    let registry = tool_policy.apply(&registry);
     let policy = lightagent_core::PolicyEngine::new(profile.approval_policy.into());
     let mut rows = Vec::new();
     for name in registry.names() {
@@ -1204,6 +1219,7 @@ fn get_key(config: &Config, key: &str) -> Option<String> {
         "web.max_fetch_bytes" => Some(config.web.max_fetch_bytes.to_string()),
         "web.timeout_secs" => Some(config.web.timeout_secs.to_string()),
         "rag.realtime_enabled" => Some(config.rag.realtime_enabled.to_string()),
+        "tools.profile_policy" => Some(config.tools.profile_policy.as_str().to_owned()),
         "platform.jev.enabled" => Some(config.platform.jev.endpoint.enabled.to_string()),
         "platform.jev.base_url" => Some(
             config
@@ -1426,6 +1442,7 @@ fn set_key(config: &mut Config, key: &str, value: &str) -> Result<(), String> {
             config.web.timeout_secs = parse_u64(value, "web.timeout_secs")?;
         }
         "rag.realtime_enabled" => config.rag.realtime_enabled = parse_bool(value)?,
+        "tools.profile_policy" => config.tools.profile_policy = value.parse()?,
         "platform.jev.enabled" => config.platform.jev.endpoint.enabled = parse_bool(value)?,
         "platform.jev.base_url" => config.platform.jev.endpoint.base_url = parse_opt_string(value),
         "platform.jev.model" => config.platform.jev.model = value.trim().to_owned(),
