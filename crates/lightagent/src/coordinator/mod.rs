@@ -40,7 +40,7 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) use classify::{ClassificationReport, Outcome};
 pub(crate) use state::{JevBudget, JevState, Trigger};
-pub(crate) use tool::{add_explicit_tool, status};
+pub(crate) use tool::{add_explicit_tool, status, user_status};
 
 /// Jev stubs shared with the run-level tests in `serve`.
 #[cfg(test)]
