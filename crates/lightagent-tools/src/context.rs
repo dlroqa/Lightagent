@@ -491,6 +491,7 @@ mod tests {
             search_query_param: "q".to_owned(),
             search_api_key: Some("super-secret-token".to_owned()),
             search_max_results: 5,
+            ..WebPolicy::default()
         };
         let rendered = format!("{policy:?}");
         assert!(

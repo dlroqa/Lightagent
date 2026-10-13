@@ -29,8 +29,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::chat::{
     LightweightFactory, configured_model, configured_registry, load_extensions, load_skills,
-    open_terminal_context, resolve_profile, web_context, web_research_instructions,
-    workspace_context,
+    open_terminal_context, resolve_profile, web_research_instructions, workspace_context,
 };
 
 /// Builds and drives a real run with the Lightweight provider per request.
