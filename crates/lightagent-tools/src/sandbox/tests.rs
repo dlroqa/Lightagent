@@ -28,6 +28,7 @@ enum Behavior {
 /// lifecycle call and records the environment it would hand a child.
 struct MockBackend {
     behavior: Behavior,
+    assurance: Assurance,
     enforced: BTreeSet<Guarantee>,
     server_env: BTreeMap<String, String>,
     starts: AtomicUsize,
@@ -40,6 +41,7 @@ impl MockBackend {
     fn new(behavior: Behavior) -> Self {
         Self {
             behavior,
+            assurance: Assurance::Simulated,
             enforced: Guarantee::ALL.into_iter().collect(),
             server_env: BTreeMap::from([
                 ("PROVIDER_API_KEY".to_owned(), "sk-server-secret".to_owned()),
@@ -52,6 +54,11 @@ impl MockBackend {
             releases: AtomicUsize::new(0),
             child_env: Mutex::new(None),
         }
+    }
+
+    fn experimental(mut self) -> Self {
+        self.assurance = Assurance::Experimental;
+        self
     }
 
     fn without(mut self, guarantee: Guarantee) -> Self {
@@ -71,7 +78,7 @@ impl SandboxBackend for MockBackend {
     }
 
     fn assurance(&self) -> Assurance {
-        Assurance::Simulated
+        self.assurance
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -746,6 +753,51 @@ fn the_policy_and_the_gate_agree_on_untrusted_execution() {
     );
     assert_eq!(
         SandboxGate::deny_by_default(always()).route(&remote(grants())),
+        Err(SandboxError::Denied(DenialReason::NoBackend))
+    );
+}
+
+/// An experimental backend (real processes, unverified guarantees) is never
+/// eligible: not in production, and not even through the test-only gate
+/// that accepts simulations.
+#[tokio::test]
+async fn an_experimental_backend_is_never_eligible_for_untrusted_runs() {
+    let backend = Arc::new(MockBackend::new(Behavior::Succeed).experimental());
+    for gate in [
+        SandboxGate::with_backend(backend.clone(), always()),
+        test_gate(&backend),
+    ] {
+        assert_eq!(
+            gate.route(&remote(grants())),
+            Err(SandboxError::Denied(DenialReason::NotVerified))
+        );
+        assert_eq!(
+            gate.execute(&remote(grants()), &request()).await,
+            Err(SandboxError::Denied(DenialReason::NotVerified))
+        );
+        assert_eq!(gate.route(&local()), Ok(Route::Host));
+    }
+    assert_eq!(MockBackend::count(&backend.starts), 0);
+    assert_eq!(
+        SandboxError::from(BackendFault::TimedOut),
+        SandboxError::TimedOut
+    );
+    assert_eq!(
+        SandboxError::from(BackendFault::Cancelled),
+        SandboxError::Cancelled
+    );
+}
+
+/// macOS and Windows have no execution backend at all: the bubblewrap
+/// module is not compiled there, and the production gate denies.
+#[cfg(not(target_os = "linux"))]
+#[tokio::test]
+async fn untrusted_execution_is_denied_on_macos_and_windows() {
+    assert_ne!(Platform::current(), Platform::Linux);
+    let gate = SandboxGate::deny_by_default(always());
+    assert_eq!(gate.backend_name(), "deny");
+    assert_eq!(
+        gate.execute(&remote(grants()), &request()).await,
         Err(SandboxError::Denied(DenialReason::NoBackend))
     );
 }
