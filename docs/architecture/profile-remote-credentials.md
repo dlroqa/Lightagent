@@ -80,8 +80,16 @@ credential, and a tool being available grants no credential.
 - **Master key source.** The 256-bit key comes from
   `LIGHTAGENT_CREDENTIAL_KEY_FILE` (64 hex digits) or
   `LIGHTAGENT_CREDENTIAL_KEY`. The key file must be **outside** the
-  Lightagent home (checked on canonical paths), and on Unix owner-only.
-  `remote-credential keygen` creates one as a new `0600` file.
+  Lightagent home (checked on canonical paths). On Unix it must be a
+  regular file, mode `0600` or stricter, owned by the account that owns the
+  home; mode and owner are checked on the opened file, so a path swapped
+  after the check is never read. An unreadable home proves no owner, so the
+  key is refused. `remote-credential keygen` creates one as a new `0600`
+  file.
+- **Windows.** There is no POSIX mode or owner to check, so neither check
+  runs: the key file's ACL is the operator's responsibility (owner-only
+  read, no inherited group access). The outside-the-home check still
+  applies. Prefer the key file over the environment variable there too.
 - **Fingerprints.** Each record carries a short fingerprint of the key that
   sealed it, so the wrong key is reported as `key_mismatch` instead of a
   decryption failure.
@@ -132,6 +140,13 @@ each remote request:
 - **Rotation supersedes.** A run that opened version *n* stops when version
   *n+1* exists (`superseded`). New runs get the new secret.
 - **Budgets** count requests per run, including MCP protocol requests.
+  The count is one atomic decrement per request on the run's single
+  `CredentialUse`, taken only after every other check passes, so racing
+  requests never exceed it (`concurrent_requests_never_exceed_the_budget`:
+  64 threads, budget 5, exactly 5 succeed). A run builds one web context
+  (shared with its delegated workers) and one MCP registry, so it holds one
+  counter per grant. Listing a profile's tools (`tools_for`) connects with a
+  separate, throwaway count: MCP protocol requests only, never a tool call.
   Operations restrict MCP `tools/call` by tool name, and `web.search`.
 - **No fallback.** Once a vault exists, untrusted runs never receive an
   installation credential, even for a profile the configuration lists in
@@ -266,16 +281,40 @@ Plus `the_key_must_be_well_formed_and_kept_apart`,
 
 ## 11. Rollback and recovery
 
-- **Rollback.** Revert the PR. `<home>/credentials/` is then unused; delete
-  it to remove every sealed secret. Untrusted runs return to the
-  configuration's grants.
+- **Rollback (backup-preserving).** Never delete vault data as a rollback
+  shortcut.
+  1. Stop the server and any `remote-credential` command.
+  2. Copy `<home>/credentials/` (`state.json`, `audit.jsonl*`) to an
+     owner-only backup location, and record the key fingerprint
+     (`remote-credential status`). Keep the key file; the backup is
+     ciphertext only.
+  3. Revert the PR and deploy the previous build. That build never reads
+     `<home>/credentials/`, so the directory stays in place, unused.
+     Untrusted runs return to the configuration's grants (multi-user mode
+     is not activatable in either build).
+  4. Moving forward again reads the same, untouched vault.
+- **Never restore a revoked credential.** Revocation is a field in
+  `state.json`, so an older copy can hold a grant as active that was
+  revoked since. Before restoring any backup of `state.json`:
+  1. compare its `generation` with the current one; restore only the
+     newest copy that is not known to be corrupt;
+  2. read `audit.jsonl` (kept outside the restored file) for every
+     `credential_revoked` and `credential_rotated` after the backup's time,
+     and re-run `remote-credential revoke <id>` for each revocation right
+     after the restore, before the server starts;
+  3. for a rotation after the backup, `revoke` the restored grant and
+     `add` it again with the current secret (the restored version holds
+     the old secret);
+  4. where the remote service supports it, also revoke the secret at the
+     service itself: that is the only revocation no restore can undo.
 - **Lost key.** Sealed secrets cannot be recovered. Revoke them and add new
   ones under a new key.
 - **Key rotation.** `remote-credential keygen` a new key, point
   `LIGHTAGENT_CREDENTIAL_KEY_FILE` at it, then
   `remote-credential rekey --previous-key-file <old>`. It is all or nothing.
 - **Corrupt vault.** Untrusted runs get no credential (fail closed). Restore
-  `state.json` from a backup: it holds no plaintext.
+  `state.json` from a backup as above (it holds no plaintext), replaying
+  later revocations before the server starts.
 
 ## 12. Remaining limitations
 

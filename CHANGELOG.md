@@ -15,7 +15,10 @@ All notable Lightagent changes are documented here.
     TLS provider) under a per-record HKDF key bound to the credential,
     profile, service and version. The master key is kept outside the home
     (`LIGHTAGENT_CREDENTIAL_KEY_FILE`). A missing or wrong key, an
-    integrity failure or a corrupt vault fails closed.
+    integrity failure or a corrupt vault fails closed. On Unix the key
+    file must be a regular owner-only file owned by the home's account,
+    checked on the opened file.
+  - Budgets: racing requests of one run never exceed its budget.
   - Enforcement: the grant is re-read before every request, and there is
     no fallback to installation credentials.
   - Management: `lightagent remote-credential` (`keygen`, `status`, `add`,
@@ -286,6 +289,9 @@ All notable Lightagent changes are documented here.
 
 - Linux CI jobs are pinned to `ubuntu-24.04` ahead of the `ubuntu-latest`
   move to 26.04. Required check names are unchanged.
+- CI fails when `Cargo.lock` is not exactly what Cargo resolves
+  (`cargo metadata --locked` on Linux, Windows and macOS). The lockfile now
+  records `lightagent-core`'s existing `sha2` dependency, which it omitted.
 - Lightagent's Jev model routing no longer replaces Lightweight's `Auto`
   model; `Auto` reaches the provider unchanged so Lightweight decides the route.
 - `active` classification alone no longer adds advisory guidance; it also

@@ -244,6 +244,34 @@ fn the_key_must_be_well_formed_and_kept_apart() {
     }
     let loaded = MasterKey::from_file(&outside, &home.0).unwrap();
     assert_eq!(loaded.fingerprint(), key.fingerprint());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        // Not a regular file: refused.
+        let directory = outside_dir.join("not-a-key");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            MasterKey::from_file(&directory, &home.0).err(),
+            Some(VaultError::KeyPermissions)
+        );
+        // Owned by another account than the home's (a root-owned home
+        // stands in for it): refused, whatever the mode.
+        let root_owned = Path::new("/usr");
+        if std::fs::metadata(&outside).unwrap().uid() != 0
+            && std::fs::metadata(root_owned).is_ok_and(|meta| meta.uid() == 0)
+        {
+            assert_eq!(
+                MasterKey::from_file(&outside, root_owned).err(),
+                Some(VaultError::KeyPermissions)
+            );
+        }
+        // An unreadable home proves no owner: refused.
+        assert_eq!(
+            MasterKey::from_file(&outside, &outside_dir.join("missing-home")).err(),
+            Some(VaultError::KeyPermissions)
+        );
+    }
     for bad in ["", "zz", &key.to_hex()[..62]] {
         assert_eq!(MasterKey::from_hex(bad).err(), Some(VaultError::KeyInvalid));
     }
@@ -543,6 +571,55 @@ fn every_request_is_checked_against_the_current_grant() {
         assert!(audit.contains(code), "{code}");
     }
     assert!(!audit.contains(SECRET) && !audit.contains("rotated-secret-value"));
+}
+
+// Racing requests of one run never exceed its budget: exactly the budget
+// succeeds, every other request is refused with `budget`.
+#[test]
+fn concurrent_requests_never_exceed_the_budget() {
+    let home = home();
+    let vault = CredentialVault::new(&home.0);
+    let key = MasterKey::generate().unwrap();
+    let at = Arc::new(AtomicU64::new(T0));
+    let service = RemoteService::Mcp {
+        server: "git".into(),
+    };
+    let mut limited = spec("alice-bot", service.clone());
+    limited.destinations = ["https://mcp.test:8443".to_owned()].into();
+    limited.max_requests_per_run = Some(5);
+    vault
+        .add(&operator(), T0, &key, limited, &secret(SECRET))
+        .unwrap();
+    let Resolved::Active { guard, .. } = resolve(
+        &home.0,
+        Some(&key),
+        &profile("alice-bot"),
+        &service,
+        clock(&at),
+    ) else {
+        panic!("active");
+    };
+    let start = Arc::new(std::sync::Barrier::new(64));
+    let threads: Vec<_> = (0..64)
+        .map(|_| {
+            let guard = Arc::clone(&guard);
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                guard.authorize(None, "https://mcp.test:8443/mcp")
+            })
+        })
+        .collect();
+    let outcomes: Vec<_> = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect();
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 5);
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| matches!(outcome, Ok(()) | Err(CredentialDenial::Budget)))
+    );
 }
 
 // Controlled key rotation: every active grant is re-sealed or none is.

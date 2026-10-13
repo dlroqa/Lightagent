@@ -130,8 +130,11 @@ impl MasterKey {
         hex(&self.0)
     }
 
-    /// Read a key file. It must be outside `home` and, on Unix, readable by
-    /// its owner only.
+    /// Read a key file. It must be outside `home` and, on Unix, a regular
+    /// file readable by its owner only, owned by the account that owns
+    /// `home`. The checks apply to the opened file itself, so a path swapped
+    /// after the check is never read. Windows has no POSIX mode or owner to
+    /// check: there the file's ACL is the operator's responsibility.
     pub fn from_file(path: &Path, home: &Path) -> Result<Self, VaultError> {
         let file = path.canonicalize()?;
         if let Ok(home) = home.canonicalize()
@@ -139,14 +142,23 @@ impl MasterKey {
         {
             return Err(VaultError::KeyInsideHome);
         }
+        let mut opened = std::fs::File::open(&file)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt as _;
-            if std::fs::metadata(&file)?.permissions().mode() & 0o077 != 0 {
+            use std::os::unix::fs::MetadataExt as _;
+            let meta = opened.metadata()?;
+            // The home's owner is the operator account; an unreadable home
+            // leaves the owner unproven, so the key is refused.
+            let owner = std::fs::metadata(home)
+                .map(|home| home.uid())
+                .map_err(|_| VaultError::KeyPermissions)?;
+            if !meta.is_file() || meta.mode() & 0o077 != 0 || meta.uid() != owner {
                 return Err(VaultError::KeyPermissions);
             }
         }
-        Self::from_hex(&std::fs::read_to_string(&file)?)
+        let mut text = String::new();
+        io::Read::read_to_string(&mut opened, &mut text)?;
+        Self::from_hex(&text)
     }
 
     /// The key configured for this process: [`KEY_FILE_ENV`], else
