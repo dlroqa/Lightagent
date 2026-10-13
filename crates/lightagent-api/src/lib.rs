@@ -12,6 +12,8 @@
 
 pub mod auth;
 pub mod manager;
+#[cfg(feature = "provisioning-api")]
+pub mod provisioning;
 pub mod sse;
 
 use std::collections::HashSet;

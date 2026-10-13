@@ -6,6 +6,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# The provisioning HTTP contract (`provisioning::routes`). Off by default and
+# enabled by no release or production build: CI builds and tests it on its
+# own. Even when compiled, `router()` never serves it.
+provisioning-api = []
+
 [dependencies]
 lightagent-core.workspace = true
 lightagent-tools.workspace = true

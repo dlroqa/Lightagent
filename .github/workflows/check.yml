@@ -59,6 +59,13 @@ jobs:
             exit 1
           fi
       - run: bash ./scripts/check.sh
+      # The provisioning HTTP contract is behind a cargo feature no release
+      # build enables, so check.sh never compiles it: build, lint and test it
+      # here on every platform.
+      - name: Provisioning API contract (feature-gated)
+        run: |
+          cargo clippy -p lightagent-api --features provisioning-api --all-targets -- -D warnings
+          cargo test -p lightagent-api --features provisioning-api --test provisioning_api
       - name: CLI smoke
         run: |
           cargo run -q -p lightagent --bin lightagent -- banner --preview
