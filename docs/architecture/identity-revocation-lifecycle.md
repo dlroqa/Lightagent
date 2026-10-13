@@ -296,7 +296,8 @@ files written with `--secret-file` belong to the operator.
 1. Serve wiring: a persistent authority plus an explicit activation
    setting with startup validation. This PR adds neither.
 2. Bounded revalidation (interval or generation change) for push
-   cancellation across processes, including expiry (§6).
+   cancellation across processes, including expiry (§6). *Implemented, not
+   activated*: `bounded-revocation-monitor.md`.
 3. Profile-scoped session, tool-catalog and settings endpoints. These are
    operator-only in multi-user mode today.
 4. A verified execution sandbox before untrusted runs get local execution.

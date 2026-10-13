@@ -6,6 +6,20 @@ All notable Lightagent changes are documented here.
 
 ### Security
 
+- Bounded revalidation of active runs, not activated. One shared monitor in
+  `RunManager` re-checks every active revocable run on a bounded interval:
+  the default is 5 s, clamped to 100 ms–300 s
+  (`RunManager::with_revalidation_interval`). A run is revoked and torn down
+  even while it waits on a model stream, a provider connection being set up,
+  a tool, an MCP call, a delegated worker or an approval, and open event
+  streams re-check their subscriber at every sweep. A sweep reads the
+  identity store once, however many runs it checks, and reads it again at
+  every sweep. A corrupt store fails closed. The monitor runs only while a
+  revocable run is active; trusted single-user, ACP and terminal runs never
+  start it. Open Terminal re-checks authorization before every poll. Measured
+  on GitHub-hosted runners: detection within one interval plus about 2 ms; a
+  sweep over 200 runs takes about 0.4 ms. Details:
+  `docs/architecture/bounded-revocation-monitor.md`.
 - Revocation-aware run lifecycle, not activated. A run started in
   multi-user mode carries a `RunAuthorization` that is re-checked at every
   enforcement point:
