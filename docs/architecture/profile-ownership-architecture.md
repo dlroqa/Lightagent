@@ -220,7 +220,10 @@ Multi-user mode is **not activatable** in this slice: nothing in
 `lightagent serve`, the CLI or the configuration constructs
 `AuthConfig::multi_user`. Before it can be offered:
 
-1. **Tool policy is installation-wide.** `tools.*` and `web.*` apply to every
+1. **Tool policy** is now per profile ([`profile-tool-policy.md`](profile-tool-policy.md)):
+   untrusted runs are strict and never receive unisolated local execution.
+   **Execution isolation** remains the blocker for offering local tools to
+   users. The original note follows. **Tool policy was installation-wide.** `tools.*` and `web.*` apply to every
    profile, and `AgentProfile.toolsets` is advisory. A user's run gets the same
    tools as the operator's, including local file and terminal tools that act
    as the OS account. Operator authority could be reached through a

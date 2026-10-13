@@ -14,6 +14,7 @@ use lightagent_api::manager::{
     self, ProviderCapabilities, RunFactory, RunManager, RunStatus, RuntimeModel, StartRun,
 };
 use lightagent_api::{AppState, AuthConfig, Scope, router};
+use lightagent_core::identity::RunTrust;
 use lightagent_core::{
     AgentEvent, AgentEventSink, AgentLoop, ApprovalDecision, ConfigStore, LightagentPaths,
     PolicyEngine, ProfileStore, RunId, StopReason,
@@ -84,6 +85,15 @@ impl RunFactory for LightweightRunFactory {
             ),
             Arc::clone(&self.jev),
         );
+        // The catalog shows what a run of the active profile would receive.
+        let registry = crate::chat::tool_policy(
+            &config,
+            &extensions,
+            &registry,
+            &profile,
+            RunTrust::LocalOperator,
+        )
+        .apply(&registry);
         Ok(registry
             .names()
             .iter()
@@ -201,6 +211,21 @@ impl RunFactory for LightweightRunFactory {
         cancel: CancellationToken,
         decisions: UnboundedReceiver<ApprovalDecision>,
     ) -> RunStatus {
+        self.run_as(request, RunTrust::LocalOperator, sink, cancel, decisions)
+            .await
+    }
+
+    /// A run for a starter of `trust`. Its tools are the enabled tools
+    /// narrowed by the profile's tool policy; an untrusted run is always
+    /// strict and never receives unisolated local execution.
+    async fn run_as(
+        &self,
+        request: StartRun,
+        trust: RunTrust,
+        sink: AgentEventSink,
+        cancel: CancellationToken,
+        decisions: UnboundedReceiver<ApprovalDecision>,
+    ) -> RunStatus {
         let paths = LightagentPaths::rooted_at(&self.root);
         let config = match ConfigStore::at(&paths).load() {
             Ok(config) => config,
@@ -289,6 +314,22 @@ impl RunFactory for LightweightRunFactory {
             budget,
             Arc::clone(&self.jev),
         );
+        // The profile's tool policy narrows the enabled tools before anything
+        // sees them: the model, the workflow policy, the executor and any
+        // delegated worker. It never adds a tool or relaxes an approval.
+        let tool_policy =
+            crate::chat::tool_policy(&config, &extensions, &registry, &profile, trust);
+        if let Some(line) = tool_policy.summary(profile.id.as_str()) {
+            eprintln!("· {line}");
+        }
+        let registry = tool_policy.apply(&registry);
+        let registry_snapshot = registry.clone();
+        if tool_policy.enforced {
+            delegation.worker_registry =
+                tool_policy.worker_registry(&ToolRegistry::worker_default());
+            delegation.limit_ceiling = Some(profile.limits);
+            delegation.approval_floor = Some(profile.approval_policy);
+        }
         // Classification only advises. The workflow policy inspects the
         // registry, the approval policy and the limits without changing them;
         // the executor below is built exactly as without Jev.
@@ -334,6 +375,14 @@ impl RunFactory for LightweightRunFactory {
         )
         .with_run(RunId::new())
         .with_delegation(delegation);
+        if tool_policy.enforced {
+            executor = executor.with_call_guard(crate::chat::tool_policy_guard(
+                self.root.clone(),
+                profile.id.clone(),
+                trust,
+                registry_snapshot,
+            ));
+        }
         if let Some(web) = web_context(&config) {
             executor = executor.with_web(web);
         }
@@ -894,8 +943,19 @@ pub(crate) mod routing_tests {
     /// One real run through the factory against a stub gateway, returning its
     /// status, events and the bodies the provider received.
     async fn run_through_factory(
+        config: lightagent_core::Config,
+        message: &str,
+    ) -> (RunStatus, Vec<AgentEvent>, Vec<serde_json::Value>) {
+        run_through_factory_with(config, message, Vec::new(), RunTrust::LocalOperator).await
+    }
+
+    /// As [`run_through_factory`], for a `lead` profile with `toolsets`,
+    /// started by a caller of `trust`.
+    async fn run_through_factory_with(
         mut config: lightagent_core::Config,
         message: &str,
+        toolsets: Vec<String>,
+        trust: RunTrust,
     ) -> (RunStatus, Vec<AgentEvent>, Vec<serde_json::Value>) {
         let (gateway, chats) = gateway_stub().await;
         let root = std::env::temp_dir().join(format!(
@@ -912,12 +972,13 @@ pub(crate) mod routing_tests {
             .save(&config)
             .unwrap();
         let store = ProfileStore::new(&root);
-        let lead = lightagent_core::AgentProfile::new(
+        let mut lead = lightagent_core::AgentProfile::new(
             lightagent_core::ProfileId::new("lead").unwrap(),
             "Lead",
             "Persona",
             "fast",
         );
+        lead.toolsets = toolsets;
         store.create(&lead).unwrap();
         store.set_active(&lead.id).unwrap();
         let factory = LightweightRunFactory {
@@ -927,7 +988,7 @@ pub(crate) mod routing_tests {
         let (sink, mut events) = tokio::sync::mpsc::unbounded_channel();
         let (_decide, decisions) = tokio::sync::mpsc::unbounded_channel();
         let status = factory
-            .run(
+            .run_as(
                 StartRun {
                     message: message.to_owned(),
                     history: vec![],
@@ -935,6 +996,7 @@ pub(crate) mod routing_tests {
                     model: None,
                     cwd: None,
                 },
+                trust,
                 sink,
                 CancellationToken::new(),
                 decisions,
@@ -1226,5 +1288,164 @@ pub(crate) mod routing_tests {
             ));
         }
         crate::coordinator::evaluation::write_report("performance-simulation", &report, &summary);
+    }
+
+    /// Every capability a profile could ask for: web search and fetch, the
+    /// workspace tools and the terminal.
+    fn tool_config(mode: lightagent_core::ToolPolicyMode) -> lightagent_core::Config {
+        let mut config = lightagent_core::Config::default();
+        config.web.enabled = true;
+        config.web.search.endpoint = Some("http://127.0.0.1:9/search".to_owned());
+        config.tools.enabled = true;
+        config.tools.allow_terminal = true;
+        config.tools.profile_policy = mode;
+        config
+    }
+
+    fn strings(entries: &[&str]) -> Vec<String> {
+        entries.iter().map(|entry| (*entry).to_owned()).collect()
+    }
+
+    #[tokio::test]
+    async fn off_ignores_toolsets_and_report_only_changes_nothing() {
+        use lightagent_core::ToolPolicyMode::{Off, ReportOnly};
+        let (_, _, baseline) = run_through_factory(tool_config(Off), "hi").await;
+        let baseline = tool_names(&baseline[0]);
+        assert!(baseline.contains(&"terminal.run".to_owned()));
+        for mode in [Off, ReportOnly] {
+            let (status, _, bodies) = run_through_factory_with(
+                tool_config(mode),
+                "hi",
+                strings(&["datetime.now"]),
+                RunTrust::LocalOperator,
+            )
+            .await;
+            assert_eq!(status, RunStatus::Completed);
+            assert_eq!(tool_names(&bodies[0]), baseline, "{mode:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_enforced_profile_policy_shapes_the_provider_request() {
+        use lightagent_core::ToolPolicyMode::{Enforce, Strict};
+        for mode in [Enforce, Strict] {
+            let (status, _, bodies) = run_through_factory_with(
+                tool_config(mode),
+                "hi",
+                strings(&["datetime.now", "fs.read"]),
+                RunTrust::LocalOperator,
+            )
+            .await;
+            assert_eq!(status, RunStatus::Completed);
+            assert_eq!(
+                tool_names(&bodies[0]),
+                ["datetime.now", "fs.read"],
+                "{mode:?}"
+            );
+        }
+        // Strict with no list offers nothing; enforce with no list keeps all.
+        let (_, _, strict) = run_through_factory_with(
+            tool_config(Strict),
+            "hi",
+            Vec::new(),
+            RunTrust::LocalOperator,
+        )
+        .await;
+        assert!(tool_names(&strict[0]).is_empty());
+        let (_, _, legacy) = run_through_factory_with(
+            tool_config(Enforce),
+            "hi",
+            Vec::new(),
+            RunTrust::LocalOperator,
+        )
+        .await;
+        assert!(tool_names(&legacy[0]).contains(&"terminal.run".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn an_untrusted_run_never_receives_unisolated_local_execution() {
+        // Configured off, and the profile lists everything: an untrusted run
+        // is still strict and gets no local files, terminal or delegation.
+        let (status, _, bodies) = run_through_factory_with(
+            tool_config(lightagent_core::ToolPolicyMode::Off),
+            "hi",
+            strings(&[
+                "fs.*",
+                "terminal.run",
+                "agent.delegate",
+                "web.*",
+                "datetime.now",
+            ]),
+            RunTrust::RemoteUser,
+        )
+        .await;
+        assert_eq!(status, RunStatus::Completed);
+        let names = tool_names(&bodies[0]);
+        assert_eq!(names, ["datetime.now", "web.fetch", "web.search"]);
+        // Identity alone grants nothing: an empty list gives no tools.
+        let (_, _, empty) = run_through_factory_with(
+            tool_config(lightagent_core::ToolPolicyMode::Off),
+            "hi",
+            Vec::new(),
+            RunTrust::RemoteUser,
+        )
+        .await;
+        assert!(tool_names(&empty[0]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn jev_workflow_eligibility_follows_the_effective_tools() {
+        use crate::coordinator::test_support::{answer, jev_stub};
+        let (jev, _) = jev_stub(200, answer("research", 0.95), Duration::ZERO).await;
+        let with_jev = |mode| {
+            let mut config = tool_config(mode);
+            config.platform.jev.endpoint.enabled = true;
+            config.platform.jev.endpoint.base_url = Some(jev.clone());
+            config.platform.jev.classification.mode =
+                lightagent_core::JevClassificationMode::Active;
+            config.platform.jev.classification.workflow_guidance = true;
+            config.platform.jev.classification.allowed_profiles = vec!["lead".to_owned()];
+            config
+        };
+        let message = "find recent papers on solid-state batteries";
+        // Web tools withheld by the profile: research has nothing to use and
+        // guidance is not applied, however confident the classification.
+        let (_, events, bodies) = run_through_factory_with(
+            with_jev(lightagent_core::ToolPolicyMode::Enforce),
+            message,
+            strings(&["datetime.now"]),
+            RunTrust::LocalOperator,
+        )
+        .await;
+        let decision = classification(&events).unwrap();
+        assert_eq!(decision.category.as_deref(), Some("research"));
+        assert_eq!(
+            decision.workflow_eligibility.as_deref(),
+            Some("not_configured")
+        );
+        assert!(!decision.workflow_applied);
+        assert_eq!(
+            tool_names(&bodies[0]),
+            ["datetime.now"],
+            "classification added no tool"
+        );
+        assert!(
+            !system_prompt(&bodies[0]).contains(crate::coordinator::workflow::RESEARCH_GUIDANCE)
+        );
+        // With web tools permitted, the same classification is eligible.
+        let (_, events, _) = run_through_factory_with(
+            with_jev(lightagent_core::ToolPolicyMode::Enforce),
+            message,
+            strings(&["datetime.now", "web.*"]),
+            RunTrust::LocalOperator,
+        )
+        .await;
+        assert_eq!(
+            classification(&events)
+                .unwrap()
+                .workflow_eligibility
+                .as_deref(),
+            Some("eligible")
+        );
     }
 }

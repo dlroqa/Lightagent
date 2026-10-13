@@ -37,8 +37,8 @@ pub use config::{
     ExtensionsConfig, InferenceConfig, InfinityConfig, JevClassificationConfig,
     JevClassificationMode, JevConfig, JevRoutingGrant, JevRoutingInput, JevRoutingPermission,
     McpConfig, McpServerEntry, OpenTerminalConfig, PlatformConfig, PlatformEndpointConfig,
-    QdrantConfig, SavedProvider, SecretRef, SecurityConfig, SubagentsConfig, ToolsConfig,
-    WebConfig, WebSearchConfig,
+    QdrantConfig, SavedProvider, SecretRef, SecurityConfig, SubagentsConfig, ToolPolicyMode,
+    ToolsConfig, WebConfig, WebSearchConfig,
 };
 pub use event::{AgentEvent, ClassificationDiagnostics, StopReason};
 pub use ids::RunId;

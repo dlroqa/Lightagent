@@ -9,6 +9,7 @@ use lightagent_api::manager::{RunFactory, RunManager, RunStatus, StartRun};
 use lightagent_api::{AppState, AuthConfig, IdentityAuthority, IdentityState, router};
 use lightagent_core::identity::{
     AuditAction, AuditOutcome, Capability, Denial, PrincipalId, PrincipalSource, Restriction, Role,
+    RunTrust,
 };
 use lightagent_core::{AgentEvent, AgentEventSink, ApprovalDecision, ApprovalId, ProfileId};
 use lightagent_store::SessionStore;
@@ -26,10 +27,23 @@ const MARKER: &str = "private-marker-7f3a";
 #[derive(Default)]
 struct ScriptFactory {
     seen: Arc<Mutex<Vec<StartRun>>>,
+    trusts: Arc<Mutex<Vec<RunTrust>>>,
 }
 
 #[async_trait]
 impl RunFactory for ScriptFactory {
+    async fn run_as(
+        &self,
+        request: StartRun,
+        trust: RunTrust,
+        sink: AgentEventSink,
+        cancel: CancellationToken,
+        decisions: UnboundedReceiver<ApprovalDecision>,
+    ) -> RunStatus {
+        self.trusts.lock().unwrap().push(trust);
+        self.run(request, sink, cancel, decisions).await
+    }
+
     async fn run(
         &self,
         request: StartRun,
@@ -74,6 +88,7 @@ struct World {
     identity: Arc<IdentityAuthority>,
     manager: RunManager,
     seen: Arc<Mutex<Vec<StartRun>>>,
+    trusts: Arc<Mutex<Vec<RunTrust>>>,
     alice: String,
     alice_key: String,
     bob: String,
@@ -125,6 +140,7 @@ async fn world() -> World {
     let identity = Arc::new(IdentityAuthority::new(state));
     let factory = ScriptFactory::default();
     let seen = Arc::clone(&factory.seen);
+    let trusts = Arc::clone(&factory.trusts);
     let manager = RunManager::new(Arc::new(factory));
     let addr = spawn(
         manager.clone(),
@@ -136,6 +152,7 @@ async fn world() -> World {
         identity,
         manager,
         seen,
+        trusts,
         alice_key: key_id(&alice),
         alice,
         bob,
@@ -1037,4 +1054,95 @@ async fn revocation_racing_requests_never_admits_afterwards() {
         .await;
         assert_eq!(status, 401, "after revocation completes, never admitted");
     }
+}
+
+// --- run trust ------------------------------------------------------------
+
+#[tokio::test]
+async fn a_users_run_reaches_the_runtime_as_untrusted_and_an_operators_as_local() {
+    let world = world().await;
+    let (status, _) = start(
+        &world.addr,
+        &world.alice,
+        r#"{"message":"x","profile":"alice-bot"}"#,
+    )
+    .await;
+    assert_eq!(status, 202);
+    recorded(&world.seen, 1).await;
+    assert_eq!(world.trusts.lock().unwrap().clone(), [RunTrust::RemoteUser]);
+    for token in [world.ops.as_str(), LEGACY_KEY] {
+        let (status, _) = start(&world.addr, token, r#"{"message":"x","profile":"orphan"}"#).await;
+        assert_eq!(status, 202);
+    }
+    recorded(&world.seen, 3).await;
+    assert_eq!(
+        world.trusts.lock().unwrap()[1..],
+        [RunTrust::LocalOperator, RunTrust::LocalOperator]
+    );
+}
+
+/// A runtime that only implements `run`, as every factory did before trust.
+struct PlainFactory {
+    ran: Arc<Mutex<bool>>,
+}
+
+#[async_trait]
+impl RunFactory for PlainFactory {
+    async fn run(
+        &self,
+        _request: StartRun,
+        _sink: AgentEventSink,
+        _cancel: CancellationToken,
+        _decisions: UnboundedReceiver<ApprovalDecision>,
+    ) -> RunStatus {
+        *self.ran.lock().unwrap() = true;
+        RunStatus::Completed
+    }
+}
+
+#[tokio::test]
+async fn a_runtime_that_cannot_confine_tools_refuses_untrusted_runs() {
+    let ran = Arc::new(Mutex::new(false));
+    let manager = RunManager::new(Arc::new(PlainFactory {
+        ran: Arc::clone(&ran),
+    }));
+    let request = || StartRun {
+        message: "x".to_owned(),
+        history: vec![],
+        profile: Some("alice-bot".to_owned()),
+        model: None,
+        cwd: None,
+    };
+    let untrusted = manager
+        .start_as(
+            request(),
+            lightagent_api::RunOwner::new(
+                principal("alice"),
+                Some(profile("alice-bot")),
+                RunTrust::RemoteUser,
+            ),
+        )
+        .await;
+    for _ in 0..100 {
+        if untrusted.status().await.is_terminal() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(untrusted.status().await, RunStatus::Failed);
+    assert!(!*ran.lock().unwrap(), "the runtime never started it");
+    assert!(untrusted.events().await.iter().any(|event| matches!(
+        event,
+        AgentEvent::Error { message } if message.contains("cannot confine")
+    )));
+    // A local operator's run is unchanged.
+    let local = manager.start(request()).await;
+    for _ in 0..100 {
+        if local.status().await.is_terminal() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(local.status().await, RunStatus::Completed);
+    assert!(*ran.lock().unwrap());
 }

@@ -113,6 +113,32 @@ pub enum PrincipalSource {
     LegacyOperatorKey,
 }
 
+/// How far a run's caller is trusted with the server's own OS account.
+///
+/// Tool policy uses it: a `RemoteUser` run is always evaluated under the
+/// strict profile policy, and never receives tools that act through the
+/// server's OS account (local files, local commands, delegation) until those
+/// run in real execution isolation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunTrust {
+    /// The terminal, ACP, the single-user API, and operator callers.
+    #[default]
+    LocalOperator,
+    /// An ordinary user authenticated by the multi-user API.
+    RemoteUser,
+}
+
+impl Role {
+    /// The trust a run started by this role receives.
+    pub fn run_trust(self) -> RunTrust {
+        match self {
+            Role::Operator => RunTrust::LocalOperator,
+            Role::User => RunTrust::RemoteUser,
+        }
+    }
+}
+
 /// An authenticated caller's identity.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Principal {

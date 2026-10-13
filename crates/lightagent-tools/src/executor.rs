@@ -9,7 +9,7 @@
 //! is shown, never a panic.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -31,8 +31,12 @@ use crate::schema;
 /// prompt, a log or an approval UI.
 const PREVIEW_MAX_BYTES: usize = 200;
 
+/// Decides, at each call, whether a tool is still permitted for this run.
+pub type CallGuard = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 /// Runs the tools in a [`ToolRegistry`] under a policy and hard bounds.
 pub struct BoundedExecutor {
+    call_guard: Option<CallGuard>,
     registry: ToolRegistry,
     policy: Mutex<PolicyEngine>,
     pending: Mutex<HashMap<String, (ApprovalRequest, String)>>,
@@ -57,6 +61,7 @@ impl BoundedExecutor {
         max_output_bytes: usize,
     ) -> Self {
         Self {
+            call_guard: None,
             registry,
             policy: Mutex::new(policy),
             pending: Mutex::new(HashMap::new()),
@@ -98,6 +103,18 @@ impl BoundedExecutor {
         if let Ok(mut policy) = self.policy.lock() {
             policy.allow_without_restrictions();
         }
+    }
+
+    /// Re-check each call against `guard` (for example, the profile's current
+    /// tool policy). A call it refuses is denied before any approval prompt
+    /// and never runs, even though the tool is in the registry.
+    pub fn with_call_guard(mut self, guard: CallGuard) -> Self {
+        self.call_guard = Some(guard);
+        self
+    }
+
+    fn guard_refuses(&self, name: &str) -> bool {
+        self.call_guard.as_ref().is_some_and(|guard| !guard(name))
     }
 
     /// Set the clock time-reading tools observe.
@@ -223,6 +240,12 @@ impl ToolInvoker for BoundedExecutor {
         let Some((risk, scopes)) = self.classify(call) else {
             return ApprovalNeed::AutoApprove;
         };
+        if self.guard_refuses(&call.name) {
+            return ApprovalNeed::Deny(format!(
+                "the tool '{}' is no longer permitted for this run",
+                call.name
+            ));
+        }
         if let Some(reason) = self.blocked_terminal_call(call) {
             return ApprovalNeed::Deny(reason);
         }
@@ -251,6 +274,12 @@ impl ToolInvoker for BoundedExecutor {
         let Some(tool) = self.registry.get(&call.name) else {
             return ToolOutcome::error(format!("the tool '{}' is not available", call.name));
         };
+        if self.guard_refuses(&call.name) {
+            return ToolOutcome::error(format!(
+                "the tool '{}' is no longer permitted for this run",
+                call.name
+            ));
+        }
 
         let args = match parse_arguments(&call.arguments) {
             Ok(args) => args,

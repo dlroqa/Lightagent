@@ -1,8 +1,8 @@
 # Proposal: enforceable profile toolsets
 
-Status: **proposal only.** Nothing here is implemented. It answers the
-authorization gap recorded in `jev-coordination-audit.md` (finding 6) and must
-be approved separately before any runtime change.
+Status: **implemented**, with a strict mode and run trust added. See
+[`profile-tool-policy.md`](profile-tool-policy.md). The original proposal is
+kept below for the record.
 
 ## Current behavior
 

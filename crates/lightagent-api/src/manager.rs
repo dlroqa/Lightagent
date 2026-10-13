@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lightagent_core::identity::PrincipalId;
+use lightagent_core::identity::{PrincipalId, RunTrust};
 use lightagent_core::provider::ProviderMessage;
 use lightagent_core::{
     AgentEvent, AgentEventSink, AgentLoop, AgentProvider, ApprovalDecision, ApprovalId, ProfileId,
@@ -72,6 +72,7 @@ pub struct StartRun {
 pub struct RunOwner {
     principal: Option<PrincipalId>,
     profile: Option<ProfileId>,
+    trust: RunTrust,
 }
 
 impl RunOwner {
@@ -80,12 +81,19 @@ impl RunOwner {
         Self::default()
     }
 
-    /// A run started by `principal` as the authorized `profile`.
-    pub fn new(principal: PrincipalId, profile: Option<ProfileId>) -> Self {
+    /// A run started by `principal` as the authorized `profile`, with the
+    /// trust its role carries.
+    pub fn new(principal: PrincipalId, profile: Option<ProfileId>, trust: RunTrust) -> Self {
         Self {
             principal: Some(principal),
             profile,
+            trust,
         }
+    }
+
+    /// How far the run's starter is trusted with the server's OS account.
+    pub fn trust(&self) -> RunTrust {
+        self.trust
     }
 
     pub fn principal(&self) -> Option<&PrincipalId> {
@@ -265,6 +273,29 @@ pub trait RunFactory: Send + Sync + 'static {
         cancel: CancellationToken,
         decisions: UnboundedReceiver<ApprovalDecision>,
     ) -> RunStatus;
+
+    /// Drive `request` for a starter of the given `trust`. A factory that
+    /// can confine an untrusted run's tools overrides this; the default
+    /// runs a local operator's request as [`run`](Self::run) and **refuses**
+    /// an untrusted one rather than give it operator tools.
+    async fn run_as(
+        &self,
+        request: StartRun,
+        trust: RunTrust,
+        sink: AgentEventSink,
+        cancel: CancellationToken,
+        decisions: UnboundedReceiver<ApprovalDecision>,
+    ) -> RunStatus {
+        match trust {
+            RunTrust::LocalOperator => self.run(request, sink, cancel, decisions).await,
+            RunTrust::RemoteUser => {
+                let _ = sink.send(AgentEvent::Error {
+                    message: "this runtime cannot confine an untrusted run's tools".to_owned(),
+                });
+                RunStatus::Failed
+            }
+        }
+    }
 }
 
 /// Drive one agent loop to a terminal status, handling approval pauses.
@@ -387,6 +418,7 @@ impl RunManager {
     /// authorized the owner for `request.profile`.
     pub async fn start_as(&self, request: StartRun, owner: RunOwner) -> Arc<RunState> {
         let id = new_run_id();
+        let trust = owner.trust();
         let (decisions_tx, decisions_rx) = mpsc::unbounded_channel();
         let state = Arc::new(RunState {
             id: id.clone(),
@@ -438,7 +470,9 @@ impl RunManager {
                 }
             });
 
-            let status = factory.run(request, sink_tx, cancel, decisions_rx).await;
+            let status = factory
+                .run_as(request, trust, sink_tx, cancel, decisions_rx)
+                .await;
             let _ = forwarder.await;
             run_state.set_pending(None).await;
             run_state.set_status(status).await;

@@ -190,6 +190,22 @@ pub enum ApprovalPolicy {
     Strict,
 }
 
+impl ApprovalPolicy {
+    /// The stricter of two policies (`Permissive` < `Balanced` < `Strict`).
+    pub fn stricter(self, other: Self) -> Self {
+        let rank = |policy: Self| match policy {
+            Self::Permissive => 0,
+            Self::Balanced => 1,
+            Self::Strict => 2,
+        };
+        if rank(other) > rank(self) {
+            other
+        } else {
+            self
+        }
+    }
+}
+
 /// Security posture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -456,6 +472,53 @@ pub struct ToolsConfig {
     pub terminal_timeout_secs: u64,
     /// When non-empty, only these program names may be run by `terminal.run`.
     pub terminal_allowlist: Vec<String>,
+    /// How a profile's `toolsets` limit its runs' tools. `off`, the default
+    /// for every configuration, keeps today's behavior: every profile gets
+    /// the tools enabled above.
+    pub profile_policy: ToolPolicyMode,
+}
+
+/// How `AgentProfile.toolsets` applies to a run's tools. A profile can only
+/// ever narrow what the settings above enable; it never adds a tool.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPolicyMode {
+    /// `toolsets` is not consulted: today's behavior.
+    #[default]
+    Off,
+    /// Runs keep every enabled tool; what `enforce` would remove is reported.
+    ReportOnly,
+    /// A non-empty `toolsets` is enforced. An empty list keeps every enabled
+    /// tool, and unrecognized entries match nothing.
+    Enforce,
+    /// Only tools the profile lists are offered: an empty list offers none,
+    /// `all` is not accepted, and any unrecognized entry withholds every tool.
+    Strict,
+}
+
+impl ToolPolicyMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::ReportOnly => "report_only",
+            Self::Enforce => "enforce",
+            Self::Strict => "strict",
+        }
+    }
+}
+
+impl std::str::FromStr for ToolPolicyMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" => Ok(Self::Off),
+            "report_only" => Ok(Self::ReportOnly),
+            "enforce" => Ok(Self::Enforce),
+            "strict" => Ok(Self::Strict),
+            _ => Err("tool profile policy must be off, report_only, enforce or strict".to_owned()),
+        }
+    }
 }
 
 impl Default for ToolsConfig {
@@ -467,6 +530,7 @@ impl Default for ToolsConfig {
             allow_terminal: false,
             terminal_timeout_secs: 30,
             terminal_allowlist: Vec::new(),
+            profile_policy: ToolPolicyMode::Off,
         }
     }
 }
