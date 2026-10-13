@@ -520,8 +520,11 @@ fn issued_credentials_authenticate_and_store_only_a_digest() {
     assert!(persisted.contains(key_id.as_str()));
     assert_eq!(format!("{token:?}"), "IssuedToken(<redacted>)");
     let record = store.get(key_id).unwrap();
-    assert_eq!(record.secret_sha256.len(), 64);
-    assert_ne!(record.secret_sha256, secret);
+    // A versioned, domain-separated digest: 64 hex digits after `v1:`.
+    let digest = record.verifier.strip_prefix("v1:").unwrap();
+    assert_eq!(digest.len(), 64);
+    assert_ne!(digest, secret);
+    assert!(!record.verifier.contains(secret));
     // A reloaded store authenticates the same token.
     let reloaded: CredentialStore = serde_json::from_str(&persisted).unwrap();
     assert!(reloaded.authenticate(&text).is_ok());

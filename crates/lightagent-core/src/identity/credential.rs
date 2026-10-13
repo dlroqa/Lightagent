@@ -1,11 +1,17 @@
 //! Installation-issued API credentials.
 //!
 //! A token is `la_<key id>_<secret>`: a public 16-hex-digit key id, used to
-//! find the record, and a 64-hex-digit secret, 256 bits of OS entropy. Only the
-//! secret's SHA-256 is stored. A fast hash is the right tool for a
-//! high-entropy random secret (a slow password hash protects guessable
-//! secrets, which these are not), and the comparison is constant-time. The
-//! plaintext exists once, in the [`IssuedToken`] returned at issue.
+//! find the record, and a 64-hex-digit secret, 256 bits of OS entropy. Only a
+//! verifier is stored: `v1:` and the SHA-256 of a domain-separation label, the
+//! key id and the secret. A fast hash is the right tool for a uniformly
+//! random 256-bit secret: a slow password hash protects *guessable* secrets,
+//! and these are not; inverting the digest is a 2^256 search. The label and
+//! key id bind a verifier to this purpose and this record, so a digest copied
+//! between records or reused from another system verifies nothing. A server
+//! key (HMAC pepper) is not used: it adds key management and would protect
+//! only against brute force that 256 bits already rules out. The comparison is
+//! constant-time. The plaintext exists once, in the [`IssuedToken`] returned
+//! at issue.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -26,14 +32,21 @@ pub struct CredentialRecord {
     pub key_id: String,
     pub principal: PrincipalId,
     pub role: Role,
-    /// Lowercase hex SHA-256 of the secret part of the token.
-    pub secret_sha256: String,
+    /// `v1:` and the lowercase hex SHA-256 of the domain-separated secret
+    /// (see the module documentation). Never the secret.
+    pub verifier: String,
     #[serde(default)]
     pub restriction: Restriction,
     pub created_unix: u64,
     /// Set when revoked; a revoked credential never authenticates again.
     #[serde(default)]
     pub revoked_unix: Option<u64>,
+    /// When set, the credential stops authenticating at this time.
+    #[serde(default)]
+    pub expires_unix: Option<u64>,
+    /// The credential this one replaced by rotation, if any.
+    #[serde(default)]
+    pub replaces: Option<String>,
 }
 
 /// The plaintext token, shown once. Its `Debug` never prints the secret, and
@@ -60,6 +73,10 @@ pub enum CredentialError {
     Entropy,
     #[error("no such credential")]
     Unknown,
+    #[error("the credential is revoked")]
+    Revoked,
+    #[error("an expiry must be in the future")]
+    Expiry,
 }
 
 /// Every credential this installation issued, keyed by key id.
@@ -79,6 +96,23 @@ impl CredentialStore {
         restriction: Restriction,
         now_unix: u64,
     ) -> Result<IssuedToken, CredentialError> {
+        self.issue_expiring(principal, role, restriction, now_unix, None)
+            .map(|(_, token)| token)
+    }
+
+    /// Issue a credential that stops authenticating at `expires_unix`.
+    /// Returns its key id and the token, once.
+    pub fn issue_expiring(
+        &mut self,
+        principal: PrincipalId,
+        role: Role,
+        restriction: Restriction,
+        now_unix: u64,
+        expires_unix: Option<u64>,
+    ) -> Result<(String, IssuedToken), CredentialError> {
+        if expires_unix.is_some_and(|at| at <= now_unix) {
+            return Err(CredentialError::Expiry);
+        }
         let mut key = [0u8; KEY_ID_BYTES];
         let mut secret = [0u8; SECRET_BYTES];
         getrandom::fill(&mut key).map_err(|_| CredentialError::Entropy)?;
@@ -95,13 +129,59 @@ impl CredentialStore {
                 key_id: key_id.clone(),
                 principal,
                 role,
-                secret_sha256: digest(&secret),
+                verifier: verifier(&key_id, &secret),
                 restriction,
                 created_unix: now_unix,
                 revoked_unix: None,
+                expires_unix,
+                replaces: None,
             },
         );
-        Ok(IssuedToken(format!("{PREFIX}{key_id}_{secret}")))
+        let token = IssuedToken(format!("{PREFIX}{key_id}_{secret}"));
+        Ok((key_id, token))
+    }
+
+    /// Issue a replacement for `key_id` with the same principal, role and
+    /// restriction. The old credential keeps working until it is revoked, so
+    /// a client can switch over first.
+    pub fn rotate(
+        &mut self,
+        key_id: &str,
+        now_unix: u64,
+        expires_unix: Option<u64>,
+    ) -> Result<(String, IssuedToken), CredentialError> {
+        let old = self
+            .credentials
+            .get(key_id)
+            .ok_or(CredentialError::Unknown)?;
+        if old.revoked_unix.is_some() {
+            return Err(CredentialError::Revoked);
+        }
+        let (principal, role, restriction) =
+            (old.principal.clone(), old.role, old.restriction.clone());
+        let (new_id, token) =
+            self.issue_expiring(principal, role, restriction, now_unix, expires_unix)?;
+        if let Some(record) = self.credentials.get_mut(&new_id) {
+            record.replaces = Some(key_id.to_owned());
+        }
+        Ok((new_id, token))
+    }
+
+    /// Revoke every credential of `principal`. Returns the key ids revoked.
+    pub fn revoke_principal(&mut self, principal: &PrincipalId, now_unix: u64) -> Vec<String> {
+        self.credentials
+            .values_mut()
+            .filter(|record| &record.principal == principal && record.revoked_unix.is_none())
+            .map(|record| {
+                record.revoked_unix = Some(now_unix);
+                record.key_id.clone()
+            })
+            .collect()
+    }
+
+    /// Every record, by key id. Records hold no secret.
+    pub fn records(&self) -> impl Iterator<Item = &CredentialRecord> {
+        self.credentials.values()
     }
 
     /// Revoke a credential. Takes effect at the next request it is used on.
@@ -121,28 +201,40 @@ impl CredentialStore {
     /// Authenticate a presented bearer token. A malformed, unknown or wrong
     /// token is `Unauthenticated`; a correct but revoked one is `Revoked`.
     pub fn authenticate(&self, token: &str) -> Result<Caller, Denial> {
+        self.authenticate_at(token, now_unix())
+    }
+
+    /// [`authenticate`](Self::authenticate) at `now_unix`: an expired
+    /// credential is `Expired`.
+    pub fn authenticate_at(&self, token: &str, now_unix: u64) -> Result<Caller, Denial> {
         let (key_id, secret) = parse(token).ok_or(Denial::Unauthenticated)?;
         let record = self
             .credentials
             .get(key_id)
             .ok_or(Denial::Unauthenticated)?;
-        if !constant_time_eq(digest(secret).as_bytes(), record.secret_sha256.as_bytes()) {
+        if !constant_time_eq(
+            verifier(key_id, secret).as_bytes(),
+            record.verifier.as_bytes(),
+        ) {
             return Err(Denial::Unauthenticated);
         }
-        Self::caller_from(record)
+        Self::caller_from(record, now_unix)
     }
 
     /// The caller for an already-authenticated credential, read afresh: a
-    /// long-lived connection calls this to notice revocation or a changed
-    /// restriction. A missing or revoked record is `Revoked`.
+    /// long-lived connection calls this to notice revocation, expiry or a
+    /// changed restriction. A missing or revoked record is `Revoked`.
     pub fn caller_for(&self, key_id: &str) -> Result<Caller, Denial> {
         let record = self.credentials.get(key_id).ok_or(Denial::Revoked)?;
-        Self::caller_from(record)
+        Self::caller_from(record, now_unix())
     }
 
-    fn caller_from(record: &CredentialRecord) -> Result<Caller, Denial> {
+    fn caller_from(record: &CredentialRecord, now_unix: u64) -> Result<Caller, Denial> {
         if record.revoked_unix.is_some() {
             return Err(Denial::Revoked);
+        }
+        if record.expires_unix.is_some_and(|at| now_unix >= at) {
+            return Err(Denial::Expired);
         }
         Ok(Caller {
             principal: Principal {
@@ -171,10 +263,26 @@ fn parse(token: &str) -> Option<(&str, &str)> {
         .then_some((key_id, secret))
 }
 
-fn digest(secret: &str) -> String {
-    let hash = Sha256::digest(secret.as_bytes());
+/// Separates these verifiers from every other use of SHA-256.
+const VERIFIER_LABEL: &[u8] = b"lightagent api credential verifier v1\0";
+
+/// `v1:` and SHA-256(label || key id || 0 || secret), in lowercase hex.
+fn verifier(key_id: &str, secret: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(VERIFIER_LABEL);
+    hasher.update(key_id.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(secret.as_bytes());
+    let hash = hasher.finalize();
     let bytes: &[u8] = hash.as_ref();
-    hex(bytes)
+    format!("v1:{}", hex(bytes))
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default()
 }
 
 /// Equal-length digests compared without an early exit.

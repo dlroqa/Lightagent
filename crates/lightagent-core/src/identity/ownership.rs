@@ -89,6 +89,11 @@ impl OwnershipRegistry {
         self.profiles.get(profile)
     }
 
+    /// Every owned profile and its record.
+    pub fn profiles(&self) -> impl Iterator<Item = (&ProfileId, &ProfileOwnership)> {
+        self.profiles.iter()
+    }
+
     /// Profiles `principal` owns.
     pub fn owned_by<'a>(
         &'a self,

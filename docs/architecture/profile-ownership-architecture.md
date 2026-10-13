@@ -61,7 +61,7 @@ Added in this slice as types, not yet persisted.
 | `Capability` | `runs_read`, `runs_write`, `sessions_read`, `sessions_write`, `tools_read`, `approvals_write`, `administer`, `provision` | One per API scope, plus `provision`. `administer` and `provision` are operator-only. |
 | `Restriction` | `capabilities: Option<Set>`, `profiles: Option<Set<ProfileId>>` | Carried by a credential. It only narrows. |
 | `Caller` | `principal`, `restriction` | What an entry point resolves. |
-| `CredentialRecord` | `key_id`, `principal`, `role`, `secret_sha256`, `restriction`, `created_unix`, `revoked_unix` | Token `la_<16 hex>_<64 hex>` (256-bit secret). Only the SHA-256 is stored, compared in constant time. Issuing fails if OS entropy is unavailable. |
+| `CredentialRecord` | `key_id`, `principal`, `role`, `verifier`, `restriction`, `created_unix`, `revoked_unix`, `expires_unix`, `replaces` | Token `la_<16 hex>_<64 hex>` (256-bit secret). Only a versioned, domain-separated SHA-256 verifier (`v1:`) is stored, compared in constant time. Issuing fails if OS entropy is unavailable. See `persistent-identity-store.md`. |
 | `OwnershipRegistry` | `profile → { owner, grants: principal → Set<Capability> }` | `assign`: idempotent for the same owner, `Conflict` for another. `reassign`: an operator action that drops grants. `grant`/`revoke`: never operator-only capabilities. `remove`: deleted profiles keep no owner. |
 | `AuthorizedProfile` | private fields | Built only by `authorize`. |
 | `AuditRecord` | `at_unix`, `principal`, `key_id`, `action`, `profile`, `outcome` | Ids and fixed codes only. No free-text field. |

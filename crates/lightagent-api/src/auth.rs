@@ -24,6 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::http::{HeaderMap, StatusCode};
 use lightagent_core::ProfileId;
+use lightagent_core::identity::store::{IdentityStore, StoredAudit};
 use lightagent_core::identity::{
     AuditAction, AuditRecord, AuthorizedProfile, Caller, Capability, CredentialStore, Denial,
     OwnershipRegistry, PrincipalSource, Role, authorize, authorize_capability,
@@ -75,6 +76,10 @@ const AUDIT_CAPACITY: usize = 4_096;
 pub struct IdentityAuthority {
     state: RwLock<IdentityState>,
     audit: Mutex<VecDeque<AuditRecord>>,
+    /// When set, the state is re-read from this store before every check,
+    /// so a change made elsewhere (another process, a restart) applies to
+    /// the next request, and an unreadable store denies everything.
+    store: Option<Arc<IdentityStore>>,
 }
 
 impl fmt::Debug for IdentityAuthority {
@@ -88,16 +93,58 @@ impl IdentityAuthority {
         Self {
             state: RwLock::new(state),
             audit: Mutex::new(VecDeque::new()),
+            store: None,
         }
     }
 
-    /// Change the state (issue or revoke a credential, assign an owner, grant
-    /// or revoke a capability). `None` if the state is unavailable.
+    /// An authority backed by the durable store. It holds no state of its
+    /// own between requests: every check re-reads the store, so nothing a
+    /// revocation removed is retained. Changes go through
+    /// [`IdentityStore::transact`], never [`update`](Self::update).
+    pub fn persistent(store: Arc<IdentityStore>) -> Self {
+        Self {
+            state: RwLock::new(IdentityState::default()),
+            audit: Mutex::new(VecDeque::new()),
+            store: Some(store),
+        }
+    }
+
+    /// Reload from the store, if any. On a store that cannot be read the
+    /// state is emptied, so every credential and grant is refused.
+    fn sync(&self) -> Result<(), Denial> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        let fresh = store.load().map(|document| IdentityState {
+            credentials: document.credentials().clone(),
+            ownership: store.effective_ownership(&document),
+        });
+        let mut state = self.state.write().map_err(|_| Denial::Unauthenticated)?;
+        match fresh {
+            Ok(fresh) => {
+                *state = fresh;
+                Ok(())
+            }
+            Err(_) => {
+                *state = IdentityState::default();
+                Err(Denial::Unauthenticated)
+            }
+        }
+    }
+
+    /// Change the in-memory state (issue or revoke a credential, assign an
+    /// owner, grant or revoke a capability). `None` if the state is
+    /// unavailable, or if the authority is persistent: durable changes are
+    /// transactions on the store.
     pub fn update<R>(&self, change: impl FnOnce(&mut IdentityState) -> R) -> Option<R> {
+        if self.store.is_some() {
+            return None;
+        }
         self.state.write().ok().map(|mut state| change(&mut state))
     }
 
     fn authenticate(&self, token: &str) -> Result<Caller, Denial> {
+        self.sync()?;
         let state = self.state.read().map_err(|_| Denial::Unauthenticated)?;
         state.credentials.authenticate(token)
     }
@@ -108,6 +155,7 @@ impl IdentityAuthority {
     pub fn refresh(&self, caller: &Caller) -> Result<Caller, Denial> {
         match &caller.principal.source {
             PrincipalSource::Credential { key_id } => {
+                self.sync().map_err(|_| Denial::Revoked)?;
                 let state = self.state.read().map_err(|_| Denial::Revoked)?;
                 state.credentials.caller_for(key_id)
             }
@@ -123,9 +171,9 @@ impl IdentityAuthority {
         profile: &ProfileId,
     ) -> Result<AuthorizedProfile, Denial> {
         let decision = self
-            .state
-            .read()
+            .sync()
             .map_err(|_| Denial::ProfileNotGranted)
+            .and_then(|()| self.state.read().map_err(|_| Denial::ProfileNotGranted))
             .and_then(|state| authorize(caller, capability, profile, &state.ownership));
         self.record(
             Some(caller),
@@ -159,6 +207,7 @@ impl IdentityAuthority {
         if principal != &caller.principal.id {
             return Err(Denial::ProfileNotGranted);
         }
+        self.sync().map_err(|_| Denial::ProfileNotGranted)?;
         let state = self.state.read().map_err(|_| Denial::ProfileNotGranted)?;
         authorize(caller, capability, profile, &state.ownership).map(|_| ())
     }
@@ -175,11 +224,20 @@ impl IdentityAuthority {
             .duration_since(UNIX_EPOCH)
             .map(|elapsed| elapsed.as_secs())
             .unwrap_or_default();
+        let record = AuditRecord::decision(at, caller, action, profile, outcome);
+        if let Some(store) = &self.store {
+            // Durable and bounded; a failure to record never admits.
+            let _ = store.append_audit(&[StoredAudit {
+                generation: None,
+                subject: None,
+                record: record.clone(),
+            }]);
+        }
         if let Ok(mut audit) = self.audit.lock() {
             if audit.len() == AUDIT_CAPACITY {
                 audit.pop_front();
             }
-            audit.push_back(AuditRecord::decision(at, caller, action, profile, outcome));
+            audit.push_back(record);
         }
     }
 
@@ -197,7 +255,7 @@ impl IdentityAuthority {
 /// which profiles exist or who owns them.
 pub fn rejection(denial: Denial) -> (StatusCode, String) {
     match denial {
-        Denial::Unauthenticated | Denial::Revoked => (
+        Denial::Unauthenticated | Denial::Revoked | Denial::Expired => (
             StatusCode::UNAUTHORIZED,
             "a valid `Authorization: Bearer <key>` is required".to_owned(),
         ),
@@ -575,5 +633,94 @@ mod tests {
             !mapped.contains(&Capability::Provision),
             "no API scope provisions today"
         );
+    }
+
+    /// The persistent authority re-reads the durable store at every check:
+    /// a revocation or profile deletion made elsewhere applies to the next
+    /// request, a restart loses nothing, and an unreadable store denies.
+    #[test]
+    fn a_persistent_authority_follows_the_store_and_fails_closed() {
+        use lightagent_core::identity::store::{IdentityStore, Outcome};
+        use lightagent_core::identity::{AuditOutcome, PrincipalId, Restriction, Role};
+        use lightagent_core::{AgentProfile, ProfileStore};
+
+        let root = std::env::temp_dir().join(format!(
+            "lightagent-api-identity-{}",
+            lightagent_core::RunId::new().as_str()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let research = ProfileId::new("research").unwrap();
+        ProfileStore::new(&root)
+            .create(&AgentProfile::new(
+                research.clone(),
+                "Research",
+                "Persona",
+                "fast",
+            ))
+            .unwrap();
+        let operator = Caller::local_operator(PrincipalSource::LocalProcess);
+        let alice = PrincipalId::new("alice").unwrap();
+        let admin = IdentityStore::new(&root);
+        let Ok(Outcome::Applied {
+            value: (key_id, token),
+            ..
+        }) = admin.transact(&operator, 1, None, |tx| {
+            tx.create_principal(alice.clone(), Role::User, None)?;
+            tx.assign_owner(&research, &alice)?;
+            let (key_id, token) = tx.issue_credential(&alice, Restriction::default(), None)?;
+            Ok((key_id, token.expose().to_owned()))
+        })
+        else {
+            panic!("provisioning failed");
+        };
+
+        // A server started after provisioning: nothing held in memory.
+        let authority = IdentityAuthority::persistent(Arc::new(IdentityStore::new(&root)));
+        let caller = authority.authenticate(&token).unwrap();
+        assert!(
+            authority
+                .authorize_profile(&caller, Capability::RunsWrite, &research)
+                .is_ok()
+        );
+        assert!(authority.update(|_| ()).is_none(), "no in-memory changes");
+
+        // Revoked through another handle (another process): refused at once,
+        // including for the already-authenticated caller.
+        admin
+            .transact(&operator, 2, None, |tx| tx.revoke_credential(&key_id))
+            .unwrap();
+        assert_eq!(authority.authenticate(&token), Err(Denial::Revoked));
+        assert_eq!(authority.refresh(&caller), Err(Denial::Revoked));
+
+        // A deleted profile is no longer owned, whatever the record says.
+        let second = admin
+            .transact(&operator, 3, None, |tx| {
+                tx.issue_credential(&alice, Restriction::default(), None)
+                    .map(|(_, token)| token.expose().to_owned())
+            })
+            .unwrap();
+        let Outcome::Applied { value: token, .. } = second else {
+            panic!("issue failed");
+        };
+        let caller = authority.authenticate(&token).unwrap();
+        ProfileStore::new(&root).delete(&research).unwrap();
+        assert_eq!(
+            authority.authorize_profile(&caller, Capability::RunsWrite, &research),
+            Err(Denial::ProfileUnowned)
+        );
+        // Denials are durable audit records.
+        assert!(
+            admin
+                .audit()
+                .unwrap()
+                .iter()
+                .any(|record| record.record.outcome
+                    == AuditOutcome::Denied(Denial::ProfileUnowned))
+        );
+
+        // An unreadable store denies everything.
+        std::fs::write(root.join("identity").join("state.json"), b"{broken").unwrap();
+        assert_eq!(authority.authenticate(&token), Err(Denial::Unauthenticated));
+        std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -24,6 +24,15 @@ pub enum AuditAction {
     OwnerReassigned,
     GrantAdded,
     GrantRevoked,
+    CredentialRotated,
+    PrincipalCreated,
+    PrincipalSuspended,
+    PrincipalReactivated,
+    IssuerTrusted,
+    /// A profile's ownership record was removed (profile deleted or released).
+    OwnerRemoved,
+    /// A repeated provisioning request matched an earlier one.
+    IdempotentReplay,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
