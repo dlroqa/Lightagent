@@ -28,7 +28,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
-use lightagent_core::identity::{AuditAction, Caller, Capability, Role, authorize_capability};
+use lightagent_core::identity::{
+    AuditAction, Caller, Capability, PrincipalSource, Role, authorize_capability, revoked_message,
+};
 use lightagent_core::{
     AgentEvent, ApprovalPolicy, ConfigStore, LightagentPaths, PlatformEndpointConfig, ProfileId,
     ProfileStore, SecretRef, SkillStore, skill_dirs,
@@ -813,6 +815,9 @@ async fn create_run(
         Option<ProfileId>,
         lightagent_core::identity::RunTrust,
     )> = None;
+    // In multi-user mode the run stays revocable: who started it is
+    // re-authorized at every enforcement point while it runs.
+    let mut supervision: Option<(Arc<auth::IdentityAuthority>, Caller)> = None;
     if state.auth.identity().is_some() {
         let (identity, caller) = match multi_user_caller(&state, &headers, Scope::RunsWrite) {
             Ok(found) => found,
@@ -851,6 +856,7 @@ async fn create_run(
                 caller.principal.role.run_trust(),
             ));
         }
+        supervision = Some((identity, caller));
     } else if let Some(rejection) = deny(&state, &headers, Scope::RunsWrite) {
         return rejection;
     }
@@ -913,10 +919,29 @@ async fn create_run(
                     .as_deref()
                     .and_then(|id| ProfileId::new(id).ok())
             });
-            state
-                .manager
-                .start_as(request, RunOwner::new(principal, profile, trust))
-                .await
+            let mut owner = RunOwner::new(principal, profile, trust);
+            match supervision {
+                Some((identity, caller)) => {
+                    if let PrincipalSource::Credential { key_id } = &caller.principal.source {
+                        owner = owner.with_credential(key_id.clone());
+                    }
+                    let check = identity.run_check(caller, owner.clone());
+                    let started = state
+                        .manager
+                        .start_supervised(request, owner, check, identity.generation())
+                        .await;
+                    match started {
+                        Ok(run) => run,
+                        Err(denial) => {
+                            if let Some(id) = &session_id {
+                                state.busy_sessions.lock().await.remove(id);
+                            }
+                            return refused(denial);
+                        }
+                    }
+                }
+                None => state.manager.start_as(request, owner).await,
+            }
         }
         None => state.manager.start(request).await,
     };
@@ -1019,13 +1044,19 @@ async fn get_run(
     Path(id): Path<String>,
 ) -> Response {
     match authorized_run(&state, &headers, &id, Scope::RunsRead).await {
-        Ok((run, _)) => Json(json!({
-            "id": run.id(),
-            "status": run.status().await,
-            "events": run.events().await.len(),
-            "pending_approval": run.pending().await,
-        }))
-        .into_response(),
+        Ok((run, _)) => {
+            let mut body = json!({
+                "id": run.id(),
+                "status": run.status().await,
+                "events": run.events().await.len(),
+                "pending_approval": run.pending().await,
+            });
+            // Only a revoked (multi-user) run carries this, as a fixed code.
+            if let Some(denial) = run.revocation() {
+                body["revocation"] = json!(denial.code());
+            }
+            Json(body).into_response()
+        }
         Err(response) => *response,
     }
 }
@@ -1382,6 +1413,15 @@ async fn respond_approval(
         Ok((found, _)) => found,
         Err(response) => return *response,
     };
+    // An approval for a run that has lost its authorization is stale: it is
+    // refused here, and the run checks again before acting on any decision.
+    if let Err(denial) = state_run.authorization().verify() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": revoked_message(denial) })),
+        )
+            .into_response();
+    }
     let Some(pending) = state_run.pending().await else {
         return (
             StatusCode::CONFLICT,
@@ -1436,7 +1476,9 @@ fn event_stream(
         queue: VecDeque<AgentEvent>,
         finished: bool,
         guard: Option<StreamGuard>,
+        rechecks: tokio::sync::watch::Receiver<u64>,
     }
+    let rechecks = run.rechecks();
     stream::unfold(
         Cursor {
             run,
@@ -1444,6 +1486,7 @@ fn event_stream(
             queue: VecDeque::new(),
             finished: false,
             guard,
+            rechecks,
         },
         |mut cursor| async move {
             loop {
@@ -1459,12 +1502,18 @@ fn event_stream(
                     return None;
                 }
                 let (new_events, status) = if cursor.guard.is_some() {
-                    // Wake periodically to re-check while the run is quiet.
-                    match tokio::time::timeout(STREAM_RECHECK, cursor.run.wait_from(cursor.seen))
-                        .await
-                    {
-                        Ok(next) => next,
-                        Err(_) => continue,
+                    // Wake periodically to re-check while the run is quiet,
+                    // and at once when the supervisor asks.
+                    let run = Arc::clone(&cursor.run);
+                    tokio::select! {
+                        next = run.wait_from(cursor.seen) => next,
+                        () = tokio::time::sleep(STREAM_RECHECK) => continue,
+                        changed = cursor.rechecks.changed() => {
+                            if changed.is_err() {
+                                return None;
+                            }
+                            continue;
+                        }
                     }
                 } else {
                     cursor.run.wait_from(cursor.seen).await

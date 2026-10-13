@@ -19,6 +19,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,7 +28,7 @@ use lightagent_core::ProfileId;
 use lightagent_core::identity::store::{IdentityStore, StoredAudit};
 use lightagent_core::identity::{
     AuditAction, AuditRecord, AuthorizedProfile, Caller, Capability, CredentialStore, Denial,
-    OwnershipRegistry, PrincipalSource, Role, authorize, authorize_capability,
+    OwnershipRegistry, PrincipalSource, RevocationCheck, Role, authorize, authorize_capability,
 };
 
 use crate::manager::RunOwner;
@@ -71,6 +72,16 @@ pub struct IdentityState {
 /// The most recent authorization decisions kept in memory.
 const AUDIT_CAPACITY: usize = 4_096;
 
+/// The time credential expiry is judged at, in Unix seconds.
+pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+fn system_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default()
+}
+
 /// The multi-user identity authority. Every check reads the current state;
 /// a poisoned lock denies rather than admits.
 pub struct IdentityAuthority {
@@ -80,6 +91,9 @@ pub struct IdentityAuthority {
     /// so a change made elsewhere (another process, a restart) applies to
     /// the next request, and an unreadable store denies everything.
     store: Option<Arc<IdentityStore>>,
+    /// Counts in-memory changes, standing in for the store's generation.
+    changes: AtomicU64,
+    now: Clock,
 }
 
 impl fmt::Debug for IdentityAuthority {
@@ -94,6 +108,25 @@ impl IdentityAuthority {
             state: RwLock::new(state),
             audit: Mutex::new(VecDeque::new()),
             store: None,
+            changes: AtomicU64::new(0),
+            now: Arc::new(system_now),
+        }
+    }
+
+    /// Judge credential expiry by `now` instead of the system clock (tests,
+    /// or a host with its own time source).
+    pub fn with_clock(mut self, now: Clock) -> Self {
+        self.now = now;
+        self
+    }
+
+    /// The identity-state generation: the store's for a persistent
+    /// authority, else the number of in-memory changes. `None` if the store
+    /// cannot be read.
+    pub fn generation(&self) -> Option<u64> {
+        match &self.store {
+            Some(store) => store.load().ok().map(|document| document.generation()),
+            None => Some(self.changes.load(Ordering::SeqCst)),
         }
     }
 
@@ -106,6 +139,8 @@ impl IdentityAuthority {
             state: RwLock::new(IdentityState::default()),
             audit: Mutex::new(VecDeque::new()),
             store: Some(store),
+            changes: AtomicU64::new(0),
+            now: Arc::new(system_now),
         }
     }
 
@@ -140,13 +175,17 @@ impl IdentityAuthority {
         if self.store.is_some() {
             return None;
         }
-        self.state.write().ok().map(|mut state| change(&mut state))
+        let changed = self.state.write().ok().map(|mut state| change(&mut state));
+        if changed.is_some() {
+            self.changes.fetch_add(1, Ordering::SeqCst);
+        }
+        changed
     }
 
     fn authenticate(&self, token: &str) -> Result<Caller, Denial> {
         self.sync()?;
         let state = self.state.read().map_err(|_| Denial::Unauthenticated)?;
-        state.credentials.authenticate(token)
+        state.credentials.authenticate_at(token, (self.now)())
     }
 
     /// The caller as the current state sees it: an issued credential is read
@@ -157,7 +196,7 @@ impl IdentityAuthority {
             PrincipalSource::Credential { key_id } => {
                 self.sync().map_err(|_| Denial::Revoked)?;
                 let state = self.state.read().map_err(|_| Denial::Revoked)?;
-                state.credentials.caller_for(key_id)
+                state.credentials.caller_for_at(key_id, (self.now)())
             }
             _ => Ok(caller.clone()),
         }
@@ -191,12 +230,17 @@ impl IdentityAuthority {
     /// the run's profile. A run with no recorded principal (started before
     /// multi-user mode, through ACP, or by the single-user API) is
     /// operator-only. Knowing a run id authorizes nothing.
+    ///
+    /// The caller's credential is read again first, so a [`Caller`] kept
+    /// from before a revocation, expiry or narrowing authorizes nothing.
     pub fn authorize_run(
         &self,
         caller: &Caller,
         owner: &RunOwner,
         capability: Capability,
     ) -> Result<(), Denial> {
+        let current = self.refresh(caller)?;
+        let caller = &current;
         authorize_capability(caller, capability)?;
         if caller.principal.role == Role::Operator {
             return Ok(());
@@ -212,6 +256,27 @@ impl IdentityAuthority {
         authorize(caller, capability, profile, &state.ownership).map(|_| ())
     }
 
+    /// The check a revocable run started by `caller` re-runs at every
+    /// enforcement point: the credential is read again, then the run's
+    /// owner and profile are authorized for `runs_write` against the current
+    /// ownership. It holds only identifiers, never an earlier decision. The
+    /// first refusal is audited (the run stops checking after it).
+    pub fn run_check(self: &Arc<Self>, caller: Caller, owner: RunOwner) -> RevocationCheck {
+        let identity = Arc::clone(self);
+        Arc::new(move || {
+            let decision = identity.authorize_run(&caller, &owner, Capability::RunsWrite);
+            if let Err(denial) = decision {
+                identity.record(
+                    Some(&caller),
+                    AuditAction::Request(Capability::RunsWrite),
+                    owner.profile(),
+                    Err(denial),
+                );
+            }
+            decision
+        })
+    }
+
     /// Append one audit record, keeping the most recent [`AUDIT_CAPACITY`].
     pub fn record(
         &self,
@@ -220,10 +285,7 @@ impl IdentityAuthority {
         profile: Option<&ProfileId>,
         outcome: Result<(), Denial>,
     ) {
-        let at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs())
-            .unwrap_or_default();
+        let at = (self.now)();
         let record = AuditRecord::decision(at, caller, action, profile, outcome);
         if let Some(store) = &self.store {
             // Durable and bounded; a failure to record never admits.

@@ -15,6 +15,7 @@ mod banner;
 mod chat;
 mod coordinator;
 mod extensions;
+mod identity_admin;
 mod import;
 mod jev;
 mod markdown;
@@ -128,6 +129,12 @@ enum Command {
         /// Serve the built WebUI panel from this directory (e.g. frontend/dist).
         #[arg(long)]
         web_root: Option<std::path::PathBuf>,
+    },
+    /// Manage local identities: users, credentials, ownership and audit.
+    /// Operator-only (this OS account); does not enable multi-user mode.
+    Identity {
+        #[command(subcommand)]
+        action: identity_admin::IdentityAction,
     },
     /// Serve the Agent Client Protocol (ACP) over stdio, for an editor to drive.
     Acp,
@@ -405,6 +412,7 @@ async fn dispatch(cli: Cli) -> Result<(), String> {
             key_env,
             web_root,
         }) => serve::run(host, port, key_env, web_root).await,
+        Some(Command::Identity { action }) => identity_admin::run(action, cli.json),
         Some(Command::Acp) => acp::run().await,
         Some(Command::Architecture) => architecture(cli.json),
         Some(Command::Doctor) => doctor(cli.json).await,

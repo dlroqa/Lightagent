@@ -22,4 +22,6 @@ pub use fs::{FsList, FsRead, FsWrite};
 pub use open_terminal::OpenTerminalRun;
 pub use skill::SkillRead;
 pub use terminal::TerminalRun;
-pub use web::{WebFetch, WebSearch, WebSearchHit, fetch_text, search_results};
+pub use web::{
+    WebFetch, WebSearch, WebSearchHit, fetch_text, fetch_text_authorized, search_results,
+};

@@ -14,7 +14,7 @@ use lightagent_api::manager::{
     self, ProviderCapabilities, RunFactory, RunManager, RunStatus, RuntimeModel, StartRun,
 };
 use lightagent_api::{AppState, AuthConfig, Scope, router};
-use lightagent_core::identity::RunTrust;
+use lightagent_core::identity::{AuthorizedProvider, RunAuthorization, RunTrust};
 use lightagent_core::{
     AgentEvent, AgentEventSink, AgentLoop, ApprovalDecision, ConfigStore, LightagentPaths,
     PolicyEngine, ProfileStore, RunId, StopReason,
@@ -225,6 +225,51 @@ impl RunFactory for LightweightRunFactory {
         cancel: CancellationToken,
         decisions: UnboundedReceiver<ApprovalDecision>,
     ) -> RunStatus {
+        self.run_with(request, trust, None, sink, cancel, decisions)
+            .await
+    }
+
+    /// A revocable run: the same run, with `authorization` re-checked before
+    /// any external request (Jev preflight included), every model turn,
+    /// every tool call, remote request and delegated worker, and every
+    /// approval decision.
+    async fn run_supervised(
+        &self,
+        request: StartRun,
+        trust: RunTrust,
+        authorization: RunAuthorization,
+        sink: AgentEventSink,
+        cancel: CancellationToken,
+        decisions: UnboundedReceiver<ApprovalDecision>,
+    ) -> RunStatus {
+        self.run_with(request, trust, Some(authorization), sink, cancel, decisions)
+            .await
+    }
+}
+
+impl LightweightRunFactory {
+    /// The run itself. `authorization` is `None` for a run that is not
+    /// revocable, which then behaves exactly as it always has.
+    async fn run_with(
+        &self,
+        request: StartRun,
+        trust: RunTrust,
+        authorization: Option<RunAuthorization>,
+        sink: AgentEventSink,
+        cancel: CancellationToken,
+        decisions: UnboundedReceiver<ApprovalDecision>,
+    ) -> RunStatus {
+        if let Some(authorization) = &authorization
+            && let Err(denial) = authorization.verify()
+        {
+            let _ = sink.send(AgentEvent::Error {
+                message: lightagent_core::identity::revoked_message(denial),
+            });
+            let _ = sink.send(AgentEvent::RunCompleted {
+                reason: StopReason::Cancelled,
+            });
+            return RunStatus::Cancelled;
+        }
         let paths = LightagentPaths::rooted_at(&self.root);
         let config = match ConfigStore::at(&paths).load() {
             Ok(config) => config,
@@ -380,6 +425,9 @@ impl RunFactory for LightweightRunFactory {
         )
         .with_run(RunId::new())
         .with_delegation(delegation);
+        if let Some(authorization) = &authorization {
+            executor = executor.with_authorization(authorization.clone());
+        }
         if tool_policy.enforced {
             executor = executor.with_call_guard(crate::chat::tool_policy_guard(
                 self.root.clone(),
@@ -434,14 +482,18 @@ impl RunFactory for LightweightRunFactory {
         if let Err(error) = crate::memory::capture(&profile_dir, &config, &request.message, None) {
             eprintln!("could not retain durable memory: {error}");
         }
+        let authorization =
+            authorization.unwrap_or_else(|| RunAuthorization::unconditional(cancel.clone()));
+        let provider = AuthorizedProvider::new(provider, authorization.clone());
         let agent = AgentLoop::from_profile(provider, executor, &profile);
-        manager::drive(
+        manager::drive_supervised(
             agent,
             request.history,
             request.message,
             sink,
             cancel,
             decisions,
+            authorization,
         )
         .await
     }

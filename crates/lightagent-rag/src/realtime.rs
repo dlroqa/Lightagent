@@ -14,7 +14,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures_util::{StreamExt as _, stream};
 use lightagent_core::{RiskClass, Scope, ToolOutcome};
-use lightagent_tools::builtins::{WebSearchHit, fetch_text, search_results};
+use lightagent_tools::builtins::{WebSearchHit, fetch_text_authorized, search_results};
 use lightagent_tools::{Tool, ToolCtx, ToolDefinition};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -111,6 +111,9 @@ impl Tool for RealtimeRag {
         let Some(web) = ctx.web.clone() else {
             return ToolOutcome::error("web access is not enabled for this run");
         };
+        if let Err(reason) = ctx.authorized() {
+            return ToolOutcome::error(reason);
+        }
 
         let results = tokio::select! {
             _ = ctx.cancel.cancelled() => return ToolOutcome::error("rag.realtime was cancelled"),
@@ -145,7 +148,7 @@ impl Tool for RealtimeRag {
         let fetched = stream::iter(candidates.into_iter().map(|(rank, hit)| {
             let web = web.clone();
             async move {
-                let page = fetch_text(&web, &hit.url).await;
+                let page = fetch_text_authorized(&web, &hit.url, ctx).await;
                 (rank, hit, page)
             }
         }))

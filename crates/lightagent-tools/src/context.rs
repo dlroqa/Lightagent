@@ -14,6 +14,7 @@ use std::sync::{
 };
 use std::time::{Duration, SystemTime};
 
+use lightagent_core::identity::{RunAuthorization, revoked_message};
 use lightagent_core::{
     ApprovalPolicy, ProfileStore, ProviderFactory, RunId, RunLimits, SkillStore,
 };
@@ -416,6 +417,10 @@ pub struct ToolCtx {
     pub open_terminal: Option<OpenTerminalContext>,
     /// Present only when skills are available for this run.
     pub skills: Option<SkillContext>,
+    /// The run's authorization, re-checked before a tool reaches outside the
+    /// process (a remote request, a delegated worker). `None` for a run that
+    /// is not revocable.
+    pub authorization: Option<RunAuthorization>,
 }
 
 impl ToolCtx {
@@ -430,6 +435,22 @@ impl ToolCtx {
             workspace: None,
             open_terminal: None,
             skills: None,
+            authorization: None,
+        }
+    }
+
+    /// Re-check `authorization` before remote requests and delegation.
+    pub fn with_authorization(mut self, authorization: RunAuthorization) -> Self {
+        self.authorization = Some(authorization);
+        self
+    }
+
+    /// Whether the run may still take an action that reaches outside the
+    /// process. Always allowed for a run that is not revocable.
+    pub fn authorized(&self) -> Result<(), String> {
+        match &self.authorization {
+            Some(authorization) => authorization.verify().map_err(revoked_message),
+            None => Ok(()),
         }
     }
 

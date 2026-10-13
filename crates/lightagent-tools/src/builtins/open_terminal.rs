@@ -299,6 +299,10 @@ impl Tool for OpenTerminalRun {
         let Some(remote) = ctx.open_terminal.as_ref() else {
             return ToolOutcome::error("Open Terminal is not enabled for this run");
         };
+        // A revoked run sends nothing to the remote service.
+        if let Err(reason) = ctx.authorized() {
+            return ToolOutcome::error(reason);
+        }
         // `run` owns the cleanup guard once the remote process is known. Let
         // it observe cancellation and await DELETE itself; an outer select
         // would drop that future first and make cleanup merely best-effort.

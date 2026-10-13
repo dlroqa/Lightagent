@@ -45,7 +45,12 @@ impl Tool for McpTool {
         &self.definition
     }
 
-    async fn call(&self, args: &Value, _ctx: &ToolCtx) -> ToolOutcome {
+    async fn call(&self, args: &Value, ctx: &ToolCtx) -> ToolOutcome {
+        // A revoked run sends no further request to the server. A request
+        // already in flight is dropped when the run is cancelled.
+        if let Err(reason) = ctx.authorized() {
+            return ToolOutcome::error(reason);
+        }
         match self.client.call_tool(&self.remote_name, args.clone()).await {
             Ok(result) => ToolOutcome {
                 content: result.text,
