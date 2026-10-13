@@ -6,6 +6,24 @@ All notable Lightagent changes are documented here.
 
 ### Security
 
+- Execution-isolation foundation (`lightagent_tools::sandbox`): a typed
+  `SandboxBackend` interface with a capability description (14 isolation
+  guarantees), per-run and per-profile `ExecutionContext` (logical root
+  grants, deny-by-default network, named secret grants, resource limits,
+  cancellation), and a `SandboxGate` that:
+  - routes trusted runs to the existing local executor, unchanged;
+  - denies every untrusted execution unless a backend with *verified*
+    isolation enforces every required guarantee. No such backend exists,
+    and its witness type has no values, so a mock or self-declared backend
+    can never be selected;
+  - has no host execution path, so a failed sandbox never falls back;
+  - re-checks authorization, honors cancellation, bounds wall clock and
+    output, and always releases the sandbox;
+  - reports fixed error codes with no paths or credentials.
+
+  Nothing calls it yet and no setting selects a backend. Design, threat
+  model and backend comparison:
+  `docs/architecture/sandbox-executor-foundation.md`.
 - Per-profile tool policy (`tools.profile_policy`: `off` (default),
   `report_only`, `enforce`, `strict`) over `AgentProfile.toolsets`. Effective
   tools are the enabled tools, narrowed by the profile's list and the run's

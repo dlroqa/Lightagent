@@ -144,10 +144,12 @@ are.** That is why untrusted runs never receive them.
 To be built as its own PRs before any local execution is offered to
 untrusted runs:
 
-1. **Execution broker.** Local tools call a `SandboxExecutor` trait instead
-   of acting directly. The default `InProcess` implementation keeps today's
-   behavior for local operators, and `Isolated` implementations serve
-   untrusted runs.
+1. **Execution broker.** Interface and deny-by-default gate built:
+   `lightagent_tools::sandbox` (`SandboxBackend`, `SandboxGate`,
+   `ExecutionContext`), see
+   [`sandbox-executor-foundation.md`](sandbox-executor-foundation.md).
+   Trusted runs keep today's local execution. No isolating backend exists
+   yet, so untrusted execution is denied.
 2. **Per-profile filesystem roots.** One root per profile, mounted only into
    that profile's worker. Opened with `openat2(RESOLVE_BENEATH |
    RESOLVE_NO_SYMLINKS)` or the platform equivalent; no traversal or symlink
@@ -218,8 +220,10 @@ treated as not requiring isolation for untrusted runs.
 
 ## Remaining blockers for multi-user activation
 
-1. **Execution isolation** (plan above). Until then, untrusted runs get no
-   local files, commands, stdio MCP or delegation, by design.
+1. **Execution isolation** (plan above; interface and gate in
+   [`sandbox-executor-foundation.md`](sandbox-executor-foundation.md)). Until
+   a verified backend exists, untrusted runs get no local files, commands,
+   stdio MCP or delegation, by design.
 2. Identity store, persistence and CLI (credentials, owners, grants), and an
    activation command.
 3. Sessions, `/profiles`, `/jev`, `/tools` scoped to the authorized profile.

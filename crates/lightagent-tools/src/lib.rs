@@ -33,6 +33,7 @@ pub mod executor;
 pub mod output;
 pub mod policy;
 pub mod registry;
+pub mod sandbox;
 pub mod schema;
 pub mod workspace;
 

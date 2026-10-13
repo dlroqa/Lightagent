@@ -569,7 +569,7 @@ fn host_matches_list(host: &str, domains: &[String]) -> bool {
 }
 
 /// Whether an address is globally routable — the negation of the SSRF guard.
-fn is_public_ip(ip: IpAddr) -> bool {
+pub(crate) fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_public_v4(v4),
         IpAddr::V6(v6) => is_public_v6(v6),
