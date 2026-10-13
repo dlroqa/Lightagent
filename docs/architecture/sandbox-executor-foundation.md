@@ -23,6 +23,7 @@ These three must not be confused, in code, tests or review:
 | --- | --- | --- | --- |
 | **Interface** (`SandboxBackend`, `ExecutionContext`, `SandboxGate`) | Types describing what a backend is asked and what it claims | No | n/a |
 | **Simulation** (`Assurance::Simulated`, the test `MockBackend`) | In-process stand-in that runs nothing | **No** | **Never** by the production gate; only by a `#[cfg(test)]` gate constructor absent from every shipped build |
+| **Experimental** (`Assurance::Experimental`, the Linux bubblewrap backend) | Really runs programs behind OS controls; guarantees implemented and tested on one runner, not independently verified ([`sandbox-linux-bubblewrap.md`](sandbox-linux-bubblewrap.md)) | Partially | **Never**, by any gate, including the test-only one |
 | **Verified isolation** (`Assurance::Verified(VerifiedIsolation)`) | A backend whose enforcement was demonstrated on this platform | Yes, by definition | Yes, if it enforces every required guarantee |
 
 `VerifiedIsolation` is an enum **with no variants**. No value of it can
@@ -266,7 +267,7 @@ runners of the platform it claims.
 
 | Platform | This build | Planned |
 | --- | --- | --- |
-| Linux x64 | Gate + deny. Untrusted execution denied. | `bubblewrap` backend, after demonstration on `ubuntu-24.04` runners |
+| Linux x64 | Gate + deny. Untrusted execution denied. An experimental bubblewrap backend exists (tests only, never eligible). | Verification of a backend (see the bubblewrap document's remaining work) |
 | macOS ARM64 | Gate + deny. Untrusted execution denied. | Deny; remote worker |
 | Windows x64 | Gate + deny. Untrusted execution denied. | Deny; remote worker |
 | Any | Trusted runs: unchanged local execution as the server's OS account | Unchanged |

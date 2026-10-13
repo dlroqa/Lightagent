@@ -93,6 +93,63 @@ jobs:
           if [ "$ready" != true ]; then cat "$terminal_test_root/server.log"; exit 1; fi
           cargo test -p lightagent-tools live_open_terminal -- --ignored --nocapture
 
+  sandbox-linux:
+    # Experimental. Not a required check. Runs the live bubblewrap backend
+    # tests against the runner's real kernel. A missing kernel feature fails
+    # the job with an infrastructure report; nothing is skipped. Every
+    # credential below is synthetic: the tests prove none reaches a sandbox.
+    name: Linux sandbox (bubblewrap, experimental)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      OPENAI_API_KEY: synthetic-provider-key-not-a-secret
+      TYPESAFE_API_KEY: synthetic-jev-key-not-a-secret
+      LIGHTAGENT_API_KEY: synthetic-operator-key-not-a-secret
+      SSH_AUTH_SOCK: /tmp/synthetic-ssh-agent.sock
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sandbox-linux
+      - name: Install bubblewrap from the distribution
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap
+      - name: Record kernel and runner prerequisites
+        shell: bash
+        run: |
+          {
+            echo "### Runner prerequisites"
+            echo '```'
+            echo "kernel: $(uname -r)"
+            echo "user: $(id -u) (root: $([ "$(id -u)" = 0 ] && echo yes || echo no))"
+            echo "bwrap: $(command -v bwrap) $(bwrap --version)"
+            stat -c 'bwrap mode %a owner %U' /usr/bin/bwrap
+            for knob in user/max_user_namespaces kernel/unprivileged_userns_clone kernel/apparmor_restrict_unprivileged_userns; do
+              echo "$knob: $(cat /proc/sys/$knob 2>/dev/null || echo absent)"
+            done
+            echo "cgroup: $(stat -fc %T /sys/fs/cgroup) $(cat /proc/self/cgroup)"
+            echo "apparmor bwrap profile: $(ls /etc/apparmor.d 2>/dev/null | grep -i bwrap || echo none)"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Fail closed on the stock runner
+        # Ubuntu 24.04 restricts unprivileged user namespaces through
+        # AppArmor and ships no profile for bwrap: the backend must refuse.
+        run: cargo test -p lightagent-tools --test sandbox_bubblewrap -- --ignored --nocapture --exact a_host_that_denies_user_namespaces_leaves_the_backend_unavailable
+      - name: Grant user namespaces to bwrap only
+        # The Ubuntu-documented, per-binary alternative to disabling
+        # kernel.apparmor_restrict_unprivileged_userns, which stays 1. This is
+        # the deployment prerequisite the backend documents.
+        run: |
+          printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' \
+            'profile bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '}' \
+            | sudo tee /etc/apparmor.d/lightagent-bwrap
+          sudo apparmor_parser -r /etc/apparmor.d/lightagent-bwrap
+          echo "apparmor_restrict_unprivileged_userns: $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Live sandbox tests
+        env:
+          LIGHTAGENT_SANDBOX_LIVE: '1'
+        run: cargo test -p lightagent-tools --test sandbox_bubblewrap -- --ignored --nocapture --test-threads=1 --skip a_host_that_denies_user_namespaces
+
   web-render:
     name: standalone Web UI render
     runs-on: ubuntu-24.04

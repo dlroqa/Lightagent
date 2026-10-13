@@ -16,6 +16,10 @@
 //!   [`SandboxGate`]): what a backend is asked to do and what it claims;
 //! * a *simulated* backend (the test mock, [`Assurance::Simulated`]): runs
 //!   nothing, isolates nothing, and the production gate never accepts it;
+//! * an *experimental* backend ([`Assurance::Experimental`], the Linux
+//!   [`bubblewrap`] adapter): really runs programs behind some OS controls,
+//!   but its guarantees are not independently verified, so no gate, not even
+//!   a test gate, ever routes a run to it;
 //! * *verified* OS isolation ([`Assurance::Verified`]): its witness,
 //!   [`VerifiedIsolation`], has no values. No backend in this build can claim
 //!   it, so every untrusted execution request is denied.
@@ -161,6 +165,11 @@ pub enum Assurance {
     /// Pretends to run, in process, for tests. Isolates nothing, whatever
     /// guarantees it lists. Never accepted by the production gate.
     Simulated,
+    /// Runs programs behind real OS controls whose guarantees have not been
+    /// independently verified. Its [`Capabilities`] list what it implements
+    /// and tests, nothing more. Never accepted by any gate: a working
+    /// subprocess is not proof of a sandbox.
+    Experimental,
     /// OS isolation, demonstrated on this platform.
     Verified(VerifiedIsolation),
 }
@@ -604,6 +613,10 @@ pub enum BackendFault {
     ExecutionFailed,
     /// The backend stopped the execution at a limit.
     LimitExceeded(Guarantee),
+    /// The backend stopped the execution at the run's wall-clock limit.
+    TimedOut,
+    /// The backend stopped the execution because the run was cancelled.
+    Cancelled,
 }
 
 /// A pluggable executor that runs programs away from the server's OS
@@ -681,7 +694,8 @@ impl SandboxBackend for DenyBackend {
 pub enum DenialReason {
     /// The backend refuses everything ([`DenyBackend`]).
     NoBackend,
-    /// The backend's isolation is not verified (a simulation).
+    /// The backend's isolation is not verified (a simulation or an
+    /// experimental backend).
     NotVerified,
     /// The backend does not enforce a guarantee the run requires.
     Unsupported(Guarantee),
@@ -783,6 +797,8 @@ impl From<BackendFault> for SandboxError {
             BackendFault::Unavailable | BackendFault::StartFailed => Self::Unavailable,
             BackendFault::ExecutionFailed => Self::ExecutionFailed,
             BackendFault::LimitExceeded(guarantee) => Self::LimitExceeded(guarantee),
+            BackendFault::TimedOut => Self::TimedOut,
+            BackendFault::Cancelled => Self::Cancelled,
         }
     }
 }
@@ -872,6 +888,7 @@ impl SandboxGate {
                 return Err(DenialReason::NotVerified);
             }
             Assurance::Simulated => {}
+            Assurance::Experimental => return Err(DenialReason::NotVerified),
             Assurance::Verified(witness) => match witness {},
         }
         let enforced = self.backend.capabilities().enforced;
@@ -959,6 +976,9 @@ fn bound_output(mut output: ExecOutput, max_bytes: usize) -> ExecOutput {
     output.truncated |= stdout_cut || stderr_cut;
     output
 }
+
+#[cfg(target_os = "linux")]
+pub mod bubblewrap;
 
 #[cfg(test)]
 mod tests;
