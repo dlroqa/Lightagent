@@ -786,7 +786,7 @@ fn a_filesystem_failure_leaves_a_retryable_operation_and_nothing_usable() {
 #[test]
 fn an_identity_store_failure_leaves_no_usable_orphan() {
     let world = world();
-    world.service.inject(Fault::AfterProfileCreatedRecorded);
+    world.service.inject(Fault::ProfileCreatedRecorded);
     assert_eq!(
         world
             .provision("key-00000040", &request(SUBJECT, "alice-research"))
@@ -848,10 +848,10 @@ fn an_identity_store_failure_leaves_no_usable_orphan() {
 #[test]
 fn crash_and_restart_recovery_completes_every_interrupted_operation() {
     for (index, at) in [
-        Fault::AfterPendingRecorded,
-        Fault::AfterProfileRenamed,
-        Fault::AfterProfileCreatedRecorded,
-        Fault::AfterIdentityCommitted,
+        Fault::PendingRecorded,
+        Fault::ProfileRenamed,
+        Fault::ProfileCreatedRecorded,
+        Fault::IdentityCommitted,
     ]
     .into_iter()
     .enumerate()
@@ -911,7 +911,7 @@ fn a_failed_operation_quarantines_its_profile() {
         .provision("key-00000050", &request(SUBJECT, "alice-research"))
         .unwrap()
         .status;
-    world.service.inject(Fault::AfterProfileCreatedRecorded);
+    world.service.inject(Fault::ProfileCreatedRecorded);
     assert!(
         world
             .provision("key-00000051", &request(SUBJECT, "alice-second"))
@@ -1227,7 +1227,7 @@ fn world_with_expiring_credential() -> World {
 #[test]
 fn reconciliation_fails_operations_of_a_withdrawn_provisioner() {
     let world = world();
-    world.service.inject(Fault::AfterProfileCreatedRecorded);
+    world.service.inject(Fault::ProfileCreatedRecorded);
     assert!(
         world
             .provision("key-00000090", &request(SUBJECT, "alice-research"))

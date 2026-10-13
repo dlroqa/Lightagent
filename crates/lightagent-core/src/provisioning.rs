@@ -486,14 +486,14 @@ pub struct ProvisioningAudit {
 /// The current time in Unix seconds.
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
-/// A point at which a test stops an operation, as a crash would. Outside
+/// The point after which a test stops an operation, as a crash would. Outside
 /// tests the points are inert.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Fault {
-    AfterPendingRecorded,
-    AfterProfileRenamed,
-    AfterProfileCreatedRecorded,
-    AfterIdentityCommitted,
+    PendingRecorded,
+    ProfileRenamed,
+    ProfileCreatedRecorded,
+    IdentityCommitted,
 }
 
 /// How one step of an operation ended.
@@ -832,7 +832,7 @@ impl ProvisioningService {
                 now,
             )?;
             subject.1 = Some(id.clone());
-            self.crash_point(Fault::AfterPendingRecorded)?;
+            self.crash_point(Fault::PendingRecorded)?;
             let status = self.resume(&mut ledger, &id, &actor, now)?;
             Ok(ProvisionOutcome {
                 replayed: false,
@@ -988,7 +988,7 @@ impl ProvisioningService {
                 Ok(next) => {
                     self.transition(ledger, id, next, None, now)?;
                     if next == OperationState::ProfileCreated {
-                        self.crash_point(Fault::AfterProfileCreatedRecorded)?;
+                        self.crash_point(Fault::ProfileCreatedRecorded)?;
                     }
                 }
                 Err(Step::Fail(code)) => {
@@ -1083,7 +1083,7 @@ impl ProvisioningService {
             let _ = directory.sync_all();
         }
         self.clear_staging(&operation.id);
-        self.crash_point(Fault::AfterProfileRenamed)
+        self.crash_point(Fault::ProfileRenamed)
             .map_err(Step::Retry)?;
         // The rename landed where something else may have appeared first
         // (a directory replaced while empty): check it is ours.
@@ -1134,7 +1134,7 @@ impl ProvisioningService {
                 });
         match outcome {
             Ok(Outcome::Applied { .. } | Outcome::Replayed { .. }) => {
-                self.crash_point(Fault::AfterIdentityCommitted)
+                self.crash_point(Fault::IdentityCommitted)
                     .map_err(Step::Retry)?;
                 Ok(())
             }
