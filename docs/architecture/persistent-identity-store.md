@@ -299,12 +299,16 @@ and Windows.
 ## 11. Remaining blockers before multi-user activation
 
 1. **Operator interface.** A local CLI, `lightagent identity …`, for
-   principals, credentials, ownership, grants, issuers and audit. Today
-   only the library API exists.
+   principals, credentials, ownership, grants, issuers and audit.
+   *Addressed for users, credentials, ownership, grant revocation and audit*
+   in `identity-revocation-lifecycle.md` §2. Operator credentials and
+   issuers are still library-only.
 2. **Wiring.** `serve` building `IdentityAuthority::persistent`, behind an
    explicit, reviewed activation flag, with C1–C6.
 3. **Cancellation on revocation.** In-flight runs of a revoked credential,
    suspended principal or reassigned profile must be cancelled (§6).
+   *Implemented, not activated*: `identity-revocation-lifecycle.md` §3–§6.
+   Cross-process push still needs bounded revalidation.
 4. **Scoped endpoints.** Sessions, `/profiles`, `/tools` and `/jev`, for
    users (still operator-only).
 5. **Verified execution isolation** (the sandbox is experimental), plus

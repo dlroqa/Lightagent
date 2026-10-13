@@ -13,6 +13,7 @@
 
 use async_trait::async_trait;
 use lightagent_core::ProfileId;
+use lightagent_core::identity::{AuthorizedProvider, RunAuthorization};
 use lightagent_core::{
     AgentEvent, AgentLoop, PolicyEngine, RiskClass, RunConfig, RunLimits, RunOutcome, Scope,
     ToolOutcome,
@@ -102,6 +103,10 @@ impl Tool for AgentDelegate {
         let Some(delegation) = ctx.delegation.clone() else {
             return ToolOutcome::error("delegation is not enabled for this run");
         };
+        // A revoked run starts no worker.
+        if let Err(reason) = ctx.authorized() {
+            return ToolOutcome::error(reason);
+        }
         let args: DelegateArgs = match serde_json::from_value(args.clone()) {
             Ok(args) => args,
             Err(error) => {
@@ -187,6 +192,17 @@ impl Tool for AgentDelegate {
         if delegation.permits_nested_delegation() {
             executor = executor.with_delegation(delegation.child_context());
         }
+        // The worker acts for the same run: its tool calls, remote requests
+        // and model turns check the run's authorization, and it shares the
+        // run's cancellation token, so a revocation stops it too.
+        let authorization = match &ctx.authorization {
+            Some(authorization) => {
+                executor = executor.with_authorization(authorization.clone());
+                authorization.clone()
+            }
+            None => RunAuthorization::unconditional(ctx.cancel.clone()),
+        };
+        let provider = AuthorizedProvider::new(provider, authorization);
 
         let mut config = RunConfig::new(worker.routing.model.clone());
         config.system = Some(worker.persona.clone());
@@ -194,7 +210,13 @@ impl Tool for AgentDelegate {
         config.parent = ctx.run.clone();
 
         let child = AgentLoop::new(provider, executor, config);
-        match child.run(args.task, ctx.cancel.clone()).await {
+        let result = child.run(args.task, ctx.cancel.clone()).await;
+        // A worker whose run was revoked while it worked hands nothing back,
+        // not even a partial answer.
+        if let Err(reason) = ctx.authorized() {
+            return ToolOutcome::error(reason);
+        }
+        match result {
             Ok(RunOutcome::Completed { events }) => ToolOutcome::ok(final_content(&events)),
             Ok(RunOutcome::AwaitingApproval { .. }) => ToolOutcome::error(format!(
                 "worker '{}' paused awaiting approval, which delegation cannot grant",

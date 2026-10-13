@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use lightagent_core::identity::{RunAuthorization, revoked_message};
 use lightagent_core::{
     ApprovalDecision, ApprovalNeed, ApprovalRecord, ApprovalRequest, PolicyEngine, RiskClass,
     RunId, Scope, ToolCall, ToolInvoker, ToolOutcome, ToolSchema,
@@ -37,6 +38,7 @@ pub type CallGuard = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 /// Runs the tools in a [`ToolRegistry`] under a policy and hard bounds.
 pub struct BoundedExecutor {
     call_guard: Option<CallGuard>,
+    authorization: Option<RunAuthorization>,
     registry: ToolRegistry,
     policy: Mutex<PolicyEngine>,
     pending: Mutex<HashMap<String, (ApprovalRequest, String)>>,
@@ -62,6 +64,7 @@ impl BoundedExecutor {
     ) -> Self {
         Self {
             call_guard: None,
+            authorization: None,
             registry,
             policy: Mutex::new(policy),
             pending: Mutex::new(HashMap::new()),
@@ -115,6 +118,22 @@ impl BoundedExecutor {
 
     fn guard_refuses(&self, name: &str) -> bool {
         self.call_guard.as_ref().is_some_and(|guard| !guard(name))
+    }
+
+    /// Re-check the run's `authorization` before every call is approved or
+    /// launched, and hand it to the tools so remote requests and delegated
+    /// workers check it too. Once it is refused, no further call runs.
+    pub fn with_authorization(mut self, authorization: RunAuthorization) -> Self {
+        self.authorization = Some(authorization);
+        self
+    }
+
+    /// Why the run may no longer act, if it may not.
+    fn unauthorized(&self) -> Option<String> {
+        self.authorization
+            .as_ref()
+            .and_then(|authorization| authorization.verify().err())
+            .map(revoked_message)
     }
 
     /// Set the clock time-reading tools observe.
@@ -224,6 +243,9 @@ impl BoundedExecutor {
         if let Some(skills) = &self.skills {
             ctx = ctx.with_skills(skills.clone());
         }
+        if let Some(authorization) = &self.authorization {
+            ctx = ctx.with_authorization(authorization.clone());
+        }
         ctx
     }
 }
@@ -240,6 +262,10 @@ impl ToolInvoker for BoundedExecutor {
         let Some((risk, scopes)) = self.classify(call) else {
             return ApprovalNeed::AutoApprove;
         };
+        // A revoked run asks no one: nothing it requests may run.
+        if let Some(reason) = self.unauthorized() {
+            return ApprovalNeed::Deny(reason);
+        }
         if self.guard_refuses(&call.name) {
             return ApprovalNeed::Deny(format!(
                 "the tool '{}' is no longer permitted for this run",
@@ -274,6 +300,11 @@ impl ToolInvoker for BoundedExecutor {
         let Some(tool) = self.registry.get(&call.name) else {
             return ToolOutcome::error(format!("the tool '{}' is not available", call.name));
         };
+        // Checked again at launch: an approval granted before a revocation
+        // never lets the call run after it.
+        if let Some(reason) = self.unauthorized() {
+            return ToolOutcome::error(reason);
+        }
         if self.guard_refuses(&call.name) {
             return ToolOutcome::error(format!(
                 "the tool '{}' is no longer permitted for this run",

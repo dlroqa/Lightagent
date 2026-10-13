@@ -21,6 +21,7 @@
 mod audit;
 mod credential;
 mod ownership;
+pub mod revocation;
 pub mod store;
 
 use std::collections::BTreeSet;
@@ -34,6 +35,9 @@ pub use audit::{AuditAction, AuditOutcome, AuditRecord};
 pub use credential::{CredentialError, CredentialRecord, CredentialStore, IssuedToken};
 pub use ownership::{
     Assignment, OWNER_DEFAULT, OwnershipError, OwnershipRegistry, ProfileOwnership,
+};
+pub use revocation::{
+    AuthorizedProvider, RevocationCheck, RevocationScope, RunAuthorization, revoked_message,
 };
 
 /// A server-verified identity. Never derived from a profile id.

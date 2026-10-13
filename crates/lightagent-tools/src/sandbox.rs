@@ -38,7 +38,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use lightagent_core::identity::{
-    AuthorizedProfile, Capability, LOCAL_OPERATOR, PrincipalId, RunTrust,
+    AuthorizedProfile, Capability, LOCAL_OPERATOR, PrincipalId, RunAuthorization, RunTrust,
 };
 use lightagent_core::{ProfileId, RunId};
 use serde::Serialize;
@@ -816,6 +816,13 @@ pub enum Route {
 /// Whether a run's authorization still holds (credential and ownership not
 /// revoked). Checked before every start and every execution.
 pub type AuthorizationCheck = Arc<dyn Fn(&ExecutionContext) -> bool + Send + Sync>;
+
+/// The gate's check for a run's [`RunAuthorization`]: it holds until the run
+/// is revoked, and a refusal here revokes and cancels the run as any other
+/// enforcement point does.
+pub fn authorization_check(authorization: RunAuthorization) -> AuthorizationCheck {
+    Arc::new(move |_| authorization.verify().is_ok())
+}
 
 /// Which assurance the gate accepts. Production accepts only verified
 /// isolation; the simulated variant exists only in this crate's tests.

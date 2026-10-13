@@ -8,12 +8,24 @@
 //! channel the approvals endpoint feeds; a cancel token stops both the model and
 //! the tools. Building the concrete loop is left to a [`RunFactory`], so tests
 //! inject a mock provider and production injects the Lightweight one.
+//!
+//! The manager is also the run **supervisor** for revocation. A run started
+//! with [`RunManager::start_supervised`] carries a [`RunAuthorization`] that
+//! is re-checked at every enforcement point (model turn, tool launch, remote
+//! request, delegated worker, approval), and the supervisor can find and
+//! revoke the runs an identity change affects ([`RunManager::revoke`]) or
+//! re-check every active run at once ([`RunManager::revalidate`]). A run
+//! started with [`RunManager::start`] or [`RunManager::start_as`] is not
+//! revocable and behaves exactly as before.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lightagent_core::identity::{PrincipalId, RunTrust};
+use lightagent_core::identity::{
+    Caller, Capability, Denial, PrincipalId, RevocationCheck, RevocationScope, Role,
+    RunAuthorization, RunTrust, authorize_capability, revoked_message,
+};
 use lightagent_core::provider::ProviderMessage;
 use lightagent_core::{
     AgentEvent, AgentEventSink, AgentLoop, AgentProvider, ApprovalDecision, ApprovalId, ProfileId,
@@ -21,7 +33,7 @@ use lightagent_core::{
 };
 use serde::Serialize;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, watch};
 use tokio_util::sync::CancellationToken;
 
 /// The lifecycle state of a run.
@@ -73,6 +85,8 @@ pub struct RunOwner {
     principal: Option<PrincipalId>,
     profile: Option<ProfileId>,
     trust: RunTrust,
+    /// The public key id of the credential that started the run, if one did.
+    credential: Option<String>,
 }
 
 impl RunOwner {
@@ -88,6 +102,34 @@ impl RunOwner {
             principal: Some(principal),
             profile,
             trust,
+            credential: None,
+        }
+    }
+
+    /// Record the public key id of the credential that started the run, so
+    /// a supervisor can find the run when that credential is revoked.
+    pub fn with_credential(mut self, key_id: impl Into<String>) -> Self {
+        self.credential = Some(key_id.into());
+        self
+    }
+
+    /// The public key id of the starting credential, if any. Never a secret.
+    pub fn credential(&self) -> Option<&str> {
+        self.credential.as_deref()
+    }
+
+    /// Whether an identity change described by `scope` can affect this run.
+    /// Ownership and grants bound only a user's run; an operator's run is
+    /// affected only through its own credential or principal.
+    pub fn affected_by(&self, scope: &RevocationScope) -> bool {
+        let user = self.trust == RunTrust::RemoteUser;
+        match scope {
+            RevocationScope::Credential(key_id) => self.credential() == Some(key_id.as_str()),
+            RevocationScope::Principal(principal) => self.principal() == Some(principal),
+            RevocationScope::Profile(profile) => user && self.profile() == Some(profile),
+            RevocationScope::Grant { profile, principal } => {
+                user && self.profile() == Some(profile) && self.principal() == Some(principal)
+            }
         }
     }
 
@@ -115,6 +157,10 @@ pub struct RunState {
     notify: Notify,
     cancel: CancellationToken,
     decisions: mpsc::UnboundedSender<ApprovalDecision>,
+    authorization: RunAuthorization,
+    /// Bumped by the supervisor so open event streams re-check their
+    /// subscriber at once instead of at their next periodic check.
+    recheck: watch::Sender<u64>,
 }
 
 /// A pending approval, as the approvals endpoint reports it.
@@ -164,9 +210,34 @@ impl RunState {
     }
 
     /// Submit an approval decision to a waiting run. Returns whether it was
-    /// delivered (the run may already have moved on).
+    /// delivered (the run may already have moved on). A revoked run takes no
+    /// decision; one already queued is checked again before it is used.
     pub fn decide(&self, decision: ApprovalDecision) -> bool {
+        if self.authorization.revoked().is_some() {
+            return false;
+        }
         self.decisions.send(decision).is_ok()
+    }
+
+    /// The run's authorization, re-checked during the run.
+    pub fn authorization(&self) -> &RunAuthorization {
+        &self.authorization
+    }
+
+    /// Why the run lost its authorization, if it did.
+    pub fn revocation(&self) -> Option<Denial> {
+        self.authorization.revoked()
+    }
+
+    /// A receiver that changes whenever the supervisor asks open streams to
+    /// re-check their subscriber.
+    pub fn rechecks(&self) -> watch::Receiver<u64> {
+        self.recheck.subscribe()
+    }
+
+    fn request_recheck(&self) {
+        self.recheck
+            .send_modify(|count| *count = count.wrapping_add(1));
     }
 
     /// Wait until an event beyond `seen` is available or the run is terminal.
@@ -296,6 +367,39 @@ pub trait RunFactory: Send + Sync + 'static {
             }
         }
     }
+
+    /// Drive a revocable run. `authorization` shares the run's `cancel`
+    /// token. The default checks it once at the start and then runs
+    /// [`run_as`](Self::run_as), so a revocation still cancels the run but
+    /// is not checked inside its tools; a factory that builds its own loop
+    /// overrides this to put `authorization` on its executor and provider
+    /// and to drive with [`drive_supervised`].
+    async fn run_supervised(
+        &self,
+        request: StartRun,
+        trust: RunTrust,
+        authorization: RunAuthorization,
+        sink: AgentEventSink,
+        cancel: CancellationToken,
+        decisions: UnboundedReceiver<ApprovalDecision>,
+    ) -> RunStatus {
+        if let Err(denial) = authorization.verify() {
+            return revoked(&sink, denial);
+        }
+        self.run_as(request, trust, sink, cancel, decisions).await
+    }
+}
+
+/// End a run whose authorization was withdrawn: say why (the code only) and
+/// finish it as cancelled.
+fn revoked(sink: &AgentEventSink, denial: Denial) -> RunStatus {
+    let _ = sink.send(AgentEvent::Error {
+        message: revoked_message(denial),
+    });
+    let _ = sink.send(AgentEvent::RunCompleted {
+        reason: StopReason::Cancelled,
+    });
+    RunStatus::Cancelled
 }
 
 /// Drive one agent loop to a terminal status, handling approval pauses.
@@ -310,8 +414,38 @@ pub async fn drive<P: AgentProvider, I: ToolInvoker>(
     message: String,
     sink: AgentEventSink,
     cancel: CancellationToken,
-    mut decisions: UnboundedReceiver<ApprovalDecision>,
+    decisions: UnboundedReceiver<ApprovalDecision>,
 ) -> RunStatus {
+    let authorization = RunAuthorization::unconditional(cancel.clone());
+    drive_supervised(
+        agent,
+        history,
+        message,
+        sink,
+        cancel,
+        decisions,
+        authorization,
+    )
+    .await
+}
+
+/// [`drive`] for a revocable run: `authorization` is checked before the run
+/// starts and before an approval decision is acted on, so a decision made or
+/// queued before a revocation never resumes the run after it. A revocation
+/// during an approval wait ends the wait at once. The loop's provider and
+/// invoker check the same authorization at every model turn and tool call.
+pub async fn drive_supervised<P: AgentProvider, I: ToolInvoker>(
+    agent: AgentLoop<P, I>,
+    history: Vec<ProviderMessage>,
+    message: String,
+    sink: AgentEventSink,
+    cancel: CancellationToken,
+    mut decisions: UnboundedReceiver<ApprovalDecision>,
+    authorization: RunAuthorization,
+) -> RunStatus {
+    if let Err(denial) = authorization.verify() {
+        return revoked(&sink, denial);
+    }
     let mut outcome = match agent
         .run_streaming_with_history(history, message, cancel.clone(), sink.clone())
         .await
@@ -342,9 +476,19 @@ pub async fn drive<P: AgentProvider, I: ToolInvoker>(
             }
             RunOutcome::AwaitingApproval { suspended, .. } => {
                 tokio::select! {
-                    () = cancel.cancelled() => return RunStatus::Cancelled,
+                    () = cancel.cancelled() => {
+                        return match authorization.revoked() {
+                            Some(denial) => revoked(&sink, denial),
+                            None => RunStatus::Cancelled,
+                        };
+                    }
                     decision = decisions.recv() => match decision {
                         Some(decision) => {
+                            // A stale approval: decided before the run lost
+                            // its authorization. The call does not run.
+                            if let Err(denial) = authorization.verify() {
+                                return revoked(&sink, denial);
+                            }
                             outcome = match agent.resume(suspended, decision, cancel.clone()).await {
                                 Ok(outcome) => outcome,
                                 Err(error) => {
@@ -415,11 +559,44 @@ impl RunManager {
     }
 
     /// Start a run recording its `owner`. The caller must already have
-    /// authorized the owner for `request.profile`.
+    /// authorized the owner for `request.profile`. The run is not
+    /// revocable: only cancellation stops it.
     pub async fn start_as(&self, request: StartRun, owner: RunOwner) -> Arc<RunState> {
+        self.launch(request, owner, None).await
+    }
+
+    /// Start a revocable run. `check` reads the current identity state and is
+    /// consulted now (a revocation before the run starts refuses it, and no
+    /// run is created) and then at every enforcement point of the run.
+    /// `generation` is the identity-state generation it was authorized at.
+    pub async fn start_supervised(
+        &self,
+        request: StartRun,
+        owner: RunOwner,
+        check: RevocationCheck,
+        generation: Option<u64>,
+    ) -> Result<Arc<RunState>, Denial> {
+        check()?;
+        Ok(self.launch(request, owner, Some((check, generation))).await)
+    }
+
+    async fn launch(
+        &self,
+        request: StartRun,
+        owner: RunOwner,
+        revocable: Option<(RevocationCheck, Option<u64>)>,
+    ) -> Arc<RunState> {
         let id = new_run_id();
         let trust = owner.trust();
         let (decisions_tx, decisions_rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let supervised = revocable.is_some();
+        let authorization = match revocable {
+            Some((check, generation)) => {
+                RunAuthorization::revocable(check, cancel.clone(), generation)
+            }
+            None => RunAuthorization::unconditional(cancel.clone()),
+        };
         let state = Arc::new(RunState {
             id: id.clone(),
             owner,
@@ -427,8 +604,10 @@ impl RunManager {
             status: Mutex::new(RunStatus::Running),
             pending: Mutex::new(None),
             notify: Notify::new(),
-            cancel: CancellationToken::new(),
+            cancel,
             decisions: decisions_tx,
+            authorization,
+            recheck: watch::Sender::new(0),
         });
         self.runs.lock().await.insert(id, state.clone());
 
@@ -470,9 +649,16 @@ impl RunManager {
                 }
             });
 
-            let status = factory
-                .run_as(request, trust, sink_tx, cancel, decisions_rx)
-                .await;
+            let status = if supervised {
+                let authorization = run_state.authorization.clone();
+                factory
+                    .run_supervised(request, trust, authorization, sink_tx, cancel, decisions_rx)
+                    .await
+            } else {
+                factory
+                    .run_as(request, trust, sink_tx, cancel, decisions_rx)
+                    .await
+            };
             let _ = forwarder.await;
             run_state.set_pending(None).await;
             run_state.set_status(status).await;
@@ -484,6 +670,74 @@ impl RunManager {
     /// The run with this id, if it exists.
     pub async fn get(&self, id: &str) -> Option<Arc<RunState>> {
         self.runs.lock().await.get(id).cloned()
+    }
+
+    /// The runs that have not reached a terminal state.
+    async fn active(&self) -> Vec<Arc<RunState>> {
+        let runs: Vec<Arc<RunState>> = self.runs.lock().await.values().cloned().collect();
+        let mut active = Vec::new();
+        for run in runs {
+            if !run.status().await.is_terminal() {
+                active.push(run);
+            }
+        }
+        active
+    }
+
+    /// The active revocable runs an identity change described by `scope`
+    /// can affect. Unrelated runs, and runs that are not revocable, are
+    /// never included.
+    pub async fn affected_by(&self, scope: &RevocationScope) -> Vec<Arc<RunState>> {
+        self.active()
+            .await
+            .into_iter()
+            .filter(|run| run.authorization.is_revocable() && run.owner.affected_by(scope))
+            .collect()
+    }
+
+    /// Revoke the active runs `scope` affects, recording `denial` as the
+    /// reason, and cancel them. Only an operator holding `administer` may do
+    /// this; other runs are untouched. Returns the ids of the runs this call
+    /// revoked.
+    pub async fn revoke(
+        &self,
+        actor: &Caller,
+        scope: &RevocationScope,
+        denial: Denial,
+    ) -> Result<Vec<String>, Denial> {
+        if actor.principal.role != Role::Operator {
+            return Err(Denial::MissingCapability);
+        }
+        authorize_capability(actor, Capability::Administer)?;
+        let mut revoked = Vec::new();
+        for run in self.affected_by(scope).await {
+            if run.authorization.revoke(denial) {
+                revoked.push(run.id.clone());
+            }
+            run.request_recheck();
+        }
+        Ok(revoked)
+    }
+
+    /// Re-check every active revocable run against the current identity
+    /// state, revoking and cancelling each that no longer holds, and ask
+    /// every open event stream to re-check its subscriber. One bounded check
+    /// per active run; nothing polls. Returns the runs revoked now, with
+    /// why.
+    pub async fn revalidate(&self) -> Vec<(String, Denial)> {
+        let mut revoked = Vec::new();
+        for run in self.active().await {
+            if run.authorization.is_revocable()
+                && run.authorization.revoked().is_none()
+                && let Err(denial) = run.authorization.verify()
+            {
+                revoked.push((run.id.clone(), denial));
+            }
+        }
+        for run in self.runs.lock().await.values() {
+            run.request_recheck();
+        }
+        revoked
     }
 
     /// The runs currently awaiting an approval decision.

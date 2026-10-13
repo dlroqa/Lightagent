@@ -6,6 +6,34 @@ All notable Lightagent changes are documented here.
 
 ### Security
 
+- Revocation-aware run lifecycle, not activated. A run started in
+  multi-user mode carries a `RunAuthorization` that is re-checked at every
+  enforcement point:
+  - every model request (`AuthorizedProvider`);
+  - every tool approval and launch (`BoundedExecutor::with_authorization`);
+  - every `web.fetch` hop, `web.search`, `rag.realtime`, MCP `tools/call`
+    and Open Terminal request;
+  - before and inside every delegated worker;
+  - before an approval decision is acted on.
+
+  The first refusal is final and cancels the run, tearing down the model
+  stream, the tool in flight and any worker. The run manager acts as the
+  supervisor: `RunManager::revoke` revokes the runs a credential, principal,
+  profile or grant change affects (operator only), and
+  `RunManager::revalidate` re-checks every active run and ends event streams
+  whose subscriber is no longer authorized. Stale approvals are refused
+  (`409`). A retained `Caller` can no longer bypass a revocation, because
+  `authorize_run` re-reads the credential. Single-user, ACP and terminal
+  runs are unchanged. Details:
+  `docs/architecture/identity-revocation-lifecycle.md`.
+- `lightagent identity`: local, operator-only management of the durable
+  identity store. It covers status, users (create, list, suspend), user
+  credentials (issue, rotate, revoke, list), profile ownership (assign,
+  reassign, remove), grants (list, revoke) and the sanitized audit trail.
+  A new secret is shown once: only to an interactive terminal outside CI,
+  never in `--json` output, or written to a new owner-only file
+  (`--secret-file`). An undelivered credential is revoked. The command does
+  not activate multi-user mode and exposes nothing remotely.
 - Durable identity store (`lightagent_core::identity::store`), not activated.
   Principals, credentials, profile ownership, grants, reassignment history
   and idempotency keys are kept in one versioned document,

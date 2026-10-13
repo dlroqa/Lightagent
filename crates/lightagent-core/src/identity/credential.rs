@@ -225,8 +225,14 @@ impl CredentialStore {
     /// long-lived connection calls this to notice revocation, expiry or a
     /// changed restriction. A missing or revoked record is `Revoked`.
     pub fn caller_for(&self, key_id: &str) -> Result<Caller, Denial> {
+        self.caller_for_at(key_id, now_unix())
+    }
+
+    /// [`caller_for`](Self::caller_for) at `now_unix`: an expired credential
+    /// is `Expired`.
+    pub fn caller_for_at(&self, key_id: &str, now_unix: u64) -> Result<Caller, Denial> {
         let record = self.credentials.get(key_id).ok_or(Denial::Revoked)?;
-        Self::caller_from(record, now_unix())
+        Self::caller_from(record, now_unix)
     }
 
     fn caller_from(record: &CredentialRecord, now_unix: u64) -> Result<Caller, Denial> {

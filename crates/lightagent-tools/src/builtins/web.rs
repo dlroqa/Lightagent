@@ -93,7 +93,7 @@ impl Tool for WebFetch {
                 return ToolOutcome::error(format!("could not read fetch arguments: {error}"));
             }
         };
-        match fetch_text(&web, &args.url).await {
+        match fetch_text_authorized(&web, &args.url, ctx).await {
             Ok(text) => ToolOutcome::ok(text),
             Err(message) => ToolOutcome::error(message),
         }
@@ -106,12 +106,29 @@ impl Tool for WebFetch {
 /// Composite tools such as realtime RAG use this typed entry point rather than
 /// calling `web.fetch` and reparsing its rendered [`ToolOutcome`].
 pub async fn fetch_text(web: &WebContext, start: &str) -> Result<String, String> {
+    fetch(web, start, None).await
+}
+
+/// [`fetch_text`] for a run's tool call: the run's authorization is checked
+/// before every hop, so a revoked run opens no further connection.
+pub async fn fetch_text_authorized(
+    web: &WebContext,
+    start: &str,
+    ctx: &ToolCtx,
+) -> Result<String, String> {
+    fetch(web, start, Some(ctx)).await
+}
+
+async fn fetch(web: &WebContext, start: &str, ctx: Option<&ToolCtx>) -> Result<String, String> {
     let mut url = reqwest::Url::parse(start).map_err(|_| "invalid URL".to_owned())?;
     let rules = web.policy.egress_rules();
     // web.fetch carries no credential, but redirects are still validated:
     // http(s) only, no userinfo, no downgrade, no loop, a bounded count.
     let mut redirects = egress::Redirects::new(&url, MAX_REDIRECTS, false);
     loop {
+        if let Some(ctx) = ctx {
+            ctx.authorized()?;
+        }
         // Messages name the host only: never a path, query or userinfo.
         let host = egress::display_host(&url);
         // Every hop is vetted on its resolved addresses and the connection is
@@ -262,6 +279,9 @@ impl Tool for WebSearch {
                 return ToolOutcome::error(format!("could not read search arguments: {error}"));
             }
         };
+        if let Err(reason) = ctx.authorized() {
+            return ToolOutcome::error(reason);
+        }
         match search_results(&web, &args.query, args.max_results).await {
             Ok(hits) if hits.is_empty() => {
                 ToolOutcome::ok(format!("No results for {:?}.", args.query))
