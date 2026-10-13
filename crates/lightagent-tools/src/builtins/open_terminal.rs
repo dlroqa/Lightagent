@@ -388,6 +388,12 @@ impl OpenTerminalRun {
         let mut output_truncated = false;
 
         loop {
+            // A run whose authorization was withdrawn (observed here, or by
+            // its supervisor) sends no further poll: its process is deleted.
+            if let Err(reason) = ctx.authorized() {
+                cleanup.cleanup_now().await;
+                return ToolOutcome::error(reason);
+            }
             if ctx.cancel.is_cancelled() {
                 cleanup.cleanup_now().await;
                 return ToolOutcome::error("open_terminal.run was cancelled");
@@ -867,6 +873,60 @@ mod tests {
             );
             task.await.unwrap();
         }
+    }
+
+    // A revocation observed between polls deletes the remote process and
+    // sends no further poll; a revoked run starts no new command.
+    #[tokio::test]
+    async fn revocation_between_polls_deletes_the_process_and_stops_polling() {
+        use lightagent_core::identity::{Denial, RevocationCheck, RunAuthorization};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut replies = checks();
+        replies.push(reply("POST", "/execute?wait=0", process("running", "")));
+        let mut poll = reply(
+            "GET",
+            "/execute/job-1/status?wait=0&offset=0",
+            process("running", ""),
+        );
+        // Held open while the test revokes, so the next loop iteration is
+        // the first to observe it.
+        poll.delay = Duration::from_millis(750);
+        replies.push(poll);
+        replies.push(reply("DELETE", "/execute/job-1?force=true", json!({})));
+        let (mut ctx, mut requests, task) = server(replies).await;
+        let allowed = Arc::new(AtomicBool::new(true));
+        let flag = allowed.clone();
+        let check: RevocationCheck = Arc::new(move || {
+            if flag.load(Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err(Denial::Revoked)
+            }
+        });
+        let authorization = RunAuthorization::revocable(check, CancellationToken::new(), None);
+        ctx.cancel = authorization.cancel_token().clone();
+        ctx = ctx.with_authorization(authorization.clone());
+        let again = ctx.clone();
+        let execution = tokio::spawn(async move { call(&ctx).await });
+        while requests.recv().await.unwrap() != "/execute/job-1/status?wait=0&offset=0" {}
+        allowed.store(false, Ordering::SeqCst);
+        let result = execution.await.unwrap();
+        assert!(
+            result.is_error && result.content.contains("withdrawn"),
+            "{}",
+            result.content
+        );
+        // The server saw exactly: health, config, execute, one poll, delete.
+        task.await.unwrap();
+        assert_eq!(
+            requests.recv().await.as_deref(),
+            Some("/execute/job-1?force=true")
+        );
+        assert_eq!(authorization.revoked(), Some(Denial::Revoked));
+        // Nothing more is dispatched for this run.
+        let refused = call(&again).await;
+        assert!(refused.is_error && refused.content.contains("withdrawn"));
+        assert!(requests.recv().await.is_none());
     }
 
     #[tokio::test]

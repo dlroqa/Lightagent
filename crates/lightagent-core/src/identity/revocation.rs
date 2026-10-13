@@ -20,6 +20,7 @@
 //!
 //! [`verify`]: RunAuthorization::verify
 
+use std::cell::Cell;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -148,6 +149,31 @@ impl RunAuthorization {
     }
 }
 
+static SWEEPS: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    static SWEEP: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+/// Run `checks` as one **sweep**: a supervisor re-checking many runs at
+/// once. Inside it, an identity authority may read its durable state once
+/// and answer every check from that read, instead of once per run. The
+/// state is read at the start of every sweep: nothing is carried from one
+/// sweep to the next, so a sweep never relies on an earlier positive
+/// answer. `checks` must not await (the scope is the calling thread).
+pub fn sweep<R>(checks: impl FnOnce() -> R) -> R {
+    let epoch = SWEEPS.fetch_add(1, Ordering::Relaxed);
+    let previous = SWEEP.with(|sweep| sweep.replace(Some(epoch)));
+    let result = checks();
+    SWEEP.with(|sweep| sweep.set(previous));
+    result
+}
+
+/// The sweep the current thread is in, if any.
+pub fn current_sweep() -> Option<u64> {
+    SWEEP.with(Cell::get)
+}
+
 /// The message a run's tools and events report when its authorization was
 /// revoked: the fixed denial code only.
 pub fn revoked_message(denial: Denial) -> String {
@@ -204,7 +230,16 @@ impl<P: AgentProvider> AgentProvider for AuthorizedProvider<P> {
             cancel.cancel();
             return Ok(Box::pin(futures_util::stream::pending()));
         }
-        self.inner.stream(request, cancel).await
+        if !self.authorization.is_revocable() {
+            return self.inner.stream(request, cancel).await;
+        }
+        // A revocable run also abandons a connection still being set up:
+        // the loop only watches cancellation once the stream exists.
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Ok(Box::pin(futures_util::stream::pending())),
+            stream = self.inner.stream(request, cancel.clone()) => stream,
+        }
     }
 }
 
@@ -268,6 +303,26 @@ mod tests {
             authorization.clone().revoked(),
             Some(Denial::ProfileNotGranted)
         );
+    }
+
+    #[test]
+    fn sweeps_are_scoped_to_the_thread_and_never_reused() {
+        assert_eq!(current_sweep(), None);
+        let (first, nested, after) = sweep(|| {
+            let first = current_sweep();
+            let nested = sweep(current_sweep);
+            (first, nested, current_sweep())
+        });
+        assert!(first.is_some() && nested.is_some());
+        assert_ne!(first, nested, "every sweep reads afresh");
+        assert_eq!(after, first, "the outer sweep is restored");
+        assert_eq!(current_sweep(), None);
+        let other = std::thread::spawn(|| sweep(|| std::thread::spawn(current_sweep).join()))
+            .join()
+            .unwrap()
+            .unwrap();
+        assert_eq!(other, None, "another thread is never in this sweep");
+        assert_ne!(sweep(current_sweep), first);
     }
 
     #[test]

@@ -37,7 +37,8 @@ pub use ownership::{
     Assignment, OWNER_DEFAULT, OwnershipError, OwnershipRegistry, ProfileOwnership,
 };
 pub use revocation::{
-    AuthorizedProvider, RevocationCheck, RevocationScope, RunAuthorization, revoked_message,
+    AuthorizedProvider, RevocationCheck, RevocationScope, RunAuthorization, current_sweep,
+    revoked_message, sweep,
 };
 
 /// A server-verified identity. Never derived from a profile id.
