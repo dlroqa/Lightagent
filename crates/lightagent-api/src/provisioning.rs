@@ -87,17 +87,17 @@ fn refused(failure: ProvisioningError) -> Response {
 }
 
 /// The caller, from the identity authority. Without one, nothing is served.
-fn caller(api: &ProvisioningApi, headers: &HeaderMap) -> Result<Caller, Response> {
+fn caller(api: &ProvisioningApi, headers: &HeaderMap) -> Result<Caller, Box<Response>> {
     if api.auth.identity().is_none() {
-        return Err(error(
+        return Err(Box::new(error(
             StatusCode::SERVICE_UNAVAILABLE,
             "identity_unavailable",
             "provisioning requires the identity store",
-        ));
+        )));
     }
     api.auth.caller(headers).map_err(|denial| {
         let (status, text) = crate::auth::rejection(denial);
-        error(status, "unauthenticated", &text)
+        Box::new(error(status, "unauthenticated", &text))
     })
 }
 
@@ -118,7 +118,7 @@ async fn provision(
 ) -> Response {
     let caller = match caller(&api, &headers) {
         Ok(caller) => caller,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let body = match body {
         Ok(Json(body)) => body,
@@ -184,7 +184,7 @@ async fn status(
 ) -> Response {
     let caller = match caller(&api, &headers) {
         Ok(caller) => caller,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let service = Arc::clone(&api.service);
     match blocking(move || service.status(&caller, &operation_id)).await {
@@ -200,7 +200,7 @@ async fn revoke(
 ) -> Response {
     let caller = match caller(&api, &headers) {
         Ok(caller) => caller,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let service = Arc::clone(&api.service);
     match blocking(move || service.revoke(&caller, &operation_id)).await {
