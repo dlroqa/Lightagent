@@ -1206,8 +1206,8 @@ impl ProvisioningService {
         let result = self.exclusive(|| {
             let identity = self.identity_document()?;
             let ledger = self.load()?;
-            let (_, provisioner) = self.admit(caller, &identity, &ledger, now)?;
-            let operation = owned_operation(&ledger, &provisioner, operation_id)?;
+            let (actor, provisioner) = self.admit(caller, &identity, &ledger, now)?;
+            let operation = owned_operation(&ledger, &actor, &provisioner, operation_id)?;
             self.status_of(operation)
         });
         if result.is_err() {
@@ -1242,7 +1242,7 @@ impl ProvisioningService {
             let identity = self.identity_document()?;
             let mut ledger = self.load()?;
             let (actor, provisioner) = self.admit(caller, &identity, &ledger, now)?;
-            let operation = owned_operation(&ledger, &provisioner, operation_id)?.clone();
+            let operation = owned_operation(&ledger, &actor, &provisioner, operation_id)?.clone();
             subject = (
                 Some(operation.profile.clone()),
                 Some(operation.principal.clone()),
@@ -1468,10 +1468,12 @@ fn state_outcome(status: &OperationStatus) -> String {
     state.to_owned()
 }
 
-/// `operation_id` if it belongs to `provisioner`; another's, a malformed id
-/// and a missing one are all `UnknownOperation`.
+/// `operation_id` if it belongs to `provisioner` and lies within the
+/// credential's profile limit; another's, one outside the limit, a malformed
+/// id and a missing one are all `UnknownOperation`.
 fn owned_operation<'a>(
     ledger: &'a Ledger,
+    actor: &Caller,
     provisioner: &Provisioner,
     operation_id: &str,
 ) -> Result<&'a Operation, ProvisioningError> {
@@ -1482,6 +1484,13 @@ fn owned_operation<'a>(
         .operations
         .get(operation_id)
         .filter(|op| op.provisioner == provisioner.principal)
+        .filter(|op| {
+            actor
+                .restriction
+                .profiles
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(&op.profile))
+        })
         .ok_or(ProvisioningError::UnknownOperation)
 }
 

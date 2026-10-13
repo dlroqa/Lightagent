@@ -690,7 +690,7 @@ fn concurrent_provisioning_never_creates_conflicting_ownership() {
                     service(&root).provision(
                         &site,
                         &format!("key-race-{index:04}"),
-                        &request(&format!("synthetic-subject-{index:04}"), "contested"),
+                        &request(&format!("synthetic-race-{index:04}"), "contested"),
                     )
                 })
             })
@@ -1287,10 +1287,33 @@ fn credential_profile_limits_quotas_and_templates_are_enforced() {
             .err(),
         Some(ProvisioningError::Denied("profile_outside_credential"))
     );
-    world
+    let only = world
         .service
         .provision(&limited, "key-00000101", &request(SUBJECT, "only-this"))
-        .unwrap();
+        .unwrap()
+        .status;
+    let elsewhere = world
+        .provision("key-00000104", &request(SUBJECT, "not-this"))
+        .unwrap()
+        .status;
+    // The limited credential sees and revokes only operations inside its
+    // limit; the rest are answered like missing ones.
+    assert_eq!(
+        world.service.status(&limited, &only.operation_id).unwrap(),
+        only
+    );
+    for attempt in [
+        world.service.status(&limited, &elsewhere.operation_id),
+        world.service.revoke(&limited, &elsewhere.operation_id),
+    ] {
+        assert_eq!(attempt, Err(ProvisioningError::UnknownOperation));
+    }
+    assert!(
+        world
+            .effective()
+            .get(&profile("not-this"))
+            .is_some_and(|record| record.owner == elsewhere.principal_id)
+    );
     world
         .service
         .register_provisioner(
@@ -1298,7 +1321,7 @@ fn credential_profile_limits_quotas_and_templates_are_enforced() {
             &principal("control-site"),
             [ISSUER.to_owned()].into(),
             ["assistant".to_owned()].into(),
-            2,
+            3,
         )
         .unwrap();
     world

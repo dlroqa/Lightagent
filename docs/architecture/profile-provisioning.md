@@ -98,7 +98,9 @@ A **provisioner** is an identity-store principal with:
    templates it may use, and a quota of live profiles.
 
 All four are read from the durable stores on every call, under the ledger
-lock. Refused: the legacy `--key-env` key, the terminal/ACP local operator,
+lock. A credential may also carry a profile limit (`Restriction::profiles`).
+It then provisions only those ids, and sees or revokes only operations on
+them. Any other operation is answered `unknown_operation`. Refused: the legacy `--key-env` key, the terminal/ACP local operator,
 the single-user compatibility caller, user credentials, revoked, expired or
 rotated-away credentials, suspended principals, and withdrawn
 registrations.
@@ -156,6 +158,10 @@ principal ─owns─► profile (assign_owner + .identity-binding)   ◄── o
   and its registration for that issuer). It does not verify the user's
   sign-in: the website does that and vouches for the subject. The user's
   website session token is never sent to Lightagent or to a profile.
+- **Where it is stored.** The `(issuer, subject)` pair is kept in two
+  owner-only files: the identity store (principal record) and the ledger
+  (operation record). Both are needed to resolve the mapping and to replay
+  operations. Audit lines, errors and responses never contain it.
 - **Subjects** are 1–255 printable ASCII characters (an OIDC `sub`).
   Issuers are `https://` URLs of printable ASCII, at most 256 bytes, without
   userinfo, query or fragment, compared byte for byte.
@@ -424,6 +430,10 @@ run unchanged.
 7. **Per-user rate limits** on runs and provisioning quotas beyond the
    per-provisioner profile count.
 8. **Web UI** sign-in and a profile switcher limited to authorized profiles.
+9. **Scale.** The ledger is one JSON document, read and rewritten on each
+   call, and bounded at 100,000 operations (then `403 ledger_full`, with no
+   eviction, so idempotency is never silently lost). Archiving terminal
+   operations is a follow-up before large deployments.
 
 ## 14. Threat model
 
