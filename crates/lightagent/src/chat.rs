@@ -89,33 +89,118 @@ pub(crate) fn web_context(config: &Config) -> Option<WebContext> {
 /// Whose remote requests a run makes: an operator run, or an untrusted run of
 /// one profile. Decides which destinations and credentials the remote tools
 /// may use; it never adds a tool.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum RemoteAccess<'a> {
     /// The terminal, ACP, the single-user API and operators: today's
     /// behavior, with the installation's credentials.
     Operator,
-    /// An untrusted (multi-user) run of this profile: only destinations and
-    /// credentials the operator granted the profile.
+    /// An untrusted (multi-user) run of this profile on an installation
+    /// without a credential vault: only destinations and installation
+    /// credentials the operator granted the profile in the configuration.
     Untrusted(&'a ProfileId),
+    /// An untrusted run of this profile on an installation with a credential
+    /// vault: only the profile's own vault grants, never an installation
+    /// credential.
+    Granted(&'a ProfileId, &'a ProfileCredentials),
 }
 
 impl<'a> RemoteAccess<'a> {
-    pub(crate) fn for_run(
+    /// The access of a run started with `trust`: an untrusted run uses the
+    /// profile's vault `credentials` when the installation has a vault.
+    pub(crate) fn for_run_with(
         trust: lightagent_core::identity::RunTrust,
         profile: &'a ProfileId,
+        credentials: Option<&'a ProfileCredentials>,
     ) -> Self {
-        match trust {
-            lightagent_core::identity::RunTrust::LocalOperator => Self::Operator,
-            lightagent_core::identity::RunTrust::RemoteUser => Self::Untrusted(profile),
+        match (trust, credentials) {
+            (lightagent_core::identity::RunTrust::LocalOperator, _) => Self::Operator,
+            (lightagent_core::identity::RunTrust::RemoteUser, Some(credentials)) => {
+                Self::Granted(profile, credentials)
+            }
+            (lightagent_core::identity::RunTrust::RemoteUser, None) => Self::Untrusted(profile),
         }
     }
 
-    /// Whether a credential granted to `profiles` may be used.
-    fn may_use(self, profiles: &[String]) -> bool {
+    fn is_operator(self) -> bool {
+        matches!(self, Self::Operator)
+    }
+
+    /// The untrusted run's profile.
+    fn profile(self) -> Option<&'a ProfileId> {
         match self {
-            Self::Operator => true,
-            Self::Untrusted(profile) => profiles.iter().any(|granted| granted == profile.as_str()),
+            Self::Operator => None,
+            Self::Untrusted(profile) | Self::Granted(profile, _) => Some(profile),
         }
+    }
+
+    /// Whether the profile is listed in `profiles` (an operator always is).
+    fn may_use(self, profiles: &[String]) -> bool {
+        match self.profile() {
+            None => true,
+            Some(profile) => profiles.iter().any(|granted| granted == profile.as_str()),
+        }
+    }
+}
+
+/// The vault credentials an untrusted run of one profile may present,
+/// resolved per service when the run is built and re-checked before every
+/// request. Holds the key only for the run's lifetime.
+pub(crate) struct ProfileCredentials {
+    home: PathBuf,
+    profile: ProfileId,
+    key: Option<lightagent_core::credentials::MasterKey>,
+}
+
+impl std::fmt::Debug for ProfileCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProfileCredentials")
+            .field("profile", &self.profile)
+            .field("key", &self.key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+impl ProfileCredentials {
+    /// `None` when the installation has no credential vault (the legacy,
+    /// configuration-granted behavior applies). A key that is missing or
+    /// invalid leaves every grant unusable: denied, never a fallback.
+    pub(crate) fn load(home: &Path, profile: &ProfileId) -> Option<Self> {
+        if !lightagent_core::credentials::CredentialVault::new(home).exists() {
+            return None;
+        }
+        Some(Self {
+            home: home.to_path_buf(),
+            profile: profile.clone(),
+            key: lightagent_core::credentials::MasterKey::from_environment(home)
+                .ok()
+                .flatten(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_key(
+        home: &Path,
+        profile: &ProfileId,
+        key: Option<lightagent_core::credentials::MasterKey>,
+    ) -> Self {
+        Self {
+            home: home.to_path_buf(),
+            profile: profile.clone(),
+            key,
+        }
+    }
+
+    fn resolve(
+        &self,
+        service: &lightagent_core::credentials::RemoteService,
+    ) -> lightagent_core::credentials::Resolved {
+        lightagent_core::credentials::resolve(
+            &self.home,
+            self.key.as_ref(),
+            &self.profile,
+            service,
+            Arc::new(lightagent_core::credentials::system_now),
+        )
     }
 }
 
@@ -132,7 +217,36 @@ pub(crate) fn web_context_for(config: &Config, access: RemoteAccess<'_>) -> Opti
         .user_agent(concat!("lightagent/", env!("CARGO_PKG_VERSION")))
         .build()
         .ok()?;
-    let credential_granted = access.may_use(&config.web.search.credential_profiles);
+    use lightagent_core::credentials::{RemoteService, Resolved};
+    // The search key a run may present, and the grant re-checked per request.
+    let (search_api_key, search_credential, search_credential_withheld) = match access {
+        RemoteAccess::Granted(_, credentials) => {
+            match credentials.resolve(&RemoteService::WebSearch) {
+                Resolved::Active { secret, guard } => {
+                    (Some(secret.expose().to_owned()), Some(guard), false)
+                }
+                // A grant that may not be used refuses search outright.
+                Resolved::Denied(_) => (None, None, true),
+                // No grant: anonymous search only where no key is needed.
+                Resolved::Absent => (None, None, config.web.search.api_key.is_some()),
+            }
+        }
+        _ => {
+            let granted = access.may_use(&config.web.search.credential_profiles);
+            (
+                // Resolved only for a run allowed to use it.
+                config
+                    .web
+                    .search
+                    .api_key
+                    .as_ref()
+                    .filter(|_| granted)
+                    .and_then(|key| key.resolve()),
+                None,
+                !granted && config.web.search.api_key.is_some(),
+            )
+        }
+    };
     let policy = WebPolicy {
         allow_domains: config.web.allow_domains.clone(),
         block_private_addresses: config.web.block_private_addresses,
@@ -143,30 +257,21 @@ pub(crate) fn web_context_for(config: &Config, access: RemoteAccess<'_>) -> Opti
             .iter()
             .filter_map(|network| network.parse().ok())
             .collect(),
-        untrusted_destinations: match access {
-            RemoteAccess::Operator => None,
-            RemoteAccess::Untrusted(profile) => Some(
-                config
-                    .web
-                    .untrusted_destinations
-                    .get(profile.as_str())
-                    .cloned()
-                    .unwrap_or_default(),
-            ),
-        },
-        search_credential_withheld: !credential_granted && config.web.search.api_key.is_some(),
+        untrusted_destinations: access.profile().map(|profile| {
+            config
+                .web
+                .untrusted_destinations
+                .get(profile.as_str())
+                .cloned()
+                .unwrap_or_default()
+        }),
+        search_credential_withheld,
         max_fetch_bytes: config.web.max_fetch_bytes,
         timeout,
         search_endpoint: config.web.search.endpoint.clone(),
         search_query_param: config.web.search.query_param.clone(),
-        // Resolved only for a run allowed to use it.
-        search_api_key: config
-            .web
-            .search
-            .api_key
-            .as_ref()
-            .filter(|_| credential_granted)
-            .and_then(|key| key.resolve()),
+        search_api_key,
+        search_credential,
         search_max_results: config.web.search.max_results,
     };
     Some(WebContext::new(client, Arc::new(policy)))
@@ -506,7 +611,7 @@ pub(crate) async fn mcp_tools(
         RemoteAccess::Operator => hub.tools,
         // A server's annotations (`readOnlyHint`) are its own claims: an
         // untrusted run asks before every call, whatever the server says.
-        RemoteAccess::Untrusted(_) => hub
+        RemoteAccess::Untrusted(_) | RemoteAccess::Granted(..) => hub
             .tools
             .into_iter()
             .map(|tool| Arc::new(ApprovalRequired::new(tool)) as Arc<dyn Tool>)
@@ -552,7 +657,7 @@ fn to_mcp_spec(
     Some(match entry {
         // A local process as the server's OS account: never started for an
         // untrusted run (its tools are withheld by the tool policy too).
-        McpServerEntry::Stdio { .. } if access != RemoteAccess::Operator => return None,
+        McpServerEntry::Stdio { .. } if !access.is_operator() => return None,
         McpServerEntry::Stdio {
             name,
             command,
@@ -570,6 +675,33 @@ fn to_mcp_spec(
         McpServerEntry::Http {
             untrusted_profiles, ..
         } if !access.may_use(untrusted_profiles) => return None,
+        McpServerEntry::Http { name, url, .. } if matches!(access, RemoteAccess::Granted(..)) => {
+            use lightagent_core::credentials::{RemoteService, Resolved};
+            let RemoteAccess::Granted(_, credentials) = access else {
+                return None;
+            };
+            // Only the profile's own grant for this server; installation
+            // headers and `auth` are never sent to an untrusted run.
+            let (bearer, credential) = match credentials.resolve(&RemoteService::Mcp {
+                server: name.clone(),
+            }) {
+                Resolved::Active { secret, guard } => {
+                    (Some(secret.expose().to_owned()), Some(guard))
+                }
+                Resolved::Absent => (None, None),
+                // A grant that may not be used: the server is not reached.
+                Resolved::Denied(_) => return None,
+            };
+            McpServerSpec {
+                name: name.clone(),
+                transport: McpTransportSpec::Http {
+                    url: url.clone(),
+                    headers: Vec::new(),
+                    bearer,
+                    credential,
+                },
+            }
+        }
         McpServerEntry::Http {
             name,
             url,
@@ -597,6 +729,7 @@ fn to_mcp_spec(
                         .as_ref()
                         .filter(|_| granted)
                         .and_then(|secret| secret.resolve()),
+                    credential: None,
                 },
             }
         }
@@ -2796,6 +2929,7 @@ pub(crate) fn configured_model(profile_model: &str, config: &Config) -> String {
 #[cfg(test)]
 mod model_tests {
     use super::*;
+    use lightagent_core::credentials::MasterKey;
     use lightagent_store::RunRecord;
     use std::time::SystemTime;
 
@@ -3999,5 +4133,374 @@ for line in sys.stdin:
         assert!(revoked.policy.search_api_key.is_none());
         assert!(revoked.policy.search_credential_withheld);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    // --- profile-scoped vault credentials ------------------------------------
+
+    const VAULT_SEARCH_KEY: &str = "synthetic-vault-search-key";
+    const VAULT_MCP_BEARER: &str = "synthetic-vault-mcp-bearer";
+
+    /// A home with `research` and `billing` profiles, and a key.
+    fn vault_home() -> (PathBuf, lightagent_core::credentials::MasterKey) {
+        let home = std::env::temp_dir().join(format!(
+            "lightagent-vault-run-{}",
+            lightagent_core::RunId::new().as_str()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        for id in ["research", "billing"] {
+            ProfileStore::new(&home)
+                .create(&lightagent_core::AgentProfile::new(
+                    ProfileId::new(id).unwrap(),
+                    id,
+                    "Persona",
+                    "m",
+                ))
+                .unwrap();
+        }
+        (
+            home,
+            lightagent_core::credentials::MasterKey::generate().unwrap(),
+        )
+    }
+
+    fn grant(
+        home: &Path,
+        key: &lightagent_core::credentials::MasterKey,
+        profile: &str,
+        service: lightagent_core::credentials::RemoteService,
+        origin: &str,
+        secret: &str,
+        budget: Option<u32>,
+    ) -> String {
+        lightagent_core::credentials::CredentialVault::new(home)
+            .add(
+                &lightagent_core::identity::Caller::local_operator(
+                    lightagent_core::identity::PrincipalSource::LocalProcess,
+                ),
+                lightagent_core::credentials::system_now(),
+                key,
+                lightagent_core::credentials::GrantSpec {
+                    profile: ProfileId::new(profile).unwrap(),
+                    service,
+                    operations: None,
+                    destinations: [origin.to_owned()].into(),
+                    expires_unix: None,
+                    max_requests_per_run: budget,
+                },
+                &lightagent_core::credentials::ExternalSecret::new(secret).unwrap(),
+            )
+            .unwrap()
+    }
+
+    fn revoke(home: &Path, id: &str) {
+        lightagent_core::credentials::CredentialVault::new(home)
+            .revoke(
+                &lightagent_core::identity::Caller::local_operator(
+                    lightagent_core::identity::PrincipalSource::LocalProcess,
+                ),
+                lightagent_core::credentials::system_now(),
+                id,
+            )
+            .unwrap();
+    }
+
+    // 1, 2, 3, 15. Once the vault exists, an untrusted run presents only its
+    // own profile's grant: never the installation key, even for a profile the
+    // configuration lists, and never another profile's grant.
+    #[test]
+    fn vault_grants_replace_installation_credentials_for_untrusted_runs() {
+        let (home, key) = vault_home();
+        let research = ProfileId::new("research").unwrap();
+        let billing = ProfileId::new("billing").unwrap();
+        let installation = home.join("installation-key");
+        std::fs::write(&installation, "synthetic-installation-key").unwrap();
+        let mut config = Config::default();
+        config.web.enabled = true;
+        config.web.search.endpoint = Some("https://search.example.com/q".to_owned());
+        config.web.search.api_key = Some(lightagent_core::SecretRef::File { path: installation });
+        config.web.search.credential_profiles = vec!["research".to_owned(), "billing".to_owned()];
+        let id = grant(
+            &home,
+            &key,
+            "research",
+            lightagent_core::credentials::RemoteService::WebSearch,
+            "https://search.example.com",
+            VAULT_SEARCH_KEY,
+            None,
+        );
+        let mine =
+            ProfileCredentials::with_key(&home, &research, MasterKey::from_hex(&key.to_hex()).ok());
+        let granted = web_context_for(&config, RemoteAccess::Granted(&research, &mine)).unwrap();
+        assert_eq!(
+            granted.policy.search_api_key.as_deref(),
+            Some(VAULT_SEARCH_KEY)
+        );
+        assert!(granted.policy.search_credential.is_some());
+        assert!(!granted.policy.search_credential_withheld);
+        assert!(!format!("{:?}", granted.policy).contains(VAULT_SEARCH_KEY));
+        // Billing is listed for the installation key but has no grant.
+        let theirs =
+            ProfileCredentials::with_key(&home, &billing, MasterKey::from_hex(&key.to_hex()).ok());
+        let other = web_context_for(&config, RemoteAccess::Granted(&billing, &theirs)).unwrap();
+        assert!(
+            other.policy.search_api_key.is_none(),
+            "no installation fallback"
+        );
+        assert!(other.policy.search_credential_withheld);
+        // No key: the grant is unusable, and nothing falls back.
+        let keyless = ProfileCredentials::with_key(&home, &research, None);
+        let locked = web_context_for(&config, RemoteAccess::Granted(&research, &keyless)).unwrap();
+        assert!(locked.policy.search_api_key.is_none() && locked.policy.search_credential_withheld);
+        // Revoked: the same.
+        revoke(&home, &id);
+        let revoked = web_context_for(&config, RemoteAccess::Granted(&research, &mine)).unwrap();
+        assert!(
+            revoked.policy.search_api_key.is_none() && revoked.policy.search_credential_withheld
+        );
+        // Operators are unchanged.
+        let operator = web_context_for(&config, RemoteAccess::Operator).unwrap();
+        assert_eq!(
+            operator.policy.search_api_key.as_deref(),
+            Some("synthetic-installation-key")
+        );
+        assert!(operator.policy.search_credential.is_none());
+        // An installation without a vault keeps the configured grants.
+        let (bare, _) = vault_home();
+        assert!(ProfileCredentials::load(&bare, &research).is_none());
+        std::fs::remove_dir_all(home).ok();
+        std::fs::remove_dir_all(bare).ok();
+    }
+
+    /// A search backend that records each request's Authorization header
+    /// and answers JSON, or redirects to `redirect`.
+    async fn search_stub(redirect: Option<String>) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&log);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let seen = Arc::clone(&seen);
+                let redirect = redirect.clone();
+                tokio::spawn(async move {
+                    let mut bytes = Vec::new();
+                    let mut buffer = [0u8; 4096];
+                    while !bytes.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buffer).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => bytes.extend_from_slice(&buffer[..read]),
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
+                    let authorization = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("authorization:"))
+                        .map(|value| value.trim().to_owned())
+                        .unwrap_or_default();
+                    seen.lock().unwrap().push(authorization);
+                    let response = match redirect {
+                        Some(target) => format!(
+                            "HTTP/1.1 302 Found\r\nlocation: {target}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        ),
+                        None => {
+                            let body = r#"{"results":[{"title":"t","url":"https://example.com","content":"c"}]}"#;
+                            format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                                body.len()
+                            )
+                        }
+                    };
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        (format!("http://127.0.0.1:{}", address.port()), log)
+    }
+
+    // 4, 6, 8, 9, 12. Each search re-checks the grant: a revocation, a spent
+    // budget or another origin sends nothing; a redirect is not followed.
+    #[tokio::test]
+    async fn every_search_rechecks_the_profile_grant() {
+        use lightagent_tools::builtins::search_results;
+        lightagent_provider_lightweight::ensure_provider();
+        let (home, key) = vault_home();
+        let research = ProfileId::new("research").unwrap();
+        let (origin, log) = search_stub(None).await;
+        let (elsewhere, elsewhere_log) = search_stub(None).await;
+        let (redirecting, redirect_log) = search_stub(Some(format!("{elsewhere}/search"))).await;
+        let mut config = Config::default();
+        config.web.enabled = true;
+        config.web.search.endpoint = Some(format!("{origin}/search"));
+        config
+            .web
+            .untrusted_destinations
+            .insert("research".to_owned(), vec!["127.0.0.1".to_owned()]);
+        let id = grant(
+            &home,
+            &key,
+            "research",
+            lightagent_core::credentials::RemoteService::WebSearch,
+            &origin,
+            VAULT_SEARCH_KEY,
+            Some(2),
+        );
+        let credentials =
+            ProfileCredentials::with_key(&home, &research, MasterKey::from_hex(&key.to_hex()).ok());
+        let web = web_context_for(&config, RemoteAccess::Granted(&research, &credentials)).unwrap();
+        assert_eq!(search_results(&web, "first", None).await.unwrap().len(), 1);
+        assert_eq!(
+            log.lock().unwrap().clone(),
+            vec![format!("bearer {}", VAULT_SEARCH_KEY.to_ascii_lowercase())]
+        );
+        // Another origin than the grant names: refused before sending.
+        for endpoint in [
+            format!("{elsewhere}/search"),
+            format!("{redirecting}/search"),
+        ] {
+            let mut moved = config.clone();
+            moved.web.search.endpoint = Some(endpoint);
+            let web =
+                web_context_for(&moved, RemoteAccess::Granted(&research, &credentials)).unwrap();
+            let error = search_results(&web, "moved", None).await.unwrap_err();
+            assert!(error.contains("refused (destination)"), "{error}");
+        }
+        assert!(
+            elsewhere_log.lock().unwrap().is_empty() && redirect_log.lock().unwrap().is_empty()
+        );
+        // Revoked mid-run: the next search sends nothing.
+        revoke(&home, &id);
+        let error = search_results(&web, "second", None).await.unwrap_err();
+        assert!(error.contains("refused (revoked)"), "{error}");
+        assert_eq!(log.lock().unwrap().len(), 1);
+
+        // Budget, and a redirect whose target never sees the key.
+        let id = grant(
+            &home,
+            &key,
+            "research",
+            lightagent_core::credentials::RemoteService::WebSearch,
+            &redirecting,
+            VAULT_SEARCH_KEY,
+            Some(1),
+        );
+        let mut redirected = config.clone();
+        redirected.web.search.endpoint = Some(format!("{redirecting}/search"));
+        let web =
+            web_context_for(&redirected, RemoteAccess::Granted(&research, &credentials)).unwrap();
+        assert!(
+            search_results(&web, "redirect", None).await.is_err(),
+            "not followed"
+        );
+        let error = search_results(&web, "again", None).await.unwrap_err();
+        assert!(error.contains("refused (budget)"), "{error}");
+        assert_eq!(redirect_log.lock().unwrap().len(), 1);
+        assert!(
+            elsewhere_log.lock().unwrap().is_empty(),
+            "the target never saw the key"
+        );
+        revoke(&home, &id);
+        let audit = serde_json::to_string(
+            &lightagent_core::credentials::CredentialVault::new(&home)
+                .audit()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(!audit.contains(VAULT_SEARCH_KEY));
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    // 1, 7, 12, 15. MCP: a profile's own grant is the only bearer an
+    // untrusted run sends; installation `auth` and headers never are; a
+    // revoked grant keeps the server unreached, and a revocation mid-run
+    // stops the next request.
+    #[tokio::test]
+    async fn vault_mcp_credentials_follow_profile_grants() {
+        lightagent_provider_lightweight::ensure_provider();
+        let (home, key) = vault_home();
+        let research = ProfileId::new("research").unwrap();
+        let billing = ProfileId::new("billing").unwrap();
+        let none = ExtensionStore::load(&[]);
+        let (url, log) = mcp_http_stub(None).await;
+        let origin = lightagent_core::credentials::origin_of(&url).unwrap();
+        let (config, dir) = mcp_config(&url, &["research", "billing"], &["research", "billing"]);
+        let id = grant(
+            &home,
+            &key,
+            "research",
+            lightagent_core::credentials::RemoteService::Mcp {
+                server: "docs".into(),
+            },
+            &origin,
+            VAULT_MCP_BEARER,
+            None,
+        );
+        let mine =
+            ProfileCredentials::with_key(&home, &research, MasterKey::from_hex(&key.to_hex()).ok());
+        let tools = mcp_tools(&config, &none, RemoteAccess::Granted(&research, &mine)).await;
+        assert!(!tools.is_empty());
+        {
+            let requests = log.lock().unwrap();
+            assert!(!requests.is_empty());
+            for headers in requests.iter() {
+                assert_eq!(
+                    headers.get("authorization").map(String::as_str),
+                    Some(format!("Bearer {VAULT_MCP_BEARER}").as_str())
+                );
+                assert!(!headers.contains_key("x-api-key"), "no installation header");
+            }
+            assert_eq!(
+                sent_credentials(&requests),
+                (false, false),
+                "no installation bearer"
+            );
+        }
+        // Billing: listed for the installation credential, but no grant:
+        // connects with nothing.
+        let before = log.lock().unwrap().len();
+        let theirs =
+            ProfileCredentials::with_key(&home, &billing, MasterKey::from_hex(&key.to_hex()).ok());
+        assert!(
+            !mcp_tools(&config, &none, RemoteAccess::Granted(&billing, &theirs))
+                .await
+                .is_empty()
+        );
+        for headers in log.lock().unwrap()[before..].iter() {
+            assert!(!headers.contains_key("authorization") && !headers.contains_key("x-api-key"));
+        }
+        // Revoked mid-run: the next call sends nothing.
+        let lookup = tools
+            .iter()
+            .find(|tool| tool.definition().name == "mcp.docs.lookup")
+            .unwrap()
+            .clone();
+        revoke(&home, &id);
+        let before = log.lock().unwrap().len();
+        let outcome = lookup
+            .call(
+                &serde_json::json!({}),
+                &lightagent_tools::ToolCtx::new(CancellationToken::new()),
+            )
+            .await;
+        assert!(
+            outcome.is_error && outcome.content.contains("credential refused (revoked)"),
+            "{}",
+            outcome.content
+        );
+        assert_eq!(
+            log.lock().unwrap().len(),
+            before,
+            "no request after revocation"
+        );
+        // A new run: the revoked grant keeps the server unreached.
+        assert!(
+            mcp_tools(&config, &none, RemoteAccess::Granted(&research, &mine))
+                .await
+                .is_empty()
+        );
+        assert_eq!(log.lock().unwrap().len(), before);
+        std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(home).ok();
     }
 }

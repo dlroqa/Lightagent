@@ -49,6 +49,15 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci --prefix frontend
+      # The committed lockfile must be exactly what Cargo resolves: a stale
+      # or hand-edited entry fails here, with Cargo's own correction shown.
+      - name: Cargo.lock is current
+        run: |
+          if ! cargo metadata --locked --format-version 1 >/dev/null; then
+            cargo metadata --format-version 1 >/dev/null
+            git diff -- Cargo.lock
+            exit 1
+          fi
       - run: bash ./scripts/check.sh
       - name: CLI smoke
         run: |

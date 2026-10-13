@@ -115,12 +115,13 @@ impl RunFactory for LightweightRunFactory {
         let profile_dir = profiles.handle(&profile.id).dir().to_path_buf();
         let extensions = load_extensions(&self.root, &profile_dir);
         let skills = load_skills(&self.root, &profile_dir, &extensions, &config);
+        let credentials = vault_credentials(&self.root, &profile.id, trust);
         let mut registry = crate::chat::configured_registry_for(
             &config,
             &profile_dir,
             &extensions,
             !skills.is_empty(),
-            crate::chat::RemoteAccess::for_run(trust, &profile.id),
+            crate::chat::RemoteAccess::for_run_with(trust, &profile.id, credentials.as_ref()),
         )
         .await;
         crate::coordinator::add_explicit_tool(
@@ -397,12 +398,15 @@ impl LightweightRunFactory {
         );
         delegation.delegate_timeout = Duration::from_secs(config.subagents.delegate_timeout_secs);
         delegation.subagents = crate::chat::subagent_policy(&config);
+        // An untrusted run's remote credentials: the profile's own vault
+        // grants once the installation has a vault.
+        let credentials = vault_credentials(&self.root, &profile.id, trust);
         let mut registry = crate::chat::configured_registry_for(
             &config,
             &profile_dir,
             &extensions,
             !skills.is_empty(),
-            crate::chat::RemoteAccess::for_run(trust, &profile.id),
+            crate::chat::RemoteAccess::for_run_with(trust, &profile.id, credentials.as_ref()),
         )
         .await;
         // One Jev budget per run covers the preflight and every explicit call.
@@ -491,7 +495,7 @@ impl LightweightRunFactory {
         }
         if let Some(web) = crate::chat::web_context_for(
             &config,
-            crate::chat::RemoteAccess::for_run(trust, &profile.id),
+            crate::chat::RemoteAccess::for_run_with(trust, &profile.id, credentials.as_ref()),
         ) {
             executor = executor.with_web(web);
         }
@@ -550,6 +554,18 @@ impl LightweightRunFactory {
         )
         .await
     }
+}
+
+/// The vault credentials of an untrusted run of `profile`; `None` for a
+/// trusted run or an installation without a vault.
+fn vault_credentials(
+    root: &std::path::Path,
+    profile: &ProfileId,
+    trust: RunTrust,
+) -> Option<crate::chat::ProfileCredentials> {
+    (trust == RunTrust::RemoteUser)
+        .then(|| crate::chat::ProfileCredentials::load(root, profile))
+        .flatten()
 }
 
 fn fail(sink: &AgentEventSink, message: &str) {

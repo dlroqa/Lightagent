@@ -85,6 +85,9 @@ flate2 = "1.1.9"          # defaults to the pure-Rust miniz_oxide backend
 zip = "8.6.0"
 
 getrandom = "0.4.3"   # OS entropy for run, call, session and API identifiers
+# AEAD and HKDF for credentials sealed at rest. Already in the tree as the
+# rustls provider (see the dependency policy); named directly, never custom.
+ring = "0.17.14"
 
 # --- internal ---
 # --- release support ---

@@ -21,6 +21,7 @@ mod jev;
 mod markdown;
 mod memory;
 mod rag;
+mod remote_credentials;
 mod serve;
 mod setup;
 mod slash;
@@ -135,6 +136,12 @@ enum Command {
     Identity {
         #[command(subcommand)]
         action: identity_admin::IdentityAction,
+    },
+    /// Manage profile-scoped remote credentials (sealed at rest).
+    /// Operator-only (this OS account); used by untrusted runs only.
+    RemoteCredential {
+        #[command(subcommand)]
+        action: remote_credentials::RemoteCredentialAction,
     },
     /// Serve the Agent Client Protocol (ACP) over stdio, for an editor to drive.
     Acp,
@@ -413,6 +420,7 @@ async fn dispatch(cli: Cli) -> Result<(), String> {
             web_root,
         }) => serve::run(host, port, key_env, web_root).await,
         Some(Command::Identity { action }) => identity_admin::run(action, cli.json),
+        Some(Command::RemoteCredential { action }) => remote_credentials::run(action, cli.json),
         Some(Command::Acp) => acp::run().await,
         Some(Command::Architecture) => architecture(cli.json),
         Some(Command::Doctor) => doctor(cli.json).await,
