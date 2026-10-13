@@ -17,7 +17,7 @@ use lightagent_api::{AppState, AuthConfig, Scope, router};
 use lightagent_core::identity::{AuthorizedProvider, RunAuthorization, RunTrust};
 use lightagent_core::{
     AgentEvent, AgentEventSink, AgentLoop, ApprovalDecision, ConfigStore, LightagentPaths,
-    PolicyEngine, ProfileStore, RunId, StopReason,
+    PolicyEngine, ProfileId, ProfileStore, RunId, StopReason,
 };
 use lightagent_provider_lightweight::{LightweightProvider, ProviderConfig};
 use lightagent_runtime::{RuntimeClient, RuntimeEndpoint};
@@ -98,6 +98,59 @@ impl RunFactory for LightweightRunFactory {
             .iter()
             .filter_map(|name| registry.get(name).map(|tool| tool.definition().clone()))
             .collect())
+    }
+
+    /// What a run of `profile` with `trust` would receive, built exactly as
+    /// the run builds it: the profile's remote access, the explicit Jev tool
+    /// and the profile's tool policy for that trust.
+    async fn tools_for(
+        &self,
+        profile: &ProfileId,
+        trust: RunTrust,
+    ) -> Result<Vec<ToolDefinition>, String> {
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let config = ConfigStore::at(&paths).load().map_err(|e| e.to_string())?;
+        let profiles = ProfileStore::new(&self.root);
+        let profile = resolve_profile(&profiles, &config, Some(profile.as_str().to_owned()))?;
+        let profile_dir = profiles.handle(&profile.id).dir().to_path_buf();
+        let extensions = load_extensions(&self.root, &profile_dir);
+        let skills = load_skills(&self.root, &profile_dir, &extensions, &config);
+        let mut registry = crate::chat::configured_registry_for(
+            &config,
+            &profile_dir,
+            &extensions,
+            !skills.is_empty(),
+            crate::chat::RemoteAccess::for_run(trust, &profile.id),
+        )
+        .await;
+        crate::coordinator::add_explicit_tool(
+            &mut registry,
+            &config,
+            profile.id.as_str(),
+            crate::coordinator::JevBudget::new(
+                config.platform.jev.classification.max_calls_per_run,
+            ),
+            Arc::clone(&self.jev),
+        );
+        let registry = crate::chat::tool_policy(&config, &extensions, &registry, &profile, trust)
+            .apply(&registry);
+        Ok(registry
+            .names()
+            .iter()
+            .filter_map(|name| registry.get(name).map(|tool| tool.definition().clone()))
+            .collect())
+    }
+
+    async fn jev_status_for(&self, profile: &ProfileId) -> Result<serde_json::Value, String> {
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let config = ConfigStore::at(&paths)
+            .load()
+            .map_err(|error| error.to_string())?;
+        Ok(crate::coordinator::user_status(
+            &config,
+            profile.as_str(),
+            &self.jev,
+        ))
     }
 
     async fn jev_status(&self) -> Result<serde_json::Value, String> {

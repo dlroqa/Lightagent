@@ -257,6 +257,29 @@ impl IdentityAuthority {
         decision
     }
 
+    /// The profiles a user may take `capability` on: those it owns or was
+    /// granted, from the current ownership state (bound to existing
+    /// profiles for a persistent authority). The credential is read again
+    /// first. Operators are not listed this way: they reach every profile.
+    pub fn accessible_profiles(
+        &self,
+        caller: &Caller,
+        capability: Capability,
+    ) -> Result<Vec<ProfileId>, Denial> {
+        let caller = self.refresh(caller)?;
+        authorize_capability(&caller, capability)?;
+        self.sync().map_err(|_| Denial::ProfileNotGranted)?;
+        let state = self.state.read().map_err(|_| Denial::ProfileNotGranted)?;
+        Ok(state
+            .ownership
+            .profiles()
+            .filter(|(profile, _)| {
+                authorize(&caller, capability, profile, &state.ownership).is_ok()
+            })
+            .map(|(profile, _)| profile.clone())
+            .collect())
+    }
+
     /// Whether `caller` may take `capability` on a run started by `owner`.
     ///
     /// An operator may act on every run. A user only on a run it started

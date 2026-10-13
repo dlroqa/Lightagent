@@ -247,6 +247,52 @@ pub(crate) fn status(config: &Config, profile: &str, state: &JevState) -> Value 
     })
 }
 
+/// The Jev status an ordinary user of `profile` may see: whether the
+/// external classifier is on, that profile's own routing and classification
+/// permissions, whether the explicit tool is available to it, and the
+/// outcome of its latest classification. Excluded, as installation-wide or
+/// other profiles' state: the endpoint and key status, the connection check,
+/// the classifier model and version, thresholds and token counts, the
+/// routing allow-list, and anything of another profile.
+pub(crate) fn user_status(config: &Config, profile: &str, state: &JevState) -> Value {
+    let jev = &config.platform.jev;
+    let settings = &jev.classification;
+    let last = state.last(profile).map(|record| {
+        let diagnostics = &record.diagnostics;
+        json!({
+            "outcome": diagnostics.outcome,
+            "category": diagnostics.category,
+            "category_confidence": diagnostics.category_confidence,
+            "complexity": diagnostics.complexity,
+            "fallback_reason": diagnostics.fallback_reason,
+            "workflow": diagnostics.workflow,
+            "influenced": diagnostics.influenced,
+            "recorded_at_unix": record
+                .recorded_at
+                .duration_since(UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or_default(),
+        })
+    });
+    json!({
+        "name": "Jev Task Classification",
+        "kind": "external_classification",
+        "scope": "profile",
+        "profile": profile,
+        "enabled": jev.endpoint.enabled,
+        "routing": { "profile_permission": jev.routing_grant(profile).as_str() },
+        "classification": {
+            "mode": settings.mode.as_str(),
+            "profile_permitted": settings.permits_profile(profile),
+        },
+        "explicit_tool": {
+            "name": ClassifyTaskTool::NAME,
+            "available": available(config, profile),
+        },
+        "last_classification": last,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::classify::tests::{answer, config, jev_stub};
@@ -278,6 +324,52 @@ mod tests {
             .expect("the tool is registered")
             .call(&json!({ "task": task }), &ToolCtx::new(cancel))
             .await
+    }
+
+    /// What an ordinary user sees is its own profile's state only: no other
+    /// profile's record, no endpoint, model version, allow-list or
+    /// threshold.
+    #[test]
+    fn the_user_status_holds_only_the_profiles_own_state() {
+        let mut config = config("http://jev.test", JevClassificationMode::Shadow);
+        config.platform.jev.routing_allowed_profiles = vec!["alice-bot".into(), "bob-bot".into()];
+        let state = JevState::new();
+        state.record(
+            "alice-bot",
+            lightagent_core::ClassificationDiagnostics {
+                category: Some("alice-category".into()),
+                model_version: Some("jev-9.9.9".into()),
+                input_tokens: Some(321),
+                ..Default::default()
+            },
+        );
+        state.record(
+            "bob-bot",
+            lightagent_core::ClassificationDiagnostics {
+                category: Some("bob-category".into()),
+                ..Default::default()
+            },
+        );
+        let view = user_status(&config, "alice-bot", &state);
+        let text = view.to_string();
+        assert!(text.contains("alice-category"), "{text}");
+        assert_eq!(view["scope"], "profile");
+        for leaked in [
+            "bob",
+            "jev.test",
+            "jev-9.9.9",
+            "321",
+            "allowed_profiles",
+            "threshold",
+            "api_key",
+            "verification",
+            "endpoint",
+        ] {
+            assert!(!text.contains(leaked), "{leaked}: {text}");
+        }
+        // The operator's status is unchanged and still carries the details.
+        let full = status(&config, "alice-bot", &state).to_string();
+        assert!(full.contains("allowed_profiles") && full.contains("jev-9.9.9"));
     }
 
     #[test]

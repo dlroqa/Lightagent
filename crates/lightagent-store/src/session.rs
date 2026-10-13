@@ -123,6 +123,12 @@ pub struct RunRecord {
 pub struct Session {
     pub id: SessionId,
     pub profile: String,
+    /// The principal that created the session in multi-user mode, written by
+    /// the server. `None` for every session created otherwise (the terminal,
+    /// ACP, the single-user API, an operator): such a session is
+    /// operator-only in multi-user mode and is never assigned later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     /// ACP workspace root, when this session was opened by an editor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
@@ -155,6 +161,7 @@ impl Session {
         Self {
             id: SessionId::generate(),
             profile: profile.into(),
+            owner: None,
             cwd: None,
             title: title.into(),
             pinned: false,
@@ -249,6 +256,9 @@ fn source_from_arguments(arguments: &str) -> Option<String> {
 pub struct SessionSummary {
     pub id: SessionId,
     pub profile: String,
+    /// See [`Session::owner`]. Absent for sessions without an owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     pub title: String,
     #[serde(default)]
     pub pinned: bool,
@@ -282,6 +292,7 @@ impl SessionSummary {
         Self {
             id: session.id.clone(),
             profile: session.profile.clone(),
+            owner: session.owner.clone(),
             title: session.title.clone(),
             pinned: session.pinned,
             archived: session.archived,

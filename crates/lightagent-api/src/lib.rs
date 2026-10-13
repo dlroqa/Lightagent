@@ -29,7 +29,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
 use lightagent_core::identity::{
-    AuditAction, Caller, Capability, PrincipalSource, Role, authorize_capability, revoked_message,
+    AuditAction, Caller, Capability, PrincipalId, PrincipalSource, Role, RunTrust,
+    authorize_capability, revoked_message,
 };
 use lightagent_core::{
     AgentEvent, ApprovalPolicy, ConfigStore, LightagentPaths, PlatformEndpointConfig, ProfileId,
@@ -261,15 +262,163 @@ async fn authorized_run(
     Ok((run, Some(guard)))
 }
 
+/// How a request reaches profile-scoped data (sessions, the tool catalog,
+/// skills, Jev status, the provider view).
+enum Access {
+    /// Single-user mode, or an operator in multi-user mode: the behavior
+    /// these routes have always had.
+    Unscoped,
+    /// An ordinary user in multi-user mode, authorized for one profile.
+    User(UserAccess),
+}
+
+/// A user authorized, from server-side ownership, for one profile.
+struct UserAccess {
+    principal: PrincipalId,
+    profile: ProfileId,
+    root: PathBuf,
+}
+
+impl UserAccess {
+    /// The authorized profile's own session store.
+    fn sessions(&self, state: &AppState) -> SessionStore {
+        SessionStore::at_profile(&ProfileStore::new(&self.root).handle(&self.profile))
+            .keep_history(state.sessions.is_history_kept())
+    }
+
+    /// Whether `session` is this user's, on this profile. Both facts come
+    /// from the session record the server wrote; a session without an owner
+    /// (created before multi-user mode, or by an operator) is never a user's.
+    fn owns(&self, session: &Session) -> bool {
+        session.owner.as_deref() == Some(self.principal.as_str())
+            && session.profile == self.profile.as_str()
+    }
+
+    fn owns_summary(&self, summary: &lightagent_store::SessionSummary) -> bool {
+        summary.owner.as_deref() == Some(self.principal.as_str())
+            && summary.profile == self.profile.as_str()
+    }
+}
+
+/// The Lightagent home, from the config store, when the embedding has one.
+fn home(state: &AppState) -> Option<PathBuf> {
+    state
+        .config_store
+        .as_ref()
+        .and_then(|store| store.path().parent().map(std::path::Path::to_path_buf))
+}
+
+/// Authorize a request for `scope` on profile-scoped data.
+///
+/// Single-user mode and operators take the route's existing check. A user
+/// must hold `scope` and be authorized for the profile (`requested`, else the
+/// server's default) by the current ownership state: the name selects, the
+/// ownership registry decides. A refusal is the same whether the profile is
+/// someone else's, unowned or missing.
+fn access(
+    state: &AppState,
+    headers: &HeaderMap,
+    scope: Scope,
+    requested: Option<&str>,
+) -> Result<Access, Box<Response>> {
+    let Some(identity) = state.auth.identity() else {
+        return match deny(state, headers, scope) {
+            Some(rejection) => Err(Box::new(rejection)),
+            None => Ok(Access::Unscoped),
+        };
+    };
+    let caller = state
+        .auth
+        .caller(headers)
+        .map_err(|denial| Box::new(refused(denial)))?;
+    if caller.principal.role == Role::Operator {
+        return match deny(state, headers, scope) {
+            Some(rejection) => Err(Box::new(rejection)),
+            None => Ok(Access::Unscoped),
+        };
+    }
+    if let Err(denial) = authorize_capability(&caller, scope.into()) {
+        identity.record(
+            Some(&caller),
+            AuditAction::Request(scope.into()),
+            None,
+            Err(denial),
+        );
+        return Err(Box::new(refused(denial)));
+    }
+    let raw = requested.unwrap_or(state.session_profile.as_str());
+    let Ok(profile) = ProfileId::new(raw) else {
+        return Err(Box::new(bad_request("invalid profile id")));
+    };
+    let authorized = identity
+        .authorize_profile(&caller, scope.into(), &profile)
+        .map_err(|denial| Box::new(refused(denial)))?;
+    // Without the home, no restricted view can be built: operator-only.
+    let Some(root) = home(state) else {
+        return Err(Box::new(operator_only()));
+    };
+    Ok(Access::User(UserAccess {
+        principal: authorized.principal().clone(),
+        profile: authorized.profile().clone(),
+        root,
+    }))
+}
+
+/// The answer for a session a user may not see, and for one that does not
+/// exist: identical, so an id reveals nothing.
+fn no_session() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({ "error": "no such session" })),
+    )
+        .into_response()
+}
+
+/// The answer when a restricted representation cannot be produced: the
+/// endpoint stays operator-only.
+fn operator_only() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "error": "this endpoint is operator-only in multi-user mode" })),
+    )
+        .into_response()
+}
+
+/// The optional `?profile=` of a profile-scoped request.
+#[derive(Default, Deserialize)]
+struct ProfileQuery {
+    #[serde(default)]
+    profile: Option<String>,
+}
+
 async fn health() -> Response {
     Json(json!({ "status": "ok", "service": "lightagent" })).into_response()
 }
 
-async fn list_tools(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Some(rejection) = deny(&state, &headers, Scope::ToolsRead) {
-        return rejection;
-    }
-    let definitions = match state.manager.tools().await {
+async fn list_tools(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ProfileQuery>,
+) -> Response {
+    let scoped = match access(&state, &headers, Scope::ToolsRead, query.profile.as_deref()) {
+        Ok(Access::Unscoped) => None,
+        Ok(Access::User(user)) => Some(user),
+        Err(response) => return *response,
+    };
+    let listed = match &scoped {
+        // What a run of this profile, started by this user, would receive:
+        // a configured tool is not available to every profile.
+        Some(user) => match state
+            .manager
+            .tools_for(&user.profile, RunTrust::RemoteUser)
+            .await
+        {
+            Ok(tools) => Ok(tools),
+            Err(_) => return operator_only(),
+        },
+        None => state.manager.tools().await,
+    };
+    let definitions = match listed {
         Ok(tools) => tools,
         Err(error) => {
             return (
@@ -289,14 +438,25 @@ async fn list_tools(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
             })
         })
         .collect();
-    Json(json!({ "tools": tools })).into_response()
+    match scoped {
+        Some(user) => {
+            Json(json!({ "tools": tools, "profile": user.profile.as_str() })).into_response()
+        }
+        None => Json(json!({ "tools": tools })).into_response(),
+    }
 }
 
 /// Public metadata for skills installed for the active profile. Bodies stay in
 /// the harness and are read by the approval-gated `skill.read` tool only.
-async fn list_skills(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Some(rejection) = deny(&state, &headers, Scope::ToolsRead) {
-        return rejection;
+async fn list_skills(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ProfileQuery>,
+) -> Response {
+    match access(&state, &headers, Scope::ToolsRead, query.profile.as_deref()) {
+        Ok(Access::Unscoped) => {}
+        Ok(Access::User(user)) => return user_skills(&state, &user).await,
+        Err(response) => return *response,
     }
     let Some(config_store) = &state.config_store else {
         return internal("Lightagent skills are unavailable in this embedding");
@@ -323,11 +483,50 @@ async fn list_skills(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
         .collect();
     Json(json!({ "skills": skills })).into_response()
 }
+/// A user's skill list: the authorized profile's skills, and only when a run
+/// of that profile would receive `skill.read`.
+async fn user_skills(state: &AppState, user: &UserAccess) -> Response {
+    let Ok(tools) = state
+        .manager
+        .tools_for(&user.profile, RunTrust::RemoteUser)
+        .await
+    else {
+        return operator_only();
+    };
+    let readable = tools.iter().any(|tool| tool.name == "skill.read");
+    let mut listed = Vec::new();
+    if readable {
+        let profiles = ProfileStore::new(&user.root);
+        let skills = SkillStore::load(&skill_dirs(
+            &user.root,
+            profiles.handle(&user.profile).dir(),
+        ));
+        for name in skills.names() {
+            if let Some(skill) = skills.get(&name) {
+                listed.push(json!({"name": skill.name, "description": skill.description}));
+            }
+        }
+    }
+    Json(json!({ "skills": listed, "profile": user.profile.as_str() })).into_response()
+}
+
 /// The Jev status the Tools and Settings screens show. Readable with the
 /// tool-catalog scope; it holds no credential, secret reference or message.
-async fn get_jev_status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Some(rejection) = deny(&state, &headers, Scope::ToolsRead) {
-        return rejection;
+async fn get_jev_status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ProfileQuery>,
+) -> Response {
+    match access(&state, &headers, Scope::ToolsRead, query.profile.as_deref()) {
+        Ok(Access::Unscoped) => {}
+        // Only the authorized profile's own permissions and latest record.
+        Ok(Access::User(user)) => {
+            return match state.manager.jev_status_for(&user.profile).await {
+                Ok(status) => Json(status).into_response(),
+                Err(_) => operator_only(),
+            };
+        }
+        Err(response) => return *response,
     }
     match state.manager.jev_status().await {
         Ok(status) => Json(status).into_response(),
@@ -358,14 +557,41 @@ fn unavailable(message: &str) -> Response {
 async fn get_provider_capabilities(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(query): Query<ProfileQuery>,
 ) -> Response {
-    if let Some(rejection) = deny(&state, &headers, Scope::ToolsRead) {
-        return rejection;
+    match access(&state, &headers, Scope::ToolsRead, query.profile.as_deref()) {
+        Ok(Access::Unscoped) => {}
+        Ok(Access::User(user)) => return user_provider(&user),
+        Err(response) => return *response,
     }
     match state.manager.provider_capabilities().await {
         Ok(capabilities) => Json(capabilities).into_response(),
         Err(error) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": error }))).into_response(),
     }
+}
+
+/// A user's provider view: the same fields as the operator's, with the
+/// provider, endpoint, catalogs and runtime models withheld. Only the
+/// authorized profile's own configured model is shown.
+fn user_provider(user: &UserAccess) -> Response {
+    let Ok(profile) = ProfileStore::new(&user.root).load(&user.profile) else {
+        return internal("the profile could not be read");
+    };
+    Json(json!({
+        "provider": null,
+        "base_url": null,
+        "configured_model": profile.routing.model,
+        "models": [],
+        "model_aliases": {},
+        "model_catalog": {},
+        "runtime_models": [],
+        "streaming": true,
+        "tool_calls": true,
+        "reasoning_content": false,
+        "scope": "profile",
+        "profile": user.profile.as_str(),
+    }))
+    .into_response()
 }
 
 /// A concise, non-sensitive view of a profile suitable for a model/profile picker.
@@ -378,6 +604,15 @@ struct ProfileSummary {
 }
 
 async fn list_profiles(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(identity) = state.auth.identity() {
+        match state.auth.caller(&headers) {
+            Ok(caller) if caller.principal.role == Role::User => {
+                return user_profiles(&state, identity, &caller);
+            }
+            Ok(_) => {}
+            Err(denial) => return refused(denial),
+        }
+    }
     if let Some(rejection) = deny(&state, &headers, Scope::SessionsRead) {
         return rejection;
     }
@@ -406,6 +641,55 @@ async fn list_profiles(State(state): State<Arc<AppState>>, headers: HeaderMap) -
         });
     }
     Json(json!({ "active_profile": state.session_profile, "profiles": summaries })).into_response()
+}
+
+/// A user's profile list: only the profiles it owns or was granted, from the
+/// current ownership state. Another profile's id, name or model never
+/// appears, and the server's default profile is named only if accessible.
+fn user_profiles(
+    state: &AppState,
+    identity: &auth::IdentityAuthority,
+    caller: &Caller,
+) -> Response {
+    let accessible = match identity.accessible_profiles(caller, Capability::SessionsRead) {
+        Ok(accessible) => accessible,
+        Err(denial) => {
+            identity.record(
+                Some(caller),
+                AuditAction::Request(Capability::SessionsRead),
+                None,
+                Err(denial),
+            );
+            return refused(denial);
+        }
+    };
+    identity.record(
+        Some(caller),
+        AuditAction::Request(Capability::SessionsRead),
+        None,
+        Ok(()),
+    );
+    let Some(root) = home(state) else {
+        return operator_only();
+    };
+    let profiles = ProfileStore::new(&root);
+    let mut summaries = Vec::new();
+    for id in &accessible {
+        // Ownership of a profile that no longer exists lists nothing.
+        if let Ok(profile) = profiles.load(id) {
+            summaries.push(ProfileSummary {
+                active: profile.id.as_str() == state.session_profile,
+                id: profile.id.as_str().to_owned(),
+                name: profile.name,
+                model: profile.routing.model,
+            });
+        }
+    }
+    let active = summaries
+        .iter()
+        .any(|summary| summary.active)
+        .then(|| state.session_profile.clone());
+    Json(json!({ "active_profile": active, "profiles": summaries })).into_response()
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -818,19 +1102,14 @@ async fn create_run(
     // In multi-user mode the run stays revocable: who started it is
     // re-authorized at every enforcement point while it runs.
     let mut supervision: Option<(Arc<auth::IdentityAuthority>, Caller)> = None;
+    // A user's session: in the authorized profile's store, and its own.
+    let mut session_scope: Option<UserAccess> = None;
     if state.auth.identity().is_some() {
         let (identity, caller) = match multi_user_caller(&state, &headers, Scope::RunsWrite) {
             Ok(found) => found,
             Err(response) => return *response,
         };
         if caller.principal.role == Role::User {
-            if body.session_id.is_some() {
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(json!({"error": "sessions are operator-only in multi-user mode"})),
-                )
-                    .into_response();
-            }
             let requested = body
                 .profile
                 .clone()
@@ -840,6 +1119,26 @@ async fn create_run(
             };
             match identity.authorize_profile(&caller, Capability::RunsWrite, &requested) {
                 Ok(authorized) => {
+                    // Continuing a session appends to it: `sessions_write` on
+                    // the same profile, which the owner bundle does not hold
+                    // without a grant.
+                    if body.session_id.is_some() {
+                        if let Err(denial) = identity.authorize_profile(
+                            &caller,
+                            Capability::SessionsWrite,
+                            authorized.profile(),
+                        ) {
+                            return refused(denial);
+                        }
+                        let Some(root) = home(&state) else {
+                            return operator_only();
+                        };
+                        session_scope = Some(UserAccess {
+                            principal: authorized.principal().clone(),
+                            profile: authorized.profile().clone(),
+                            root,
+                        });
+                    }
                     body.profile = Some(authorized.profile().as_str().to_owned());
                     owner = Some((
                         authorized.principal().clone(),
@@ -863,11 +1162,28 @@ async fn create_run(
     let mut history = Vec::new();
     let mut profile = body.profile;
     let mut session_id = None;
+    let session_store = match &session_scope {
+        Some(user) => user.sessions(&state),
+        None => state.sessions.clone(),
+    };
+    let session_profile = match &session_scope {
+        Some(user) => user.profile.as_str().to_owned(),
+        None => state.session_profile.clone(),
+    };
     if let Some(raw) = body.session_id {
         let id = match SessionId::parse(&raw) {
             Ok(id) => id,
             Err(error) => return bad_request(&error.to_string()),
         };
+        // Another user's session (or an unowned one) is answered exactly
+        // like a missing one, before anything else is revealed about it.
+        if let Some(user) = &session_scope
+            && !session_store
+                .load(&id)
+                .is_ok_and(|session| user.owns(&session))
+        {
+            return no_session();
+        }
         let mut busy = state.busy_sessions.lock().await;
         if !busy.insert(id.clone()) {
             return (
@@ -876,14 +1192,14 @@ async fn create_run(
             )
                 .into_response();
         }
-        let mut session = match state.sessions.load(&id) {
+        let mut session = match session_store.load(&id) {
             Ok(session) => session,
             Err(error) => {
                 busy.remove(&id);
                 return not_found(&error.to_string());
             }
         };
-        if session.profile != state.session_profile
+        if session.profile != session_profile
             || profile
                 .as_ref()
                 .is_some_and(|value| value != &session.profile)
@@ -897,7 +1213,7 @@ async fn create_run(
             session.title = session_title(&body.message);
         }
         session.push_message(StoredMessage::new("user", &body.message));
-        if let Err(error) = state.sessions.save(&session) {
+        if let Err(error) = session_store.save(&session) {
             busy.remove(&id);
             return internal(&error.to_string());
         }
@@ -949,17 +1265,18 @@ async fn create_run(
         let state = Arc::clone(&state);
         let run = Arc::clone(&run);
         let id = id.clone();
+        let sessions = session_store.clone();
         tokio::spawn(async move {
             let mut seen = 0;
             loop {
                 let (events, status) = run.wait_from(seen).await;
                 seen += events.len();
                 if status.is_terminal() {
-                    match state.sessions.load(&id) {
+                    match sessions.load(&id) {
                         Ok(mut session) => {
                             let events = run.events().await;
                             session.record_run_events(&events, &format!("{status:?}"));
-                            if let Err(error) = state.sessions.save(&session) {
+                            if let Err(error) = sessions.save(&session) {
                                 eprintln!("could not save agent session {id:?}: {error}");
                             }
                         }
@@ -1088,9 +1405,32 @@ async fn cancel_run(
     }
 }
 
-async fn list_sessions(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Some(rejection) = deny(&state, &headers, Scope::SessionsRead) {
-        return rejection;
+async fn list_sessions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ProfileQuery>,
+) -> Response {
+    match access(
+        &state,
+        &headers,
+        Scope::SessionsRead,
+        query.profile.as_deref(),
+    ) {
+        Ok(Access::Unscoped) => {}
+        // Only this user's own sessions of the authorized profile.
+        Ok(Access::User(user)) => {
+            return match user.sessions(&state).list() {
+                Ok(list) => {
+                    let list: Vec<_> = list
+                        .into_iter()
+                        .filter(|summary| user.owns_summary(summary))
+                        .collect();
+                    Json(json!({ "sessions": list })).into_response()
+                }
+                Err(_) => internal("sessions could not be listed"),
+            };
+        }
+        Err(response) => return *response,
     }
     match state.sessions.list() {
         Ok(list) => Json(json!({ "sessions": list })).into_response(),
@@ -1103,6 +1443,8 @@ struct SearchSessionsQuery {
     q: String,
     #[serde(default)]
     limit: Option<usize>,
+    #[serde(default)]
+    profile: Option<String>,
 }
 
 async fn search_sessions(
@@ -1110,9 +1452,16 @@ async fn search_sessions(
     headers: HeaderMap,
     Query(query): Query<SearchSessionsQuery>,
 ) -> Response {
-    if let Some(rejection) = deny(&state, &headers, Scope::SessionsRead) {
-        return rejection;
-    }
+    let user = match access(
+        &state,
+        &headers,
+        Scope::SessionsRead,
+        query.profile.as_deref(),
+    ) {
+        Ok(Access::Unscoped) => None,
+        Ok(Access::User(user)) => Some(user),
+        Err(response) => return *response,
+    };
     let term = query.q.trim();
     if term.is_empty() {
         return Json(json!({ "sessions": [] })).into_response();
@@ -1121,22 +1470,57 @@ async fn search_sessions(
         return bad_request("search query must be 200 characters or fewer");
     }
     let limit = query.limit.unwrap_or(20).clamp(1, 50);
+    if let Some(user) = user {
+        // Filtered before the limit, so another user's sessions neither
+        // appear nor crowd this user's out.
+        return match user.sessions(&state).search(term, usize::MAX) {
+            Ok(found) => {
+                let found: Vec<_> = found
+                    .into_iter()
+                    .filter(|result| user.owns_summary(&result.session))
+                    .take(limit)
+                    .collect();
+                Json(json!({ "sessions": found })).into_response()
+            }
+            Err(_) => internal("sessions could not be searched"),
+        };
+    }
     match state.sessions.search(term, limit) {
         Ok(list) => Json(json!({ "sessions": list })).into_response(),
         Err(error) => internal(&error.to_string()),
     }
 }
 
-async fn create_session(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Some(rejection) = deny(&state, &headers, Scope::SessionsWrite) {
-        return rejection;
-    }
+async fn create_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ProfileQuery>,
+) -> Response {
+    let user = match access(
+        &state,
+        &headers,
+        Scope::SessionsWrite,
+        query.profile.as_deref(),
+    ) {
+        Ok(Access::Unscoped) => None,
+        Ok(Access::User(user)) => Some(user),
+        Err(response) => return *response,
+    };
     if !state.sessions.is_history_kept() {
         return (
             StatusCode::CONFLICT,
             Json(json!({ "error": "session history is disabled" })),
         )
             .into_response();
+    }
+    if let Some(user) = user {
+        // Recorded with its owner and the authorized profile, by the server.
+        let mut session = Session::new(user.profile.as_str(), "agent session");
+        session.owner = Some(user.principal.as_str().to_owned());
+        return match user.sessions(&state).save(&session) {
+            Ok(()) => (StatusCode::CREATED, Json(json!({ "id": session.id }))).into_response(),
+            Err(_) => internal("the session could not be saved"),
+        };
     }
     let session = Session::new(&state.session_profile, "agent session");
     match state.sessions.save(&session) {
@@ -1151,11 +1535,19 @@ async fn upload_attachment(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(query): Query<ProfileQuery>,
     body: Bytes,
 ) -> Response {
-    if let Some(rejection) = deny(&state, &headers, Scope::SessionsWrite) {
-        return rejection;
-    }
+    let user = match access(
+        &state,
+        &headers,
+        Scope::SessionsWrite,
+        query.profile.as_deref(),
+    ) {
+        Ok(Access::Unscoped) => None,
+        Ok(Access::User(user)) => Some(user),
+        Err(response) => return *response,
+    };
     const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
     if body.len() > MAX_ATTACHMENT_BYTES {
         return bad_request("attachments must be 20 MB or smaller");
@@ -1178,6 +1570,18 @@ async fn upload_attachment(
     let Some(filename) = filename else {
         return bad_request("attachment filename is invalid");
     };
+    if let Some(user) = user {
+        let store = user.sessions(&state);
+        return match store.load(&id) {
+            Ok(session) if user.owns(&session) => {
+                match store.save_attachment(&id, filename, &body) {
+                    Ok(path) => Json(json!({ "name": filename, "path": path })).into_response(),
+                    Err(_) => internal("the attachment could not be saved"),
+                }
+            }
+            _ => no_session(),
+        };
+    }
     let session = match state.sessions.load(&id) {
         Ok(session) => session,
         Err(error) => return not_found(&error.to_string()),
@@ -1199,10 +1603,18 @@ async fn get_session(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(query): Query<ProfileQuery>,
 ) -> Response {
-    if let Some(rejection) = deny(&state, &headers, Scope::SessionsRead) {
-        return rejection;
-    }
+    let user = match access(
+        &state,
+        &headers,
+        Scope::SessionsRead,
+        query.profile.as_deref(),
+    ) {
+        Ok(Access::Unscoped) => None,
+        Ok(Access::User(user)) => Some(user),
+        Err(response) => return *response,
+    };
     let id = match SessionId::parse(&id) {
         Ok(id) => id,
         Err(error) => {
@@ -1213,6 +1625,12 @@ async fn get_session(
                 .into_response();
         }
     };
+    if let Some(user) = user {
+        return match user.sessions(&state).load(&id) {
+            Ok(session) if user.owns(&session) => Json(session).into_response(),
+            _ => no_session(),
+        };
+    }
     match state.sessions.load(&id) {
         Ok(session) => Json(session).into_response(),
         Err(error) => (
@@ -1273,11 +1691,23 @@ async fn update_session(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(query): Query<ProfileQuery>,
     Json(body): Json<UpdateSessionBody>,
 ) -> Response {
-    if let Some(rejection) = deny(&state, &headers, Scope::SessionsWrite) {
-        return rejection;
-    }
+    let user = match access(
+        &state,
+        &headers,
+        Scope::SessionsWrite,
+        query.profile.as_deref(),
+    ) {
+        Ok(Access::Unscoped) => None,
+        Ok(Access::User(user)) => Some(user),
+        Err(response) => return *response,
+    };
+    let store = match &user {
+        Some(user) => user.sessions(&state),
+        None => state.sessions.clone(),
+    };
     let id = match SessionId::parse(&id) {
         Ok(id) => id,
         Err(error) => return bad_request(&error.to_string()),
@@ -1300,6 +1730,16 @@ async fn update_session(
         Patch::Missing => None,
     };
 
+    // A user learns nothing about a session that is not its own, not even
+    // whether it has an active run.
+    if let Some(user) = &user
+        && !user
+            .sessions(&state)
+            .load(&id)
+            .is_ok_and(|session| user.owns(&session))
+    {
+        return no_session();
+    }
     let busy = state.busy_sessions.lock().await;
     if busy.contains(&id) {
         return (
@@ -1308,9 +1748,11 @@ async fn update_session(
         )
             .into_response();
     }
-    let mut session = match state.sessions.load(&id) {
-        Ok(session) => session,
-        Err(error) => return not_found(&error.to_string()),
+    let mut session = match (store.load(&id), &user) {
+        (Ok(session), None) => session,
+        (Ok(session), Some(user)) if user.owns(&session) => session,
+        (_, Some(_)) => return no_session(),
+        (Err(error), None) => return not_found(&error.to_string()),
     };
     if let Some(value) = title {
         session.title = value;
@@ -1326,7 +1768,7 @@ async fn update_session(
     }
     session.touch();
     let summary = lightagent_store::SessionSummary::of(&session);
-    let result = state.sessions.save(&session);
+    let result = store.save(&session);
     drop(busy);
     match result {
         Ok(()) => Json(summary).into_response(),
@@ -1338,10 +1780,18 @@ async fn delete_session(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(query): Query<ProfileQuery>,
 ) -> Response {
-    if let Some(rejection) = deny(&state, &headers, Scope::SessionsWrite) {
-        return rejection;
-    }
+    let user = match access(
+        &state,
+        &headers,
+        Scope::SessionsWrite,
+        query.profile.as_deref(),
+    ) {
+        Ok(Access::Unscoped) => None,
+        Ok(Access::User(user)) => Some(user),
+        Err(response) => return *response,
+    };
     let id = match SessionId::parse(&id) {
         Ok(id) => id,
         Err(error) => {
@@ -1352,6 +1802,16 @@ async fn delete_session(
                 .into_response();
         }
     };
+    // A user learns nothing about a session that is not its own, not even
+    // whether it has an active run.
+    if let Some(user) = &user
+        && !user
+            .sessions(&state)
+            .load(&id)
+            .is_ok_and(|session| user.owns(&session))
+    {
+        return no_session();
+    }
     let busy = state.busy_sessions.lock().await;
     if busy.contains(&id) {
         return (
@@ -1359,6 +1819,18 @@ async fn delete_session(
             Json(json!({ "error": "session has an active run" })),
         )
             .into_response();
+    }
+    if let Some(user) = user {
+        let store = user.sessions(&state);
+        let result = match store.load(&id) {
+            Ok(session) if user.owns(&session) => store.delete(&id),
+            _ => return no_session(),
+        };
+        drop(busy);
+        return match result {
+            Ok(removed) => Json(json!({ "deleted": removed })).into_response(),
+            Err(_) => internal("the session could not be deleted"),
+        };
     }
     let result = state.sessions.delete(&id);
     drop(busy);

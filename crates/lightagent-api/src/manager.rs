@@ -330,6 +330,26 @@ pub trait RunFactory: Send + Sync + 'static {
             .collect())
     }
 
+    /// The tools a run of `profile` started with `trust` would receive: the
+    /// enabled tools narrowed by that profile's tool policy. The default
+    /// cannot compute it, so a restricted catalog is refused and the tool
+    /// catalog stays operator-only in multi-user mode.
+    async fn tools_for(
+        &self,
+        _profile: &ProfileId,
+        _trust: RunTrust,
+    ) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
+        Err("a profile-scoped tool catalog is not available in this embedding".to_owned())
+    }
+
+    /// The Jev status an ordinary user of `profile` may see: that profile's
+    /// own permissions and latest classification only (no endpoint,
+    /// verification, threshold, model or other profile's state). The default
+    /// refuses, keeping Jev status operator-only.
+    async fn jev_status_for(&self, _profile: &ProfileId) -> Result<serde_json::Value, String> {
+        Err("a profile-scoped Jev status is not available in this embedding".to_owned())
+    }
+
     /// Discover capabilities from the active provider.
     async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
         Err("provider capability discovery is not available in this embedding".to_owned())
@@ -725,6 +745,20 @@ impl RunManager {
     pub async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
         self.factory.tools().await
     }
+    /// The tools a run of `profile` with `trust` would receive.
+    pub async fn tools_for(
+        &self,
+        profile: &ProfileId,
+        trust: RunTrust,
+    ) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
+        self.factory.tools_for(profile, trust).await
+    }
+
+    /// The Jev status an ordinary user of `profile` may see.
+    pub async fn jev_status_for(&self, profile: &ProfileId) -> Result<serde_json::Value, String> {
+        self.factory.jev_status_for(profile).await
+    }
+
     /// Discover the selected provider's current model catalog and capabilities.
     pub async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
         self.factory.provider_capabilities().await
