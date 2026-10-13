@@ -342,7 +342,7 @@ struct World {
     ops: String,
 }
 
-fn world() -> World {
+fn setup() -> World {
     let mut state = IdentityState::default();
     let mut issue = |id: &str, role: Role, expires: Option<u64>| {
         state
@@ -506,7 +506,7 @@ fn says_withdrawn(events: &[AgentEvent], code: &str) -> bool {
 // Revocation before the run starts: no run is created, nothing runs.
 #[tokio::test]
 async fn revocation_before_a_run_starts_refuses_it() {
-    let world = world();
+    let world = setup();
     // Authenticated, then revoked before the run is created.
     let alice = world.caller(&world.alice);
     world.revoke_credential(&world.alice);
@@ -534,7 +534,7 @@ async fn revocation_before_a_run_starts_refuses_it() {
 // Revocation during model inference: the stream in flight is torn down.
 #[tokio::test]
 async fn revocation_during_inference_stops_the_model() {
-    let world = world();
+    let world = setup();
     let model = Model::new(vec![Turn::Hold]);
     let run = world
         .start(
@@ -570,7 +570,7 @@ async fn revocation_during_inference_stops_the_model() {
 // store): the tool never runs and the model is not asked again.
 #[tokio::test]
 async fn revocation_before_a_tool_blocks_it_and_any_further_turn() {
-    let world = world();
+    let world = setup();
     let identity = world.identity.clone();
     let alice_key = key_id(&world.alice);
     let model = Model::reacting(
@@ -613,7 +613,7 @@ async fn revocation_before_a_tool_blocks_it_and_any_further_turn() {
 // principal): the call is torn down.
 #[tokio::test]
 async fn suspension_while_a_tool_executes_tears_it_down() {
-    let world = world();
+    let world = setup();
     let model = Model::new(vec![Turn::Call("probe.hold", "{}")]);
     let probe = Probe::new("probe.hold", RiskClass::Observe, true);
     let run = world
@@ -656,7 +656,7 @@ async fn suspension_while_a_tool_executes_tears_it_down() {
 // longer be delivered, and the awaited call never runs.
 #[tokio::test]
 async fn revocation_during_an_approval_wait_ends_it() {
-    let world = world();
+    let world = setup();
     let model = Model::new(vec![Turn::Call("probe.mutate", "{}"), Turn::Say("done")]);
     let probe = Probe::new("probe.mutate", RiskClass::Mutating, false);
     let mut script = Script::new(model).with_tool(probe.clone());
@@ -686,7 +686,7 @@ async fn revocation_during_an_approval_wait_ends_it() {
 // but before the run observed it. The run checks before acting on it.
 #[tokio::test]
 async fn a_stale_approval_never_resumes_the_run() {
-    let world = world();
+    let world = setup();
     let model = Model::new(vec![Turn::Call("probe.mutate", "{}"), Turn::Say("done")]);
     let probe = Probe::new("probe.mutate", RiskClass::Mutating, false);
     let mut script = Script::new(model.clone()).with_tool(probe.clone());
@@ -713,7 +713,7 @@ async fn a_stale_approval_never_resumes_the_run() {
 // continue.
 #[tokio::test]
 async fn reassignment_stops_only_the_previous_owners_run() {
-    let world = world();
+    let world = setup();
     let alice_model = Model::new(vec![Turn::Hold]);
     let bob_model = Model::new(vec![Turn::Hold]);
     let alice_run = world
@@ -759,7 +759,7 @@ async fn reassignment_stops_only_the_previous_owners_run() {
 // are unaffected.
 #[tokio::test]
 async fn concurrent_runs_are_revoked_precisely() {
-    let world = world();
+    let world = setup();
     let mut runs = Vec::new();
     for (token, profile_id, message) in [
         (&world.alice, "alice-bot", "a1"),
@@ -836,7 +836,7 @@ async fn concurrent_runs_are_revoked_precisely() {
 // Only an operator holding `administer` may revoke through the supervisor.
 #[tokio::test]
 async fn only_an_operator_may_revoke_runs() {
-    let world = world();
+    let world = setup();
     let model = Model::new(vec![Turn::Hold]);
     let run = world
         .start(&world.bob, "bob-bot", "mine", Script::new(model.clone()))
@@ -872,7 +872,7 @@ async fn only_an_operator_may_revoke_runs() {
 // expires. An approval for a revoked run is refused as stale.
 #[tokio::test]
 async fn expiry_ends_streams_and_runs_and_stales_approvals() {
-    let world = world();
+    let world = setup();
     let model = Model::new(vec![Turn::Hold]);
     let run = world
         .start(
@@ -1090,7 +1090,7 @@ async fn delegated_workers_follow_the_runs_authorization() {
 
     // In flight: the run approves the delegation, the worker's model holds,
     // and revoking the run tears the worker down.
-    let world = world();
+    let world = setup();
     let worker = Model::new(vec![Turn::Hold]);
     let parent = Model::new(vec![Turn::Call("agent.delegate", delegate)]);
     let mut script = Script::new(parent);
@@ -1137,7 +1137,7 @@ async fn delegated_workers_follow_the_runs_authorization() {
     assert_eq!(worker.requests(), 0, "no worker was started");
 
     // Revoked mid-worker, observed by the worker's own checks.
-    let world = world();
+    let world = setup();
     let identity = world.identity.clone();
     let alice_key = key_id(&world.alice);
     let worker = Model::reacting(vec![Turn::Call("probe.run", "{}")], move |_| {
