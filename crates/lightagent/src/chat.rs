@@ -105,15 +105,8 @@ pub(crate) enum RemoteAccess<'a> {
 }
 
 impl<'a> RemoteAccess<'a> {
-    pub(crate) fn for_run(
-        trust: lightagent_core::identity::RunTrust,
-        profile: &'a ProfileId,
-    ) -> Self {
-        Self::for_run_with(trust, profile, None)
-    }
-
-    /// [`for_run`](Self::for_run) with the profile's vault credentials, when
-    /// the installation has a vault.
+    /// The access of a run started with `trust`: an untrusted run uses the
+    /// profile's vault `credentials` when the installation has a vault.
     pub(crate) fn for_run_with(
         trust: lightagent_core::identity::RunTrust,
         profile: &'a ProfileId,
