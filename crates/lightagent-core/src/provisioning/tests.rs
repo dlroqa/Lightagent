@@ -1864,3 +1864,132 @@ fn web_a_fresh_ledger_answers_a_merits_refusal_for_a_bound_profile() {
         "the user still owns the profile"
     );
 }
+
+// r4 §10.6 against the real stores (test-only; no continuity check exists in
+// the service yet). C2 and C3 need, per harness: which operations the ledger
+// knows, which ones the profiles carry, and whether the identity store is
+// older than the ledger. Profile markers hold each operation's random
+// `marker` token (not its id), and they survive revocation, reassignment and
+// crashes. The identity store's generation is monotone and drops when an
+// older copy is restored. Identity idempotency records cannot serve C3: they
+// are capped at 10,000 and evicted oldest first (`store.rs`
+// `MAX_IDEMPOTENCY`), and nothing exposes them.
+
+fn ledger_markers(world: &World) -> BTreeSet<String> {
+    world
+        .service
+        .load()
+        .unwrap()
+        .operations()
+        .map(|op| op.marker.clone())
+        .collect()
+}
+
+fn profile_markers(world: &World) -> BTreeSet<String> {
+    let profiles = world
+        .profile_dir(WEB_PROFILE)
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    std::fs::read_dir(profiles)
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| std::fs::read_to_string(entry.path().join(MARKER_FILE)).ok())
+        .map(|marker| marker.trim().to_owned())
+        .collect()
+}
+
+#[test]
+fn web_continuity_inputs_are_observable_on_the_real_stores() {
+    let harness = world();
+    // Completed, revoked, operator-reassigned, and interrupted after the
+    // profile was created (a crash-recovery marker without a binding).
+    let completed = harness
+        .provision("idk_fixturecontinuity000001", &web_request(WEB_PROFILE))
+        .unwrap()
+        .status;
+    let revoked = harness
+        .provision(
+            "idk_fixturecontinuity000002",
+            &web_request("agt_fixtureprofile000000000002"),
+        )
+        .unwrap()
+        .status;
+    harness
+        .service
+        .revoke(&harness.site(), &revoked.operation_id)
+        .unwrap();
+    harness
+        .provision(
+            "idk_fixturecontinuity000003",
+            &web_request("agt_fixtureprofile000000000003"),
+        )
+        .unwrap();
+    operator_change(harness.root(), |tx| {
+        tx.create_principal(principal("carol"), Role::User, None)
+            .unwrap();
+        tx.reassign_owner(
+            &profile("agt_fixtureprofile000000000003"),
+            &principal("carol"),
+        )
+        .unwrap();
+    });
+    harness.service.inject(Fault::ProfileCreatedRecorded);
+    assert!(
+        harness
+            .provision(
+                "idk_fixturecontinuity000004",
+                &web_request("agt_fixtureprofile000000000004")
+            )
+            .is_err()
+    );
+
+    // Consistent: every marker on disk names a ledger operation (C2 passes),
+    // for historical revoked, reassigned and interrupted operations alike.
+    let on_disk = profile_markers(&harness);
+    assert_eq!(on_disk.len(), 4);
+    assert!(on_disk.is_subset(&ledger_markers(&harness)));
+    let identity_generation = harness.identity().generation();
+
+    // An older identity store restored beside the ledger: its generation
+    // drops below what the ledger's last bind produced (C3, as L1 records it).
+    let identity_state = harness.root().join("identity").join("state.json");
+    let newer = std::fs::read(&identity_state).unwrap();
+    let older = {
+        let fresh = world();
+        fresh
+            .provision("idk_fixturecontinuity000005", &web_request(WEB_PROFILE))
+            .unwrap();
+        std::fs::read(fresh.root().join("identity").join("state.json")).unwrap()
+    };
+    std::fs::write(&identity_state, &older).unwrap();
+    assert!(
+        harness.identity().generation() < identity_generation,
+        "detectable"
+    );
+    std::fs::write(&identity_state, &newer).unwrap();
+
+    // A fresh ledger beside the kept profiles (RC7): no marker on disk is
+    // known any more (C2 fails), so a gateway can refuse before serving.
+    std::fs::remove_file(harness.service.root().join(STATE)).unwrap();
+    harness
+        .service
+        .register_provisioner(
+            &operator(),
+            &principal("control-site"),
+            [ISSUER.to_owned()].into(),
+            ["assistant".to_owned()].into(),
+            10,
+        )
+        .unwrap();
+    assert!(ledger_markers(&harness).is_empty());
+    assert!(!profile_markers(&harness).is_subset(&ledger_markers(&harness)));
+    // Nothing was altered by looking: the user still owns the profile.
+    assert_eq!(
+        harness
+            .effective()
+            .get(&profile(WEB_PROFILE))
+            .map(|o| o.owner.clone()),
+        Some(completed.principal_id)
+    );
+}
