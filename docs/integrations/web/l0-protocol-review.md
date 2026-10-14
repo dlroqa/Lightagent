@@ -1,206 +1,223 @@
-# L0 review: `LA-WEB-PROVISIONING/1` candidate r1
+# L0 review: `LA-WEB-PROVISIONING/1`
 
 | | |
 |---|---|
-| Candidate | `la-web-provisioning-1/r1` |
-| Compatibility digest reviewed | `030537b8be8cc003cff31e503343d5082629eab3f3f10c82fb17d7776b24a1d2` |
-| Lightagent baseline | PR #26 `340cb48` (service), PR #27 (audit and handoff) |
-| Verdict | **REJECT r1.** It is secure and implementable in principle, but four corrections are required (§4). Accept a revision r2 with a new digest once they are made |
+| Current candidate | `la-web-provisioning-1/r2`, Web commit `d31e544968447c3f7901f004321c20983e879267` (metadata commit `fbc5c20`), branch `l0/la-web-provisioning-r2` |
+| Compatibility digest reviewed | `8649b453d55013cc5d35ed81bc052d219c4afd56eec0d031798f680923248b9a` |
+| Lightagent baseline | PR #26 `340cb48` (service unchanged), PR #27, PR #28 |
+| Verdict | **REJECT r2.** RC2, RC3 and RC4 are resolved, and RC1 is correct for a harness clock that never steps. Two gaps let Web conclude `failed` while the user owns a profile: RC5 (harness clock steps) and RC6 (journal before send). Both corrections are narrow (§4). Accept r3 with a new digest once they are made |
+| Lightagent acceptance row | **none recorded.** Acceptance waits for a digest that passes |
 
-The review used Web's files directly. A byte-identical mirror is in
-`la-web-provisioning-1-r1/`, next to this file. The mirror is a review copy
-of a **candidate**, not a frozen protocol, and must never be edited.
+The mirror in `la-web-provisioning-1-r2/` was extracted with `git archive`
+from Web commit `d31e544`, not from a working tree. It is a review copy of a
+candidate and must never be edited. `ACCEPTANCE.md` is not mirrored: it is
+Web's metadata, outside the manifest.
 
 ## 1. Provenance
 
-- The candidate files are **not committed** in the Web repository. They are
-  untracked in the working tree on top of `775c7c7` (`phase-5-account-ui`),
-  next to uncommitted edits to other Web docs. The mirror was copied from that
-  working tree, and its bytes still match the manifest and Web's current files.
-- `ACCEPTANCE.md` defines the digest as the hash of `MANIFEST.json` "exactly
-  as committed". No such commit exists yet, so neither side can record
-  acceptance against a commit (RC4).
+| Check | Result |
+|---|---|
+| Candidate commit `d31e544…` exists, parent `775c7c7` | yes |
+| Metadata commit `fbc5c20` changes only `ACCEPTANCE.md` and names `d31e544` and digest `8649b453…` | yes |
+| Hashed files committed (not untracked); Web working tree clean | yes |
+| `MANIFEST.json` at `d31e544` (and at `fbc5c20`) hashes to `8649b453…` | yes |
+| Specification and 8 fixture files: `sha256sum -c` | 10/10 OK |
+| `fixtureDigest` | `49c28a8b…1f55`, recomputed |
+| Runtime or Cloudflare configuration changes in `d31e544` | none. `src/`, `wrangler*` and `migrations/` are untouched. Only docs, `.gitattributes`, a test-only `package.json` script, and test/tooling files |
+| r1 command, redelivery and key vectors carried into r2 | byte-identical apart from `fixtureSet` |
+| Reachability of the commit | **local only**: `ACCEPTANCE.md` states the Web repository has no remote. See §6 |
 
 ## 2. Verification results
 
-All results come from the independent Rust implementation in
-`crates/lightagent-protocol-conformance`. It is written from the
-specification text, Web's reference codec was not read, and it uses no Web
-tooling.
+Independent Rust in `crates/lightagent-protocol-conformance`, written from
+the specification text. Web's reference codec was not read.
 
-| Check | Result |
+| Fixture set | Result |
 |---|---|
-| `MANIFEST.json` SHA-256 equals the reported digest | pass |
-| Specification and 7 fixture files: size and SHA-256 per `MANIFEST.json`; `MANIFEST.sha256` agrees; `fixtureDigest` recomputed | pass (`sha256sum -c`: 9/9 OK) |
-| `fixtureIds` list exactly the vector ids in each file | pass |
-| Test keys: `seed = SHA-256(label)`, public keys derived with `ring` | 4/4 |
 | `commands-valid.json` | 15/15 accepted |
-| `commands-invalid.json` | 132/132 refused with exactly the expected code (and the registered HTTP status) |
-| `redelivery.json` | 6/6 as expected |
-| Canonical JSON, signing input, `payloadHash`, deterministic Ed25519 signature (re-signed from the test seed), and exact wire body reproduced | 20/20 (15 valid commands and 5 detailed redeliveries); worked example §6.3: 647, 690 and 748 bytes |
-| Redelivery invariants (§9.1) and the "not a redelivery" counter-example | pass |
-| `responses.json` (35), `create-resolution.json` (16) | Web-side classification vectors (§15). Reviewed by hand against PR #26 semantics; see RC2 and §3.F |
+| `commands-invalid.json` | 132/132 with the exact code and registered HTTP status |
+| `redelivery.json` | 6/6, plus §9.1 invariants and the counter-example |
+| Canonical JSON, signing input, `payloadHash`, Ed25519 re-signature, wire body | 20/20 |
+| `responses.json` (§12.4 classification and §13.1 ownership) | 45/45 |
+| `create-resolution.json` (§13.2 R1–R3) | 21/21 |
+| `execution-deadline.json` | 10/10: 5 single step-14 checks, and 5 races both with and without step 14 |
+| Manifest, `fixtureIds`, test keys | all verified |
 
-Each check is load-bearing. Removing the duplicate-key, NFC, canonical-bytes
-or replay check makes 4, 1, 7 and 3 vectors fail respectively.
+**Schedule model** (`model.rs`). One harness serving one job, with calls
+serialized by the ledger lock (P2) and recorded before effect (P3):
 
-One exception: removing the explicit `S < L` check changes nothing, because
-`ring` 0.17.14 also refuses a non-canonical `S`. The fixture
-`signature-noncanonical-s` therefore cannot show whether the check exists
-when `ring` is the backend. The explicit check stays, as §6.2 requires, and a
-unit test covers it. This needs no protocol change.
+| Schedules | Without step 14 | r2 step 14 | Step 14 + fence (RC5) |
+|---|---|---|---|
+| 20,000 random, clock never steps | 67 unsafe | 0 | 0 |
+| Hand-built: harness 30 s behind Web, 1 s backward step | n/a | **unsafe** | safe |
+| 50,000 random clock-step hazards within r2's limits | n/a | **1,068 unsafe** (backward steps from 13 s) | 0 |
+| 20,000 random, clock steps of up to ±90 s | n/a | n/a | 0 |
+| The 5 fixture races | as fixture | as fixture | identical to step 14: no liveness cost |
 
-## 3. Semantic compatibility with PR #26
+"Unsafe" means Web concludes `failed` while an operation exists.
 
-These were tested against the service itself. The new tests are in
-`provisioning/tests.rs`, each starting `web_`. They are test-only, and the
-service is unchanged.
+**Service semantics** (`provisioning/tests.rs`, `web_*`, test-only, service
+unchanged):
+- **Ordering:** S1, S2, S3, S11, exact redelivery, `idempotency_conflict`,
+  and merits refusals recording nothing.
+- **Failed-id reuse.**
+- **`ownerBound` combinations:**
+  - `profile_created`/`true`, `completed`/`false`, `failed`/`true` and
+    `revoked`/`true`;
+  - revoke after an operator removed ownership answers `revoked`;
+  - a reassigned profile is never re-bound by a create replay, and a new key
+    is `profile_unavailable`.
+- **`invalid_template`** as a stored failure: an unknown recorded template is
+  resumed by `reconcile`, and `status` reports `failed`/`invalid_template`.
 
-**A. Unicode normalization.** Accept NFC (§17.1). No new crate is needed:
-`icu_normalizer` 2.3.0 (ICU4X), with `compiled_data`, is already compiled
-into every Lightagent binary through `reqwest → url → idna → idna_adapter`.
-The verifier declares it directly with `default-features = false`, so
-`Cargo.lock` gains only the workspace package entry. It gains no crate and
-no feature. Do not add the `unicode-normalization` crate: it would be a new
-crate. Rust's `char::is_control` (Cc) and `char::is_whitespace`
-(`White_Space`) are exactly the §8.1 sets. Different Unicode versions on the
-two sides can only disagree about characters assigned between them. That
-produces `INVALID_DISPLAY_NAME`, a final refusal with no effect (CL4).
+## 3. Findings on r2
 
-**B. Retrying a failed create on the same id (§17.3): confirmed.** After an
-operation for `agt_…` ends `failed`, a new idempotency key provisions the same
-id. `begin` reserves an id only through non-failed operations, and the failed
-profile is in quarantine (test
-`web_a_failed_create_leaves_its_profile_id_available_to_a_new_key`). It
-succeeds only once the cause of the failure is gone. The failed key keeps
-answering its failure.
+**RC1 (execution deadline): correct, but conditional.** PR #26 matches the
+current code exactly: `exclusive` takes an in-process `Mutex` and then a
+blocking `File::lock` with no deadline, and `provision` reads its clock before
+`exclusive`. So step 14 needs the new entry point P1 describes.
 
-**C. Ordering.** All of these are tested:
-- Exact redelivery is one operation.
-- A changed payload under the same key is `idempotency_conflict`, and nothing
-  changes.
-- A delayed create after a revoke returns the recorded `revoked` operation
-  and binds nothing (S1/S11).
-- A new key or another subject on a revoked id is `profile_unavailable` (S2).
-- A revoke of an unfinished operation is `operation_in_progress` without
-  effect (S3).
-- A refusal on the merits records nothing, so the same key can succeed later.
+With step 14, R3 is sound if the harness clock never steps backward. The r2
+argument (§13.2) is right, and the clock-free part is right too:
+- `t`'s admission check gives `h(t) ≥ t.issuedAt − 30 ≥ u.expiresAt + 30`;
+- `u` can start only while `h < u.expiresAt + 30`.
 
-**D. Error mappings.** Every registered code traces to the same-named PR #26
-code, with the same meaning, or is a gateway code. The order PR #26 enforces
-matches the class split:
-- `admission` codes, including `profile_outside_credential`, come before the
-  idempotency lookup.
-- `merits` codes come only from `begin`, which records nothing.
+These are the answers to Phase 3:
+- the clock is checked at admission (step 12);
+- the clock is checked again after the lock, before the lookup (step 14);
+- at or after `expiresAt + 30` nothing begins or resumes;
+- a command that started in time may finish late (P2, fixture
+  `begun-before-deadline-completes-late`);
+- expiry never proves failure (`elapsed-time-alone`, `timeouts-exhausted`).
 
-PR #26 codes the gateway can never return are the operator-only codes:
-`operator_required`, `invalid_quota`, `unknown_principal`,
-`unknown_provisioner`, and `issuer_not_trusted` as a request error.
+**Smallest safe implementation point:** a new
+`ProvisioningService` entry point that takes the deadline, reads the clock
+inside `exclusive()` before `admit`, and is otherwise `provision`. `provision`
+and the PR #26 HTTP API stay unchanged. This is §16.2 item 9 plus RC5.
 
-Two mismatches remain: RC2 and RC3.
+**RC5 (new, required): harness clock steps void R3.** r2 says a backward
+step "larger than 30 s" voids R3 (§9.3, §17 item 3) and asks only for SHOULD
+slewing. Both are insufficient.
 
-**E. Response authentication.** Unsigned v1 responses are acceptable under
-the §12.1 gate: no user credential is issued, and every user path goes
-through the Worker. The threat table and the gate need two clarifications
-(CL2, CL3). No browser-to-harness path exists in the candidate.
+The step that suffices is any step larger than `h(t) − (u.expiresAt + 30)`.
+With the harness 30 s behind Web, which r2 accepts, that can be 1 s:
+1. `u` is admitted and waits for the lock.
+2. `t` is issued at `u`'s horizon and is refused on the merits at harness
+   time `u.expiresAt + 30`.
+3. The clock steps back 1 s.
+4. `u` starts at `u.expiresAt + 29`, passes step 14, and binds the user.
+5. Web's R3 has already concluded `failed`.
 
-**F. Idempotency and reconciliation.** The transmission journal and R1–R4/R6
-recover ambiguous outcomes without a second profile or binding, **except** the
-R3 gap that RC1 closes. Status polling cannot recover an interrupted create
-(CL1).
+The test `a_one_second_backward_step_defeats_step_14_but_not_the_fence`
+reproduces this. Backward steps happen in practice: NTP and chrony step
+corrections, VM snapshot restore and migration, and manual changes. The R3
+inference therefore cannot be approved as specified.
 
-## 4. Required corrections (new revision and digest)
+**RC6 (new, required): journal before send.** R3 quantifies over "every
+transmission of the job". §16.1.4 lists the journal's columns but never
+requires a transmission to be durably journaled **before** it is sent. A Worker
+can fail after `fetch` and before its D1 write. The unjournaled transmission
+`u` can then commit while a later merits refusal makes R3 conclude `failed`.
 
-**RC1. Execution deadline under the ledger lock (§9.3, §10, §13.2).**
-R3 assumes that a transmission `u` can have no effect after its acceptance
-horizon. But the time window is checked at step 12, and `provision` then
-waits without limit for the ledger lock: an in-process `Mutex`, then a
-blocking `File::lock`. `provision` also reads its clock before taking the
-lock. So `u` can pass step 12 in time and commit after a later transmission
-`t` of the same job was refused on the merits. Web would then mark the job
-`failed` (R3) while the user is bound, and R6 leaves `failed` alone.
+**RC2 (`ownerBound`): resolved.** Every combination is valid, and §13.1
+assesses ownership without moving state. Tested against the service:
+- `completed`/`false` after reassignment;
+- revoke → `ownership_changed` when another owner exists, and `revoked` when
+  none remains;
+- `revoked`/`true` after an operator gives the profile back;
+- a replay never re-binds, and a new key is refused.
 
-Add to §10, step 14:
+Web's classifier (`responses.json`, 45/45) never infers ownership from
+`state`. Web never re-creates or re-binds a reassigned profile (§13.1, §13.6).
 
-> Before the idempotency lookup, while holding the ledger lock, the harness
-> re-reads its clock. If `now ≥ expiresAt + MAX_CLOCK_SKEW_SECONDS`, it
-> refuses with `EXPIRED` and has no effect.
+**RC3 (`INVALID_TEMPLATE`): resolved.** It is a reachable stored failure
+(tested). Its registry entry, its two meanings, its R1 handling, and the
+no-auto-retry rule all match the service. A retry with a new key under the
+same build would be refused `INVALID_TEMPLATE` at validation, so "needs
+operator attention" is right.
 
-Add to §13.2: "This bound holds because of §10 step 14." Update the
-`errors.json` entry for `EXPIRED` to say it may also come from step 14.
+**RC4 (provenance): resolved**, with the reachability caveat in §6.
 
-The Lightagent side is a narrow, additive service entry point that checks a
-deadline under the lock. It is planned for the L3 stage. It is not built in
-this review, and `provision` is unchanged.
+**CL1–CL4: accepted** as written. Non-terminal create answers are
+`RESPONSE_INVALID`, and status never completes a create. The forged-failure
+threat case and the Unicode-version note are in. T1–T7 are reviewed in §5.
 
-**RC2. `ownerBound` is current ownership, not a function of state (§12.1
-item 3, §12.2, fixture `invalid-owner-bound-pending`).** PR #26 computes
-`owner_bound` as the effective ownership of (operation principal, profile)
-when it answers. Tests show three reachable states that break
-"`ownerBound` ⇔ `completed`":
-- `profile_created` and bound: a crash after the identity commit;
-- `completed` and not bound: an operator reassigned the profile;
-- `failed` and bound: the same user was later provisioned on that id.
+## 4. Required corrections for r3 (new digest)
 
-Web can observe the second, for example on a create re-send. It would
-classify it `RESPONSE_INVALID` and keep re-sending without ever resolving.
+**RC5. Fail-closed execution fence.** Replace §9.3's clock-discipline
+paragraph and §17 item 3. Add to §10 step 14 and §10.4 P1:
 
-Replace the rule with:
+> The harness keeps a durable, non-decreasing **execution fence**, which
+> starts at 0, under the ledger lock. Step 14 refuses `EXPIRED` with no effect
+> if `now ≥ expiresAt + 30` **or** `expiresAt + 30 ≤ fence`. When a create
+> passes step 15 (local admission), the harness sets
+> `fence := max(fence, issuedAt − 30)` and makes it durable before the call's
+> answer is released. The fence is not an operation and is not keyed:
+> "a `begin` refusal records nothing" still holds for the operation ledger.
 
-> `ownerBound` reports whether the operation's principal effectively owns
-> `profileId` on the harness when it answers. It is independent of `state`.
-> `completed`/`false` means the harness operator changed ownership, which
-> needs attention. Any non-`completed` state with `true` is informational.
-> Neither is `RESPONSE_INVALID`.
+Add to §13.2: "R3's horizon clause rests on P1–P3 and the fence. It holds for
+any harness clock behaviour, because the fence uses only signed Web stamps:
+`t` passing step 15 sets `fence ≥ t.issuedAt − 30 ≥ u.expiresAt + 30`."
 
-Change `invalid-owner-bound-pending` accordingly, and add a valid
-`completed`/`false` response vector.
+A harness clock that is wrong forward only causes extra `EXPIRED` answers,
+which are fail-closed. The fence cannot be pushed into the future by a bad
+command, because step 12 refuses `issuedAt > now + 30`.
 
-**RC3. Missing operation failure code (§11, `errors.json`
-`operationFailureCodes`).** PR #26 can record `failed` with
-`invalid_template` when a recorded operation's template is unknown at
-materialization. That happens only across a harness build change, but it is
-a real stored state. Add `INVALID_TEMPLATE` to `operationFailureCodes`.
+New fixtures in `execution-deadline.json`:
+- a race with a backward step after `t` (unsafe with step 14 alone, safe with
+  the fence);
+- single fence checks at `expiresAt + 30 = fence` (refuse) and
+  `expiresAt + 30 = fence + 1` (proceed).
 
-**RC4. Commit the candidate.** Commit the specification, fixtures, manifest
-and `.gitattributes` on a Web branch, and name that commit in
-`ACCEPTANCE.md`. The digest is accepted only for committed bytes.
+The Lightagent L3 cost is a few lines in the same new entry point, and one
+field in the ledger file.
 
-## 5. Recommended clarifications (same revision)
+**RC6. Journal before send.** Add to §13.2 (inputs) and §16.1.4:
 
-- **CL1 (§13.3).** In Lightagent v1, a `profile.create` operation response is
-  always terminal (`completed`, `failed` or `revoked`). An interrupted create
-  is answered with an indeterminate code. `profile.status` is read-only and
-  never advances an operation. Recovery is R4, re-sending the same create,
-  or an operator `reconcile`. Replace "after `pending` or `profile_created`,
-  Web polls `profile.status`" with "re-send the create (R4); use status only
-  to confirm".
-- **CL2 (§12.1 threat table).** Add a forged `failed`. It is silent like a
-  forged `revoked`: R6 leaves `failed` operations alone, so a real binding
-  would remain. It is covered by the same gate.
-- **CL3 (§12.1 gate b).** Say whether Cloudflare Tunnel or Access TLS
-  termination counts as operator-controlled. Recommendation: only when the
-  harness operator controls that Cloudflare account. Otherwise response
-  signing is required first.
-- **CL4 (§4.6).** Note that NFC tables follow each side's Unicode version.
-  A disagreement yields `INVALID_DISPLAY_NAME` (final, no effect). Web MAY
-  restrict names to characters assigned in a stated Unicode version.
+> Web MUST commit a transmission's journal record (`command_id`, `issued_at`,
+> `expires_at`) durably before the request leaves the Worker. A transmission
+> without a committed record is never sent. Its later outcome is recorded
+> against that record.
 
-## 6. Acceptance criteria status
+Add a `create-resolution.json` note or case showing that a transmission
+missing from the journal is not allowed to exist.
 
-| # | Criterion | Status |
+## 5. Remaining risks (reviewed)
+
+| # | Item | Assessment |
 |---|---|---|
-| 1 | Manifest hashes verify | met |
-| 2 | Rust reproduces canonical bytes and signatures | met |
-| 3 | Every applicable fixture passes | met (153/153 command and redelivery vectors) |
-| 4 | Specification matches PR #26 semantics | **not met**: RC1, RC2, RC3 |
-| 5 | Unicode and retry questions resolved | met (A, B) |
-| 6 | No rule bypasses `{provision}`-only credential checks | met: §10.2 keeps PR #26 admission, re-read on every command, and a signature alone is `UNAUTHENTICATED` without a mapping |
-| 7 | No independent Lightagent function or boundary weakened | met: no route, gateway, key or production code added; the service is unchanged |
+| 1 | Unsigned responses through §12.5 T1–T7 | Acceptable for v1 under gates (a)–(c). Lightagent should keep the gateway on loopback (T7) and send no CORS headers (T6). Validating the Access JWT is optional defence in depth, never authority |
+| 2 | Forged `failed`, including refusals without an operation id | Residual, as r2 states. It needs a position inside TLS. It is closed only by response signing or `profile.lookup`. It grants nothing in v1 |
+| 3 | Issuer/subject stability and `{provision}`-only admission | Unchanged and sound: `usr_…` is immutable, the issuer is compared byte for byte, every `keyId` maps to one provisioner, and admission is re-read per command (§10.2) |
+| 4 | Create/revoke ordering and idempotency | Sound, and tested against the service |
+| 5 | Transient refusals | Safe: with no uncertain transmission nothing exists, so `failed` is never wrong about a binding. But a transient `EXPIRED`, `NOT_YET_VALID`, `UNKNOWN_KEY` or `UNAUTHENTICATED` (skew, rotation, operator configuration) fails the job at once. Recommendation (non-blocking): Web retries protocol- and admission-class refusals for a bounded period before failing |
+| 6 | Unicode versions | Safe (final `INVALID_DISPLAY_NAME`, no effect). Harness NFC data: `icu_normalizer_data` 2.3.0 |
+| 7 | D1 journal and reconciliation | Sufficient with RC6 |
+| 8 | `attempt_count` CHECK (0–10) and suspension transitions | Implementation readiness, not protocol. The migration in §16.1.4 must decouple reconciliation from the CHECK. A profile whose harness binding was revoked must not return to `active`, because D1 still allows `suspended → active` |
 
-## 7. Re-review of r2
+## 6. Before freezing (non-protocol)
 
-Replace the mirror with r2's committed bytes, then update
-`COMPATIBILITY_DIGEST` in `crates/lightagent-protocol-conformance/tests/fixtures.rs`.
-Re-run the `LA-WEB-PROVISIONING/1 fixtures (offline)` job, and check the
-RC1–RC3 text against the service tests.
+The candidate commit exists only in a local Web repository with no remote.
+Before both sides record acceptance of r3, make the candidate commit
+retrievable by both reviewers: push it to a remote, or attach a `git bundle`
+to the review. Otherwise the acceptance rows name a commit nobody else can
+fetch.
+
+## 7. Implementation readiness, after acceptance (not started)
+
+| Lightagent | Web |
+|---|---|
+| L1: fail-closed `control_webhooks` configuration (harness id, trusted keys, `keyId` → credential mapping) | Production codec ported from the reference, tested against the fixtures |
+| L2: separate, feature-gated router on loopback; strict parser and verifier (this crate's code moved into a gateway crate); nonce ledger | Migration: transmission journal (RC6), observed state, decoupled `attempt_count`, suspension path |
+| L3: the P1 + fence entry point in `ProvisioningService` (RC1, RC5), the §10.3 adapter, and the lock-wait race test against the real service | Signing secret and `keyId`, `PROVISIONING_ISSUER`, `classifyResponse`, a level-triggered reconciler (R4–R6) |
+| CI: this crate's offline job stays; a staged cross-repository job later | Display-name check before signing; v1 operation set only |
+
+Staging, ingress, real keys, merges and activation each need separate
+approval.
+
+## r1 history
+
+r1 (`030537b8…a1d2`) was rejected with RC1 (execution deadline), RC2
+(`ownerBound` ⇔ `completed`), RC3 (missing `INVALID_TEMPLATE`) and RC4
+(uncommitted candidate). It also had CL1–CL4. r2 resolves all of them except
+the RC1 clock caveat that RC5 addresses.

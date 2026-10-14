@@ -1693,3 +1693,127 @@ fn web_owner_bound_is_current_ownership_not_operation_state() {
 
     // `failed` and bound: shown in the previous test.
 }
+
+// r2 §13.1 against the service. After an operator removes ownership outright,
+// revoke answers `revoked`; after the operator gives a revoked profile back
+// to the same principal, status answers `revoked`/`true`. A reassigned
+// profile is never re-bound by a replay of its create, and a new key cannot
+// take it.
+#[test]
+fn web_ownership_changes_by_the_operator_are_reported_not_undone() {
+    let world = world();
+    let done = world
+        .provision("idk_fixtureremoved0000000001", &web_request(WEB_PROFILE))
+        .unwrap()
+        .status;
+    operator_change(world.root(), |tx| {
+        tx.remove_profile(&profile(WEB_PROFILE)).unwrap();
+    });
+    let status = world
+        .service
+        .status(&world.site(), &done.operation_id)
+        .unwrap();
+    assert_eq!(
+        (status.state, status.owner_bound),
+        (OperationState::Completed, false)
+    );
+    let revoked = world
+        .service
+        .revoke(&world.site(), &done.operation_id)
+        .unwrap();
+    assert_eq!(
+        (revoked.state, revoked.owner_bound),
+        (OperationState::Revoked, false),
+        "no owner remained"
+    );
+    operator_change(world.root(), |tx| {
+        tx.reassign_owner(&profile(WEB_PROFILE), &done.principal_id)
+            .unwrap();
+    });
+    let status = world
+        .service
+        .status(&world.site(), &done.operation_id)
+        .unwrap();
+    assert_eq!(
+        (status.state, status.owner_bound),
+        (OperationState::Revoked, true)
+    );
+
+    // Reassigned to someone else after completion.
+    let other = "agt_fixtureprofile000000000002";
+    let second = world
+        .provision("idk_fixturereassign000000001", &web_request(other))
+        .unwrap()
+        .status;
+    operator_change(world.root(), |tx| {
+        tx.create_principal(principal("carol"), Role::User, None)
+            .unwrap();
+        tx.reassign_owner(&profile(other), &principal("carol"))
+            .unwrap();
+    });
+    let replay = world
+        .provision("idk_fixturereassign000000001", &web_request(other))
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(
+        (replay.status.state, replay.status.owner_bound),
+        (OperationState::Completed, false)
+    );
+    assert_eq!(
+        world
+            .effective()
+            .get(&profile(other))
+            .map(|o| o.owner.clone()),
+        Some(principal("carol")),
+        "the replay did not re-bind"
+    );
+    assert_eq!(
+        world
+            .provision("idk_fixturereassign000000002", &web_request(other))
+            .err(),
+        Some(ProvisioningError::Conflict("profile_unavailable"))
+    );
+    assert_eq!(
+        world
+            .service
+            .revoke(&world.site(), &second.operation_id)
+            .err(),
+        Some(ProvisioningError::Conflict("ownership_changed"))
+    );
+}
+
+// RC3: `invalid_template` is a real stored failure. A create interrupted at
+// `pending` by a build that knew its template, then resumed by a build that
+// does not, fails in `materialize` with `invalid_template` (simulated by
+// renaming the recorded template). The operation's status then reports it.
+#[test]
+fn web_an_unknown_recorded_template_fails_the_operation() {
+    let world = world();
+    world.service.inject(Fault::PendingRecorded);
+    assert!(
+        world
+            .provision("idk_fixtureretired0000000001", &web_request(WEB_PROFILE))
+            .is_err()
+    );
+    let path = world.service.root().join(STATE);
+    let ledger = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        ledger.matches("\"assistant\"").count(),
+        2,
+        "registration and operation"
+    );
+    let mut value: serde_json::Value = serde_json::from_str(&ledger).unwrap();
+    for operation in value["operations"].as_object_mut().unwrap().values_mut() {
+        operation["template"] = "retired".into();
+    }
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+    let report = world.service.reconcile(&operator()).unwrap();
+    assert_eq!(report.failed, 1);
+    let operation = operation_for(&world, WEB_PROFILE);
+    let status = world.service.status(&world.site(), &operation.id).unwrap();
+    assert_eq!(status.state, OperationState::Failed);
+    assert_eq!(status.failure.as_deref(), Some("invalid_template"));
+    assert!(!status.owner_bound);
+    assert!(!world.profile_dir(WEB_PROFILE).exists());
+}
