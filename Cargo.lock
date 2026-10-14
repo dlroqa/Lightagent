@@ -1138,6 +1138,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lightagent-protocol-conformance"
+version = "0.4.1"
+dependencies = [
+ "hex",
+ "icu_normalizer",
+ "ring",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "lightagent-provider-lightweight"
 version = "0.4.1"
 dependencies = [

@@ -1,0 +1,25 @@
+[package]
+name = "lightagent-protocol-conformance"
+description = "Independent L0 verifier for the LA-WEB-PROVISIONING/1 candidate fixtures. Test-only: nothing depends on it, and it serves nothing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# Ed25519 verification. `ring` is already the rustls provider (see the
+# workspace dependency policy).
+ring.workspace = true
+sha2.workspace = true
+# NFC check for display names. Already compiled into every Lightagent binary
+# with exactly this feature (reqwest -> url -> idna -> idna_adapter), so this
+# adds an edge, not a crate, and no new feature.
+icu_normalizer = { version = "2.3.0", default-features = false, features = ["compiled_data"] }
+
+[dev-dependencies]
+# Fixture files are trusted test input, so an ordinary parser reads them. Wire
+# bodies (`bodyHex`) go through this crate's strict parser only.
+serde_json.workspace = true
+hex.workspace = true

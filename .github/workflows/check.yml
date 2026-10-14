@@ -71,6 +71,29 @@ jobs:
           cargo run -q -p lightagent --bin lightagent -- banner --preview
           cargo run -q -p lightagent --bin lightagent -- tools list --json | grep -q datetime.now
 
+  # LA-WEB-PROVISIONING/1 candidate (L0 review only; nothing is served).
+  # Offline: the mirrored Web specification and fixtures, their manifest
+  # hashes, every command vector through the independent Rust verifier, and
+  # the service properties the protocol relies on. It never contacts Web.
+  # check.sh also runs these tests on every platform, as part of the workspace.
+  protocol-fixtures:
+    name: LA-WEB-PROVISIONING/1 fixtures (offline)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: protocol-fixtures
+      - name: Mirrored bytes match the manifest
+        working-directory: docs/integrations/web/la-web-provisioning-1-r1
+        run: sha256sum -c protocol/la-web-provisioning-1/MANIFEST.sha256
+      - name: Independent verifier against every vector
+        run: cargo test -p lightagent-protocol-conformance -- --nocapture
+      - name: Service semantics the protocol relies on
+        run: cargo test -p lightagent-core --lib provisioning::tests::web_
+
   open-terminal-live:
     name: Open Terminal live contract
     runs-on: ubuntu-24.04
