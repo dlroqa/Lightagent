@@ -85,26 +85,40 @@ The identity half is advanced inside the transaction closure. That happens
 only after the closure checks that the stored marker follows from the
 ledger's view:
 
-- it is absent, before the first transaction; or
-- it carries this continuity id, at the sequence the ledger saw or one
-  ahead of it.
+- it is absent, before the ledger's first bind or revoke; or
+- it carries this continuity id, at exactly the sequence the ledger saw; or
+- it is one ahead **for this same operation and action**. That is an
+  interrupted call's transaction, applied again because its idempotency
+  record was pruned.
 
 Otherwise the transaction is refused with `continuity_mismatch` and writes
-nothing. The operation stays retryable. A rolled-back or foreign identity
-store is therefore never advanced past what the ledger saw, and later
-provisioning cannot hide a rollback.
+nothing. The operation stays retryable.
+
+- A rolled-back or foreign identity store is never advanced, so later
+  provisioning cannot hide a rollback.
+- While one operation's transaction is in flight, every other bind and
+  revoke is refused until that operation settles. The identity store is
+  therefore **never more than one transaction ahead**, and two interrupted
+  calls cannot leave a state the check would reject.
+- The cost: after a crash, other operations wait, retryably, until a resend
+  or `reconcile` settles the interrupted one. `reconcile` may need two
+  passes. An operator can always remove access directly through the identity
+  store.
 
 The two stores are not one transaction. The only window is a crash after
 the identity commit and before the ledger save. That leaves the identity
 store exactly **one** transaction ahead, on an operation the ledger still
 shows in flight:
 
-| `last_action` | Ledger state of `last_operation` |
-|---|---|
-| `bind` | `profile_created` |
-| `revoke` | `completed` |
+| `last_action` | Ledger state of `last_operation` | Identity store must show |
+|---|---|---|
+| `bind` | `profile_created` | the operation's principal exists and owns the profile |
+| `revoke` | `completed` | that ownership is gone |
 
-The check recognizes this state and serves it. The recovery is the existing
+The check accepts this state, and only for that operation in that state,
+holding that effect. Every other shape fails as `LEDGER_BEHIND_STORES`: the
+wrong state, the wrong action, an unknown operation, missing effects, or two
+or more ahead. Each of these is tested. The recovery is the existing
 one:
 
 - a resend of the same command, or `reconcile`, resumes the operation;
@@ -127,13 +141,15 @@ after.
 | C1 | A ledger file exists | `NO_LEDGER` |
 | C1 | It is stamped | `UNSTAMPED_LEDGER` |
 | C1 | With this harness id | `HARNESS_ID_MISMATCH` |
-| C1 | And is not retired | `RETIRED` |
+| C1 | The stamp's harness id and continuity id are well formed | `UNSTAMPED_LEDGER` |
+| C1 | And is not retired (`retired`, or any `retired_unix`) | `RETIRED` |
 | C2 | The identity marker, if present, has this continuity id and `ledger_generation_seen ≤` the ledger's generation | `LEDGER_BEHIND_STORES` |
 | C2 | Its sequence is the ledger's `identity_sequence_seen`, and `last_operation` is in the ledger, `completed` (bind) or `revoked` (revoke). Or it is exactly one ahead, with the in-flight state of §3. Never further ahead | `LEDGER_BEHIND_STORES` |
 | C2 | **Every** `.provisioning-operation` token under `profiles/` belongs to a ledger operation (checked independently of the counters) | `LEDGER_BEHIND_STORES` |
 | C3 | Once the ledger has bound or revoked (`identity_sequence_seen > 0`, or any operation `completed` or `revoked`), the identity marker exists | `STORES_BEHIND_LEDGER` |
 | C3 | Its sequence is `≥ identity_sequence_seen` | `STORES_BEHIND_LEDGER` |
 | C3 | The identity generation is `≥ identity_generation_seen` | `STORES_BEHIND_LEDGER` |
+| C3 | Every `completed` or `revoked` operation's principal exists. Principals are never deleted, so this survives pruning and reassignment | `STORES_BEHIND_LEDGER` |
 
 `Ledger::check_stamp(harness_id)` is C1 on a loaded ledger. A gateway runs it
 under the ledger lock for every command (step 13). A storage or parse error
@@ -180,6 +196,10 @@ ledger.
 - C1 then fails, so a gateway serves nothing.
 - `begin` refuses every new operation on a retired ledger
   (`harness_retired`), so no route records a new operation.
+- `resume` refuses to advance an operation recorded before retirement
+  (`harness_retired`). No resend or `reconcile` creates a profile or a
+  binding afterwards. Such an operation stays unresolved for the operator,
+  as r4 §10.6 step 3 requires.
 - Nothing is deleted or reassigned. Profiles, markers, ownership, principals
   and credentials stay for the operator, as the tests verify.
 - Status and revocation keep working: removing access is never blocked.
@@ -201,6 +221,14 @@ These are excluded only by procedure and by Web, never by this check:
    the retired or known id and must refuse to reactivate it (§10.6).
 3. **Two live copies of one installation** (a cloned VM): excluded only by
    A1.
+4. **Deliberate forgery by someone who can write the stores.** The markers
+   are integrity evidence against loss and partial restore, not
+   authentication. A writer who edits the identity store's marker after
+   rolling it back is caught when the lost transaction created a principal
+   (tested), but not when it only bound an existing one. Defending against
+   a filesystem-level adversary needs a key held outside these stores (a MAC
+   over the markers). That is out of scope for L1, and the stores are
+   owner-only (`0600`).
 
 ### Required operator restore procedure (before any activation)
 
@@ -238,10 +266,14 @@ MUST NOT serve without it:
   whose continuity is broken, its bind and revoke refuse in the identity
   transaction (`storage_unavailable`, retryable). Its creates on a retired
   ledger are refused with `harness_retired`.
-- **Behaviour changes, limited to stamped ledgers.** `provision` and
-  `revoke` keep their signatures and codes. Inside them, the bind and revoke
-  identity transactions gain the gated continuity write, and `begin` gains
-  the retirement refusal. Both are inert unless `initialize` was called.
+- **Behaviour changes, limited to stamped ledgers** (approved in review).
+  `provision` and `revoke` keep their signatures and codes. Inside them:
+  - the bind and revoke identity transactions gain the gated continuity
+    write;
+  - `begin` and `resume` gain the retirement refusal;
+  - `revoke` gains a test-only crash point, inert outside tests.
+
+  All of these are inert unless `initialize` was called.
 
 ## 8. Tests
 

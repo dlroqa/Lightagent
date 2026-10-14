@@ -40,7 +40,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Ledger, OperationState};
+use super::{Ledger, Operation, OperationState, valid_operation_id};
 use crate::identity::store::{ContinuityAction, IdentityDocument};
 
 /// The ledger's harness stamp. Every field is required: a ledger whose stamp
@@ -122,16 +122,21 @@ impl Ledger {
 
     /// C1 on a loaded ledger: stamped with `harness_id` and not retired. A
     /// gateway re-checks this under the ledger lock for every command. A
-    /// missing ledger loads as an empty one, so it is `UnstampedLedger` here.
+    /// missing ledger loads as an empty one, so it is `UnstampedLedger` here,
+    /// and so is a stamp whose harness id or continuity id is malformed. A
+    /// recorded retirement time counts as retired, whatever `retired` says.
     pub fn check_stamp(&self, harness_id: &str) -> Result<&LedgerContinuity, ContinuityFailure> {
         let stamp = self
             .continuity
             .as_ref()
+            .filter(|stamp| {
+                valid_harness_id(&stamp.harness_id) && valid_operation_id(&stamp.continuity_id)
+            })
             .ok_or(ContinuityFailure::UnstampedLedger)?;
         if stamp.harness_id != harness_id {
             return Err(ContinuityFailure::HarnessIdMismatch);
         }
-        if stamp.retired {
+        if stamp.retired || stamp.retired_unix != 0 {
             return Err(ContinuityFailure::Retired);
         }
         Ok(stamp)
@@ -160,26 +165,22 @@ pub(crate) fn evaluate(
         {
             return Err(LedgerBehindStores);
         }
-        let last = ledger
-            .operations
-            .get(&marker.last_operation)
-            .map(|op| op.state);
+        let last = ledger.operations.get(&marker.last_operation);
         let consistent = match marker.sequence.checked_sub(seen) {
             // Settled: the ledger saved the state this transaction produced.
             Some(0) => {
-                last == Some(match marker.last_action {
-                    ContinuityAction::Bind => OperationState::Completed,
-                    ContinuityAction::Revoke => OperationState::Revoked,
-                })
+                last.map(|op| op.state)
+                    == Some(match marker.last_action {
+                        ContinuityAction::Bind => OperationState::Completed,
+                        ContinuityAction::Revoke => OperationState::Revoked,
+                    })
             }
             // In flight: the identity transaction committed and the process
-            // stopped before the ledger saved. A resend or reconcile ends it.
-            Some(1) => {
-                last == Some(match marker.last_action {
-                    ContinuityAction::Bind => OperationState::ProfileCreated,
-                    ContinuityAction::Revoke => OperationState::Completed,
-                })
-            }
+            // stopped before the ledger saved. The ledger still records this
+            // same operation in the state before that transaction, and the
+            // identity store holds that transaction's effect. A resend or
+            // reconcile ends it.
+            Some(1) => last.is_some_and(|op| in_flight(op, marker.last_action, identity)),
             // More than one transaction the ledger never saw.
             Some(_) => false,
             // The identity store is behind: C3 below.
@@ -206,6 +207,21 @@ pub(crate) fn evaluate(
             OperationState::Completed | OperationState::Revoked
         )
     });
+    // Principals are never deleted, so every principal a bind created or
+    // resolved is still there, whatever was pruned or reassigned since.
+    if ledger
+        .operations
+        .values()
+        .filter(|op| {
+            matches!(
+                op.state,
+                OperationState::Completed | OperationState::Revoked
+            )
+        })
+        .any(|op| identity.principal(&op.principal).is_none())
+    {
+        return Err(StoresBehindLedger);
+    }
     match marker {
         None if seen > 0 || bound_or_revoked => return Err(StoresBehindLedger),
         Some(marker) if marker.sequence < seen => return Err(StoresBehindLedger),
@@ -218,4 +234,23 @@ pub(crate) fn evaluate(
         return Err(StoresBehindLedger);
     }
     Ok(())
+}
+
+/// Whether `op` is exactly where an interrupted `action` leaves it: the
+/// ledger shows the state before the transaction, and the identity store
+/// shows its effect. A bind created (or resolved) the principal and made it
+/// the owner. A revoke removed that ownership.
+fn in_flight(op: &Operation, action: ContinuityAction, identity: &IdentityDocument) -> bool {
+    let owned = identity
+        .recorded_ownership()
+        .get(&op.profile)
+        .is_some_and(|record| record.owner == op.principal);
+    match action {
+        ContinuityAction::Bind => {
+            op.state == OperationState::ProfileCreated
+                && identity.principal(&op.principal).is_some()
+                && owned
+        }
+        ContinuityAction::Revoke => op.state == OperationState::Completed && !owned,
+    }
 }

@@ -514,6 +514,8 @@ pub(crate) enum Fault {
     ProfileRenamed,
     ProfileCreatedRecorded,
     IdentityCommitted,
+    /// After a revoke's identity transaction, before the ledger records it.
+    RevokeIdentityCommitted,
 }
 
 /// How one step of an operation ended.
@@ -1004,6 +1006,16 @@ impl ProvisioningService {
                 .get(id)
                 .cloned()
                 .ok_or(ProvisioningError::Corrupt)?;
+            // A retired harness id creates and binds nothing more, not even
+            // for an operation recorded before retirement.
+            if !operation.state.is_terminal()
+                && ledger
+                    .continuity
+                    .as_ref()
+                    .is_some_and(|stamp| stamp.retired)
+            {
+                return Err(ProvisioningError::Denied("harness_retired"));
+            }
             let step = match operation.state {
                 OperationState::Pending => self
                     .materialize(&operation)
@@ -1368,6 +1380,7 @@ impl ProvisioningService {
                 }
                 Err(_) => return Err(ProvisioningError::Unavailable),
             };
+            self.crash_point(Fault::RevokeIdentityCommitted)?;
             // Saved with the state change, in one ledger write.
             record_seen(&mut ledger, seen);
             self.transition(
@@ -1798,11 +1811,19 @@ impl Stamp {
 
     /// Advance the identity store's continuity marker inside `tx`, so it
     /// commits with the ownership change. Refuses, and so writes nothing,
-    /// unless the store's marker follows from this ledger: absent before the
-    /// first transaction, else this continuity id at the sequence the ledger
-    /// saw, or one ahead of it after an interrupted call. A store restored
-    /// to an older copy, or one that belongs to another ledger, is never
-    /// advanced past the ledger's view, so the rollback stays visible.
+    /// unless the store's marker follows from this ledger:
+    ///
+    /// - absent, before the ledger's first bind or revoke; or
+    /// - this continuity id at exactly the sequence the ledger saw; or
+    /// - one ahead of it **for this same operation and action**: the
+    ///   transaction of an interrupted call, applied again because its
+    ///   idempotency record was pruned.
+    ///
+    /// While another operation's transaction is in flight (one ahead), every
+    /// other bind or revoke is refused and stays retryable, so the identity
+    /// store is never more than one transaction ahead of the ledger. A store
+    /// restored to an older copy, or one that belongs to another ledger, is
+    /// never advanced, so the rollback stays visible.
     fn advance(
         &self,
         tx: &mut Transaction<'_>,
@@ -1814,7 +1835,10 @@ impl Stamp {
             None if seen == 0 => 0,
             Some(marker)
                 if marker.continuity_id == self.continuity_id
-                    && (seen..=seen.saturating_add(1)).contains(&marker.sequence) =>
+                    && (marker.sequence == seen
+                        || (Some(marker.sequence) == seen.checked_add(1)
+                            && marker.last_operation == operation
+                            && marker.last_action == action)) =>
             {
                 marker.sequence
             }

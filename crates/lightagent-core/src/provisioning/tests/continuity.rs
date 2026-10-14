@@ -838,3 +838,411 @@ fn continuity_harness_ids_follow_the_protocol_pattern() {
     assert!(valid_harness_id("hns_abcdefgh"));
     assert!(!valid_harness_id("hns_abcdefg-"));
 }
+
+// --- final review (PR #29) ---------------------------------------------------
+
+/// Replace the identity store's marker with `marker`.
+fn forge_marker(world: &World, marker: serde_json::Value) {
+    edit_json(&world.identity_file(), |doc| {
+        doc["provisioning_continuity"] = marker;
+    });
+}
+
+fn marker_json(world: &World, sequence: u64, operation: &str, action: &str) -> serde_json::Value {
+    serde_json::json!({
+        "continuity_id": world.stamp().continuity_id,
+        "sequence": sequence,
+        "ledger_generation_seen": world.service.load().unwrap().generation(),
+        "last_operation": operation,
+        "last_action": action,
+    })
+}
+
+// Review 1: one transaction ahead is accepted only for the same operation,
+// recorded in the state before that transition, with the identity store
+// holding its effect. Every other shape is LEDGER_BEHIND_STORES.
+#[test]
+fn continuity_one_ahead_is_accepted_only_for_the_operation_in_flight() {
+    // The genuine states, from real interruptions.
+    let world = initialized();
+    world.service.inject(Fault::IdentityCommitted);
+    assert!(
+        world
+            .provision("idk_fixturecreate00000000001", &web_request(P1))
+            .is_err()
+    );
+    assert_eq!(world.verdict(), Ok(()));
+    let done = world.create("idk_fixturecreate00000000001", P1);
+    world.service.inject(Fault::RevokeIdentityCommitted);
+    assert!(
+        world
+            .service
+            .revoke(&world.site(), &done.operation_id)
+            .is_err()
+    );
+    assert_eq!(operation_for(&world, P1).state, OperationState::Completed);
+    assert_eq!(world.marker().unwrap().sequence, 2);
+    assert_eq!(world.stamp().identity_sequence_seen, 1);
+    assert_eq!(world.verdict(), Ok(()));
+
+    // Forged shapes on top of real stores.
+    let completed = initialized();
+    let a = completed.create("idk_fixturecreate00000000001", P1);
+    completed.service.inject(Fault::ProfileCreatedRecorded);
+    assert!(
+        completed
+            .provision("idk_fixturecreate00000000002", &web_request(P2))
+            .is_err()
+    );
+    completed.service.inject(Fault::PendingRecorded);
+    assert!(
+        completed
+            .provision("idk_fixturecreate00000000003", &web_request(P3))
+            .is_err()
+    );
+    let b = operation_for(&completed, P2).id; // profile_created, not bound
+    let c = operation_for(&completed, P3).id; // pending
+    let seen = completed.stamp().identity_sequence_seen;
+    assert_eq!(completed.verdict(), Ok(()));
+    let original = read(&completed.identity_file());
+    for (sequence, operation, action, why) in [
+        (
+            seen + 1,
+            a.operation_id.as_str(),
+            "bind",
+            "bind ahead of a completed operation",
+        ),
+        (
+            seen + 1,
+            a.operation_id.as_str(),
+            "revoke",
+            "revoke ahead, ownership still held",
+        ),
+        (
+            seen + 1,
+            b.as_str(),
+            "bind",
+            "bind ahead, but the store holds no binding",
+        ),
+        (
+            seen + 1,
+            c.as_str(),
+            "bind",
+            "bind ahead of a pending operation",
+        ),
+        (
+            seen + 1,
+            "0123456789abcdef0123456789abcdef",
+            "bind",
+            "unknown operation",
+        ),
+        (seen + 2, a.operation_id.as_str(), "bind", "two ahead"),
+        (
+            seen,
+            b.as_str(),
+            "bind",
+            "settled on an operation in flight",
+        ),
+        (
+            seen,
+            a.operation_id.as_str(),
+            "revoke",
+            "settled revoke of a completed operation",
+        ),
+    ] {
+        restore(&completed.identity_file(), &original);
+        forge_marker(
+            &completed,
+            marker_json(&completed, sequence, operation, action),
+        );
+        assert_eq!(completed.verdict(), Err("LEDGER_BEHIND_STORES"), "{why}");
+    }
+    restore(&completed.identity_file(), &original);
+    assert_eq!(completed.verdict(), Ok(()));
+}
+
+// Review 2: every crash point of bind and revoke, recovered by resend and by
+// reconcile. While one transaction is in flight, no other operation can
+// advance, so the stores are never two apart; recovery is idempotent; every
+// profile has exactly its own owner; the sequence counts identity commits.
+#[test]
+fn continuity_every_interruption_recovers_once_and_never_completes_another_operation() {
+    for fault in [
+        Fault::PendingRecorded,
+        Fault::ProfileRenamed,
+        Fault::ProfileCreatedRecorded,
+        Fault::IdentityCommitted,
+    ] {
+        for by_reconcile in [false, true] {
+            let world = initialized();
+            let key_a = "idk_fixturecreate00000000001";
+            let key_b = "idk_fixturecreate00000000002";
+            world.service.inject(fault);
+            assert!(
+                world.provision(key_a, &web_request(P1)).is_err(),
+                "{fault:?}"
+            );
+            assert_eq!(world.verdict(), Ok(()), "{fault:?} after the crash");
+            let committed = fault == Fault::IdentityCommitted;
+
+            // Another operation meanwhile.
+            let other = world.provision(key_b, &web_request(P2));
+            if committed {
+                // Refused in its identity transaction, retryable, unbound.
+                assert_eq!(other.unwrap_err(), ProvisioningError::Unavailable);
+                assert_eq!(
+                    operation_for(&world, P2).state,
+                    OperationState::ProfileCreated
+                );
+                assert!(world.effective().get(&profile(P2)).is_none());
+                assert_eq!(
+                    world.marker().unwrap().last_operation,
+                    operation_for(&world, P1).id
+                );
+            } else {
+                assert_eq!(other.unwrap().status.state, OperationState::Completed);
+            }
+            assert_ne!(operation_for(&world, P1).state, OperationState::Completed);
+            assert_eq!(world.verdict(), Ok(()), "{fault:?} with another operation");
+
+            if by_reconcile {
+                for _ in 0..2 {
+                    world.service.reconcile(&operator()).unwrap();
+                }
+            } else {
+                world.create(key_a, P1);
+                world.create(key_b, P2);
+            }
+            for (id, key) in [(P1, key_a), (P2, key_b)] {
+                let op = operation_for(&world, id);
+                assert_eq!(op.state, OperationState::Completed, "{fault:?} {id}");
+                assert_eq!(
+                    world.effective().get(&profile(id)).map(|r| r.owner.clone()),
+                    Some(op.principal.clone())
+                );
+                // Idempotent: a resend changes nothing.
+                let sequence = world.marker().unwrap().sequence;
+                let again = world.provision(key, &web_request(id)).unwrap();
+                assert!(again.replayed);
+                assert_eq!(again.status.operation_id, op.id);
+                assert_eq!(world.marker().unwrap().sequence, sequence);
+            }
+            assert_eq!(world.service.load().unwrap().operations().count(), 2);
+            assert_eq!(
+                world.marker().unwrap().sequence,
+                2,
+                "{fault:?}: one commit each"
+            );
+            assert_eq!(world.stamp().identity_sequence_seen, 2);
+            assert_eq!(world.verdict(), Ok(()), "{fault:?} recovered");
+        }
+    }
+
+    // A revoke interrupted after its identity commit.
+    let world = initialized();
+    let a = world.create("idk_fixturecreate00000000001", P1);
+    world.service.inject(Fault::RevokeIdentityCommitted);
+    assert!(
+        world
+            .service
+            .revoke(&world.site(), &a.operation_id)
+            .is_err()
+    );
+    assert!(
+        world.effective().get(&profile(P1)).is_none(),
+        "access is already gone"
+    );
+    assert_eq!(world.verdict(), Ok(()));
+    // Nothing else advances until it settles.
+    assert_eq!(
+        world
+            .provision("idk_fixturecreate00000000002", &web_request(P2))
+            .unwrap_err(),
+        ProvisioningError::Unavailable
+    );
+    let revoked = world
+        .service
+        .revoke(&world.site(), &a.operation_id)
+        .unwrap();
+    assert_eq!(revoked.state, OperationState::Revoked);
+    let again = world
+        .service
+        .revoke(&world.site(), &a.operation_id)
+        .unwrap();
+    assert_eq!(again.state, OperationState::Revoked);
+    assert_eq!(world.marker().unwrap().sequence, 2);
+    world.create("idk_fixturecreate00000000002", P2);
+    assert_eq!(world.marker().unwrap().sequence, 3);
+    assert_eq!(world.verdict(), Ok(()));
+}
+
+// Review 3: an uninitialized installation's documents have exactly the
+// top-level members they had before L1.
+#[test]
+fn continuity_uninitialized_documents_keep_their_shape() {
+    let world = world();
+    let done = world.create("idk_fixturecreate00000000001", P1);
+    world
+        .service
+        .revoke(&world.site(), &done.operation_id)
+        .unwrap();
+    let keys = |path: &Path| -> Vec<String> {
+        let value: serde_json::Value = serde_json::from_slice(&read(path)).unwrap();
+        let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(
+        keys(&world.ledger_file()),
+        ["generation", "keys", "operations", "provisioners", "schema"]
+    );
+    assert_eq!(
+        keys(&world.identity_file()),
+        [
+            "bindings",
+            "credentials",
+            "generation",
+            "idempotency",
+            "ownership",
+            "principals",
+            "reassignments",
+            "schema",
+            "trusted_issuers"
+        ]
+    );
+    // The bytes are exactly what the documents serialize to without the
+    // new members.
+    let ledger = world.service.load().unwrap();
+    assert_eq!(
+        read(&world.ledger_file()),
+        serde_json::to_vec_pretty(&ledger).unwrap()
+    );
+}
+
+// Review 3: retirement stops an operation recorded before it, too: no
+// profile is created and nothing is bound, by resend or reconcile.
+#[test]
+fn continuity_retirement_stops_operations_recorded_before_it() {
+    let world = initialized();
+    world.service.inject(Fault::PendingRecorded);
+    assert!(
+        world
+            .provision("idk_fixturecreate00000000001", &web_request(P1))
+            .is_err()
+    );
+    world.service.inject(Fault::ProfileCreatedRecorded);
+    assert!(
+        world
+            .provision("idk_fixturecreate00000000002", &web_request(P2))
+            .is_err()
+    );
+    world.service.retire(&operator(), HARNESS).unwrap();
+    for (key, id) in [
+        ("idk_fixturecreate00000000001", P1),
+        ("idk_fixturecreate00000000002", P2),
+    ] {
+        assert_eq!(
+            world.provision(key, &web_request(id)).unwrap_err(),
+            ProvisioningError::Denied("harness_retired")
+        );
+    }
+    let report = world.service.reconcile(&operator()).unwrap();
+    assert_eq!(report.still_pending, 2);
+    assert_eq!(operation_for(&world, P1).state, OperationState::Pending);
+    assert_eq!(
+        operation_for(&world, P2).state,
+        OperationState::ProfileCreated
+    );
+    assert!(!world.profile_dir(P1).exists());
+    assert!(world.profile_dir(P2).exists(), "kept, never deleted");
+    assert!(world.effective().get(&profile(P2)).is_none());
+    assert_eq!(world.marker(), None);
+
+    let staged = world();
+    std::fs::create_dir_all(staged.service.root().join(STAGING).join("old")).unwrap();
+    assert_eq!(
+        staged.service.initialize(&operator(), HARNESS).unwrap_err(),
+        ProvisioningError::Conflict("provisioning_history_exists")
+    );
+}
+
+// Review 4: an identity rollback whose marker is then forged forward to the
+// ledger's view. When the lost transaction created a user, that principal
+// is missing, and principals are never deleted.
+#[test]
+fn continuity_detects_a_forged_marker_over_a_rolled_back_identity_store() {
+    let world = initialized();
+    world.create("idk_fixturecreate00000000001", P1);
+    let older = read(&world.identity_file());
+    let second = world
+        .provision(
+            "idk_fixturecreate00000000002",
+            &request("synthetic-subject-0002", P2),
+        )
+        .unwrap()
+        .status;
+    let forged = marker_json(&world, 2, &second.operation_id, "bind");
+    restore(&world.identity_file(), &older);
+    forge_marker(&world, forged);
+    edit_json(&world.identity_file(), |doc| {
+        doc["generation"] = 1000.into();
+    });
+    assert_eq!(world.verdict(), Err("STORES_BEHIND_LEDGER"));
+}
+
+// Review 5: malformed values fail closed. Nothing malformed reads as an
+// authenticated ledger.
+#[test]
+fn continuity_malformed_values_fail_closed() {
+    for (field, value, expected) in [
+        ("retired", serde_json::json!("no"), "storage_corrupt"),
+        ("retired", serde_json::Value::Null, "storage_corrupt"),
+        (
+            "identity_sequence_seen",
+            serde_json::json!(-1),
+            "storage_corrupt",
+        ),
+        ("harness_id", serde_json::json!(7), "storage_corrupt"),
+        ("continuity_id", serde_json::json!(""), "UNSTAMPED_LEDGER"),
+        (
+            "continuity_id",
+            serde_json::json!("not-hex"),
+            "UNSTAMPED_LEDGER",
+        ),
+        (
+            "harness_id",
+            serde_json::json!("hns_UPPER0000000"),
+            "UNSTAMPED_LEDGER",
+        ),
+        ("retired_unix", serde_json::json!(5), "RETIRED"),
+    ] {
+        let world = initialized();
+        world.create("idk_fixturecreate00000000001", P1);
+        edit_json(&world.ledger_file(), |doc| {
+            doc["continuity"][field] = value.clone();
+        });
+        assert_eq!(world.verdict(), Err(expected), "{field} = {value}");
+    }
+    // An empty continuity id in both stores still does not authenticate.
+    let world = initialized();
+    world.create("idk_fixturecreate00000000001", P1);
+    edit_json(&world.ledger_file(), |doc| {
+        doc["continuity"]["continuity_id"] = "".into();
+    });
+    edit_json(&world.identity_file(), |doc| {
+        doc["provisioning_continuity"]["continuity_id"] = "".into();
+    });
+    assert_eq!(world.verdict(), Err("UNSTAMPED_LEDGER"));
+    // A malformed identity marker does not parse.
+    for (field, value) in [
+        ("sequence", serde_json::json!("1")),
+        ("last_action", serde_json::json!("delete")),
+    ] {
+        let world = initialized();
+        world.create("idk_fixturecreate00000000001", P1);
+        edit_json(&world.identity_file(), |doc| {
+            doc["provisioning_continuity"][field] = value.clone();
+        });
+        assert_eq!(world.verdict(), Err("storage_unavailable"), "{field}");
+    }
+}
