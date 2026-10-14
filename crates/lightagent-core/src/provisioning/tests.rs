@@ -1435,3 +1435,261 @@ fn an_unused_service_writes_nothing() {
     assert_eq!(service.load().unwrap().operations().count(), 0);
     assert!(!service.root().exists());
 }
+
+// --- LA-WEB-PROVISIONING/1 semantics (L0 review) ------------------------------
+//
+// The Web protocol candidate (`docs/integrations/web/`) relies on these
+// properties of the service exactly as it is. They were established by
+// reading the code. These tests assert them, with the protocol's own id
+// shapes (`agt_…` profiles, `usr_…` subjects).
+
+const WEB_SUBJECT: &str = "usr_fixtureuser00000000000001";
+const WEB_PROFILE: &str = "agt_fixtureprofile000000000001";
+
+fn web_request(profile_id: &str) -> ProvisionRequest {
+    request(WEB_SUBJECT, profile_id)
+}
+
+fn operation_for(world: &World, profile_id: &str) -> Operation {
+    world
+        .service
+        .load()
+        .unwrap()
+        .operations()
+        .find(|op| op.profile.as_str() == profile_id)
+        .unwrap()
+        .clone()
+}
+
+// Exact redelivery is one operation. After revocation the same key returns
+// the recorded `revoked` operation and binds nothing (S1, S11). A new key, or
+// another subject, cannot take the id (S2). The same key with a different
+// payload changes nothing (IDEMPOTENCY_CONFLICT).
+#[test]
+fn web_redelivery_and_revocation_never_restore_access() {
+    let world = world();
+    let first = world
+        .provision("idk_fixturecreate00000000001", &web_request(WEB_PROFILE))
+        .unwrap();
+    assert!(!first.replayed);
+    assert_eq!(first.status.state, OperationState::Completed);
+    let again = world
+        .provision("idk_fixturecreate00000000001", &web_request(WEB_PROFILE))
+        .unwrap();
+    assert!(again.replayed);
+    assert_eq!(again.status, first.status);
+    assert_eq!(world.service.load().unwrap().operations().count(), 1);
+
+    let mut changed = web_request(WEB_PROFILE);
+    changed.display_name = "Changed".to_owned();
+    let before = world.service.load().unwrap();
+    assert_eq!(
+        world
+            .provision("idk_fixturecreate00000000001", &changed)
+            .err(),
+        Some(ProvisioningError::Conflict("idempotency_conflict"))
+    );
+    assert_eq!(world.service.load().unwrap(), before);
+
+    let id = first.status.operation_id.clone();
+    let revoked = world.service.revoke(&world.site(), &id).unwrap();
+    assert_eq!(revoked.state, OperationState::Revoked);
+    assert!(!revoked.owner_bound);
+
+    // A delayed copy of the create, after the revoke.
+    let late = world
+        .provision("idk_fixturecreate00000000001", &web_request(WEB_PROFILE))
+        .unwrap();
+    assert!(late.replayed);
+    assert_eq!(late.status, revoked);
+    assert!(
+        world.effective().get(&profile(WEB_PROFILE)).is_none(),
+        "no binding is restored"
+    );
+
+    for (key, subject) in [
+        ("idk_fixturecreate00000000002", WEB_SUBJECT),
+        (
+            "idk_fixturecreate00000000003",
+            "usr_fixtureuser00000000000002",
+        ),
+    ] {
+        assert_eq!(
+            world.provision(key, &request(subject, WEB_PROFILE)).err(),
+            Some(ProvisioningError::Conflict("profile_unavailable")),
+            "{subject}"
+        );
+    }
+    assert_eq!(world.service.load().unwrap().operations().count(), 1);
+    assert_eq!(world.service.status(&world.site(), &id).unwrap(), revoked);
+}
+
+// A revoke that races an unfinished create is refused without effect, and
+// succeeds once the create completes (S3).
+#[test]
+fn web_revoke_of_an_unfinished_create_is_operation_in_progress() {
+    let world = world();
+    world.service.inject(Fault::PendingRecorded);
+    assert!(
+        world
+            .provision("idk_fixtureinprogress00000001", &web_request(WEB_PROFILE))
+            .is_err()
+    );
+    let pending = operation_for(&world, WEB_PROFILE);
+    assert_eq!(pending.state, OperationState::Pending);
+    assert_eq!(
+        world.service.revoke(&world.site(), &pending.id).err(),
+        Some(ProvisioningError::Conflict("operation_in_progress"))
+    );
+    assert_eq!(
+        operation_for(&world, WEB_PROFILE).state,
+        OperationState::Pending
+    );
+
+    let done = world
+        .provision("idk_fixtureinprogress00000001", &web_request(WEB_PROFILE))
+        .unwrap();
+    assert!(done.replayed);
+    assert_eq!(done.status.state, OperationState::Completed);
+    assert_eq!(
+        world
+            .service
+            .revoke(&world.site(), &pending.id)
+            .unwrap()
+            .state,
+        OperationState::Revoked
+    );
+}
+
+// A refusal on the merits happens after the idempotency lookup and records
+// nothing, so the same key can still succeed once the cause is gone. The
+// protocol's R3 rule depends on this.
+#[test]
+fn web_merits_refusals_record_nothing() {
+    let world = world();
+    for n in 0..10 {
+        world
+            .provision(
+                &format!("idk_fixturequota{n:014}"),
+                &request(&format!("usr_quota{n:020}"), &format!("agt_quota{n:020}")),
+            )
+            .unwrap();
+    }
+    let before = world.service.load().unwrap();
+    assert_eq!(
+        world
+            .provision("idk_fixturemerits00000000001", &web_request(WEB_PROFILE))
+            .err(),
+        Some(ProvisioningError::Denied("quota_exceeded"))
+    );
+    assert_eq!(world.service.load().unwrap(), before, "nothing recorded");
+    let last = operation_for(&world, "agt_quota00000000000000000009");
+    world.service.revoke(&world.site(), &last.id).unwrap();
+    let created = world
+        .provision("idk_fixturemerits00000000001", &web_request(WEB_PROFILE))
+        .unwrap();
+    assert!(!created.replayed, "the refused key had no operation");
+    assert_eq!(created.status.state, OperationState::Completed);
+}
+
+// Spec open point 3: after an operation for an id ends `failed`, a new key
+// may provision that id again. Nothing was bound, the profile went to
+// quarantine, and only non-failed operations reserve an id. The failed key
+// keeps answering its failure.
+#[test]
+fn web_a_failed_create_leaves_its_profile_id_available_to_a_new_key() {
+    let world = world();
+    let owner = world
+        .provision(
+            "idk_fixtureowner000000000001",
+            &web_request("agt_fixtureprofile000000000009"),
+        )
+        .unwrap()
+        .status;
+    world.service.inject(Fault::ProfileCreatedRecorded);
+    assert!(
+        world
+            .provision("idk_fixturefailed00000000001", &web_request(WEB_PROFILE))
+            .is_err()
+    );
+    operator_change(world.root(), |tx| {
+        tx.set_status(&owner.principal_id, PrincipalStatus::Suspended)
+            .unwrap();
+    });
+    let failed = world
+        .provision("idk_fixturefailed00000000001", &web_request(WEB_PROFILE))
+        .unwrap()
+        .status;
+    assert_eq!(failed.state, OperationState::Failed);
+    assert_eq!(failed.failure.as_deref(), Some("principal_inactive"));
+    assert!(!world.profile_dir(WEB_PROFILE).exists());
+
+    operator_change(world.root(), |tx| {
+        tx.set_status(&owner.principal_id, PrincipalStatus::Active)
+            .unwrap();
+    });
+    let retried = world
+        .provision("idk_fixtureretry000000000001", &web_request(WEB_PROFILE))
+        .unwrap();
+    assert!(!retried.replayed);
+    assert_ne!(retried.status.operation_id, failed.operation_id);
+    assert_eq!(retried.status.state, OperationState::Completed);
+    assert!(retried.status.owner_bound);
+    // The failed key still answers its failure. Its `owner_bound` is now
+    // true: it reports the principal's current ownership of the profile,
+    // which the new operation established (see the next test).
+    let replay = world
+        .provision("idk_fixturefailed00000000001", &web_request(WEB_PROFILE))
+        .unwrap()
+        .status;
+    assert_eq!(replay.operation_id, failed.operation_id);
+    assert_eq!(replay.state, OperationState::Failed);
+    assert_eq!(replay.failure.as_deref(), Some("principal_inactive"));
+    assert!(replay.owner_bound);
+}
+
+// `owner_bound` is the effective ownership of (operation principal, profile)
+// when asked, not a function of the operation's state. The candidate
+// protocol (§12.1, §12.2, fixture `invalid-owner-bound-pending`) requires
+// `ownerBound` if and only if `completed`. These three reachable states
+// break that rule, so the protocol has to change, not the service.
+#[test]
+fn web_owner_bound_is_current_ownership_not_operation_state() {
+    // `profile_created` and bound: the identity transaction committed, and
+    // the process stopped before the ledger recorded `completed`.
+    let crashed = world();
+    crashed.service.inject(Fault::IdentityCommitted);
+    assert!(
+        crashed
+            .provision("idk_fixturecommitted00000001", &web_request(WEB_PROFILE))
+            .is_err()
+    );
+    let interrupted = operation_for(&crashed, WEB_PROFILE);
+    let status = crashed
+        .service
+        .status(&crashed.site(), &interrupted.id)
+        .unwrap();
+    assert_eq!(status.state, OperationState::ProfileCreated);
+    assert!(status.owner_bound);
+
+    // `completed` and not bound: an operator reassigned the profile.
+    let world = world();
+    let done = world
+        .provision("idk_fixturereassigned0000001", &web_request(WEB_PROFILE))
+        .unwrap()
+        .status;
+    operator_change(world.root(), |tx| {
+        tx.create_principal(principal("carol"), Role::User, None)
+            .unwrap();
+        tx.reassign_owner(&profile(WEB_PROFILE), &principal("carol"))
+            .unwrap();
+    });
+    let status = world
+        .service
+        .status(&world.site(), &done.operation_id)
+        .unwrap();
+    assert_eq!(status.state, OperationState::Completed);
+    assert!(!status.owner_bound);
+
+    // `failed` and bound: shown in the previous test.
+}
