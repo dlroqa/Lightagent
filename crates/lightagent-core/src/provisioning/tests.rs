@@ -1817,3 +1817,50 @@ fn web_an_unknown_recorded_template_fails_the_operation() {
     assert!(!status.owner_bound);
     assert!(!world.profile_dir(WEB_PROFILE).exists());
 }
+
+// r3 review counterexample. r3 §10.5 lets a harness "initialize a new ledger
+// for an existing harness id" and only raises the fence. The identity store
+// and profile directory outlive the ledger, so a fresh resend of a job whose
+// create bound the user finds no operation for its key, and `begin` refuses
+// it on the merits (`profile_unavailable`). Web's R3 would conclude `failed`
+// while the user owns the profile. This is the service behaviour that makes
+// r3's restore rule insufficient.
+#[test]
+fn web_a_fresh_ledger_answers_a_merits_refusal_for_a_bound_profile() {
+    let world = world();
+    let done = world
+        .provision("idk_fixturelostledger0000001", &web_request(WEB_PROFILE))
+        .unwrap()
+        .status;
+    assert!(done.owner_bound);
+
+    // A new ledger for the same home: the operator re-registers the
+    // provisioner; the identity store and the profile are untouched.
+    std::fs::remove_file(world.service.root().join(STATE)).unwrap();
+    world
+        .service
+        .register_provisioner(
+            &operator(),
+            &principal("control-site"),
+            [ISSUER.to_owned()].into(),
+            ["assistant".to_owned()].into(),
+            10,
+        )
+        .unwrap();
+
+    assert_eq!(
+        world
+            .provision("idk_fixturelostledger0000001", &web_request(WEB_PROFILE))
+            .err(),
+        Some(ProvisioningError::Conflict("profile_unavailable")),
+        "a merits-class refusal for the job's own key"
+    );
+    assert_eq!(
+        world
+            .effective()
+            .get(&profile(WEB_PROFILE))
+            .map(|o| o.owner.clone()),
+        Some(done.principal_id),
+        "the user still owns the profile"
+    );
+}

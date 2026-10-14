@@ -2,222 +2,254 @@
 
 | | |
 |---|---|
-| Current candidate | `la-web-provisioning-1/r2`, Web commit `d31e544968447c3f7901f004321c20983e879267` (metadata commit `fbc5c20`), branch `l0/la-web-provisioning-r2` |
-| Compatibility digest reviewed | `8649b453d55013cc5d35ed81bc052d219c4afd56eec0d031798f680923248b9a` |
+| Current candidate | `la-web-provisioning-1/r3`, Web commit `15f196ca804e7c999a8ace1792443af8ecee3d49`, metadata commit `227447b945218c54c6caa60de4af97995db59af4`, branch `l0/la-web-provisioning-r3` |
+| Compatibility digest reviewed | `bd410d38aab5890eb8ba97cedbd41a3913046f8d1fd90ff4c6d9a171c9d94a8d` |
 | Lightagent baseline | PR #26 `340cb48` (service unchanged), PR #27, PR #28 |
-| Verdict | **REJECT r2.** RC2, RC3 and RC4 are resolved, and RC1 is correct for a harness clock that never steps. Two gaps let Web conclude `failed` while the user owns a profile: RC5 (harness clock steps) and RC6 (journal before send). Both corrections are narrow (§4). Accept r3 with a new digest once they are made |
-| Lightagent acceptance row | **none recorded.** Acceptance waits for a digest that passes |
-
-The mirror in `la-web-provisioning-1-r2/` was extracted with `git archive`
-from Web commit `d31e544`, not from a working tree. It is a review copy of a
-candidate and must never be edited. `ACCEPTANCE.md` is not mirrored: it is
-Web's metadata, outside the manifest.
+| Verdict | **REJECT r3, narrowly.** RC5 and RC6 are correct, and so are r3's own additions: the fence durable before unlock, durable nonces discarded only under the fence, and `transmission-only` refusals. One counterexample remains, and it is reproduced against the PR #26 service. r3 §10.5 sanctions "initializing a new ledger for an existing harness id" with only a fence raise, and then Web can conclude `failed` for a profile the user owns. r4 needs one text change and one fixture (RC7, §4). There is no wire change |
+| Lightagent acceptance row | **none recorded** |
 
 ## 1. Provenance
 
 | Check | Result |
 |---|---|
-| Candidate commit `d31e544…` exists, parent `775c7c7` | yes |
-| Metadata commit `fbc5c20` changes only `ACCEPTANCE.md` and names `d31e544` and digest `8649b453…` | yes |
-| Hashed files committed (not untracked); Web working tree clean | yes |
-| `MANIFEST.json` at `d31e544` (and at `fbc5c20`) hashes to `8649b453…` | yes |
-| Specification and 8 fixture files: `sha256sum -c` | 10/10 OK |
-| `fixtureDigest` | `49c28a8b…1f55`, recomputed |
-| Runtime or Cloudflare configuration changes in `d31e544` | none. `src/`, `wrangler*` and `migrations/` are untouched. Only docs, `.gitattributes`, a test-only `package.json` script, and test/tooling files |
-| r1 command, redelivery and key vectors carried into r2 | byte-identical apart from `fixtureSet` |
-| Reachability of the commit | **local only**: `ACCEPTANCE.md` states the Web repository has no remote. See §6 |
+| Bundle `la-web-provisioning-1-r3.bundle` (Web-L0-review delivery) against its `.sha256` sidecar | OK, `e450270f4eab77ed7035fa7bbff0c51fdc016d9e7a9be553b76055743406cee4` |
+| `git bundle verify` | "is okay", complete history, one ref `refs/heads/l0/la-web-provisioning-r3` → `227447b…` |
+| Clone of the bundle (isolated scratch directory, not the Web working tree) | `227447b` → `15f196c` → `fbc5c20` → `d31e544` → `775c7c7`. The r2 commits are the ones reviewed before |
+| Candidate commit `15f196c…` exists; metadata commit `227447b` changes only `ACCEPTANCE.md` and names `15f196c` and digest `bd410d38…` | yes |
+| `MANIFEST.json` at `15f196c` and at `227447b` | both `bd410d38…` |
+| Mirror (`la-web-provisioning-1-r3/`, `git archive 15f196c`, `ACCEPTANCE.md` not mirrored): `sha256sum -c` | 11/11 OK |
+| `fixtureDigest` | `0190187a…a857`, recomputed |
+| Non-protocol changes `fbc5c20..15f196c` in `src/`, `migrations/`, Wrangler configuration, `package*.json`, secrets | none. Only the specification, fixtures, `ACCEPTANCE.md`, and test/tooling files (`tests/contracts/*`, `tools/provisioning-fixtures.ts`) |
+| r2 compatibility | All command, redelivery, response and key vectors are byte-identical, as are the 5 races. r2's deadline cases only gain `fence: 0`. No r2 resolution case changes its expectation. `errors.json` only gains `createResolution` |
+
+**Normative changes r2 → r3:**
+- §9.2: nonces are durable (MUST) and retained until the fence excludes them.
+- §9.3: clock steps no longer affect safety.
+- §10 steps 14–15: fence check, and an advance durable before unlock.
+- §10.4: P6 (fence) and P7 (nonces).
+- §10.5: the fence, including the restore rule.
+- §11: `createResolution`; `protocol` refusals become `transmission-only`.
+- §13.2 R3: "open" transmissions.
+- §13.2.1–§13.2.3: invariant S, A1–A8, the proof, the counterexamples.
+- §13.10: the journal (RC6).
+- §16.2 item 9.
+- §17, §18.
 
 ## 2. Verification results
 
-Independent Rust in `crates/lightagent-protocol-conformance`, written from
-the specification text. Web's reference codec was not read.
+**Fixtures** (independent Rust, `crates/lightagent-protocol-conformance`;
+Web's reference code was not read):
 
 | Fixture set | Result |
 |---|---|
-| `commands-valid.json` | 15/15 accepted |
-| `commands-invalid.json` | 132/132 with the exact code and registered HTTP status |
-| `redelivery.json` | 6/6, plus §9.1 invariants and the counter-example |
+| `commands-valid.json` | 15/15 |
+| `commands-invalid.json` | 132/132, exact code and HTTP status |
+| `redelivery.json` | 6/6 |
 | Canonical JSON, signing input, `payloadHash`, Ed25519 re-signature, wire body | 20/20 |
-| `responses.json` (§12.4 classification and §13.1 ownership) | 45/45 |
-| `create-resolution.json` (§13.2 R1–R3) | 21/21 |
-| `execution-deadline.json` | 10/10: 5 single step-14 checks, and 5 races both with and without step 14 |
-| Manifest, `fixtureIds`, test keys | all verified |
+| `responses.json` | 45/45 |
+| `create-resolution.json` | 26/26, including every `plan` (desired present and absent) |
+| `execution-deadline.json` | 13/13: 8 single checks (wall clock and fence), plus 5 races with and without step 14 |
+| `ordering-model.json` | 10 scenarios × 10 rule sets = 100/100: answers, operation, Web's conclusion, `failedAt` and `unsafe`. Replayed by an independent event-driven model (`ordering.rs`). Only its answer-timing convention is taken from the fixtures |
+| `errors.json` `createResolution` | equals §11's class mapping for every code |
 
-**Schedule model** (`model.rs`). One harness serving one job, with calls
-serialized by the ledger lock (P2) and recorded before effect (P3):
+**Adversarial search** (the review's own generator and seeds; each count is
+schedules where Web concludes `failed` while an operation or binding exists
+from a transmission issued by then):
 
-| Schedules | Without step 14 | r2 step 14 | Step 14 + fence (RC5) |
-|---|---|---|---|
-| 20,000 random, clock never steps | 67 unsafe | 0 | 0 |
-| Hand-built: harness 30 s behind Web, 1 s backward step | n/a | **unsafe** | safe |
-| 50,000 random clock-step hazards within r2's limits | n/a | **1,068 unsafe** (backward steps from 13 s) | 0 |
-| 20,000 random, clock steps of up to ±90 s | n/a | n/a | 0 |
-| The 5 fixture races | as fixture | as fixture | identical to step 14: no liveness cost |
-
-"Unsafe" means Web concludes `failed` while an operation exists.
-
-**Service semantics** (`provisioning/tests.rs`, `web_*`, test-only, service
-unchanged):
-- **Ordering:** S1, S2, S3, S11, exact redelivery, `idempotency_conflict`,
-  and merits refusals recording nothing.
-- **Failed-id reuse.**
-- **`ownerBound` combinations:**
-  - `profile_created`/`true`, `completed`/`false`, `failed`/`true` and
-    `revoked`/`true`;
-  - revoke after an operator removed ownership answers `revoked`;
-  - a reassigned profile is never re-bound by a create replay, and a new key
-    is `profile_unavailable`.
-- **`invalid_template`** as a stored failure: an unknown recorded template is
-  resumed by `reconcile`, and `status` reports `failed`/`invalid_template`.
-
-## 3. Findings on r2
-
-**RC1 (execution deadline): correct, but conditional.** PR #26 matches the
-current code exactly: `exclusive` takes an in-process `Mutex` and then a
-blocking `File::lock` with no deadline, and `provision` reads its clock before
-`exclusive`. So step 14 needs the new entry point P1 describes.
-
-With step 14, R3 is sound if the harness clock never steps backward. The r2
-argument (§13.2) is right, and the clock-free part is right too:
-- `t`'s admission check gives `h(t) ≥ t.issuedAt − 30 ≥ u.expiresAt + 30`;
-- `u` can start only while `h < u.expiresAt + 30`.
-
-These are the answers to Phase 3:
-- the clock is checked at admission (step 12);
-- the clock is checked again after the lock, before the lookup (step 14);
-- at or after `expiresAt + 30` nothing begins or resumes;
-- a command that started in time may finish late (P2, fixture
-  `begun-before-deadline-completes-late`);
-- expiry never proves failure (`elapsed-time-alone`, `timeouts-exhausted`).
-
-**Smallest safe implementation point:** a new
-`ProvisioningService` entry point that takes the deadline, reads the clock
-inside `exclusive()` before `admit`, and is otherwise `provision`. `provision`
-and the PR #26 HTTP API stay unchanged. This is §16.2 item 9 plus RC5.
-
-**RC5 (new, required): harness clock steps void R3.** r2 says a backward
-step "larger than 30 s" voids R3 (§9.3, §17 item 3) and asks only for SHOULD
-slewing. Both are insufficient.
-
-The step that suffices is any step larger than `h(t) − (u.expiresAt + 30)`.
-With the harness 30 s behind Web, which r2 accepts, that can be 1 s:
-1. `u` is admitted and waits for the lock.
-2. `t` is issued at `u`'s horizon and is refused on the merits at harness
-   time `u.expiresAt + 30`.
-3. The clock steps back 1 s.
-4. `u` starts at `u.expiresAt + 29`, passes step 14, and binds the user.
-5. Web's R3 has already concluded `failed`.
-
-The test `a_one_second_backward_step_defeats_step_14_but_not_the_fence`
-reproduces this. Backward steps happen in practice: NTP and chrony step
-corrections, VM snapshot restore and migration, and manual changes. The R3
-inference therefore cannot be approved as specified.
-
-**RC6 (new, required): journal before send.** R3 quantifies over "every
-transmission of the job". §16.1.4 lists the journal's columns but never
-requires a transmission to be durably journaled **before** it is sent. A Worker
-can fail after `fetch` and before its D1 write. The unjournaled transmission
-`u` can then commit while a later merits refusal makes R3 conclude `failed`.
-
-**RC2 (`ownerBound`): resolved.** Every combination is valid, and §13.1
-assesses ownership without moving state. Tested against the service:
-- `completed`/`false` after reassignment;
-- revoke → `ownership_changed` when another owner exists, and `revoked` when
-  none remains;
-- `revoked`/`true` after an operator gives the profile back;
-- a replay never re-binds, and a new key is refused.
-
-Web's classifier (`responses.json`, 45/45) never infers ownership from
-`state`. Web never re-creates or re-binds a reassigned profile (§13.1, §13.6).
-
-**RC3 (`INVALID_TEMPLATE`): resolved.** It is a reachable stored failure
-(tested). Its registry entry, its two meanings, its R1 handling, and the
-no-auto-retry rule all match the service. A retry with a new key under the
-same build would be refused `INVALID_TEMPLATE` at validation, so "needs
-operator attention" is right.
-
-**RC4 (provenance): resolved**, with the reachability caveat in §6.
-
-**CL1–CL4: accepted** as written. Non-terminal create answers are
-`RESPONSE_INVALID`, and status never completes a create. The forged-failure
-threat case and the Unicode-version note are in. T1–T7 are reviewed in §5.
-
-## 4. Required corrections for r3 (new digest)
-
-**RC5. Fail-closed execution fence.** Replace §9.3's clock-discipline
-paragraph and §17 item 3. Add to §10 step 14 and §10.4 P1:
-
-> The harness keeps a durable, non-decreasing **execution fence**, which
-> starts at 0, under the ledger lock. Step 14 refuses `EXPIRED` with no effect
-> if `now ≥ expiresAt + 30` **or** `expiresAt + 30 ≤ fence`. When a create
-> passes step 15 (local admission), the harness sets
-> `fence := max(fence, issuedAt − 30)` and makes it durable before the call's
-> answer is released. The fence is not an operation and is not keyed:
-> "a `begin` refusal records nothing" still holds for the operation ledger.
-
-Add to §13.2: "R3's horizon clause rests on P1–P3 and the fence. It holds for
-any harness clock behaviour, because the fence uses only signed Web stamps:
-`t` passing step 15 sets `fence ≥ t.issuedAt − 30 ≥ u.expiresAt + 30`."
-
-A harness clock that is wrong forward only causes extra `EXPIRED` answers,
-which are fail-closed. The fence cannot be pushed into the future by a bad
-command, because step 12 refuses `issuedAt > now + 30`.
-
-New fixtures in `execution-deadline.json`:
-- a race with a backward step after `t` (unsafe with step 14 alone, safe with
-  the fence);
-- single fence checks at `expiresAt + 30 = fence` (refuse) and
-  `expiresAt + 30 = fence + 1` (proceed).
-
-The Lightagent L3 cost is a few lines in the same new entry point, and one
-field in the ledger file.
-
-**RC6. Journal before send.** Add to §13.2 (inputs) and §16.1.4:
-
-> Web MUST commit a transmission's journal record (`command_id`, `issued_at`,
-> `expires_at`) durably before the request leaves the Worker. A transmission
-> without a committed record is never sent. Its later outcome is recorded
-> against that record.
-
-Add a `create-resolution.json` note or case showing that a transmission
-missing from the journal is not allowed to exist.
-
-## 5. Remaining risks (reviewed)
-
-| # | Item | Assessment |
+| Search | r3 | Ablations |
 |---|---|---|
-| 1 | Unsigned responses through §12.5 T1–T7 | Acceptable for v1 under gates (a)–(c). Lightagent should keep the gateway on loopback (T7) and send no CORS headers (T6). Validating the Access JWT is optional defence in depth, never authority |
-| 2 | Forged `failed`, including refusals without an operation id | Residual, as r2 states. It needs a position inside TLS. It is closed only by response signing or `profile.lookup`. It grants nothing in v1 |
-| 3 | Issuer/subject stability and `{provision}`-only admission | Unchanged and sound: `usr_…` is immutable, the issuer is compared byte for byte, every `keyId` maps to one provisioner, and admission is re-read per command (§10.2) |
-| 4 | Create/revoke ordering and idempotency | Sound, and tested against the service |
-| 5 | Transient refusals | Safe: with no uncertain transmission nothing exists, so `failed` is never wrong about a binding. But a transient `EXPIRED`, `NOT_YET_VALID`, `UNKNOWN_KEY` or `UNAUTHENTICATED` (skew, rotation, operator configuration) fails the job at once. Recommendation (non-blocking): Web retries protocol- and admission-class refusals for a bounded period before failing |
-| 6 | Unicode versions | Safe (final `INVALID_DISPLAY_NAME`, no effect). Harness NFC data: `icu_normalizer_data` 2.3.0 |
-| 7 | D1 journal and reconciliation | Sufficient with RC6 |
-| 8 | `attempt_count` CHECK (0–10) and suspension transitions | Implementation readiness, not protocol. The migration in §16.1.4 must decouple reconciliation from the CHECK. A profile whose harness binding was revoked must not return to `active`, because D1 still allows `suspended → active` |
+| 40,000 broad schedules per rule set: 1–3 copies, clock offset ±30 s with up to two ±90 s steps, restarts, housekeeping, late key, lock waits, long holds, lost answers, crashes after record, unjournaled sends | **0** (also 0 without the wall-clock check) | r2 74, review proposal 22, protocol refusals final 19, no journal 10, non-durable nonces 3. The fence, durability before unlock and clock-purge ablations need narrow hazards: covered by the fixtures and the focused search below, matching Web's §18 split |
+| 50,000 focused clock-step pairs (from r2's review) | fence: 0 | step 14 alone: 1,068 |
+| 20,000 schedules on a clock that never steps | 0 | no step 14: 62 |
+| 20,000 broad schedules plus one **ledger replacement** under r3's §10.5 rule | **6 unsafe** | see RC7 |
 
-## 6. Before freezing (non-protocol)
+**PR #26 service** (`web_*` in `provisioning/tests.rs`, 8 tests, test-only,
+service unchanged):
+- S1, S2, S3, S11;
+- failed-id reuse;
+- every `ownerBound` combination, and operator removal and reassignment;
+- `invalid_template` as a stored failure;
+- **new:** `web_a_fresh_ledger_answers_a_merits_refusal_for_a_bound_profile`
+  (RC7).
 
-The candidate commit exists only in a local Web repository with no remote.
-Before both sides record acceptance of r3, make the candidate commit
-retrievable by both reviewers: push it to a remote, or attach a `git bundle`
-to the review. Otherwise the acceptance rows name a commit nobody else can
-fetch.
+## 3. Assessment
 
-## 7. Implementation readiness, after acceptance (not started)
+### RC5: the execution fence
 
-| Lightagent | Web |
+**Correct.** I checked §13.2.1 line by line against PR #26:
+
+- **Lemma 1 (final refusals).**
+  - `admission` refusals come from `admit` under the lock, at step 15.
+  - `merits` refusals come from `begin`, which records nothing before
+    returning (verified in code).
+  - Both happen after the nonce was durably recorded at step 12.
+  - `payload` refusals are pre-nonce but deterministic in a byte-identical
+    payload. A8 freezes the step-8 rules. Every r3-valid payload passes PR #26
+    `validate`.
+- **Lemma 2 (exclusion by a later merits refusal).**
+  - `t` passed step 15, so `F ≥ t.issuedAt − 30 ≥ u.expiresAt + 30` was durable
+    before unlock.
+  - A copy of `u` that locks later is refused by the fence, whatever the
+    clock says.
+  - A copy that locked earlier finished durably first (P2: `exclusive` holds
+    the mutex and the file lock for all of `work()`). `t`'s lookup would then
+    have found it (P3: `begin` records `pending` before `materialize`).
+- **No clock in the proof.** The harness clock appears nowhere in the proof,
+  and none of my searches found a schedule against it except RC7.
+
+The three named cases:
+
+| Case | Finding |
 |---|---|
-| L1: fail-closed `control_webhooks` configuration (harness id, trusted keys, `keyId` → credential mapping) | Production codec ported from the reference, tested against the fixtures |
-| L2: separate, feature-gated router on loopback; strict parser and verifier (this crate's code moved into a gateway crate); nonce ledger | Migration: transmission journal (RC6), observed state, decoupled `attempt_count`, suspension path |
-| L3: the P1 + fence entry point in `ProvisioningService` (RC1, RC5), the §10.3 adapter, and the lock-wait race test against the real service | Signing secret and `keyId`, `PROVISIONING_ISSUER`, `classifyResponse`, a level-triggered reconciler (R4–R6) |
-| CI: this crate's offline job stays; a staged cross-repository job later | Display-name check before signing; v1 operation set only |
+| A. Fence persistence after unlock | Excluded by A4, and enforceable in Lightagent: `exclusive` releases the file lock only after `work()` returns, and `load()` re-reads the ledger file under the lock on every call (no cache). The fence is one field in that file, written by `save()` (`write_durable`) inside `work()`. A second gateway process therefore always reads the advanced value. Fixture `fence-visible-only-after-unlock` reproduced |
+| B. Replay of a refused command | Excluded by A5: nonces are durable across restarts, and discarded only after the fence is raised past the command. After a restart a copy is `REPLAY_DETECTED` (indeterminate). After a purge and a clock rollback, the fence refuses it. Fixtures `duplicate-of-refused-command-after-restart` and `duplicate-after-clock-purge-and-rollback` reproduced. A nonce-state restore is covered by the restore rule (but see RC7) |
+| C. Early refusal | Correct: `UNKNOWN_KEY`, `KEY_REVOKED`, `BAD_SIGNATURE`, `WRONG_AUDIENCE`, `NOT_YET_VALID`, `EXPIRED` (step 12 or 14) and `NONCE_STORE_UNAVAILABLE` are `transmission-only` and never evidence. Only `payload` (deterministic), `admission` (step 15) and `merits` (step 16) are `final`. Fixtures `pre-nonce-refusal-then-duplicate`, `single-protocol-refusal`, `single-expired-refusal` and `protocol-refusal-ruled-out-by-merits` reproduced |
+
+**Additional adversarial review:**
+
+| Item | Finding |
+|---|---|
+| Forward-issued stamps, skew | Step 12 bounds `issuedAt − 30 ≤ now`, so every advance has `F ≤ now`. A fast harness clock raises `F` only to its own `now`. The cost is a fail-closed outage after the clock is corrected, never a safety loss |
+| Overlapping windows, out-of-order delivery | Safe (`overlapping-windows-out-of-order`) |
+| Several provisioners or Web environments sharing one fence | Safe. No liveness cost on a clock that never steps back: a fence refusal implies `expiresAt + 30 ≤ F ≤ now`, which the wall-clock check refuses anyway |
+| Crash between nonce and fence persistence | No answer was released (uncertain), and later copies are `REPLAY_DETECTED`. Safe |
+| Crash between profile commit and response | Uncertain, then the R4 resend returns the operation (R1). Safe |
+| Restoring an older ledger or fence snapshot | **Unsafe unless restored consistently with the identity store: RC7** |
+| Two processes or ledgers sharing one harness id | A1 forbids it. On one host, processes share the file lock and the ledger (safe). Separate ledgers (two hosts, `cloudflared` replicas on different hosts, a cloned VM) break idempotency itself, and no protocol can detect a clone. This must be an explicit operator assumption, and is (A1) |
+| Overflow, invalid stamps | Stamps are 10-digit integers, and `F` is a `u64` of seconds. No overflow |
+| Legitimate retries | Refused only if issued ≥ 120 s before the newest admitted create. Web's fresh retries pass. A Web clock stepping back by more than about 120 s fails closed |
+| Are A1–A8 enforceable by Lightagent? | A1: by deployment, plus a harness-id check in the ledger (L1). A2: by configuration (one provisioner per key map). A3: yes, PR #26 today. A4: yes, one field under `exclusive`. A5: yes, a new nonce store whose purge takes the ledger lock first. A6, A7: Web. A8: by the protocol. **An additional assumption is missing: RC7** |
+
+### RC6: the write-before-send journal
+
+**Correct.** §13.10 requires all ten properties the brief lists:
+- durable job and desired state (step 2);
+- an immutable logical command (step 3, and the payload-hash trigger);
+- durable intent before any byte is sent (steps 4–5, invariant J);
+- an atomic claim and insert (one D1 batch, which runs as a SQL
+  transaction);
+- conservative treatment, with recoverable lost answers and identity reuse,
+  crash-safe reconciliation and suspension handling (§13.5);
+- no `failed` while an open transmission remains (R3).
+
+The six cases come out as follows:
+
+| Case | Treatment |
+|---|---|
+| Prepared, not journaled | Cannot be sent (step 5) |
+| Journaled, not sent | Uncertain, never "not sent" (`journaled-never-sent`) |
+| Sent, no answer | Uncertain |
+| Answered indeterminate | Uncertain |
+| Completed, answer lost | R4 resend, then R1 |
+| Revoked, profile still on disk | S1 returns `revoked`. A new key is `PROFILE_UNAVAILABLE` |
+
+The append-only and fixed-payload triggers, `CHECK` constraints and the
+conditional claim (`INSERT … SELECT … WHERE lease_token = ?` in the same
+batch) use SQLite features that D1 supports and that Web's migration 0001
+already uses. Safety rests on J, not on the lease.
+
+Implementation note (not a protocol defect): the reconciler must read the
+journal from D1's primary, or with a Sessions bookmark, not from a lagging
+replica.
+
+### Authority and existing Lightagent functions
+
+No r3 rule bypasses PR #26: `{provision}`-only admission is re-read under
+the lock, and a signature without a mapping is `UNAUTHENTICATED`. Also
+unchanged: issuer/subject mapping, ownership, operation-id revoke,
+idempotency, profile-id rules, the credential vault and profile isolation,
+and the standalone operator API.
+
+One implementation obligation for L2: the `keyId` → credential mapping must
+be resolved at step 15, after the nonce is recorded, because
+`UNAUTHENTICATED` is a `final` refusal. Resolving it at step 10 would make it
+a pre-nonce refusal wrongly labelled final.
+
+### Response authentication (v1)
+
+Within §12.5 (T1–T7: operator-controlled Tunnel, loopback origin, single-path
+ingress, service-token Access, no browser path, no public listener):
+
+| Threat | v1 status |
+|---|---|
+| Forged success | Needs a position inside TLS. Effect: Web shows `active`. Grants nothing without the Worker |
+| Forged `failed`, or a refusal without an operation id | Residual, and cannot be re-checked without `profile.lookup` |
+| Wrong observed-state transitions | Prevented by forward-only `state` and the correlation echoes |
+| Key rotation | Covered by §6.4 |
+| Harness unreachable | Uncertain, and R4 keeps reconciling, never `failed` |
+
+These risks are acceptable for the narrowly defined v1 deployment. Before
+broader multi-user execution (§12.1 gates a–c), response signing and
+`profile.lookup` must be added, along with the separately proven tenant
+gateway.
+
+## 4. Required correction for r4 (new digest)
+
+**RC7. Ledger continuity.** The smallest counterexample (reproduced against
+the service, the model, and 6 of 20,000 random schedules):
+
+1. `u` creates the profile and binds the user. Its answer is lost.
+2. The harness's ledger is replaced. §10.5 allows "initializing a new ledger
+   for an existing harness id" and sets `F := max(F, T + 150)`. The identity
+   store and the profile directory are kept.
+3. Web's R4 resend `t` is issued after `T` and passes the fence. The new ledger
+   has no operation for the key. PR #26 `begin` refuses `PROFILE_UNAVAILABLE`,
+   because the identity store still records the ownership.
+4. That is a `merits` refusal issued after `u`'s horizon, so R3 concludes
+   `failed` while the user owns the profile. Lemma 2 step 4 fails because P3
+   ("every later lookup sees every operation an earlier call started") no
+   longer holds across the replacement.
+
+§17 item 3 says restores are "covered by PR #26 §12". They are not. PR #26 §12
+only restores the ledger and the identity store **together** from one point.
+It never sanctions a new ledger beside a kept identity store.
+
+Normative change:
+- **§13.2.1:** add A9: "Ledger continuity: the operations recorded for a
+  harness id are never lost while their effects (profiles, ownership) persist.
+  A ledger is restored only together with the identity and profile stores,
+  from one consistent point."
+- **§10.5, "Restore or new ledger" row:** replace with: "A restore restores the
+  provisioning ledger (operations, fence, nonces), the identity store and the
+  profile store together from one consistent point (PR #26 §12), then sets
+  `F := max(F_restored, T + 150)`. A harness id's ledger is never initialized
+  anew, or restored alone. If it is lost, the harness id is **retired**: the
+  harness is registered under a new id, and every unresolved create on the
+  retired id stays unresolved (needs attention), never `failed`. Commands to
+  the retired id are `WRONG_AUDIENCE`, which is `transmission-only`."
+- **§17 item 3:** correct accordingly.
+- **Fixture:** add `fresh-ledger-retained-identity` to `ordering-model.json`
+  (the schedule above). It is unsafe under r3's rule, and safe under r4 (the
+  resend goes to the new id, or is never answered on the merits).
+
+Lightagent can enforce RC7 (L1). The gateway fails closed at startup if its
+ledger is new or lacks the configured harness id while the identity store
+holds provisioning bindings (`provisioning:` transaction keys, or
+`.provisioning-operation` markers). It also records the harness id in the
+ledger and refuses a mismatch.
+
+## 5. Recommended clarifications (same revision, non-blocking)
+
+1. §10.2: state that the `keyId` → credential mapping is resolved at step 15,
+   after the nonce.
+2. §13.10: the reconciler reads the journal with primary consistency.
+
+## 6. Implementation readiness after acceptance (not started)
+
+| Stage | Lightagent | Web |
+|---|---|---|
+| L1 | Fail-closed `control_webhooks` configuration: harness id (recorded in the ledger, RC7 startup check), trusted keys, `keyId` → credential mapping onto one provisioner. Off by default; a disabled gateway leaves behaviour identical to today | Migration 0003+: journal (§13.10), job columns, a decoupled `attempt_count`, the suspension path; display-name check; v1 operation set only |
+| L2 | A separate, feature-gated router on loopback; this crate's parser and verifier moved into it; durable nonce store (P7; its purge takes the ledger lock and raises the fence first); credential mapping at step 15 | Production codec from the reference, tested on the fixtures; signing secret, `keyId`, `PROVISIONING_ISSUER`; `classifyResponse` |
+| L3 | One additive `ProvisioningService` entry point, `provision_before(caller, key, request, issued_at, expires_at)`: inside `exclusive()` read the clock and `execution_fence`, refuse `EXPIRED`, `admit`, advance and `save()` the fence, then the existing `provision` path. `provision` and its HTTP API stay unchanged. Tests: the lock-wait race with a backward clock step, a duplicate of a refused command across a restart, and the restore rule | Level-triggered reconciler (R4–R6) and lease recovery; transport through `fetchWithTimeout` |
+| CI | This crate's offline job, plus L3 service tests on all platforms; a staged cross-repository job later, reported as skipped when its environment is absent | Fixture and D1 journal tests in workerd |
 
 Staging, ingress, real keys, merges and activation each need separate
 approval.
 
-## r1 history
+## History
 
-r1 (`030537b8…a1d2`) was rejected with RC1 (execution deadline), RC2
-(`ownerBound` ⇔ `completed`), RC3 (missing `INVALID_TEMPLATE`) and RC4
-(uncommitted candidate). It also had CL1–CL4. r2 resolves all of them except
-the RC1 clock caveat that RC5 addresses.
+| Revision | Digest | Outcome |
+|---|---|---|
+| r1 | `030537b8…a1d2` (uncommitted) | Rejected: RC1 execution deadline, RC2 `ownerBound`, RC3 `INVALID_TEMPLATE`, RC4 provenance |
+| r2 | `8649b453…8b9a` (`d31e544`) | Rejected: RC5 clock steps void R3 (fence), RC6 journal before send |
+| r3 | `bd410d38…4a8d` (`15f196c`) | Rejected: RC7 ledger continuity |
