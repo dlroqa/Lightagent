@@ -86,13 +86,72 @@ the gateway even while Web's key is still trusted.
 | L1 config | `crates/lightagent-core/src/control_webhooks.rs` (fail-closed parse; off by default), `config.rs` | Spec key and id formats (C9) |
 | L2 gateway | `crates/lightagent-api/src/control_gateway.rs` behind a new cargo feature, a separate `Router` that is never merged into `router()` without the opt-in. Ed25519 through `ring` (already in `Cargo.lock` via rustls), so no new crypto crate. Canonicalization per the spec | Spec, C1–C3 |
 | L3 adapter | the §4 seam, plus a per-profile generation store (C5) | C5, C6 |
-| L4 callbacks | outbox under `<home>/control/` | C1 decision |
+| L4 callbacks | dropped from v1 (polling only, C1) | n/a |
 | L5 | tests, `check.yml` feature jobs, offline fixture job, staging runbook | all of the above |
 
-## 6. What needs approval
+## 6. Decisions (approved 2026-10-13)
 
-- Web authors and freezes `PROVISIONING_PROTOCOL.md` and the fixtures,
-  resolving C1–C10.
-- Decision on C1: polling only for v1, or callbacks too.
-- PR #26 review and merge, with explicit approval. Until then this work stays
-  stacked on it.
+| # | Decision |
+|---|---|
+| D-spec | Web owns the canonical v1 specification (`docs/PROVISIONING_PROTOCOL.md`) and its language-neutral Ed25519 and schema fixtures. Lightagent implements only against a frozen, versioned, reviewed copy |
+| C1 | **Polling only** in v1. No outbound signed callbacks. The PR #26 rule "Lightagent does not call the website" stands. Stage L4 is dropped from v1 |
+| C2 | `profile.disable` and `profile.enable` are **excluded** from v1 |
+| C3 | v1 supports `profile.create`, `profile.status` and `profile.revoke`, with PR #26's operation-id semantics. Revoke is irreversible removal of the owner binding |
+| C4 | The bridge enforces Lightagent's 1–64 character display-name limit. Web D1 id formats and the `(issuer, subject)` mapping are unchanged |
+| C5 | No revocation-version mechanism unless the analysis in §7 finds a gap. It finds none, given the Web rules W1–W4 |
+| C7 | Ledger, idempotency, crash recovery, owner binding and `{provision}`-only credential admission are reused unchanged. A verified signature is never provisioning or operator authority by itself |
+
+No merge, activation or deployment is approved.
+
+## 7. Create/revoke ordering and stale commands
+
+The analysis is from reading `provisioning.rs` at `340cb48`. Every PR #26
+call holds the cross-process ledger lock for its whole duration, so calls on
+one harness are totally ordered.
+
+| # | Scenario | What Lightagent does | Safe? |
+|---|---|---|---|
+| S1 | A create is redelivered **with the same idempotency key** after its operation was revoked | The key lookup comes before every other check. `resume` on a terminal state returns the recorded status (`revoked`, `owner_bound: false`) and does not bind again | yes |
+| S2 | A create for a revoked profile id **with a new key** | The id is still known (the directory is kept for the operator, and a revoked operation exists): `409 profile_unavailable` | yes |
+| S3 | A revoke races a create that is still in progress | Serialized. Revoke on `pending`/`profile_created` is `409 operation_in_progress`. Revoke after `completed` succeeds | yes |
+| S4 | A revoke arrives before its create | Impossible: revoke names an operation id, and only create issues one | yes |
+| S5 | A create's outcome is unknown (timeout after commit), and Web gives up or cancels | Web has no operation id. A late or redelivered copy of that create can still bind the user | **only with W1–W2** |
+| S6 | After a create's outcome is unknown, Web opens a new job with a **new** key for the same profile | If the first create committed, the new one is `profile_unavailable`, and Web may wrongly believe the profile failed | **only with W2** |
+| S7 | The Web user is suspended while a create is in flight | Lightagent does not know Web user status. The create can complete | **only with W3** |
+| S8 | The operator reassigns the profile or suspends the user locally | Revoke is `409 ownership_changed`. A bind is `principal_inactive`, and the profile is quarantined | yes |
+| S9 | A command captured for another harness or audience | Must be refused at the gateway before admission (L2, audience = harness id) | spec |
+
+Rules Web must follow:
+
+- **W1.** Treat a create as unresolved until Lightagent returns an
+  operation (any state) or a definitive refusal before admission (`4xx`
+  other than `409 operation_in_progress`). Command expiry limits how long a
+  delayed copy can arrive. It does not tell Web what happened.
+- **W2.** Resolve an unresolved create by sending the **same idempotency key
+  and the same payload** again, freshly signed, until an operation id comes
+  back. Then revoke that operation if the profile should not exist. Open a
+  new job (with a new key) only after a definitive `failed` operation state.
+  Never derive `failed` from transport exhaustion.
+- **W3.** When a Web user or profile is suspended or revoked, revoke every
+  `completed` operation for it, and apply W2 to every unresolved one.
+- **W4.** Never reuse an `agt_` id after revocation. Lightagent refuses
+  reuse permanently (S2).
+
+Conclusion: with W1–W4, the operation identity, the provisioner-scoped
+idempotency ledger and the local authority checks are enough. No
+revocation version is needed in v1. One optional, minimal addition is a
+read-only `profile.status` **by idempotency key**. It would let Web resolve
+S5 without creating a profile only to revoke it. That needs a new read-only
+lookup in `ProvisioningService`, not a new service. Raise it only if Web
+wants it.
+
+S1 and S2 are established by reading the code. No existing test asserts
+them directly. Add them as regression tests at stage L3, before the gateway
+relies on them.
+
+## 8. Remaining approvals
+
+- Web freezes `PROVISIONING_PROTOCOL.md` and the fixtures
+  (`web-protocol-handoff.md` lists what is needed).
+- Review and merge of PR #26, with explicit approval. Until then this work
+  stays stacked on it.
