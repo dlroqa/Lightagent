@@ -1,0 +1,915 @@
+{
+  "protocol": "LA-WEB-PROVISIONING/1",
+  "fixtureSet": "la-web-provisioning-1/r4",
+  "kind": "create-resolution",
+  "description": "What Web may conclude about one profile.create job from all its transmissions (§13.2). Times are Web-clock Unix seconds.",
+  "acceptanceHorizonSeconds": 60,
+  "cases": [
+    {
+      "id": "no-transmission",
+      "description": "Nothing sent yet.",
+      "transmissions": [],
+      "expect": {
+        "status": "unresolved"
+      },
+      "plan": {
+        "present": "send-create",
+        "absent": "send-create",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "single-completed",
+      "description": "First transmission returns a completed operation.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "operation",
+            "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+            "state": "completed"
+          }
+        }
+      ],
+      "expect": {
+        "status": "resolved",
+        "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        "state": "completed"
+      },
+      "plan": {
+        "present": "none",
+        "absent": "revoke",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "timeout-then-operation",
+      "description": "Timeout, then the same key returns the operation.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000030,
+          "expiresAt": 1791000090,
+          "outcome": {
+            "kind": "operation",
+            "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+            "state": "completed"
+          }
+        }
+      ],
+      "expect": {
+        "status": "resolved",
+        "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        "state": "completed"
+      },
+      "plan": {
+        "present": "none",
+        "absent": "revoke",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "timeouts-exhausted",
+      "description": "Ten timeouts: still unresolved, never failed.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000030,
+          "expiresAt": 1791000090,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000060,
+          "expiresAt": 1791000120,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000090,
+          "expiresAt": 1791000150,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000120,
+          "expiresAt": 1791000180,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000150,
+          "expiresAt": 1791000210,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000180,
+          "expiresAt": 1791000240,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000210,
+          "expiresAt": 1791000270,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000240,
+          "expiresAt": 1791000300,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000270,
+          "expiresAt": 1791000330,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        }
+      ],
+      "expect": {
+        "status": "unresolved"
+      },
+      "plan": {
+        "present": "send-create",
+        "absent": "send-create",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "replay-detected-only",
+      "description": "Only a REPLAY_DETECTED answer (indeterminate).",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        }
+      ],
+      "expect": {
+        "status": "unresolved"
+      },
+      "plan": {
+        "present": "send-create",
+        "absent": "send-create",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "single-merits-refusal",
+      "description": "Only transmission refused with PROFILE_UNAVAILABLE.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "refused",
+            "code": "PROFILE_UNAVAILABLE"
+          }
+        }
+      ],
+      "expect": {
+        "status": "failed",
+        "code": "PROFILE_UNAVAILABLE"
+      },
+      "plan": {
+        "present": "none",
+        "absent": "none",
+        "retiredPresent": "none",
+        "retiredAbsent": "none"
+      }
+    },
+    {
+      "id": "single-admission-refusal",
+      "description": "Only transmission refused with UNAUTHENTICATED.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "refused",
+            "code": "UNAUTHENTICATED"
+          }
+        }
+      ],
+      "expect": {
+        "status": "failed",
+        "code": "UNAUTHENTICATED"
+      },
+      "plan": {
+        "present": "none",
+        "absent": "none",
+        "retiredPresent": "none",
+        "retiredAbsent": "none"
+      }
+    },
+    {
+      "id": "timeout-then-merits-too-early",
+      "description": "Timeout, then QUOTA_EXCEEDED sent before the first copy's horizon.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000030,
+          "expiresAt": 1791000090,
+          "outcome": {
+            "kind": "refused",
+            "code": "QUOTA_EXCEEDED"
+          }
+        }
+      ],
+      "expect": {
+        "status": "unresolved"
+      },
+      "plan": {
+        "present": "send-create",
+        "absent": "send-create",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "timeout-then-merits-after-horizon",
+      "description": "Timeout, then QUOTA_EXCEEDED sent after the first copy's horizon.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000120,
+          "expiresAt": 1791000180,
+          "outcome": {
+            "kind": "refused",
+            "code": "QUOTA_EXCEEDED"
+          }
+        }
+      ],
+      "expect": {
+        "status": "failed",
+        "code": "QUOTA_EXCEEDED"
+      },
+      "plan": {
+        "present": "none",
+        "absent": "none",
+        "retiredPresent": "none",
+        "retiredAbsent": "none"
+      }
+    },
+    {
+      "id": "lock-wait-horizon-minus-one",
+      "description": "Timeout, then QUOTA_EXCEEDED issued one second before the horizon: the first copy may still start under the lock.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000119,
+          "expiresAt": 1791000179,
+          "outcome": {
+            "kind": "refused",
+            "code": "QUOTA_EXCEEDED"
+          }
+        }
+      ],
+      "expect": {
+        "status": "unresolved"
+      },
+      "plan": {
+        "present": "send-create",
+        "absent": "send-create",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "lock-wait-horizon-exact",
+      "description": "Timeout, then QUOTA_EXCEEDED issued exactly at the horizon: safe only because §10 step 14 refuses the first copy if it reaches the lock later.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000120,
+          "expiresAt": 1791000180,
+          "outcome": {
+            "kind": "refused",
+            "code": "QUOTA_EXCEEDED"
+          }
+        }
+      ],
+      "expect": {
+        "status": "failed",
+        "code": "QUOTA_EXCEEDED"
+      },
+      "plan": {
+        "present": "none",
+        "absent": "none",
+        "retiredPresent": "none",
+        "retiredAbsent": "none"
+      }
+    },
+    {
+      "id": "expired-at-execution-then-operation",
+      "description": "Timeout, EXPIRED at execution, then a fresh transmission returns the committed operation.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000030,
+          "expiresAt": 1791000090,
+          "outcome": {
+            "kind": "refused",
+            "code": "EXPIRED"
+          }
+        },
+        {
+          "issuedAt": 1791000060,
+          "expiresAt": 1791000120,
+          "outcome": {
+            "kind": "operation",
+            "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+            "state": "completed"
+          }
+        }
+      ],
+      "expect": {
+        "status": "resolved",
+        "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        "state": "completed"
+      },
+      "plan": {
+        "present": "none",
+        "absent": "revoke",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "expired-at-execution-after-uncertain",
+      "description": "Timeout, then EXPIRED (protocol class): proves nothing about the first copy.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000120,
+          "expiresAt": 1791000180,
+          "outcome": {
+            "kind": "refused",
+            "code": "EXPIRED"
+          }
+        }
+      ],
+      "expect": {
+        "status": "unresolved"
+      },
+      "plan": {
+        "present": "send-create",
+        "absent": "send-create",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "timeout-then-admission-after-horizon",
+      "description": "Timeout, then UNAUTHENTICATED: admission happens before the idempotency lookup, so it proves nothing.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000120,
+          "expiresAt": 1791000180,
+          "outcome": {
+            "kind": "refused",
+            "code": "UNAUTHENTICATED"
+          }
+        }
+      ],
+      "expect": {
+        "status": "unresolved"
+      },
+      "plan": {
+        "present": "send-create",
+        "absent": "send-create",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "timeout-then-protocol-after-horizon",
+      "description": "Timeout, then BAD_SIGNATURE: a per-transmission refusal proves nothing.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000120,
+          "expiresAt": 1791000180,
+          "outcome": {
+            "kind": "refused",
+            "code": "BAD_SIGNATURE"
+          }
+        }
+      ],
+      "expect": {
+        "status": "unresolved"
+      },
+      "plan": {
+        "present": "send-create",
+        "absent": "send-create",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "timeout-then-payload-refusal",
+      "description": "Timeout, then INVALID_DISPLAY_NAME: the same payload can never succeed.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000030,
+          "expiresAt": 1791000090,
+          "outcome": {
+            "kind": "refused",
+            "code": "INVALID_DISPLAY_NAME"
+          }
+        }
+      ],
+      "expect": {
+        "status": "failed",
+        "code": "INVALID_DISPLAY_NAME"
+      },
+      "plan": {
+        "present": "none",
+        "absent": "none",
+        "retiredPresent": "none",
+        "retiredAbsent": "none"
+      }
+    },
+    {
+      "id": "operation-failed",
+      "description": "Timeout, then an operation in state failed (definitive).",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000030,
+          "expiresAt": 1791000090,
+          "outcome": {
+            "kind": "operation",
+            "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+            "state": "failed"
+          }
+        }
+      ],
+      "expect": {
+        "status": "resolved",
+        "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        "state": "failed"
+      },
+      "plan": {
+        "present": "none",
+        "absent": "confirm-status",
+        "retiredPresent": "none",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "elapsed-time-alone",
+      "description": "One uncertain transmission and a day of silence: elapsed time alone never resolves a create.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        }
+      ],
+      "expect": {
+        "status": "unresolved"
+      },
+      "plan": {
+        "present": "send-create",
+        "absent": "send-create",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "operation-revoked-replay",
+      "description": "Redelivery after revocation returns the revoked operation (S1).",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000030,
+          "expiresAt": 1791000090,
+          "outcome": {
+            "kind": "operation",
+            "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+            "state": "revoked"
+          }
+        }
+      ],
+      "expect": {
+        "status": "resolved",
+        "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        "state": "revoked"
+      },
+      "plan": {
+        "present": "operator-attention",
+        "absent": "none",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "none"
+      }
+    },
+    {
+      "id": "idempotency-conflict",
+      "description": "IDEMPOTENCY_CONFLICT is a Web defect, never a failure.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000030,
+          "expiresAt": 1791000090,
+          "outcome": {
+            "kind": "refused",
+            "code": "IDEMPOTENCY_CONFLICT"
+          }
+        }
+      ],
+      "expect": {
+        "status": "attention",
+        "code": "IDEMPOTENCY_CONFLICT"
+      },
+      "plan": {
+        "present": "operator-attention",
+        "absent": "operator-attention",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "operation-mismatch",
+      "description": "Two different operation ids for one key.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "operation",
+            "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+            "state": "completed"
+          }
+        },
+        {
+          "issuedAt": 1791000030,
+          "expiresAt": 1791000090,
+          "outcome": {
+            "kind": "operation",
+            "operationId": "ffffffffffffffffffffffffffffffff",
+            "state": "completed"
+          }
+        }
+      ],
+      "expect": {
+        "status": "attention",
+        "code": "OPERATION_MISMATCH"
+      },
+      "plan": {
+        "present": "operator-attention",
+        "absent": "operator-attention",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "single-protocol-refusal",
+      "description": "r3: the only transmission is refused UNKNOWN_KEY before its nonce was recorded. Another copy may still take effect, so the job stays unresolved (r2 concluded failed).",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "refused",
+            "code": "UNKNOWN_KEY"
+          }
+        }
+      ],
+      "expect": {
+        "status": "unresolved"
+      },
+      "plan": {
+        "present": "send-create",
+        "absent": "send-create",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "protocol-refusal-ruled-out-by-merits",
+      "description": "A transmission refused only for this copy, then a merits refusal issued after its horizon: failed.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "refused",
+            "code": "NOT_YET_VALID"
+          }
+        },
+        {
+          "issuedAt": 1791000120,
+          "expiresAt": 1791000180,
+          "outcome": {
+            "kind": "refused",
+            "code": "QUOTA_EXCEEDED"
+          }
+        }
+      ],
+      "expect": {
+        "status": "failed",
+        "code": "QUOTA_EXCEEDED"
+      },
+      "plan": {
+        "present": "none",
+        "absent": "none",
+        "retiredPresent": "none",
+        "retiredAbsent": "none"
+      }
+    },
+    {
+      "id": "single-expired-refusal",
+      "description": "r3: EXPIRED (step 12 or 14) is transmission-only. Alone it never fails a job.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "refused",
+            "code": "EXPIRED"
+          }
+        }
+      ],
+      "expect": {
+        "status": "unresolved"
+      },
+      "plan": {
+        "present": "send-create",
+        "absent": "send-create",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "journaled-never-sent",
+      "description": "RC6: a journaled transmission whose send status is unknown (the Worker died after commit) counts as uncertain.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000030,
+          "expiresAt": 1791000090,
+          "outcome": {
+            "kind": "refused",
+            "code": "QUOTA_EXCEEDED"
+          }
+        }
+      ],
+      "expect": {
+        "status": "unresolved"
+      },
+      "plan": {
+        "present": "send-create",
+        "absent": "send-create",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "admission-refusals-only",
+      "description": "Every transmission refused at local admission (after the nonce was durably recorded): nothing exists.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "refused",
+            "code": "UNAUTHENTICATED"
+          }
+        },
+        {
+          "issuedAt": 1791000030,
+          "expiresAt": 1791000090,
+          "outcome": {
+            "kind": "refused",
+            "code": "PROVISIONER_REVOKED"
+          }
+        }
+      ],
+      "expect": {
+        "status": "failed",
+        "code": "PROVISIONER_REVOKED"
+      },
+      "plan": {
+        "present": "none",
+        "absent": "none",
+        "retiredPresent": "none",
+        "retiredAbsent": "none"
+      }
+    },
+    {
+      "id": "profile-unavailable-while-open",
+      "description": "r4 R3a: PROFILE_UNAVAILABLE for a resend while an earlier transmission is open signals a possible ledger discontinuity (RC7). Never failed: needs attention.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000120,
+          "expiresAt": 1791000180,
+          "outcome": {
+            "kind": "refused",
+            "code": "PROFILE_UNAVAILABLE"
+          }
+        }
+      ],
+      "expect": {
+        "status": "attention",
+        "code": "PROFILE_UNAVAILABLE_WHILE_OPEN"
+      },
+      "plan": {
+        "present": "operator-attention",
+        "absent": "operator-attention",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "quota-after-horizon-with-profile-unavailable",
+      "description": "r4 R3a is conservative: a PROFILE_UNAVAILABLE anywhere in a job with an open transmission needs attention, even when another merits refusal would rule the open transmission out.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000120,
+          "expiresAt": 1791000180,
+          "outcome": {
+            "kind": "refused",
+            "code": "QUOTA_EXCEEDED"
+          }
+        },
+        {
+          "issuedAt": 1791000130,
+          "expiresAt": 1791000190,
+          "outcome": {
+            "kind": "refused",
+            "code": "PROFILE_UNAVAILABLE"
+          }
+        }
+      ],
+      "expect": {
+        "status": "attention",
+        "code": "PROFILE_UNAVAILABLE_WHILE_OPEN"
+      },
+      "plan": {
+        "present": "operator-attention",
+        "absent": "operator-attention",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    },
+    {
+      "id": "ledger-continuity-failed",
+      "description": "r4: the harness fails closed (LEDGER_CONTINUITY_FAILED, transmission-only). The job needs attention and is never failed.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000120,
+          "expiresAt": 1791000180,
+          "outcome": {
+            "kind": "refused",
+            "code": "LEDGER_CONTINUITY_FAILED"
+          }
+        }
+      ],
+      "expect": {
+        "status": "attention",
+        "code": "LEDGER_CONTINUITY_FAILED"
+      },
+      "plan": {
+        "present": "operator-attention",
+        "absent": "operator-attention",
+        "retiredPresent": "operator-attention",
+        "retiredAbsent": "operator-attention"
+      }
+    }
+  ]
+}

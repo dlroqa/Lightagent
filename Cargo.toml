@@ -15,6 +15,7 @@ members = [
     "crates/lightagent-jev",
     "crates/lightagent",
     "crates/release-update",
+    "crates/lightagent-protocol-conformance",
 ]
 
 [workspace.package]
