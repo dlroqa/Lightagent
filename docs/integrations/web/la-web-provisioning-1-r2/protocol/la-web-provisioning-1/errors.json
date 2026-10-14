@@ -1,6 +1,6 @@
 {
   "protocol": "LA-WEB-PROVISIONING/1",
-  "fixtureSet": "la-web-provisioning-1/r1",
+  "fixtureSet": "la-web-provisioning-1/r2",
   "kind": "errors",
   "description": "Normative error registry (§11). `lightagent` lists the existing Lightagent codes each maps from; `gateway` marks codes the signed-command gateway introduces.",
   "errors": [
@@ -275,7 +275,8 @@
       ],
       "lightagent": [
         "gateway"
-      ]
+      ],
+      "note": "From §10 step 12 (admission), or for profile.create from step 14 (execution deadline re-checked under the ledger lock). Either way this transmission had no effect."
     },
     {
       "code": "REPLAY_DETECTED",
@@ -369,7 +370,8 @@
       ],
       "lightagent": [
         "invalid_template"
-      ]
+      ],
+      "note": "As a refusal: the payload's template is not \"assistant\". Also an operation failure code: a recorded operation whose template the harness no longer knows ends failed with it."
     },
     {
       "code": "INVALID_IDEMPOTENCY_KEY",
@@ -663,7 +665,8 @@
     "EXTERNAL_IDENTITY_CONFLICT",
     "PROFILE_UNAVAILABLE",
     "OWNERSHIP_CHANGED",
-    "PROVISIONER_REVOKED"
+    "PROVISIONER_REVOKED",
+    "INVALID_TEMPLATE"
   ],
   "operationStates": [
     "pending",

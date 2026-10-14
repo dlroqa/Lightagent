@@ -1,10 +1,10 @@
 {
   "protocol": "LA-WEB-PROVISIONING/1",
-  "fixtureSet": "la-web-provisioning-1/r1",
+  "fixtureSet": "la-web-provisioning-1/r2",
   "specification": {
     "path": "docs/PROVISIONING_PROTOCOL.md",
-    "bytes": 52218,
-    "sha256": "8c5d8a093d2048025c3c8a0f0ef09e1695c9cd661ecaa166f41bcb34067d9a54"
+    "bytes": 75524,
+    "sha256": "9c92514d1a5f53c450887c48ccdeb594cd253485253016e14850a3e0b8e1efef"
   },
   "schemas": [
     "LA-WEB-PROVISIONING/1#command/profile.create",
@@ -175,15 +175,32 @@
       "single-admission-refusal",
       "timeout-then-merits-too-early",
       "timeout-then-merits-after-horizon",
+      "lock-wait-horizon-minus-one",
+      "lock-wait-horizon-exact",
+      "expired-at-execution-then-operation",
+      "expired-at-execution-after-uncertain",
       "timeout-then-admission-after-horizon",
       "timeout-then-protocol-after-horizon",
       "timeout-then-payload-refusal",
       "operation-failed",
+      "elapsed-time-alone",
       "operation-revoked-replay",
       "idempotency-conflict",
       "operation-mismatch"
     ],
     "protocol/la-web-provisioning-1/errors.json": [],
+    "protocol/la-web-provisioning-1/execution-deadline.json": [
+      "lock-at-issue",
+      "lock-one-second-before-deadline",
+      "lock-at-deadline",
+      "admitted-at-last-second-lock-after",
+      "lock-after-long-wait",
+      "lock-wait-race",
+      "begun-before-deadline-completes-late",
+      "crash-after-record-then-resend",
+      "delayed-past-admission",
+      "merits-before-horizon"
+    ],
     "protocol/la-web-provisioning-1/keys.json": [],
     "protocol/la-web-provisioning-1/redelivery.json": [
       "redelivery-create-1",
@@ -195,11 +212,19 @@
     ],
     "protocol/la-web-provisioning-1/responses.json": [
       "create-201-completed",
-      "create-200-replayed-pending",
+      "create-200-replayed-completed",
+      "create-200-replayed-completed-not-owner",
       "create-200-replayed-revoked",
       "create-201-failed",
+      "create-200-failed-invalid-template",
+      "create-401-expired-at-execution",
       "status-200-completed",
       "status-200-profile-created",
+      "status-200-pending",
+      "status-200-profile-created-owner-bound",
+      "status-200-completed-not-owner",
+      "status-200-failed-owner-bound",
+      "status-200-revoked-owner-bound",
       "revoke-200-revoked",
       "create-409-profile-unavailable",
       "create-401-unauthenticated",
@@ -212,7 +237,9 @@
       "invalid-command-id-mismatch",
       "invalid-audience-mismatch",
       "invalid-profile-mismatch",
-      "invalid-owner-bound-pending",
+      "invalid-create-nonterminal-pending",
+      "invalid-create-nonterminal-profile-created",
+      "invalid-failure-unregistered",
       "invalid-failure-lowercase",
       "invalid-failed-without-code",
       "invalid-201-replayed",
@@ -235,39 +262,44 @@
     {
       "path": "protocol/la-web-provisioning-1/commands-invalid.json",
       "bytes": 387665,
-      "sha256": "14f45ca415d24314ae2cebb7a8afb97abd44a60d2572433382d3ba2b12f87ed0"
+      "sha256": "c3c348e2debeed724027ba942ce701cbfcdedb59fa12d6755caf283372bf4e3e"
     },
     {
       "path": "protocol/la-web-provisioning-1/commands-valid.json",
       "bytes": 87207,
-      "sha256": "04eb87201ed4b5127ba6f7ab90bf9756440fbc9f1c61304c638df4d9ac0002f5"
+      "sha256": "fc284cbb04710cef8ec678ba91980e3b582156758b9df20eedabee2dc9ef2bec"
     },
     {
       "path": "protocol/la-web-provisioning-1/create-resolution.json",
-      "bytes": 10642,
-      "sha256": "45e49a0376bf03e5e9dbfae9701afb42995a36c89f1064e269d573580fc7f74f"
+      "bytes": 13932,
+      "sha256": "3971d0b28abef3ef707bcd64e1df4e4f3e3f23a680bf748865a9992b102e828e"
     },
     {
       "path": "protocol/la-web-provisioning-1/errors.json",
-      "bytes": 13307,
-      "sha256": "1eab9796eaabf0118fa1236e509f99cf26f0b23d1b6fb7cdd55b96fa20dbe074"
+      "bytes": 13706,
+      "sha256": "cdbd0cf099ce9179489a6a63b9767fe1130b135f25d6e68fb6d1f0e535032c11"
+    },
+    {
+      "path": "protocol/la-web-provisioning-1/execution-deadline.json",
+      "bytes": 9110,
+      "sha256": "2f505a13c12bba397679ee21ebee8ef356df3ec3fa7d93ae4b27ee2d08cf2c84"
     },
     {
       "path": "protocol/la-web-provisioning-1/keys.json",
       "bytes": 4413,
-      "sha256": "f90a833647ae7d651cb9b64009f732709c4e64da00a01822b46264fdf1bf6c17"
+      "sha256": "d4e99b766133cae4cf2a738568f3ef96265d5df6cd3bd258bd09174868756cae"
     },
     {
       "path": "protocol/la-web-provisioning-1/redelivery.json",
       "bytes": 32392,
-      "sha256": "1cbd954422ef30d9a93db4e85f673c40d45a9f0b4d37ee74c336831e764f384b"
+      "sha256": "1888306a043e0d77bdbfb1e5a07e7037ad30fce6f3e6bb9c4bd93e61c9fc19a5"
     },
     {
       "path": "protocol/la-web-provisioning-1/responses.json",
-      "bytes": 34614,
-      "sha256": "1ae803fc0f45150f681e1eb77004475cd13322afd64a8c222f0d346cd9a202e3"
+      "bytes": 46117,
+      "sha256": "31438dff39d37241713664e08bc36355c72f3349010db265d84eb41682ede694"
     }
   ],
-  "fixtureDigest": "cd1477ea99e391126401f7c92d1c4f6919be577973c75ab571ffc6e8bbcb713b",
+  "fixtureDigest": "49c28a8b49d8c4b0d01ff7cd89df48fe2536ca68faee9dbbddd9df842ac51f55",
   "compatibilityDigest": "SHA-256 of this file's exact bytes (MANIFEST.json); recorded in ACCEPTANCE.md, not here."
 }

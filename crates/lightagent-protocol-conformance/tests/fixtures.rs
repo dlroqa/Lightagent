@@ -1,5 +1,5 @@
 //! Runs Web's candidate `LA-WEB-PROVISIONING/1` fixtures, byte for byte as
-//! mirrored under `docs/integrations/web/la-web-provisioning-1-r1/`, through
+//! mirrored under `docs/integrations/web/la-web-provisioning-1-r2/`, through
 //! this crate's independent verifier.
 //!
 //! The mirror is pinned by the compatibility digest below. Any change to the
@@ -17,14 +17,15 @@ use serde_json::Value as Json;
 use sha2::{Digest, Sha256};
 
 /// SHA-256 of the exact bytes of `MANIFEST.json` for candidate
-/// `la-web-provisioning-1/r1`, as reported by Web.
+/// `la-web-provisioning-1/r2`, committed in Web `d31e544` (r1's
+/// `030537b8…a1d2` is superseded).
 const COMPATIBILITY_DIGEST: &str =
-    "030537b8be8cc003cff31e503343d5082629eab3f3f10c82fb17d7776b24a1d2";
+    "8649b453d55013cc5d35ed81bc052d219c4afd56eec0d031798f680923248b9a";
 const FIXTURES: &str = "protocol/la-web-provisioning-1";
 
 fn mirror() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/integrations/web/la-web-provisioning-1-r1")
+        .join("../../docs/integrations/web/la-web-provisioning-1-r2")
 }
 
 fn bytes(path: &str) -> Vec<u8> {
@@ -54,7 +55,7 @@ fn the_mirror_is_the_pinned_candidate() {
     );
     let manifest: Json = serde_json::from_slice(&manifest_bytes).unwrap();
     assert_eq!(manifest["protocol"], "LA-WEB-PROVISIONING/1");
-    assert_eq!(manifest["fixtureSet"], "la-web-provisioning-1/r1");
+    assert_eq!(manifest["fixtureSet"], "la-web-provisioning-1/r2");
 
     let spec = &manifest["specification"];
     let spec_bytes = bytes(s(&spec["path"]));
@@ -99,12 +100,12 @@ fn the_mirror_is_the_pinned_candidate() {
     // The manifest names every vector id, and only those.
     for (path, ids) in manifest["fixtureIds"].as_object().unwrap() {
         let file: Json = serde_json::from_slice(&bytes(path)).unwrap();
-        let list = file
-            .get("vectors")
-            .or_else(|| file.get("cases"))
-            .and_then(Json::as_array)
-            .map(|v| v.iter().map(|x| s(&x["id"]).to_owned()).collect::<Vec<_>>())
-            .unwrap_or_default();
+        let list: Vec<String> = ["vectors", "cases", "deadlineCases", "races"]
+            .iter()
+            .filter_map(|key| file.get(*key).and_then(Json::as_array))
+            .flatten()
+            .map(|x| s(&x["id"]).to_owned())
+            .collect();
         let named: Vec<String> = ids
             .as_array()
             .unwrap()
@@ -418,4 +419,377 @@ fn redeliveries_keep_one_logical_command() {
         vectors[first]["detail"]["command"]["payload"]["idempotencyKey"]
     );
     assert_eq!(not["expectedHarnessCode"], "IDEMPOTENCY_CONFLICT");
+}
+
+// --- r2: Web-side conclusions, execution deadline, harness races ------------
+
+use lightagent_protocol_conformance::model::{self, Attempt, Guard, RaceResult, Rng};
+use lightagent_protocol_conformance::web::{
+    self, Classified, Outcome, RegisteredCode, Registry, Request, Resolution, Transmission,
+};
+
+fn web_registry() -> Registry {
+    let doc = json("errors.json");
+    Registry {
+        codes: doc["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    s(&e["code"]).to_owned(),
+                    RegisteredCode {
+                        http: e["http"].as_u64().unwrap() as u16,
+                        class: s(&e["class"]).to_owned(),
+                        operations: e["operations"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|o| s(o).to_owned())
+                            .collect(),
+                    },
+                )
+            })
+            .collect(),
+        failure_codes: doc["operationFailureCodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| s(c).to_owned())
+            .collect(),
+    }
+}
+
+fn valid_command(id: &str) -> Json {
+    json("commands-valid.json")["vectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["id"] == id)
+        .unwrap_or_else(|| panic!("no command {id}"))["detail"]["command"]
+        .clone()
+}
+
+fn to_json(value: &lightagent_protocol_conformance::Value) -> Json {
+    serde_json::from_slice(&jcs(value)).unwrap()
+}
+
+/// §12.4 and §13.1 over all 45 `responses.json` vectors.
+#[test]
+fn every_response_is_classified_as_expected() {
+    let registry = web_registry();
+    let mut failures = Vec::new();
+    let vectors = json("responses.json")["vectors"]
+        .as_array()
+        .unwrap()
+        .clone();
+    for vector in &vectors {
+        let id = s(&vector["id"]);
+        let command = valid_command(s(&vector["request"]));
+        let request = Request {
+            command_id: s(&command["commandId"]).to_owned(),
+            audience: s(&command["audience"]).to_owned(),
+            operation: s(&command["operation"]).to_owned(),
+            profile_id: s(&command["payload"]["profileId"]).to_owned(),
+            operation_id: command["payload"]["operationId"]
+                .as_str()
+                .map(str::to_owned),
+        };
+        let got = match web::classify_response(
+            &registry,
+            &request,
+            vector["httpStatus"].as_u64().unwrap() as u16,
+            s(&vector["body"]).as_bytes(),
+        ) {
+            Classified::Operation {
+                result,
+                replayed,
+                ownership,
+            } => serde_json::json!({
+                "kind": "operation",
+                "result": to_json(&result),
+                "replayed": replayed,
+                "ownership": ownership,
+            }),
+            Classified::Refused { code, class } => {
+                serde_json::json!({"kind": "refused", "code": code, "class": class})
+            }
+            Classified::Uncertain { reason } => {
+                serde_json::json!({"kind": "uncertain", "reason": reason})
+            }
+        };
+        if got != vector["expect"] {
+            failures.push(format!("{id}: expected {}, got {got}", vector["expect"]));
+        }
+    }
+    println!(
+        "responses.json: {}/{} as expected",
+        vectors.len() - failures.len(),
+        vectors.len()
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert_eq!(vectors.len(), 45);
+}
+
+fn resolution_json(resolution: &Resolution) -> Json {
+    match resolution {
+        Resolution::Unresolved => serde_json::json!({"status": "unresolved"}),
+        Resolution::Resolved {
+            operation_id,
+            state,
+        } => serde_json::json!({"status": "resolved", "operationId": operation_id, "state": state}),
+        Resolution::Failed { code } => serde_json::json!({"status": "failed", "code": code}),
+        Resolution::Attention { code } => serde_json::json!({"status": "attention", "code": code}),
+    }
+}
+
+/// §13.2 R1–R3 over all 21 `create-resolution.json` cases.
+#[test]
+fn every_create_resolution_case_is_reproduced() {
+    let registry = web_registry();
+    let cases = json("create-resolution.json")["cases"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let mut failures = Vec::new();
+    for case in &cases {
+        let transmissions: Vec<Transmission> = case["transmissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| Transmission {
+                issued_at: t["issuedAt"].as_u64().unwrap(),
+                expires_at: t["expiresAt"].as_u64().unwrap(),
+                outcome: match s(&t["outcome"]["kind"]) {
+                    "operation" => Outcome::Operation {
+                        operation_id: s(&t["outcome"]["operationId"]).to_owned(),
+                        state: s(&t["outcome"]["state"]).to_owned(),
+                    },
+                    "refused" => Outcome::Refused {
+                        code: s(&t["outcome"]["code"]).to_owned(),
+                    },
+                    "uncertain" => Outcome::Uncertain,
+                    other => panic!("outcome {other}"),
+                },
+            })
+            .collect();
+        let got = resolution_json(&web::resolve_create_job(&registry, &transmissions));
+        if got != case["expect"] {
+            failures.push(format!(
+                "{}: expected {}, got {got}",
+                s(&case["id"]),
+                case["expect"]
+            ));
+        }
+    }
+    println!(
+        "create-resolution.json: {}/{} as expected",
+        cases.len() - failures.len(),
+        cases.len()
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert_eq!(cases.len(), 21);
+}
+
+fn race_attempts(scenario: &Json) -> Vec<Attempt> {
+    let quota: Vec<(u64, u64)> = scenario["quotaAvailable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| (w[0].as_u64().unwrap(), w[1].as_u64().unwrap()))
+        .collect();
+    let mut attempts: Vec<Attempt> = scenario["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(index, a)| {
+            let admitted = a["admittedAt"].as_u64().unwrap();
+            let lock = a["lockAcquiredAt"].as_u64().unwrap_or(admitted);
+            Attempt {
+                index,
+                issued_at: a["issuedAt"].as_u64().unwrap(),
+                expires_at: a["expiresAt"].as_u64().unwrap(),
+                admitted_clock: admitted,
+                lock_clock: lock,
+                quota_free: quota.iter().any(|(from, to)| (*from..=*to).contains(&lock)),
+                response_lost: a["responseLost"].as_bool().unwrap_or(false),
+                crash_after_record: a["crashAfterRecord"].as_bool().unwrap_or(false),
+            }
+        })
+        .collect();
+    // The fixtures' clock is a correct harness clock, so lock order is
+    // clock order.
+    attempts.sort_by_key(|a| (a.lock_clock, a.index));
+    attempts
+}
+
+fn race_json(result: &RaceResult) -> Json {
+    serde_json::json!({
+        "harness": result.harness,
+        "operation": result.operation,
+        "web": resolution_json(&result.web),
+        "unsafe": result.unsafe_,
+    })
+}
+
+/// All 10 `execution-deadline.json` cases: the 5 single step-14 checks, and
+/// the 5 races with and without step 14. The proposed fence (RC5) gives the
+/// same answers as step 14 alone on every race, so it costs no liveness on a
+/// correct clock.
+#[test]
+fn every_execution_deadline_case_is_reproduced() {
+    let doc = json("execution-deadline.json");
+    let mut checked = 0;
+    for case in doc["deadlineCases"].as_array().unwrap() {
+        let command = valid_command(s(&case["command"]));
+        let expires = command["expiresAt"].as_u64().unwrap();
+        assert_eq!(
+            case["executionDeadline"].as_u64().unwrap(),
+            expires + 30,
+            "{}",
+            case["id"]
+        );
+        assert!(case["admittedAt"].as_u64().unwrap() < expires + 30);
+        assert_eq!(
+            model::execution_deadline(expires, case["lockAcquiredAt"].as_u64().unwrap()),
+            s(&case["expect"]),
+            "{}",
+            case["id"]
+        );
+        checked += 1;
+    }
+    let registry = web_registry();
+    for race in doc["races"].as_array().unwrap() {
+        let id = s(&race["id"]);
+        let attempts = race_attempts(&race["scenario"]);
+        let with = race_json(&model::run(&registry, &attempts, Guard::Deadline));
+        assert_eq!(with, race["withExecutionDeadline"], "{id} with step 14");
+        let without = race_json(&model::run(&registry, &attempts, Guard::None));
+        assert_eq!(
+            without, race["withoutExecutionDeadline"],
+            "{id} without step 14"
+        );
+        let fenced = race_json(&model::run(&registry, &attempts, Guard::DeadlineAndFence));
+        assert_eq!(fenced, race["withExecutionDeadline"], "{id} with the fence");
+        checked += 1;
+    }
+    println!("execution-deadline.json: {checked}/10 as expected");
+    assert_eq!(checked, 10);
+}
+
+/// Seeded random schedules of one job (up to 4 transmissions, skew within
+/// ±30 s, network delay, lock waits, lost answers, crashes after recording,
+/// a quota window). With a harness clock that never steps, step 14 makes R3
+/// safe, and without it R3 is unsafe.
+#[test]
+fn step_14_makes_r3_safe_on_a_clock_that_never_steps() {
+    let registry = web_registry();
+    let mut rng = Rng::new(0x5eed_0001);
+    let (mut without, mut with, mut fenced) = (0, 0, 0);
+    const RUNS: usize = 20_000;
+    for _ in 0..RUNS {
+        let seed = rng.next_u64();
+        without +=
+            model::random_schedule(&registry, &mut Rng::new(seed), Guard::None, 0).unsafe_ as usize;
+        with += model::random_schedule(&registry, &mut Rng::new(seed), Guard::Deadline, 0).unsafe_
+            as usize;
+        fenced += model::random_schedule(&registry, &mut Rng::new(seed), Guard::DeadlineAndFence, 0)
+            .unsafe_ as usize;
+    }
+    println!(
+        "monotone clock, {RUNS} schedules: unsafe without step 14: {without}, with: {with}, with fence: {fenced}"
+    );
+    assert!(without > 0, "the model must be able to find the r1 race");
+    assert_eq!(with, 0);
+    assert_eq!(fenced, 0);
+}
+
+/// r2 accepts harness clock steps as a residual risk and says a backward
+/// step **larger than 30 s** voids R3 (§9.3, §17 item 3). One second is
+/// enough. The harness clock runs 30 s behind Web, which r2's skew allows.
+/// `t` is issued exactly at `u`'s horizon, runs first, and is refused on
+/// the merits at harness time `u.expiresAt + 30`. The clock then steps back
+/// 1 s, and `u`, waiting for the lock, starts at `u.expiresAt + 29`. It
+/// passes step 14 and binds the user, while Web's R3 has concluded `failed`.
+#[test]
+fn a_one_second_backward_step_defeats_step_14_but_not_the_fence() {
+    let registry = web_registry();
+    let u = Attempt {
+        index: 0,
+        issued_at: 1_791_000_000,
+        expires_at: 1_791_000_060,
+        admitted_clock: 1_790_999_970,
+        lock_clock: 1_791_000_089,
+        quota_free: true,
+        response_lost: true,
+        crash_after_record: false,
+    };
+    let t = Attempt {
+        index: 1,
+        issued_at: 1_791_000_120,
+        expires_at: 1_791_000_180,
+        admitted_clock: 1_791_000_090,
+        lock_clock: 1_791_000_090,
+        quota_free: false,
+        response_lost: false,
+        crash_after_record: false,
+    };
+    // Lock order is real-time order: t, then u.
+    let order = [t, u];
+    let stepped = model::run(&registry, &order, Guard::Deadline);
+    assert_eq!(stepped.harness, ["OPERATION:completed", "QUOTA_EXCEEDED"]);
+    assert_eq!(
+        stepped.web,
+        Resolution::Failed {
+            code: "QUOTA_EXCEEDED".to_owned()
+        }
+    );
+    assert!(
+        stepped.unsafe_,
+        "Web says failed; the user owns the profile"
+    );
+
+    let fenced = model::run(&registry, &order, Guard::DeadlineAndFence);
+    assert_eq!(fenced.harness, ["EXPIRED", "QUOTA_EXCEEDED"]);
+    assert_eq!(fenced.operation, None);
+    assert!(!fenced.unsafe_);
+
+    // The hazard randomized within r2's limits (skew ±30 s, lifetimes up to
+    // 120 s, clock steps of up to ±90 s, `u` taking the lock at least a
+    // second after `t`): step 14 alone is unsafe on many schedules,
+    // including backward steps well under the 30 s r2 states; with the
+    // fence, none.
+    let mut rng = Rng::new(0x5eed_0002);
+    let (mut unsafe_steps, mut fenced) = (Vec::new(), 0);
+    const PAIRS: usize = 50_000;
+    for _ in 0..PAIRS {
+        let seed = rng.next_u64();
+        let (with, step) = model::stepped_pair(&registry, &mut Rng::new(seed), Guard::Deadline);
+        if with.unsafe_ {
+            unsafe_steps.push(step);
+        }
+        let (fence, _) =
+            model::stepped_pair(&registry, &mut Rng::new(seed), Guard::DeadlineAndFence);
+        fenced += fence.unsafe_ as usize;
+    }
+    let smallest = unsafe_steps.iter().map(|s| s.abs()).min();
+    println!(
+        "stepped pairs, {PAIRS}: unsafe with step 14: {} (smallest backward step {smallest:?} s), with fence: {fenced}",
+        unsafe_steps.len()
+    );
+    assert!(unsafe_steps.iter().all(|s| *s < 0), "only backward steps");
+    assert!(smallest.is_some_and(|step| step < 30), "{smallest:?}");
+    assert_eq!(fenced, 0);
+
+    // Broad random schedules with clock steps: the fence is never unsafe.
+    let mut rng = Rng::new(0x5eed_0003);
+    const RUNS: usize = 20_000;
+    let mut fenced = 0;
+    for _ in 0..RUNS {
+        fenced += model::random_schedule(&registry, &mut rng, Guard::DeadlineAndFence, 90).unsafe_
+            as usize;
+    }
+    println!("stepped clock, {RUNS} schedules: unsafe with fence: {fenced}");
+    assert_eq!(fenced, 0);
 }

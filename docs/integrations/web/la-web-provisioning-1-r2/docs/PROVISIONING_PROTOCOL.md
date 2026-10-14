@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Protocol identifier | `LA-WEB-PROVISIONING/1` |
-| Revision | `la-web-provisioning-1/r1` |
+| Revision | `la-web-provisioning-1/r2` (changes from r1: §18) |
 | Status | **Candidate.** It is not frozen until Web and Lightagent both record acceptance of the same compatibility digest in `protocol/la-web-provisioning-1/ACCEPTANCE.md`. |
 | Owner | Web (`lightagent-control`). Lightagent mirrors a byte-identical copy. |
 | Fixtures | `protocol/la-web-provisioning-1/` (listed in `MANIFEST.json`) |
@@ -72,9 +72,9 @@ signing key maps to (§10.2).
 |---|---|
 | URL | `{endpoint}/la-web-provisioning/1/commands`, where `{endpoint}` is `harnesses.endpoint` without a trailing `/`. One URL for all three operations. The operation is inside the signed body, never in the path or query |
 | Method | `POST` only. Anything else: `405 METHOD_NOT_ALLOWED` |
-| Request headers | `Content-Type: application/json` (exact string, no parameters; otherwise `415 UNSUPPORTED_MEDIA_TYPE`), `Accept: application/json`. No `Authorization` header, no cookies, no custom authentication header. The signature is the request credential |
+| Request headers | `Content-Type: application/json` (exact string, no parameters; otherwise `415 UNSUPPORTED_MEDIA_TYPE`), `Accept: application/json`. No `Authorization` header and no cookies. The signature is the only provisioning credential. Only one other pair of headers is allowed: `CF-Access-Client-Id` and `CF-Access-Client-Secret`, when the endpoint sits behind a Cloudflare Access service-token policy (§12.5). Cloudflare consumes them, and the harness MUST NOT treat them, or the `Cf-Access-Jwt-Assertion` header that Access adds, as provisioning authority |
 | Body | At most **8192 bytes** (`MAX_MESSAGE_BYTES`). A harness MUST stop reading after 8192 bytes and answer `413 PAYLOAD_TOO_LARGE`, whatever `Content-Length` says |
-| TLS | `https://` with certificate validation by the Workers runtime. `http://` only for `environment = 'development'`, as the `harnesses` CHECK already enforces |
+| TLS | `https://` with certificate validation by the Workers runtime, to an ingress that meets §12.5. `http://` only for `environment = 'development'`, as the `harnesses` CHECK already enforces |
 | Redirects | Never followed (`fetchWithTimeout` uses `redirect: "manual"`). A 3xx is an *uncertain* outcome (§12.4) |
 | Timeout | Web SHOULD use 10 s per transmission. A timeout is an *uncertain* outcome |
 | Response | `application/json`, at most 8192 bytes, schemas in §12. Web reads at most 8192 bytes |
@@ -171,6 +171,16 @@ no v1 field shares its encoding.
 - Unpaired surrogates cannot occur. They are refused at parse time (§4.2).
 - No other normalization, case folding or confusable mapping is applied to
   any field.
+- **Unicode data versions.** Normalization tables follow each side's Unicode
+  version: V8/ICU in workerd on Web, and ICU4X `icu_normalizer` (already
+  compiled into every Lightagent binary) on the harness. NFC is stable for
+  characters assigned in both versions, so the two sides can only disagree
+  about characters assigned in one version and not the other. Such a
+  disagreement yields `INVALID_DISPLAY_NAME`, a `payload`-class refusal that
+  is final and has no effect (§13.2 R2). It never produces a wrong binding.
+  Web MAY refuse, before signing, names containing unassigned code points in
+  its own engine (`/\p{Cn}/u`). The conformance results of each side SHOULD
+  record the Unicode version they used.
 
 ## 5. Canonical form
 
@@ -400,21 +410,48 @@ MUST NOT be sent. If one is sent anyway, Lightagent answers
 |---|---|
 | Maximum lifetime `expiresAt − issuedAt` | 120 s (Web uses 60 s) |
 | Maximum clock skew `MAX_CLOCK_SKEW_SECONDS` | 30 s |
-| Harness accepts when | `issuedAt − 30 ≤ now < expiresAt + 30` (harness clock) |
-| `NOT_YET_VALID` | `issuedAt > now + 30` |
-| `EXPIRED` | `now ≥ expiresAt + 30` |
-| **Acceptance horizon** of a transmission (Web clock) | `expiresAt + 60` (2 × skew). After it, no copy of that transmission can be accepted by a harness whose clock is within 30 s of Web's |
+| Admission window (§10 step 12) | `issuedAt − 30 ≤ now < expiresAt + 30`, harness clock |
+| `NOT_YET_VALID` | `issuedAt > now + 30` at step 12 |
+| `EXPIRED` | `now ≥ expiresAt + 30` at step 12, or, for `profile.create`, at step 14 |
+| **Execution deadline** (`profile.create`) | `expiresAt + 30`, on the harness clock, read **after** the ledger lock is acquired (§10 step 14) |
+| **Acceptance horizon** of a transmission (a value on Web's clock) | `expiresAt + 60` (§13.2 R3) |
 
-Command expiry bounds how long a delayed copy can arrive. It **never** tells
-Web what happened to that copy (§13.2).
+Admission-time expiry and execution-time expiry are separate checks with
+separate meanings:
+
+- **Step 12 (admission)** bounds when a copy can be *admitted*. An admitted
+  create may then wait an unbounded time for the ledger lock: PR #26 takes an
+  in-process mutex and then a blocking file lock, and reads its clock before
+  either. Step 12 alone therefore bounds nothing about execution.
+- **Step 14 (execution deadline)** bounds when an admitted create can *start*
+  executing. No idempotency lookup, ledger read for the key, or provisioning
+  write happens at or after `expiresAt + 30` on the harness clock.
+- **Neither check bounds when a started execution completes.** A create that
+  passed step 14 holds the ledger lock until its outcome is durable, however
+  long that takes (§10.4 P2). Expiry is never evidence that a started create
+  did not commit.
+
+Web's conclusions (§13.2) rest on the start bound plus serialization, never on
+elapsed time alone. Command expiry never tells Web what happened to a copy.
+
+The harness MUST use the same wall clock at steps 12 and 14, and SHOULD
+discipline it so that it does not step backwards (slew rather than step). A
+backward step larger than `MAX_CLOCK_SKEW_SECONDS` while creates are waiting
+for the lock voids the §13.2 R3 guarantee for those creates. This is a
+residual risk (§17).
 
 ## 10. Verification and execution order
 
 A harness MUST apply these steps in order and answer with the first failing
-step's code. Steps 1–12 are the protocol layer, which every fixture in
-`commands-*.json` exercises. Steps 13–14 are Lightagent's existing service,
-reached only after the protocol layer passes. Nothing may have a side effect
-before step 12.
+step's code.
+
+- Steps 1–12 are the protocol layer, which every fixture in `commands-*.json`
+  exercises.
+- Steps 13–16 run inside Lightagent's provisioning service, reached only after
+  the protocol layer passes. Step 14 is a check that r2 adds (§10.4).
+
+Nothing may have a side effect before step 12. No provisioning side effect may
+happen before step 14 passes.
 
 | # | Step | Code on failure |
 |---|---|---|
@@ -430,12 +467,15 @@ before step 12.
 | 10 | `keyId` is trusted and not revoked (§6.4) | `UNKNOWN_KEY`, `KEY_REVOKED` |
 | 11 | `S < L`, and Ed25519 verifies `signature` over `signingInput` (§6) | `BAD_SIGNATURE` |
 | 12 | `audience` equals this harness id; time window (§9.3); nonce recorded once (§9.2) | `WRONG_AUDIENCE`; `NOT_YET_VALID`, `EXPIRED`; `REPLAY_DETECTED`, `NONCE_STORE_UNAVAILABLE` |
-| 13 | **Local admission** (§10.2) | §11 admission codes |
-| 14 | Execute through `ProvisioningService` (§10.3) | §11 payload, merits, operation, conflict and indeterminate codes, or an operation response |
+| 13 | Acquire the provisioning ledger lock (PR #26 `exclusive`: in-process mutex, then the cross-process file lock). The wait is unbounded | — |
+| 14 | **Execution deadline** (`profile.create`): while holding the lock, re-read the harness clock. If `now ≥ expiresAt + 30`, refuse with no effect (§10.4 P1) | `EXPIRED` |
+| 15 | **Local admission** (§10.2), under the lock | §11 admission codes |
+| 16 | Execute through `ProvisioningService` (§10.3), under the lock | §11 payload, merits, operation, conflict and indeterminate codes, or an operation response |
 
-The reference implements steps 1 (size only) to 12 in `verifyCommand`. A
-negative fixture is single-fault: apart from its one defect, it is canonical
-and correctly signed, so skipping any check makes that vector fail.
+The reference implements steps 1 (size only) to 12 in `verifyCommand`, and
+step 14 in `checkExecutionDeadline`. A negative fixture is single-fault: apart
+from its one defect, it is canonical and correctly signed, so skipping any
+check makes that vector fail.
 
 ### 10.2 Local admission (Lightagent PR #26, unchanged)
 
@@ -462,12 +502,32 @@ administration route. PR #26 tests this route by route
 | `profile.status` | `status(caller, operationId)` | `operation.profile == payload.profileId`, otherwise `UNKNOWN_OPERATION` |
 | `profile.revoke` | `revoke(caller, operationId)` | same |
 
-Lightagent's order inside `provision` is admit → idempotency-key format →
-payload validation → credential profile limit → **idempotency lookup** →
-`begin` (issuer allowed, template allowed, quota, ledger capacity, profile id
-unknown, principal resolution). A `begin` refusal records nothing. §13.2
-depends on this order. Any change to it on the Lightagent side is a protocol
-change.
+Lightagent's order inside `provision` is: (lock) → **execution deadline
+(r2)** → admit → idempotency-key format → payload validation → credential
+profile limit → **idempotency lookup** → `begin` (issuer allowed, template
+allowed, quota, ledger capacity, profile id unknown, principal resolution) →
+record `pending` → materialize → bind. A `begin` refusal records nothing.
+§13.2 depends on this order, and any change to it on the Lightagent side is a
+protocol change.
+
+### 10.4 Execution properties a conforming harness MUST provide
+
+| # | Property | PR #26 today |
+|---|---|---|
+| P1 | **Execution deadline.** For `profile.create`, the check at step 14 runs after the ledger lock is acquired and before the idempotency lookup and any ledger, profile or identity write. It uses a clock value read after acquisition, not the value `provision` reads before locking. A create past its deadline is answered `EXPIRED` **even if its key already has an operation**: the harness neither returns nor resumes that operation, because resuming can write. Web then learns the recorded outcome from a fresh transmission of the same logical command, which returns it (§13.2 R1) | **missing**: `provision` reads `now` before `exclusive()`. Required L3 change: a narrow additive entry point that takes the deadline and checks it inside `exclusive()`. The existing `provision` is unchanged |
+| P2 | **Serialization to durability.** Steps 14–16 of every operation run under one lock, held until the call's outcome is durable: a terminal state, a recorded `pending`/`profile_created` followed by an indeterminate error, or a refusal that recorded nothing. Calls on one harness are totally ordered | yes: `exclusive()` holds the mutex and the file lock around the whole `work()` |
+| P3 | **Record before effect.** No profile or identity write precedes the durable recording of the operation under `(provisioner, idempotencyKey)`. Every later call's idempotency lookup therefore sees every operation an earlier call started | yes: `begin` records `pending` before `materialize` and `bind` |
+| P4 | **Terminal create answers.** A `profile.create` is answered with an operation in a terminal state (`completed`, `failed`, `revoked`) or with an error. An interrupted create is answered with an `indeterminate` code, never with `pending` or `profile_created` | yes: `resume` loops to a terminal state or returns the retryable error |
+| P5 | **Status is read-only.** `profile.status` reports the recorded state and current ownership. It never advances, resumes or completes an operation. Recovery of an interrupted create is a resend (§13.3 R4) or an operator `reconcile` | yes: `status` calls only `status_of` |
+
+`profile.status` and `profile.revoke` need no execution deadline. A late
+status is a read. A late revoke only removes a binding that Web asked to
+remove, and it is idempotent. A harness MAY apply step 14 to them as well.
+
+Web MUST NOT register a harness for v1 provisioning unless it conforms to
+P1–P5. Conformance is shown by `execution-deadline.json` and Lightagent's L3
+tests, including the lock-wait race. Against a harness without P1, §13.2 R3's
+horizon clause is unsound.
 
 ## 11. Errors
 
@@ -477,7 +537,7 @@ class and applicable operations, is `errors.json`. It is normative.
 
 | Class | Meaning for Web | Codes (HTTP) |
 |---|---|---|
-| `protocol` | Refused before any side effect. Says nothing about *other* transmissions | `METHOD_NOT_ALLOWED` 405, `UNSUPPORTED_MEDIA_TYPE` 415, `PAYLOAD_TOO_LARGE` 413, `MALFORMED_JSON` `DUPLICATE_KEY` `INVALID_JSON_VALUE` `INVALID_ENVELOPE` `UNSUPPORTED_PROTOCOL` `UNKNOWN_FIELD` `MISSING_FIELD` `WRONG_PURPOSE` `UNSUPPORTED_OPERATION` `INVALID_FIELD` `INVALID_LIFETIME` `NON_CANONICAL` 400, `UNKNOWN_KEY` `KEY_REVOKED` `BAD_SIGNATURE` `NOT_YET_VALID` `EXPIRED` 401, `WRONG_AUDIENCE` 403, `NONCE_STORE_UNAVAILABLE` 503 |
+| `protocol` | Refused before any side effect (`EXPIRED` at step 12 or step 14). Says nothing about *other* transmissions | `METHOD_NOT_ALLOWED` 405, `UNSUPPORTED_MEDIA_TYPE` 415, `PAYLOAD_TOO_LARGE` 413, `MALFORMED_JSON` `DUPLICATE_KEY` `INVALID_JSON_VALUE` `INVALID_ENVELOPE` `UNSUPPORTED_PROTOCOL` `UNKNOWN_FIELD` `MISSING_FIELD` `WRONG_PURPOSE` `UNSUPPORTED_OPERATION` `INVALID_FIELD` `INVALID_LIFETIME` `NON_CANONICAL` 400, `UNKNOWN_KEY` `KEY_REVOKED` `BAD_SIGNATURE` `NOT_YET_VALID` `EXPIRED` 401, `WRONG_AUDIENCE` 403, `NONCE_STORE_UNAVAILABLE` 503 |
 | `payload` | Deterministic in the payload: the same payload can never succeed | `INVALID_PROFILE_ID` `RESERVED_PROFILE_ID` `INVALID_ISSUER` `INVALID_SUBJECT` `INVALID_DISPLAY_NAME` `INVALID_TEMPLATE` `INVALID_IDEMPOTENCY_KEY` `INVALID_OPERATION_ID` 400 |
 | `admission` | Local authority refused **before** the idempotency lookup. State-dependent | `UNAUTHENTICATED` 401, `NOT_A_PROVISIONER` `CREDENTIAL_NOT_PROVISIONING_ONLY` `PROVISIONER_INACTIVE` `PROVISIONER_REVOKED` `PROFILE_OUTSIDE_CREDENTIAL` 403 |
 | `merits` | create only. Refused **after** the idempotency lookup, so at that moment no operation existed for this key | `ISSUER_NOT_ALLOWED` `TEMPLATE_NOT_ALLOWED` `QUOTA_EXCEEDED` `LEDGER_FULL` 403, `PROFILE_UNAVAILABLE` `PRINCIPAL_INACTIVE` `EXTERNAL_IDENTITY_CONFLICT` 409 |
@@ -489,10 +549,25 @@ class and applicable operations, is `errors.json`. It is normative.
 same transmission may have been the one that executed. `STORAGE_UNAVAILABLE`
 can leave a `pending` operation in the ledger (PR #26 §6).
 
-Operation failure codes, which appear only in `result.failure` of a `failed`
+Operation failure codes appear only in `result.failure` of a `failed`
 operation: `ISSUER_NOT_TRUSTED`, `PRINCIPAL_INACTIVE`,
 `EXTERNAL_IDENTITY_CONFLICT`, `PROFILE_UNAVAILABLE`, `OWNERSHIP_CHANGED`,
-`PROVISIONER_REVOKED`.
+`PROVISIONER_REVOKED`, `INVALID_TEMPLATE`. These are the codes PR #26 can
+store: `resume` and `bind` record the first five, `reconcile` records
+`provisioner_revoked` and `materialize` records `invalid_template`.
+
+`INVALID_TEMPLATE` therefore has two distinct meanings:
+
+- **As a refusal** (`400`, `payload` class), the request's template is not
+  `assistant`. A Web signer never produces it.
+- **As a failure code**, an operation recorded earlier names a template that
+  the current harness build no longer defines, and `materialize` failed it.
+
+The second meaning is an operation outcome. It is not a transport or
+signature error: R1 resolves the job as `failed`, `error_code` is
+`INVALID_TEMPLATE`, and the profile becomes `failed`. Web MUST NOT
+automatically retry with a new key, because the same build would fail it
+again. The job needs operator attention.
 
 Lightagent's mapping is mechanical. Each lowercase PR #26 code becomes the
 same name in uppercase (`invalid_request` → `MALFORMED_JSON`, `UNKNOWN_FIELD`,
@@ -509,18 +584,24 @@ trace.
 **v1 responses are not application-signed.** Their integrity rests on:
 
 1. HTTPS to the administrator-registered endpoint of the specific harness,
-   with certificate validation by the Workers runtime. No redirects.
+   with certificate validation by the Workers runtime, through an approved
+   ingress (§12.5). No redirects.
 2. **Binding:** every response echoes `protocol`, `commandId`, `audience` and
    `operation`. Results echo `profileId`, and for status and revoke the
    `operationId`. Web rejects any mismatch (§12.4). An answer meant for
    another command, another harness or another profile is never applied.
 3. Strict parsing (duplicates, closed schemas, 8 KiB) and internal
-   consistency (`ownerBound` ⇔ `completed`; `failure` ⇔ `failed`).
-4. Monotonic observation: Web never moves an operation's observed state
+   consistency (`failure` ⇔ `failed`; a create answer is terminal). There is
+   deliberately **no** rule tying `ownerBound` to `state` (§12.2).
+4. Monotonic observation: Web never moves an operation's observed `state`
    backwards (§13.1), so a stale or replayed answer cannot undo a revocation
    that Web has observed.
 5. Polling: the observed state is re-read with `profile.status`. No
    unsolicited message is ever trusted.
+6. Conservative conclusions: a single answer can make Web conclude `failed`
+   only under §13.2 R1–R3. Every `failed` operation that Web knows the id of
+   is re-confirmed by status before a suspension is considered complete
+   (§13.5).
 
 Threat model:
 
@@ -528,8 +609,26 @@ Threat model:
 |---|---|---|
 | Network attacker without a valid certificate | Stopped by TLS | none |
 | Answer from another harness, or a cached or misrouted answer | Per-harness endpoint, audience and commandId echo | none |
-| Attacker who controls TLS termination in front of the harness (an ingress or tunnel operated by someone other than the harness operator) | Could forge `completed`, `failed` or `revoked`. It could also drop commands, but signed commands cannot be forged | A forged `revoked` would make Web believe a binding was removed when it was not. This is **silent** where dropping is visible |
+| Attacker who controls TLS termination in front of the harness (an ingress or tunnel that does not meet §12.5) | Could forge `completed`, `failed` or `revoked`. It could also drop commands, but signed commands cannot be forged | A forged `revoked` would make Web believe a binding was removed when it was not. This is **silent** where dropping is visible |
+| **Injected false `failed`**: a forged operation response with `state: failed`, or a forged `merits` or `payload` refusal, for a create that actually completed | (a) **Authenticated HTTPS** (§12.5): without a position inside TLS, nothing can be injected into the Worker's connection. (b) **Strict correlation**: the answer must echo the transmission's fresh random `commandId`, the `audience`, `operation` and `profileId` (and the `operationId` for status), so blind injection, cross-command splicing and cached or misrouted answers are rejected (`RESPONSE_INVALID` → uncertain). (c) **Conservative transitions**: one forged refusal cannot fail a job that still has an uncertain transmission unless it answers a transmission issued after that one's horizon (R3). An uncertain or invalid answer never changes state. A forged `failed` operation is re-checked by `profile.status` when the profile's desired state becomes absent (§13.5) | An on-path attacker inside TLS can forge every answer consistently, including the confirming status. A forged **refusal** carries no `operationId`, so Web cannot re-check it until `profile.lookup` exists (§13.9). The real binding would then persist **silently**: R6 leaves `failed` jobs alone, and a later create for that id is refused `PROFILE_UNAVAILABLE`. As with a forged `revoked`, it grants nothing usable in v1 (rationale below), and the same gate applies |
+| Forged `ownerBound` | Same as (a) and (b) | At worst a spurious or missed needs-attention flag. `ownerBound` never moves Web's state (§13.1) |
 | Compromised harness | Signing would not help: the harness holds its own key and enforces the binding | Trust in the harness is inherent |
+
+Residual risks of unsigned v1 responses, all accepted for v1 under the gate
+below:
+
+- An attacker inside TLS (Cloudflare's edge, a tunnel, or the harness host's
+  network) can forge any outcome undetectably, including the confirming
+  status.
+- A forged `revoked`, or a forged `failed` (or refusal), leaves a real binding
+  that Web believes absent.
+- A forged `principalId` is stored. It is opaque to Web and never used for
+  authorization.
+- Forged indeterminate answers only delay resolution, because Web keeps
+  reconciling.
+- Cloudflare's edge sees the plaintext of every command and response, as it
+  does for all of Web's traffic. Commands carry no secrets, and the signature
+  protects their integrity.
 
 Rationale: in v1 a provisioned user holds no Lightagent credential.
 Provisioning issues none (PR #26 §13.3), and every future user path is
@@ -540,13 +639,19 @@ would add a harness key, its distribution into `harnesses.public_key`, and
 Rust signing code, and would protect only against an intermediary between
 TLS termination and the harness.
 
-**Gate:** response signing becomes **required** (a new protocol revision,
-context `"LA-WEB-PROVISIONING/1" 0x00 "provisioning-response" 0x00`, which is
-reserved now, bound to `commandId`, signed by a harness key held in
-`harnesses.public_key`) before either of the following happens: (a) a user
-can reach a harness by any path that does not pass the Worker guard (for
-example AGENT_ACCESS_CONTROL §4.2 scoped tokens), or (b) a harness is reached
-through TLS termination that the harness operator does not control.
+**Gate:** response signing becomes **required** before any of the following
+happens. It would be a new protocol revision, using the context
+`"LA-WEB-PROVISIONING/1" 0x00 "provisioning-response" 0x00` (reserved now),
+bound to `commandId`, and signed by a harness key held in
+`harnesses.public_key`.
+
+- (a) A user can reach a harness by any path that does not pass the Worker
+  guard (for example AGENT_ACCESS_CONTROL §4.2 scoped tokens).
+- (b) A harness is reached through an ingress that does not meet §12.5, in
+  particular TLS termination that the harness operator does not control.
+- (c) Provisioning is used across organizations, where the Web operator and
+  the harness operator are different parties that do not trust each other's
+  infrastructure.
 
 ### 12.2 Operation response (`200`, `201`)
 
@@ -581,9 +686,28 @@ Schema `LA-WEB-PROVISIONING/1#response/operation`. Exactly:
   operation failure code (§11). A failed operation is an **operation
   response** (`200`/`201`), not an error. This differs from PR #26's HTTP API,
   which answers `409` with the operation, and the gateway maps between them.
-- `ownerBound` is `true` if and only if `state` is `completed`.
-- A revoke response's `state` is always `revoked`. Repeating a revoke returns
-  the same answer.
+- **`profile.create` answers are terminal** (§10.4 P4). The `state` is
+  `completed`, `failed` or `revoked`: the service outcome recorded for this
+  idempotency key. A create answered with `pending` or `profile_created` is
+  `RESPONSE_INVALID`. An interrupted create is answered with an
+  `indeterminate` code, and Web resends it (§13.3 R4). **Status polling
+  discovers an outcome that is already recorded. It never completes a paused
+  create** (P5).
+- **`ownerBound` is current ownership, independent of `state`.** It reports
+  whether the operation's `principalId` effectively owns `profileId` on the
+  harness at the moment of the answer, as PR #26 `status_of` computes it.
+  - Every combination of `state` and `ownerBound` is valid on the wire.
+    Examples: `completed`/`false` after an operator reassigned the profile;
+    `profile_created`/`true` after a crash following the identity commit;
+    `failed`/`true` when the same principal owns the id through a later
+    operation; `revoked`/`true` after an operator re-assigned it to the same
+    principal.
+  - `ownerBound: true` does **not** mean that this request created a binding:
+    a replayed create reports the recorded outcome with current ownership.
+  - Web's handling of each combination is in §13.1. None of them is
+    `RESPONSE_INVALID`.
+- A revoke response's `state` is always `revoked`, whatever `ownerBound` says.
+  Repeating a revoke returns the same answer.
 - Integers follow §4.3. `updatedUnix ≥ createdUnix`.
 
 ### 12.3 Error response (all other statuses)
@@ -600,12 +724,38 @@ Web classifies each transmission's outcome as exactly one of the following
 
 | Outcome | When |
 |---|---|
-| `operation` | `200`/`201` and every §12.2 rule holds, including all echoes |
+| `operation` | `200`/`201` and every §12.2 rule holds, including all echoes and, for `profile.create`, a terminal `state` |
 | `refused` | An error status, a well-formed §12.3 body, `commandId` equal or `null`, a registered code whose HTTP status matches and which applies to this operation, and a class other than `indeterminate` |
 | `uncertain` | Everything else: a timeout, a network error, any other status (for example `202` or `3xx`), an HTML error page, an oversized body, any schema or echo mismatch (`RESPONSE_INVALID`), or an indeterminate code |
 
 An `uncertain` outcome never changes Web's view of what exists on the
 harness.
+
+### 12.5 Approved HTTPS ingress for unsigned v1 responses (Cloudflare Tunnel)
+
+A harness endpoint qualifies for unsigned v1 responses only if one of these
+holds:
+
+- (i) the harness serves HTTPS itself with a publicly trusted certificate
+  for the registered hostname; or
+- (ii) it is reached through a **Cloudflare Tunnel** that meets **all** of
+  T1–T7.
+
+Otherwise response signing is required first (§12.1 gate b).
+
+| # | Requirement |
+|---|---|
+| T1 | **Operator control.** The harness operator controls the Cloudflare account that owns the tunnel, the public hostname's zone and the Access application. This holds when the Web operator and the harness operator are the same organization in that account. An account controlled by anyone else is an intermediary the harness operator does not control, and does **not** qualify. This includes a hosting provider, or the Web operator fronting a harness someone else operates |
+| T2 | **Edge TLS.** The registered `endpoint` is `https://<public hostname>` with a publicly trusted edge certificate and minimum TLS 1.2. The Worker connects with the runtime's default certificate validation. There is no `http://` endpoint outside development |
+| T3 | **Origin leg.** `cloudflared` forwards to the gateway over loopback (`http://127.0.0.1:<port>` or a Unix socket) on the harness host. If `cloudflared` runs on another host, it forwards to `https://` with origin certificate verification on (`noTLSVerify: false`, `originServerName` set). `noTLSVerify: true` across hosts is prohibited |
+| T4 | **Ingress rules.** One rule matches the hostname and exactly the gateway path (`…/la-web-provisioning/1/commands` under the operator's mount). The final rule is `service: http_status:404`. The Lightagent operator API, run and session routes, and any UI are never reachable through this hostname |
+| T5 | **Access policy.** A self-hosted Access application covers the hostname with exactly one Service Auth policy, allowing one service token issued to that Web environment and stored as a Worker secret. There is no Allow or Bypass policy for users, emails, groups or "Everyone", and no identity-provider login. This is transport admission and defence in depth. It is **not** provisioning authority (§10.2), and the harness ignores Access headers |
+| T6 | **No browser access.** The gateway sends no CORS headers. The hostname is never placed in the client bundle or any `VITE_*` or `LIGHTAGENT_PUBLIC_*` variable, and Web's CSP `connect-src` stays `'self'`. T5 refuses any browser that tries anyway. Direct browser-to-harness access is prohibited in every configuration, tunnelled or not |
+| T7 | **No public listener.** The gateway listens only on loopback, or on a private interface reachable only by `cloudflared`. It is not exposed beside the tunnel |
+
+A tunnel meeting T1–T7 counts as TLS termination controlled by the harness
+operator. Cloudflare's edge is then trusted exactly as Web already trusts it
+for its own traffic.
 
 ## 13. Lifecycle and reconciliation (Web state machine)
 
@@ -617,13 +767,30 @@ Web keeps two separate facts:
   bound for its owner. It comes from `agent_profiles.status` and
   `user_profiles.status`. The Worker guard enforces it on every Web request
   immediately, whatever the harness says.
-- **Observed state** (harness-reported): per create operation, `unknown`
-  (no operation id yet), or the last `result.state` seen, plus
-  `operationId`, `principalId` and the observation time. It changes only from
-  an `operation` outcome, and only forward:
-  `unknown → pending → profile_created → completed → revoked`, with
-  `unknown | pending | profile_created → failed`. A response that would move
-  it backwards is an anomaly (`needs attention`). It is never applied.
+- **Observed state** (harness-reported), per create operation:
+  - `state`: `unknown` (no operation id yet), or the last `result.state`
+    seen. It changes only from an `operation` outcome, and only forward:
+    `unknown → pending → profile_created → completed → revoked`, with
+    `unknown | pending | profile_created → failed`. A response that would
+    move it backwards is an anomaly (`needs attention`) and is never applied.
+  - `ownerBound`: the last value seen, with its time. This is **current
+    ownership**, not history, so it may change in either direction between
+    observations and is not subject to the forward-only rule. It never moves
+    `state`, desired state, or D1 status. It only raises or clears a
+    needs-attention flag.
+  - `operationId`, `principalId`, and the observation time.
+
+Web's assessment of each observation (reference: `assessOwnership`;
+fixtures: `responses.json` `ownership`):
+
+| `state` | `ownerBound` | Assessment | Web's response |
+|---|---|---|---|
+| `completed` | `true` | `bound` | Normal |
+| `completed` | `false` | `attention:OWNERSHIP_LOST` | The harness operator changed ownership after completion. Web does **not** re-create (the id cannot be reused, §13.6) and does not try to re-bind. It flags the profile for an operator. **Desired present:** the profile is shown as unavailable until the operator restores ownership on the harness (a later status shows `true` again) or the profile is revoked in Web and the user creates a new one. **Desired absent (suspension, deletion):** R6 still sends `profile.revoke`. `OWNERSHIP_CHANGED` means someone else now owns the profile, so this user holds nothing to remove: the revoke job ends `failed`/`OWNERSHIP_CHANGED` with needs attention, and the user's binding is considered absent. A `revoked` answer means no owner remained, and the job completes |
+| `revoked` | `false` | `unbound` | Normal after revocation |
+| `revoked` | `true` | `attention:UNEXPECTED_BINDING` | A binding Web did not create exists for a profile it revoked (operator action). Web never re-revokes in a loop, because revoke is idempotent and already terminal. It flags the operator, and desired state stays absent |
+| `pending`, `profile_created`, `failed` | `false` | `unbound` | Normal for these states |
+| `pending`, `profile_created`, `failed` | `true` | `bound-informational` | `profile_created`/`true` is a create interrupted after the identity commit. R4's resend completes it. `failed`/`true` means the principal owns the id through another operation, which Web tracks through that operation's own job. If desired is absent, R6 covers it |
 
 A Web profile shown as `revoked` means access is withdrawn by Web. It means
 "unbound on the harness" only once its revoke job is completed.
@@ -650,11 +817,34 @@ Inputs: every transmission of the job, with its `issuedAt`, `expiresAt` and
 - Otherwise the job is **unresolved**. `IDEMPOTENCY_CONFLICT` and unknown
   codes are anomalies (`needs attention`), never failures.
 
-Why R3 is stated this way: `admission` and `protocol` refusals happen before
-the idempotency lookup, so they say nothing about whether an earlier copy
-committed. A `merits` refusal happens after the lookup, so it proves no
-operation existed *at that moment*. Only once every earlier copy has passed
-its acceptance horizon is that also true for the future.
+Why R3 is stated this way:
+
+- `admission` and `protocol` refusals happen before the idempotency lookup, so
+  they say nothing about whether an earlier copy committed. That includes
+  `EXPIRED` from step 14.
+- A `merits` refusal of `t` happens under the ledger lock and after the
+  lookup. It proves that, at the moment `t` held the lock, no operation was
+  recorded for the key (P3), and that no other call was executing (P2).
+- `u` can no longer *start* after `t`, because of the execution deadline
+  (P1). `t` passed admission, so `t` acquired the lock at harness time
+  ≥ `t.issuedAt − 30` ≥ `u.expiresAt + 30`, which is `u`'s execution
+  deadline. Any later lock acquisition by `u` is refused `EXPIRED` at step
+  14, with no effect. The inequality uses only the harness's own clock
+  against the Web stamps it checked, so it holds for any Web–harness skew the
+  harness accepted.
+- If `u` started before `t`, P2 made `t` wait until `u`'s outcome was
+  durable, and P3 would then have made `t`'s lookup find `u`'s operation and
+  return it instead of refusing.
+
+So R3's conclusion depends on P1–P3 together, not on elapsed time.
+**Expiry alone never proves that a started create did not complete**
+(`begun-before-deadline-completes-late` in `execution-deadline.json`). An
+uncertain transmission stays under reconciliation until R1–R3 apply,
+however much time passes (`elapsed-time-alone`, `timeouts-exhausted`).
+Without P1, the lock-wait race in `execution-deadline.json` makes R3 unsound
+(`unsafe: true`). With P1 it is safe. The workerd contract test checks this
+on 20,000 random serialized schedules, with skew within ±30 s, lock waits,
+slow commits, lost answers, and crashes after recording.
 
 **Consequences:** exhausted retries never produce `failed`
 (`timeouts-exhausted`). A timeout followed by a quick `QUOTA_EXCEEDED` stays
@@ -671,8 +861,16 @@ unresolved (`timeout-then-merits-too-early`).
 - After about 10 transmissions without resolution, Web marks the job
   `needs attention` for an operator, but **keeps** it unresolved and keeps
   reconciling at the slow cadence. It never marks it failed.
-- After `pending` or `profile_created`, Web polls `profile.status` (5 s,
-  15 s, 60 s, then every 15 min) until the state is `completed` or `failed`.
+- **Create answers are final service outcomes** (§12.2, P4). There is
+  nothing to poll after a create answer. Web uses `profile.status` only to
+  confirm a known operation: to refresh `ownerBound` (§13.1), for R6
+  confirmation (§13.5), and for revoke follow-up (§13.4).
+- If `profile.status` reports `pending` or `profile_created` for a known
+  operation, the create was interrupted, for example by a crash after Web
+  received an indeterminate answer. Status does not advance it (P5). Web
+  resends the **create** under R4, which resumes the recorded operation, or
+  waits for the operator's `reconcile`. If Web had already observed a
+  terminal state, the regression is an anomaly (§13.1).
 - A new create job for the same `agt_` id, with a **new** idempotency key, is
   allowed only after that id's previous create resolved as `failed` (by R1
   with state `failed`, R2 or R3). It is never allowed after `revoked`, and
@@ -687,7 +885,7 @@ runs first.
 |---|---|---|
 | operation `revoked` | `completed` | `revoked` |
 | `NOT_REVOCABLE` | `completed`. Confirm with status that the operation is `failed` (nothing was bound) | `failed` |
-| `OPERATION_IN_PROGRESS` | stays open. Poll status, then revoke once `completed` | unchanged |
+| `OPERATION_IN_PROGRESS` | stays open. The create is interrupted. Resend the create (R4) to drive it to a terminal state, then revoke | unchanged |
 | `OWNERSHIP_CHANGED` | `failed` with `OWNERSHIP_CHANGED`, plus needs attention (the operator reassigned the profile; Web cannot revoke it) | unchanged |
 | `UNKNOWN_OPERATION` | needs attention. Never treated as revoked | unchanged |
 | `uncertain` | resend the same logical command (revoke is idempotent) | unchanged |
@@ -704,6 +902,17 @@ runs first.
   whose desired state is absent and whose create is not yet settled: either
   observed `completed` without a completed revoke, or still unresolved
   (§13.2). A lost event therefore cannot leave a binding behind.
+- **Confirmation.** Before a suspension or deletion counts as complete, Web
+  re-reads with `profile.status` every operation of that user that it
+  observed as `failed`.
+  - `ownerBound: true` on a `failed` operation, or on a `revoked` one, raises
+    needs attention.
+  - `failed` operations cannot be revoked (`NOT_REVOCABLE`), so only the
+    harness operator can remove such a binding.
+  - Creates that ended `failed` through a refusal (R2/R3) have no operation
+    id and cannot be confirmed in v1 (§12.1 residual risk, §13.9).
+- **Ownership already lost.** A `completed` operation with `ownerBound:
+  false` is still revoked under R6. §13.1 describes the outcome.
 - Because harness revocation is irreversible, suspending a user ends their
   existing harness bindings permanently. Reactivation creates **new** `agt_`
   profiles. The old data stays with the harness operator (Lightagent §8).
@@ -722,9 +931,9 @@ Lightagent refuses a revoked or known id with a new key
 |---|---|---|
 | no transmission yet | `pending` | `provisioning` |
 | transmission in flight, or last outcome uncertain or refused while unresolved | `sending`, or back to `pending` awaiting the next transmission (each new transmission enters `sending` again) | `provisioning` |
-| operation `pending` or `profile_created` | `accepted` | `provisioning` |
-| operation `completed` | `completed` | `active` |
-| operation `failed` (R1), or R2/R3 failure | `failed`, `error_code` = the failure or refusal code | `failed` |
+| status shows `pending` or `profile_created` (an interrupted create; create answers are terminal) | `accepted`, then R4 resend | `provisioning` |
+| operation `completed` | `completed` | `active`. A later `ownerBound: false` does not change D1 status. It sets needs attention (§13.1) |
+| operation `failed` (R1), including `INVALID_TEMPLATE`, or R2/R3 failure | `failed`, `error_code` = the failure or refusal code | `failed` |
 | create resolves as `revoked` (only after lost Web records) | `completed` + needs attention | → `revoked` (needs the transition noted in §16.1) |
 | revoke job outcomes | §13.4 | `revoked` (set when the intent was recorded, §13.5) |
 | anomaly | unchanged + needs attention | unchanged |
@@ -768,7 +977,7 @@ for R6 after a suspension: Web could learn that nothing was created without
 resending a create that then has to be revoked. A "not found" answer would
 still be final only under the R3 horizon rule.
 
-Decision for r1: **not included.** R4 is sufficient for safety. In v1 a
+Decision for r1 and r2: **not included.** R4 is sufficient for safety. In v1 a
 binding created and then revoked within minutes grants nothing usable
 (§12.1). In v1, `profile.lookup` is `UNSUPPORTED_OPERATION` (fixture
 `unsupported-profile-lookup`). Either side may propose it for a later
@@ -787,7 +996,7 @@ revision with these semantics.
 | C7 | Authority | Signature (§6) then local admission (§10.2). Every `keyId` maps to one `{provision}`-only credential |
 | C8 | Permissions | Closed payloads. Only `template: "assistant"`. Forbidden fields are listed in §8.4 and covered by fixtures |
 | C9 | Encodings | One encoding per field (§4.4). Standard base64 or hex for signatures and nonces is `INVALID_FIELD` |
-| C10 | State mapping | §12.4, §13.7. HTTP status alone never means completion. A failed operation is an operation response with `state: failed` |
+| C10 | State mapping | §12.4, §13.7. HTTP status alone never means completion. A failed operation is an operation response with `state: failed`. A create answer is terminal (P4). `ownerBound` is current ownership and independent of `state` (§12.2, §13.1) |
 
 ## 15. Fixtures, manifest and acceptance
 
@@ -798,7 +1007,8 @@ revision with these semantics.
 | `commands-invalid.json` | Single-fault negative vectors with the expected code and HTTP status |
 | `redelivery.json` | Create and revoke transmission series, including one across a key rotation, a replay, and a "not a redelivery" counter-example |
 | `responses.json` | Response bodies and Web's expected classification |
-| `create-resolution.json` | R1–R3 decision cases |
+| `create-resolution.json` | R1–R3 decision cases, including the horizon boundary (±1 s), `EXPIRED` at execution, and elapsed time alone |
+| `execution-deadline.json` | §10 step 14: single deadline checks (including admitted-in-time, locked-too-late), and harness race scenarios (lock-wait race, late completion, crash after record, delayed admission, merits before horizon), each evaluated with and without step 14 |
 | `errors.json` | The normative error registry |
 | `MANIFEST.json` | Protocol, revision, schema ids, fixture ids, specification and file SHA-256 hashes, `fixtureDigest` |
 | `MANIFEST.sha256` | The same hashes in `sha256sum -c` format (run it from the Web repository root) |
@@ -808,6 +1018,18 @@ revision with these semantics.
 - **Compatibility digest** = SHA-256 of the exact bytes of `MANIFEST.json`.
   It covers this document, every fixture and every schema id. Both
   repositories pin this value.
+- **Provenance without circularity.** The hashed contents are this document
+  and the fixture files. `MANIFEST.json` hashes them, and the digest hashes
+  `MANIFEST.json`. `ACCEPTANCE.md` (review metadata: digest, commit,
+  reviewer) is outside the manifest. A candidate is published in two commits
+  on a Web review branch:
+  1. the **candidate commit** holds every hashed file, the manifest, the
+     generator and the tests;
+  2. a **metadata commit** names the candidate commit's SHA and the digest in
+     `ACCEPTANCE.md`.
+
+  The second commit changes no hashed byte, so the digest is identical at
+  both commits. Reviewers verify the candidate commit's bytes.
 - The generator is deterministic (`npm run protocol:fixtures -- write|check`).
   `tests/static/provisioning-fixtures.test.ts` fails if any committed byte
   differs from a regeneration or from the manifest.
@@ -816,8 +1038,12 @@ revision with these semantics.
 - `.gitattributes` marks these files `-text`, so checkouts on any platform
   keep the hashed bytes.
 - A verifier passes the fixtures when every `commands-*` and `redelivery`
-  vector gives exactly its `expect`. A Web implementation additionally passes
-  `responses.json` and `create-resolution.json`.
+  vector gives exactly its `expect`, and every `execution-deadline.json`
+  `deadlineCases` entry gives its `expect`. A Web implementation additionally
+  passes `responses.json` and `create-resolution.json`. A harness's L3 tests
+  reproduce the lock-wait race against the real service: one create blocked
+  on the lock past its deadline while another call holds it MUST answer
+  `EXPIRED` and record nothing.
 
 ## 16. Required follow-up work (not part of L0)
 
@@ -852,6 +1078,12 @@ revision with these semantics.
    R4–R6 and nonce purging.
 8. Transport through `fetchWithTimeout` (10 s, `redirect: "manual"`, 8 KiB
    read limit), and response classification exactly as `classifyResponse`.
+9. Where a harness sits behind a Cloudflare Tunnel (§12.5), a per-environment
+   Access service token as Worker secrets (`CF-Access-Client-Id`/`-Secret`),
+   sent only to that harness's endpoint. It is never a provisioning
+   credential.
+10. Observed `ownerBound` with its time, the needs-attention flags of §13.1,
+    and the R6 confirmation step of §13.5.
 
 ### 16.2 Lightagent (adapter only, PR #26 service unchanged)
 
@@ -859,9 +1091,10 @@ revision with these semantics.
    `Router` behind a cargo feature, off by default, never merged into
    `router()` without opt-in.
 2. A strict parser (§4.2: duplicates, lexemes, depth), the value profile,
-   closed schemas, NFC checking (needs a normalization table, for example the
-   `unicode-normalization` crate, which is a new dependency to review), JCS of
-   the §4.3 subset, and the canonical byte comparison.
+   closed schemas, NFC checking with the ICU4X `icu_normalizer` already in the
+   dependency graph (no new crate), JCS of the §4.3 subset, and the canonical
+   byte comparison. PR #28's conformance crate already implements these
+   offline.
 3. Ed25519 through `ring`, with an explicit `S < L` check.
 4. Fail-closed configuration: own `harnessId`, the trusted-key list,
    `keyId` → local credential key id (all mapping to one provisioner).
@@ -869,22 +1102,58 @@ revision with these semantics.
 6. The §10.3 adapter: `caller_for_at` with the mapped credential, the
    `profileId` consistency check for status and revoke, uppercase code
    mapping, failed operations as `200`/`201` operation responses, and echoes.
-7. Regression tests for S1 and S2 (the audit records that they are
-   established by reading the code but not yet asserted).
+7. Regression tests for S1 and S2 (added as `web_*` tests in PR #28).
 8. A mirror of the specification and fixtures, with a CI job that runs every
    vector and checks `MANIFEST.sha256`.
+9. **§10.4 P1 (L3, required):** a narrow, additive `ProvisioningService` entry
+   point for the gateway's creates. It reads the clock **inside**
+   `exclusive()`, refuses `EXPIRED` when `now ≥ deadline` before admission,
+   the idempotency lookup and any write, and is otherwise `provision`. The
+   existing `provision` and its HTTP API stay unchanged. Tests: a create
+   blocked on the lock past its deadline records nothing; a create admitted
+   in time completes even if its commit finishes after the deadline (P2).
 
-## 17. Open points for joint review
+## 17. Open points and residual risks
 
-1. **Normalization dependency.** The NFC requirement adds a Unicode table to
-   the Rust gateway. The alternative (no NFC rule, with Web normalizing before
-   signing) is weaker but simpler. This revision chooses NFC.
-2. **`profile.lookup`** (§13.9) is deferred, not rejected.
-3. **Retrying a failed create on the same `agt_` id** (§13.3) relies on
-   Lightagent accepting an id whose only operations are `failed` (PR #26 §6
-   "No takeover"). Lightagent should confirm this, or Web will mint a new id
-   instead.
-4. **Response signing** is gated, not dropped (§12.1).
-5. **Harness reachability** from Workers (public hostname, Tunnel, or Access
-   service token as defence in depth) is a deployment decision. It is not part
-   of the protocol.
+Resolved in r2 by Lightagent's review (PR #28):
+
+- **NFC**: kept, with `icu_normalizer` (§4.6).
+- **Retrying a failed create on the same id**: confirmed by the PR #28 test
+  `web_a_failed_create_leaves_its_profile_id_available_to_a_new_key` (§13.3).
+
+Still open:
+
+1. **`profile.lookup`** (§13.9) is deferred, not rejected. It would also
+   close the "forged refusal cannot be re-checked" residual risk (§12.1).
+2. **Response signing** is gated, not dropped (§12.1 gates a–c).
+3. **Clock discipline**: a backward clock step larger than 30 s on the
+   harness, while creates wait for the lock, voids R3 for them (§9.3).
+4. **Unsigned responses**: the residual risks listed in §12.1 are accepted
+   for v1 only within the §12.5 ingress definition.
+5. **Harness reachability** (direct HTTPS or a §12.5 tunnel) is a deployment
+   choice per harness. It is recorded in that harness's registration review.
+
+## 18. Revision history
+
+### r2 (this revision)
+
+Resolves Lightagent's review of r1 (PR #28,
+`docs/integrations/web/l0-protocol-review.md`, reviewed digest
+`030537b8…a1d2`). Wire format, signing, canonical form, keys and the command
+schemas are unchanged, so every r1 command vector is unchanged in r2.
+
+| Finding | Change |
+|---|---|
+| RC1 execution deadline | §9.3 separates admission-time from execution-time expiry. New §10 steps 13–14 and §10.4 P1–P5. §13.2 R3 now rests on P1–P3 and never on elapsed time. `EXPIRED` note in `errors.json`. New `execution-deadline.json`. New resolution cases `lock-wait-horizon-*`, `expired-at-execution-*` and `elapsed-time-alone`. Randomized schedule test |
+| RC2 `ownerBound` | §12.2: current ownership, independent of `state`. The `ownerBound ⇔ completed` check is removed from the reference classifier. New §13.1 assessment table and §13.5 behaviour. Response vectors for `completed`/`false`, `profile_created`/`true`, `failed`/`true` and `revoked`/`true`. The r1 vector `invalid-owner-bound-pending` is replaced |
+| RC3 `INVALID_TEMPLATE` | Added to the operation failure codes, matching PR #26 `materialize`. Its two meanings are set out in §11. New response vector `create-200-failed-invalid-template` |
+| RC4 provenance | §15 two-commit procedure. The candidate is committed on a Web review branch, and `ACCEPTANCE.md` names the commit |
+| CL1 | §12.2, §10.4 P4/P5, §13.3: create answers are terminal, status never completes a create, and a non-terminal create answer is `RESPONSE_INVALID` (vectors `invalid-create-nonterminal-*`). The r1 vector `create-200-replayed-pending` is replaced by `create-200-replayed-completed` |
+| CL2 | §12.1 threat model: an injected false `failed`, its mitigations and residual risks |
+| CL3 | §12.5 Cloudflare Tunnel requirements T1–T7. §3 allows only Access service-token headers. Gate (b) refers to §12.5 |
+| CL4 | §4.6 Unicode data versions and `icu_normalizer` |
+
+### r1
+
+First candidate (digest `030537b8be8cc003cff31e503343d5082629eab3f3f10c82fb17d7776b24a1d2`).
+Rejected by Lightagent in PR #28 pending RC1–RC4.

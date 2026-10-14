@@ -13,6 +13,9 @@ use std::collections::BTreeSet;
 
 use sha2::{Digest, Sha256};
 
+pub mod model;
+pub mod web;
+
 pub const PROTOCOL: &str = "LA-WEB-PROVISIONING/1";
 pub const PURPOSE: &str = "provisioning-command";
 pub const MAX_MESSAGE_BYTES: usize = 8192;

@@ -87,7 +87,7 @@ jobs:
         with:
           key: protocol-fixtures
       - name: Mirrored bytes match the manifest
-        working-directory: docs/integrations/web/la-web-provisioning-1-r1
+        working-directory: docs/integrations/web/la-web-provisioning-1-r2
         run: sha256sum -c protocol/la-web-provisioning-1/MANIFEST.sha256
       - name: Independent verifier against every vector
         run: cargo test -p lightagent-protocol-conformance -- --nocapture

@@ -1,6 +1,6 @@
 {
   "protocol": "LA-WEB-PROVISIONING/1",
-  "fixtureSet": "la-web-provisioning-1/r1",
+  "fixtureSet": "la-web-provisioning-1/r2",
   "kind": "create-resolution",
   "description": "What Web may conclude about one profile.create job from all its transmissions (§13.2). Times are Web-clock Unix seconds.",
   "acceptanceHorizonSeconds": 60,
@@ -50,14 +50,14 @@
           "outcome": {
             "kind": "operation",
             "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
-            "state": "pending"
+            "state": "completed"
           }
         }
       ],
       "expect": {
         "status": "resolved",
         "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
-        "state": "pending"
+        "state": "completed"
       }
     },
     {
@@ -241,6 +241,114 @@
       }
     },
     {
+      "id": "lock-wait-horizon-minus-one",
+      "description": "Timeout, then QUOTA_EXCEEDED issued one second before the horizon: the first copy may still start under the lock.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000119,
+          "expiresAt": 1791000179,
+          "outcome": {
+            "kind": "refused",
+            "code": "QUOTA_EXCEEDED"
+          }
+        }
+      ],
+      "expect": {
+        "status": "unresolved"
+      }
+    },
+    {
+      "id": "lock-wait-horizon-exact",
+      "description": "Timeout, then QUOTA_EXCEEDED issued exactly at the horizon: safe only because §10 step 14 refuses the first copy if it reaches the lock later.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000120,
+          "expiresAt": 1791000180,
+          "outcome": {
+            "kind": "refused",
+            "code": "QUOTA_EXCEEDED"
+          }
+        }
+      ],
+      "expect": {
+        "status": "failed",
+        "code": "QUOTA_EXCEEDED"
+      }
+    },
+    {
+      "id": "expired-at-execution-then-operation",
+      "description": "Timeout, EXPIRED at execution, then a fresh transmission returns the committed operation.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000030,
+          "expiresAt": 1791000090,
+          "outcome": {
+            "kind": "refused",
+            "code": "EXPIRED"
+          }
+        },
+        {
+          "issuedAt": 1791000060,
+          "expiresAt": 1791000120,
+          "outcome": {
+            "kind": "operation",
+            "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+            "state": "completed"
+          }
+        }
+      ],
+      "expect": {
+        "status": "resolved",
+        "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        "state": "completed"
+      }
+    },
+    {
+      "id": "expired-at-execution-after-uncertain",
+      "description": "Timeout, then EXPIRED (protocol class): proves nothing about the first copy.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        },
+        {
+          "issuedAt": 1791000120,
+          "expiresAt": 1791000180,
+          "outcome": {
+            "kind": "refused",
+            "code": "EXPIRED"
+          }
+        }
+      ],
+      "expect": {
+        "status": "unresolved"
+      }
+    },
+    {
       "id": "timeout-then-admission-after-horizon",
       "description": "Timeout, then UNAUTHENTICATED: admission happens before the idempotency lookup, so it proves nothing.",
       "transmissions": [
@@ -338,6 +446,22 @@
         "status": "resolved",
         "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
         "state": "failed"
+      }
+    },
+    {
+      "id": "elapsed-time-alone",
+      "description": "One uncertain transmission and a day of silence: elapsed time alone never resolves a create.",
+      "transmissions": [
+        {
+          "issuedAt": 1791000000,
+          "expiresAt": 1791000060,
+          "outcome": {
+            "kind": "uncertain"
+          }
+        }
+      ],
+      "expect": {
+        "status": "unresolved"
       }
     },
     {

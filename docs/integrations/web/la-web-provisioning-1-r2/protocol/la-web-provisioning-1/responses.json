@@ -1,6 +1,6 @@
 {
   "protocol": "LA-WEB-PROVISIONING/1",
-  "fixtureSet": "la-web-provisioning-1/r1",
+  "fixtureSet": "la-web-provisioning-1/r2",
   "kind": "responses",
   "description": "How Web classifies a harness answer to the command named by `request` (from commands-valid.json). `body` is the exact UTF-8 response body. Lightagent's gateway must only produce bodies that classify as `operation` or `refused`.",
   "vectors": [
@@ -23,20 +23,44 @@
           "createdUnix": 1791000001,
           "updatedUnix": 1791000002
         },
-        "replayed": false
+        "replayed": false,
+        "ownership": "bound"
       }
     },
     {
-      "id": "create-200-replayed-pending",
-      "description": "Same key again while the operation is pending.",
+      "id": "create-200-replayed-completed",
+      "description": "Same key again after completion: the recorded outcome, not a new binding.",
       "request": "valid-create-basic",
       "httpStatus": 200,
-      "body": "{\"protocol\":\"LA-WEB-PROVISIONING/1\",\"commandId\":\"cmd_430fe33cce765249e22be19eb9\",\"audience\":\"hns_fixtureharnessalpha0000001\",\"operation\":\"profile.create\",\"replayed\":true,\"result\":{\"operationId\":\"0f1e2d3c4b5a69788796a5b4c3d2e1f0\",\"state\":\"pending\",\"failure\":null,\"principalId\":\"ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46\",\"profileId\":\"agt_fixtureprofile000000000001\",\"template\":\"assistant\",\"ownerBound\":false,\"createdUnix\":1791000001,\"updatedUnix\":1791000002}}",
+      "body": "{\"protocol\":\"LA-WEB-PROVISIONING/1\",\"commandId\":\"cmd_430fe33cce765249e22be19eb9\",\"audience\":\"hns_fixtureharnessalpha0000001\",\"operation\":\"profile.create\",\"replayed\":true,\"result\":{\"operationId\":\"0f1e2d3c4b5a69788796a5b4c3d2e1f0\",\"state\":\"completed\",\"failure\":null,\"principalId\":\"ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46\",\"profileId\":\"agt_fixtureprofile000000000001\",\"template\":\"assistant\",\"ownerBound\":true,\"createdUnix\":1791000001,\"updatedUnix\":1791000002}}",
       "expect": {
         "kind": "operation",
         "result": {
           "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
-          "state": "pending",
+          "state": "completed",
+          "failure": null,
+          "principalId": "ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46",
+          "profileId": "agt_fixtureprofile000000000001",
+          "template": "assistant",
+          "ownerBound": true,
+          "createdUnix": 1791000001,
+          "updatedUnix": 1791000002
+        },
+        "replayed": true,
+        "ownership": "bound"
+      }
+    },
+    {
+      "id": "create-200-replayed-completed-not-owner",
+      "description": "Completed earlier, but the operator has since changed ownership (RC2): valid, needs attention.",
+      "request": "valid-create-basic",
+      "httpStatus": 200,
+      "body": "{\"protocol\":\"LA-WEB-PROVISIONING/1\",\"commandId\":\"cmd_430fe33cce765249e22be19eb9\",\"audience\":\"hns_fixtureharnessalpha0000001\",\"operation\":\"profile.create\",\"replayed\":true,\"result\":{\"operationId\":\"0f1e2d3c4b5a69788796a5b4c3d2e1f0\",\"state\":\"completed\",\"failure\":null,\"principalId\":\"ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46\",\"profileId\":\"agt_fixtureprofile000000000001\",\"template\":\"assistant\",\"ownerBound\":false,\"createdUnix\":1791000001,\"updatedUnix\":1791000002}}",
+      "expect": {
+        "kind": "operation",
+        "result": {
+          "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+          "state": "completed",
           "failure": null,
           "principalId": "ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46",
           "profileId": "agt_fixtureprofile000000000001",
@@ -45,7 +69,8 @@
           "createdUnix": 1791000001,
           "updatedUnix": 1791000002
         },
-        "replayed": true
+        "replayed": true,
+        "ownership": "attention:OWNERSHIP_LOST"
       }
     },
     {
@@ -67,7 +92,8 @@
           "createdUnix": 1791000001,
           "updatedUnix": 1791000002
         },
-        "replayed": true
+        "replayed": true,
+        "ownership": "unbound"
       }
     },
     {
@@ -89,7 +115,43 @@
           "createdUnix": 1791000001,
           "updatedUnix": 1791000002
         },
-        "replayed": false
+        "replayed": false,
+        "ownership": "unbound"
+      }
+    },
+    {
+      "id": "create-200-failed-invalid-template",
+      "description": "Recorded operation whose template the harness no longer knows (RC3).",
+      "request": "valid-create-basic",
+      "httpStatus": 200,
+      "body": "{\"protocol\":\"LA-WEB-PROVISIONING/1\",\"commandId\":\"cmd_430fe33cce765249e22be19eb9\",\"audience\":\"hns_fixtureharnessalpha0000001\",\"operation\":\"profile.create\",\"replayed\":true,\"result\":{\"operationId\":\"0f1e2d3c4b5a69788796a5b4c3d2e1f0\",\"state\":\"failed\",\"failure\":\"INVALID_TEMPLATE\",\"principalId\":\"ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46\",\"profileId\":\"agt_fixtureprofile000000000001\",\"template\":\"assistant\",\"ownerBound\":false,\"createdUnix\":1791000001,\"updatedUnix\":1791000002}}",
+      "expect": {
+        "kind": "operation",
+        "result": {
+          "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+          "state": "failed",
+          "failure": "INVALID_TEMPLATE",
+          "principalId": "ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46",
+          "profileId": "agt_fixtureprofile000000000001",
+          "template": "assistant",
+          "ownerBound": false,
+          "createdUnix": 1791000001,
+          "updatedUnix": 1791000002
+        },
+        "replayed": true,
+        "ownership": "unbound"
+      }
+    },
+    {
+      "id": "create-401-expired-at-execution",
+      "description": "Admitted in time but reached the ledger lock after its execution deadline (§10 step 14): no effect.",
+      "request": "valid-create-basic",
+      "httpStatus": 401,
+      "body": "{\"protocol\":\"LA-WEB-PROVISIONING/1\",\"commandId\":\"cmd_430fe33cce765249e22be19eb9\",\"code\":\"EXPIRED\"}",
+      "expect": {
+        "kind": "refused",
+        "code": "EXPIRED",
+        "class": "protocol"
       }
     },
     {
@@ -111,12 +173,13 @@
           "createdUnix": 1791000001,
           "updatedUnix": 1791000002
         },
-        "replayed": null
+        "replayed": null,
+        "ownership": "bound"
       }
     },
     {
       "id": "status-200-profile-created",
-      "description": "Status mid-way (profile staged, not bound).",
+      "description": "Interrupted create (profile staged, not bound); status does not advance it.",
       "request": "valid-status-basic",
       "httpStatus": 200,
       "body": "{\"protocol\":\"LA-WEB-PROVISIONING/1\",\"commandId\":\"cmd_cf80e0d0ef24268798ce9a1fec\",\"audience\":\"hns_fixtureharnessalpha0000001\",\"operation\":\"profile.status\",\"result\":{\"operationId\":\"0f1e2d3c4b5a69788796a5b4c3d2e1f0\",\"state\":\"profile_created\",\"failure\":null,\"principalId\":\"ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46\",\"profileId\":\"agt_fixtureprofile000000000001\",\"template\":\"assistant\",\"ownerBound\":false,\"createdUnix\":1791000001,\"updatedUnix\":1791000002}}",
@@ -133,7 +196,123 @@
           "createdUnix": 1791000001,
           "updatedUnix": 1791000002
         },
-        "replayed": null
+        "replayed": null,
+        "ownership": "unbound"
+      }
+    },
+    {
+      "id": "status-200-pending",
+      "description": "Interrupted create recorded as pending.",
+      "request": "valid-status-basic",
+      "httpStatus": 200,
+      "body": "{\"protocol\":\"LA-WEB-PROVISIONING/1\",\"commandId\":\"cmd_cf80e0d0ef24268798ce9a1fec\",\"audience\":\"hns_fixtureharnessalpha0000001\",\"operation\":\"profile.status\",\"result\":{\"operationId\":\"0f1e2d3c4b5a69788796a5b4c3d2e1f0\",\"state\":\"pending\",\"failure\":null,\"principalId\":\"ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46\",\"profileId\":\"agt_fixtureprofile000000000001\",\"template\":\"assistant\",\"ownerBound\":false,\"createdUnix\":1791000001,\"updatedUnix\":1791000002}}",
+      "expect": {
+        "kind": "operation",
+        "result": {
+          "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+          "state": "pending",
+          "failure": null,
+          "principalId": "ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46",
+          "profileId": "agt_fixtureprofile000000000001",
+          "template": "assistant",
+          "ownerBound": false,
+          "createdUnix": 1791000001,
+          "updatedUnix": 1791000002
+        },
+        "replayed": null,
+        "ownership": "unbound"
+      }
+    },
+    {
+      "id": "status-200-profile-created-owner-bound",
+      "description": "Crash after the identity commit: bound, ledger not yet completed (RC2, informational).",
+      "request": "valid-status-basic",
+      "httpStatus": 200,
+      "body": "{\"protocol\":\"LA-WEB-PROVISIONING/1\",\"commandId\":\"cmd_cf80e0d0ef24268798ce9a1fec\",\"audience\":\"hns_fixtureharnessalpha0000001\",\"operation\":\"profile.status\",\"result\":{\"operationId\":\"0f1e2d3c4b5a69788796a5b4c3d2e1f0\",\"state\":\"profile_created\",\"failure\":null,\"principalId\":\"ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46\",\"profileId\":\"agt_fixtureprofile000000000001\",\"template\":\"assistant\",\"ownerBound\":true,\"createdUnix\":1791000001,\"updatedUnix\":1791000002}}",
+      "expect": {
+        "kind": "operation",
+        "result": {
+          "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+          "state": "profile_created",
+          "failure": null,
+          "principalId": "ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46",
+          "profileId": "agt_fixtureprofile000000000001",
+          "template": "assistant",
+          "ownerBound": true,
+          "createdUnix": 1791000001,
+          "updatedUnix": 1791000002
+        },
+        "replayed": null,
+        "ownership": "bound-informational"
+      }
+    },
+    {
+      "id": "status-200-completed-not-owner",
+      "description": "Completed, ownership since changed by the operator (RC2).",
+      "request": "valid-status-basic",
+      "httpStatus": 200,
+      "body": "{\"protocol\":\"LA-WEB-PROVISIONING/1\",\"commandId\":\"cmd_cf80e0d0ef24268798ce9a1fec\",\"audience\":\"hns_fixtureharnessalpha0000001\",\"operation\":\"profile.status\",\"result\":{\"operationId\":\"0f1e2d3c4b5a69788796a5b4c3d2e1f0\",\"state\":\"completed\",\"failure\":null,\"principalId\":\"ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46\",\"profileId\":\"agt_fixtureprofile000000000001\",\"template\":\"assistant\",\"ownerBound\":false,\"createdUnix\":1791000001,\"updatedUnix\":1791000002}}",
+      "expect": {
+        "kind": "operation",
+        "result": {
+          "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+          "state": "completed",
+          "failure": null,
+          "principalId": "ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46",
+          "profileId": "agt_fixtureprofile000000000001",
+          "template": "assistant",
+          "ownerBound": false,
+          "createdUnix": 1791000001,
+          "updatedUnix": 1791000002
+        },
+        "replayed": null,
+        "ownership": "attention:OWNERSHIP_LOST"
+      }
+    },
+    {
+      "id": "status-200-failed-owner-bound",
+      "description": "Failed operation whose principal owns the profile through a later operation (RC2, informational).",
+      "request": "valid-status-basic",
+      "httpStatus": 200,
+      "body": "{\"protocol\":\"LA-WEB-PROVISIONING/1\",\"commandId\":\"cmd_cf80e0d0ef24268798ce9a1fec\",\"audience\":\"hns_fixtureharnessalpha0000001\",\"operation\":\"profile.status\",\"result\":{\"operationId\":\"0f1e2d3c4b5a69788796a5b4c3d2e1f0\",\"state\":\"failed\",\"failure\":\"PROFILE_UNAVAILABLE\",\"principalId\":\"ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46\",\"profileId\":\"agt_fixtureprofile000000000001\",\"template\":\"assistant\",\"ownerBound\":true,\"createdUnix\":1791000001,\"updatedUnix\":1791000002}}",
+      "expect": {
+        "kind": "operation",
+        "result": {
+          "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+          "state": "failed",
+          "failure": "PROFILE_UNAVAILABLE",
+          "principalId": "ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46",
+          "profileId": "agt_fixtureprofile000000000001",
+          "template": "assistant",
+          "ownerBound": true,
+          "createdUnix": 1791000001,
+          "updatedUnix": 1791000002
+        },
+        "replayed": null,
+        "ownership": "bound-informational"
+      }
+    },
+    {
+      "id": "status-200-revoked-owner-bound",
+      "description": "Revoked, but the principal owns the profile again (operator action): unexpected binding.",
+      "request": "valid-status-basic",
+      "httpStatus": 200,
+      "body": "{\"protocol\":\"LA-WEB-PROVISIONING/1\",\"commandId\":\"cmd_cf80e0d0ef24268798ce9a1fec\",\"audience\":\"hns_fixtureharnessalpha0000001\",\"operation\":\"profile.status\",\"result\":{\"operationId\":\"0f1e2d3c4b5a69788796a5b4c3d2e1f0\",\"state\":\"revoked\",\"failure\":null,\"principalId\":\"ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46\",\"profileId\":\"agt_fixtureprofile000000000001\",\"template\":\"assistant\",\"ownerBound\":true,\"createdUnix\":1791000001,\"updatedUnix\":1791000002}}",
+      "expect": {
+        "kind": "operation",
+        "result": {
+          "operationId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+          "state": "revoked",
+          "failure": null,
+          "principalId": "ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46",
+          "profileId": "agt_fixtureprofile000000000001",
+          "template": "assistant",
+          "ownerBound": true,
+          "createdUnix": 1791000001,
+          "updatedUnix": 1791000002
+        },
+        "replayed": null,
+        "ownership": "attention:UNEXPECTED_BINDING"
       }
     },
     {
@@ -155,7 +334,8 @@
           "createdUnix": 1791000001,
           "updatedUnix": 1791000900
         },
-        "replayed": null
+        "replayed": null,
+        "ownership": "unbound"
       }
     },
     {
@@ -286,11 +466,33 @@
       }
     },
     {
-      "id": "invalid-owner-bound-pending",
-      "description": "ownerBound true while pending.",
+      "id": "invalid-create-nonterminal-pending",
+      "description": "A create answered with a non-terminal state (create responses are terminal, CL1).",
+      "request": "valid-create-basic",
+      "httpStatus": 200,
+      "body": "{\"protocol\":\"LA-WEB-PROVISIONING/1\",\"commandId\":\"cmd_430fe33cce765249e22be19eb9\",\"audience\":\"hns_fixtureharnessalpha0000001\",\"operation\":\"profile.create\",\"replayed\":true,\"result\":{\"operationId\":\"0f1e2d3c4b5a69788796a5b4c3d2e1f0\",\"state\":\"pending\",\"failure\":null,\"principalId\":\"ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46\",\"profileId\":\"agt_fixtureprofile000000000001\",\"template\":\"assistant\",\"ownerBound\":false,\"createdUnix\":1791000001,\"updatedUnix\":1791000002}}",
+      "expect": {
+        "kind": "uncertain",
+        "reason": "RESPONSE_INVALID"
+      }
+    },
+    {
+      "id": "invalid-create-nonterminal-profile-created",
+      "description": "A create answered with profile_created.",
       "request": "valid-create-basic",
       "httpStatus": 201,
-      "body": "{\"protocol\":\"LA-WEB-PROVISIONING/1\",\"commandId\":\"cmd_430fe33cce765249e22be19eb9\",\"audience\":\"hns_fixtureharnessalpha0000001\",\"operation\":\"profile.create\",\"replayed\":false,\"result\":{\"operationId\":\"0f1e2d3c4b5a69788796a5b4c3d2e1f0\",\"state\":\"pending\",\"failure\":null,\"principalId\":\"ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46\",\"profileId\":\"agt_fixtureprofile000000000001\",\"template\":\"assistant\",\"ownerBound\":true,\"createdUnix\":1791000001,\"updatedUnix\":1791000002}}",
+      "body": "{\"protocol\":\"LA-WEB-PROVISIONING/1\",\"commandId\":\"cmd_430fe33cce765249e22be19eb9\",\"audience\":\"hns_fixtureharnessalpha0000001\",\"operation\":\"profile.create\",\"replayed\":false,\"result\":{\"operationId\":\"0f1e2d3c4b5a69788796a5b4c3d2e1f0\",\"state\":\"profile_created\",\"failure\":null,\"principalId\":\"ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46\",\"profileId\":\"agt_fixtureprofile000000000001\",\"template\":\"assistant\",\"ownerBound\":true,\"createdUnix\":1791000001,\"updatedUnix\":1791000002}}",
+      "expect": {
+        "kind": "uncertain",
+        "reason": "RESPONSE_INVALID"
+      }
+    },
+    {
+      "id": "invalid-failure-unregistered",
+      "description": "Failure code outside the registry.",
+      "request": "valid-create-basic",
+      "httpStatus": 201,
+      "body": "{\"protocol\":\"LA-WEB-PROVISIONING/1\",\"commandId\":\"cmd_430fe33cce765249e22be19eb9\",\"audience\":\"hns_fixtureharnessalpha0000001\",\"operation\":\"profile.create\",\"replayed\":false,\"result\":{\"operationId\":\"0f1e2d3c4b5a69788796a5b4c3d2e1f0\",\"state\":\"failed\",\"failure\":\"TEMPLATE_GONE\",\"principalId\":\"ext-3b0c44298fc1c149afbf4c8996fb92427ae41e46\",\"profileId\":\"agt_fixtureprofile000000000001\",\"template\":\"assistant\",\"ownerBound\":false,\"createdUnix\":1791000001,\"updatedUnix\":1791000002}}",
       "expect": {
         "kind": "uncertain",
         "reason": "RESPONSE_INVALID"
