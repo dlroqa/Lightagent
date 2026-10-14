@@ -1,5 +1,5 @@
 //! Runs Web's candidate `LA-WEB-PROVISIONING/1` fixtures, byte for byte as
-//! mirrored under `docs/integrations/web/la-web-provisioning-1-r2/`, through
+//! mirrored under `docs/integrations/web/la-web-provisioning-1-r3/`, through
 //! this crate's independent verifier.
 //!
 //! The mirror is pinned by the compatibility digest below. Any change to the
@@ -17,15 +17,15 @@ use serde_json::Value as Json;
 use sha2::{Digest, Sha256};
 
 /// SHA-256 of the exact bytes of `MANIFEST.json` for candidate
-/// `la-web-provisioning-1/r2`, committed in Web `d31e544` (r1's
-/// `030537b8…a1d2` is superseded).
+/// `la-web-provisioning-1/r3`, committed in Web `15f196c` and delivered as a
+/// verified `git bundle` (r1 `030537b8…` and r2 `8649b453…` are superseded).
 const COMPATIBILITY_DIGEST: &str =
-    "8649b453d55013cc5d35ed81bc052d219c4afd56eec0d031798f680923248b9a";
+    "bd410d38aab5890eb8ba97cedbd41a3913046f8d1fd90ff4c6d9a171c9d94a8d";
 const FIXTURES: &str = "protocol/la-web-provisioning-1";
 
 fn mirror() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/integrations/web/la-web-provisioning-1-r2")
+        .join("../../docs/integrations/web/la-web-provisioning-1-r3")
 }
 
 fn bytes(path: &str) -> Vec<u8> {
@@ -55,7 +55,7 @@ fn the_mirror_is_the_pinned_candidate() {
     );
     let manifest: Json = serde_json::from_slice(&manifest_bytes).unwrap();
     assert_eq!(manifest["protocol"], "LA-WEB-PROVISIONING/1");
-    assert_eq!(manifest["fixtureSet"], "la-web-provisioning-1/r2");
+    assert_eq!(manifest["fixtureSet"], "la-web-provisioning-1/r3");
 
     let spec = &manifest["specification"];
     let spec_bytes = bytes(s(&spec["path"]));
@@ -100,7 +100,7 @@ fn the_mirror_is_the_pinned_candidate() {
     // The manifest names every vector id, and only those.
     for (path, ids) in manifest["fixtureIds"].as_object().unwrap() {
         let file: Json = serde_json::from_slice(&bytes(path)).unwrap();
-        let list: Vec<String> = ["vectors", "cases", "deadlineCases", "races"]
+        let list: Vec<String> = ["vectors", "cases", "deadlineCases", "races", "scenarios"]
             .iter()
             .filter_map(|key| file.get(*key).and_then(Json::as_array))
             .flatten()
@@ -573,7 +573,19 @@ fn every_create_resolution_case_is_reproduced() {
                 },
             })
             .collect();
-        let got = resolution_json(&web::resolve_create_job(&registry, &transmissions));
+        let resolution = web::resolve_create_job(&registry, &transmissions);
+        let got = resolution_json(&resolution);
+        let plan = serde_json::json!({
+            "present": web::plan(&resolution, true),
+            "absent": web::plan(&resolution, false),
+        });
+        if plan != case["plan"] {
+            failures.push(format!(
+                "{}: plan {}, got {plan}",
+                s(&case["id"]),
+                case["plan"]
+            ));
+        }
         if got != case["expect"] {
             failures.push(format!(
                 "{}: expected {}, got {got}",
@@ -588,7 +600,7 @@ fn every_create_resolution_case_is_reproduced() {
         cases.len()
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    assert_eq!(cases.len(), 21);
+    assert_eq!(cases.len(), 26);
 }
 
 fn race_attempts(scenario: &Json) -> Vec<Attempt> {
@@ -651,12 +663,15 @@ fn every_execution_deadline_case_is_reproduced() {
             case["id"]
         );
         assert!(case["admittedAt"].as_u64().unwrap() < expires + 30);
-        assert_eq!(
-            model::execution_deadline(expires, case["lockAcquiredAt"].as_u64().unwrap()),
-            s(&case["expect"]),
-            "{}",
-            case["id"]
-        );
+        // r3 §10 step 14: the wall clock and the durable fence.
+        let fence = case["fence"].as_u64().unwrap();
+        let wall = model::execution_deadline(expires, case["lockAcquiredAt"].as_u64().unwrap());
+        let got = if wall == "EXPIRED" || expires + 30 <= fence {
+            "EXPIRED"
+        } else {
+            "proceed"
+        };
+        assert_eq!(got, s(&case["expect"]), "{}", case["id"]);
         checked += 1;
     }
     let registry = web_registry();
@@ -674,8 +689,8 @@ fn every_execution_deadline_case_is_reproduced() {
         assert_eq!(fenced, race["withExecutionDeadline"], "{id} with the fence");
         checked += 1;
     }
-    println!("execution-deadline.json: {checked}/10 as expected");
-    assert_eq!(checked, 10);
+    println!("execution-deadline.json: {checked}/13 as expected");
+    assert_eq!(checked, 13);
 }
 
 /// Seeded random schedules of one job (up to 4 transmissions, skew within
@@ -792,4 +807,246 @@ fn a_one_second_backward_step_defeats_step_14_but_not_the_fence() {
     }
     println!("stepped clock, {RUNS} schedules: unsafe with fence: {fenced}");
     assert_eq!(fenced, 0);
+}
+
+// --- r3: refusal finality, ordering model, adversarial search --------------
+
+use lightagent_protocol_conformance::ordering::{self, Delivery, Rules, Scenario, Tx};
+
+/// `errors.json`'s `createResolution` is exactly §11's class mapping.
+#[test]
+fn every_code_has_the_finality_its_class_implies() {
+    let doc = json("errors.json");
+    for e in doc["errors"].as_array().unwrap() {
+        assert_eq!(
+            s(&e["createResolution"]),
+            web::create_resolution(s(&e["class"])),
+            "{}",
+            e["code"]
+        );
+    }
+}
+
+fn rules(value: &Json) -> Rules {
+    let flag = |name: &str| value[name].as_bool().unwrap();
+    Rules {
+        execution_deadline: flag("executionDeadline"),
+        fence: flag("fence"),
+        fence_durable_before_unlock: flag("fenceDurableBeforeUnlock"),
+        nonce_durable: flag("nonceDurable"),
+        nonce_retained_until_fenced: flag("nonceRetainedUntilFenced"),
+        protocol_refusals_final: flag("protocolRefusalsFinal"),
+        journal_before_send: flag("journalBeforeSend"),
+    }
+}
+
+fn u64_list(value: &Json) -> Vec<u64> {
+    value
+        .as_array()
+        .map(|a| a.iter().map(|x| x.as_u64().unwrap()).collect())
+        .unwrap_or_default()
+}
+
+fn scenario(value: &Json) -> Scenario {
+    Scenario {
+        transmissions: value["transmissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| Tx {
+                issued_at: t["issuedAt"].as_u64().unwrap(),
+                expires_at: t["expiresAt"].as_u64().unwrap(),
+                journaled: t["journaled"].as_bool().unwrap_or(true),
+            })
+            .collect(),
+        deliveries: value["deliveries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| Delivery {
+                transmission: d["transmission"].as_u64().unwrap() as usize,
+                arrives_at: d["arrivesAt"].as_u64().unwrap(),
+                lock_at: d["lockAt"].as_u64(),
+                hold_for: d["holdFor"].as_u64().unwrap_or(1),
+                answer_to_web: d["answerToWeb"].as_bool().unwrap_or(true),
+                crash_after_record: d["crashAfterRecord"].as_bool().unwrap_or(false),
+            })
+            .collect(),
+        clock: value["harnessClock"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|c| (c["from"].as_u64().unwrap(), c["offset"].as_i64().unwrap()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        quota: value["quota"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| (w[0].as_u64().unwrap(), w[1].as_u64().unwrap()))
+            .collect(),
+        restarts: u64_list(&value["restarts"]),
+        housekeeping: u64_list(&value["housekeeping"]),
+        key_trusted_from: value["keyTrustedFrom"].as_u64().unwrap_or(0),
+        ledger_restores: Vec::new(),
+    }
+}
+
+/// All 10 `ordering-model.json` scenarios under all 10 rule sets, through
+/// the independent model: answers, operation, Web's conclusion, the moment
+/// it concluded `failed`, and whether that was unsafe.
+#[test]
+fn every_ordering_scenario_is_reproduced_under_every_rule_set() {
+    let registry = web_registry();
+    let doc = json("ordering-model.json");
+    let rule_sets = doc["ruleSets"].as_object().unwrap();
+    let scenarios = doc["scenarios"].as_array().unwrap();
+    let mut failures = Vec::new();
+    let mut evaluated = 0;
+    for case in scenarios {
+        let id = s(&case["id"]);
+        let model = scenario(&case["scenario"]);
+        for (name, flags) in rule_sets {
+            let run = ordering::simulate(&registry, &model, rules(flags));
+            let got = serde_json::json!({
+                "answers": run.answers,
+                "operation": run.operation.as_ref().map(|(state, by)| serde_json::json!({"state": state, "recordedBy": by})),
+                "web": resolution_json(&run.web),
+                "failedAt": run.failed_at,
+                "unsafe": run.unsafe_,
+            });
+            if got != case["results"][name] {
+                failures.push(format!(
+                    "{id} / {name}: expected {}, got {got}",
+                    case["results"][name]
+                ));
+            }
+            evaluated += 1;
+        }
+    }
+    println!(
+        "ordering-model.json: {} scenarios × {} rule sets, {}/{evaluated} as expected",
+        scenarios.len(),
+        rule_sets.len(),
+        evaluated - failures.len()
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert_eq!((scenarios.len(), rule_sets.len()), (10, 10));
+}
+
+/// The review's own search over RC5 and RC6 hazards (independent of Web's
+/// seeds and generator): copies, clock offsets and steps, restarts, nonce
+/// housekeeping, late keys, lock waits, long holds, lost answers, crashes
+/// after recording, and unjournaled sends. Full r3 never lets Web conclude
+/// `failed` while an operation exists; each ablation that removes one
+/// mechanism the broad search can reach lets it.
+#[test]
+fn r3_holds_on_random_adversarial_schedules_and_each_rule_is_needed() {
+    let registry = web_registry();
+    let doc = json("ordering-model.json");
+    const RUNS: usize = 40_000;
+    let mut counts = BTreeMap::new();
+    for (name, flags) in doc["ruleSets"].as_object().unwrap() {
+        let rules = rules(flags);
+        let mut rng = Rng::new(0x1a5e_0003);
+        let mut violations = 0;
+        for _ in 0..RUNS {
+            let model = ordering::random_scenario(&mut rng, false);
+            violations += ordering::simulate(&registry, &model, rules).violates_s(&model) as usize;
+        }
+        counts.insert(name.clone(), violations);
+    }
+    println!("random adversarial schedules ({RUNS} each): {counts:?}");
+    assert_eq!(counts["r3"], 0);
+    assert_eq!(counts["r3-without-wall-clock-deadline"], 0);
+    // Broad schedules reach these ablations. The fence, its durability
+    // before unlock and nonce retention need narrow hazards: the fixtures
+    // above and `a_one_second_backward_step_defeats_step_14_but_not_the_fence`
+    // cover them (Web's broad search shows the same split, §18).
+    for ablation in [
+        "r2",
+        "reviewProposal",
+        "r3-without-durable-nonces",
+        "r3-protocol-refusals-final",
+        "r3-without-journal",
+    ] {
+        assert!(
+            counts[ablation] > 0,
+            "{ablation} should be unsafe somewhere"
+        );
+    }
+}
+
+/// Counterexample to r3 §10.5's restore rule ("initializing a new ledger for
+/// an existing harness id": `F := max(F, T + 150)`). The fence excludes old
+/// copies, but not a fresh R4 resend of the same job. The new ledger has no
+/// operation for the key, while the identity store still binds the user, so
+/// `begin` refuses PROFILE_UNAVAILABLE on the merits after `u`'s horizon, and
+/// R3 concludes `failed` for a profile the user owns. Reproduced against the
+/// real service in `web_a_fresh_ledger_answers_a_merits_refusal_for_a_bound_profile`.
+#[test]
+fn a_new_ledger_for_an_existing_harness_id_breaks_r3() {
+    let registry = web_registry();
+    const T0: u64 = 1_791_000_000;
+    let model = Scenario {
+        transmissions: vec![
+            Tx {
+                issued_at: T0,
+                expires_at: T0 + 60,
+                journaled: true,
+            },
+            Tx {
+                issued_at: T0 + 400,
+                expires_at: T0 + 460,
+                journaled: true,
+            },
+        ],
+        deliveries: vec![
+            Delivery {
+                transmission: 0,
+                arrives_at: T0 + 1,
+                lock_at: None,
+                hold_for: 1,
+                answer_to_web: false,
+                crash_after_record: false,
+            },
+            Delivery {
+                transmission: 1,
+                arrives_at: T0 + 401,
+                lock_at: None,
+                hold_for: 1,
+                answer_to_web: true,
+                crash_after_record: false,
+            },
+        ],
+        quota: vec![(0, u64::MAX)],
+        ledger_restores: vec![T0 + 200],
+        ..Scenario::default()
+    };
+    let run = ordering::simulate(&registry, &model, Rules::R3);
+    assert_eq!(run.answers, ["OPERATION:completed", "PROFILE_UNAVAILABLE"]);
+    assert_eq!(
+        run.web,
+        Resolution::Failed {
+            code: "PROFILE_UNAVAILABLE".to_owned()
+        }
+    );
+    assert_eq!(
+        run.bound,
+        Some(0),
+        "the identity store still binds the user"
+    );
+    assert!(run.violates_s(&model));
+
+    // The same search with a ledger replacement added to every schedule.
+    let mut rng = Rng::new(0x1a5e_0004);
+    let violations = (0..20_000)
+        .filter(|_| {
+            let model = ordering::random_scenario(&mut rng, true);
+            ordering::simulate(&registry, &model, Rules::R3).violates_s(&model)
+        })
+        .count();
+    println!("random schedules with a ledger replacement under r3: {violations}/20000 violate S");
+    assert!(violations > 0);
 }

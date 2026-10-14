@@ -14,6 +14,7 @@ use std::collections::BTreeSet;
 use sha2::{Digest, Sha256};
 
 pub mod model;
+pub mod ordering;
 pub mod web;
 
 pub const PROTOCOL: &str = "LA-WEB-PROVISIONING/1";

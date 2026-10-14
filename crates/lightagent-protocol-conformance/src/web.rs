@@ -289,8 +289,31 @@ fn class(entry: Option<&RegisteredCode>) -> Option<&str> {
 /// transmission can start executing on a conforming harness (§9.3).
 pub const ACCEPTANCE_HORIZON_SECONDS: u64 = 60;
 
-/// §13.2 R1–R3 over every transmission of one create job.
+/// r3 §11: whether a refusal of one transmission proves that no copy of it
+/// can ever take effect. Derived from the class, as §11 defines it; the
+/// tests check `errors.json`'s `createResolution` against this.
+pub fn create_resolution(class: &str) -> &'static str {
+    match class {
+        "payload" | "admission" | "merits" => "final",
+        "protocol" => "transmission-only",
+        "indeterminate" => "indeterminate",
+        "conflict" => "conflict",
+        _ => "not-applicable",
+    }
+}
+
+/// §13.2 R1–R3 over every transmission of one create job (r3).
 pub fn resolve_create_job(registry: &Registry, transmissions: &[Transmission]) -> Resolution {
+    resolve_create_job_with(registry, transmissions, false)
+}
+
+/// R1–R3, optionally with r2's rule that `protocol` refusals are final (the
+/// `r3-protocol-refusals-final` ablation).
+pub fn resolve_create_job_with(
+    registry: &Registry,
+    transmissions: &[Transmission],
+    protocol_refusals_final: bool,
+) -> Resolution {
     // R1, with two operation ids for one key as an anomaly.
     let operations: Vec<(&str, &str)> = transmissions
         .iter()
@@ -340,12 +363,21 @@ pub fn resolve_create_job(registry: &Registry, transmissions: &[Transmission]) -
             code: (*code).to_owned(),
         };
     }
-    // R3.
-    let uncertain: Vec<&Transmission> = transmissions
+    // R3. A transmission is open if it is uncertain, or refused only for
+    // that copy (a pre-nonce `protocol` refusal).
+    let open: Vec<&Transmission> = transmissions
         .iter()
-        .filter(|t| t.outcome == Outcome::Uncertain)
+        .filter(|t| match &t.outcome {
+            Outcome::Uncertain => true,
+            Outcome::Refused { code } => {
+                !protocol_refusals_final
+                    && class(registry.codes.get(code))
+                        .is_some_and(|c| create_resolution(c) == "transmission-only")
+            }
+            Outcome::Operation { .. } => false,
+        })
         .collect();
-    if uncertain.is_empty() {
+    if open.is_empty() {
         return match refusals.last() {
             Some((_, code, _)) => Resolution::Failed {
                 code: (*code).to_owned(),
@@ -357,7 +389,7 @@ pub fn resolve_create_job(registry: &Registry, transmissions: &[Transmission]) -
         .iter()
         .filter(|(_, _, entry)| class(*entry) == Some("merits"))
         .collect();
-    let ruled_out = uncertain.iter().all(|u| {
+    let ruled_out = open.iter().all(|u| {
         merits
             .iter()
             .any(|(t, _, _)| t.issued_at >= u.expires_at + ACCEPTANCE_HORIZON_SECONDS)
@@ -367,5 +399,27 @@ pub fn resolve_create_job(registry: &Registry, transmissions: &[Transmission]) -
             code: (*code).to_owned(),
         },
         _ => Resolution::Unresolved,
+    }
+}
+
+/// §13.3–§13.5: what Web does next for a resolved or unresolved create job,
+/// with the profile's desired state present or absent.
+pub fn plan(resolution: &Resolution, desired_present: bool) -> &'static str {
+    match (resolution, desired_present) {
+        (Resolution::Unresolved, _) => "send-create",
+        (Resolution::Attention { .. }, _) => "operator-attention",
+        (Resolution::Failed { .. }, _) => "none",
+        (Resolution::Resolved { state, .. }, present) => match (state.as_str(), present) {
+            ("completed", true) => "none",
+            ("completed", false) => "revoke",
+            ("failed", true) => "none",
+            // §13.5: a failed operation is re-confirmed by status before a
+            // suspension or deletion counts as complete.
+            ("failed", false) => "confirm-status",
+            // A create resolving as revoked means Web lost its own records.
+            ("revoked", true) => "operator-attention",
+            ("revoked", false) => "none",
+            _ => "operator-attention",
+        },
     }
 }
