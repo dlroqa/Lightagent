@@ -6,6 +6,29 @@ All notable Lightagent changes are documented here.
 
 ### Security
 
+- Profile provisioning for the account-control website, not activated.
+  A least-privilege boundary (`lightagent_core::provisioning`) provisions a
+  profile for an external user and binds its ownership.
+  - Who: only an operator-role credential restricted to exactly
+    `provision`, of a principal an operator registered with its issuers,
+    templates and quota. It is re-read from the durable stores on every
+    call. It reaches no run, session, tool, Jev, provider or settings
+    endpoint (tested route by route).
+  - Identity: users are named by an operator-registered `(issuer,
+    subject)`; the principal id is derived on the server, never taken from
+    the request.
+  - Safety: idempotency keys scoped to the provisioner, with request
+    fingerprints; a cross-process lock; staged profile creation; ownership
+    bound in one identity transaction. Crashes are recovered by retry or
+    `reconcile`, and a failed operation's profile is quarantined, never
+    deleted. A profile id known anywhere is never provisioned over.
+  - Defaults: new profiles have no tools, the strict approval policy and
+    tighter limits.
+  - HTTP: the contract (`PUT .../provisioning/profiles/{id}`,
+    `GET .../operations/{op}`, `POST .../operations/{op}/revoke`) is behind
+    the off-by-default `provisioning-api` cargo feature and is never served
+    by the production router. Details:
+    `docs/architecture/profile-provisioning.md`.
 - Profile-scoped remote credentials, not activated. An untrusted run's
   outbound credentials (web search, HTTP MCP) are now grants of one profile
   for one service. Each grant names its operations and destination origins,
@@ -289,6 +312,8 @@ All notable Lightagent changes are documented here.
 
 - Linux CI jobs are pinned to `ubuntu-24.04` ahead of the `ubuntu-latest`
   move to 26.04. Required check names are unchanged.
+- CI builds, lints and tests the feature-gated provisioning contract on
+  Linux, Windows and macOS.
 - CI fails when `Cargo.lock` is not exactly what Cargo resolves
   (`cargo metadata --locked` on Linux, Windows and macOS). The lockfile now
   records `lightagent-core`'s existing `sha2` dependency, which it omitted.

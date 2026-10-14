@@ -30,6 +30,7 @@ pub mod paths;
 pub mod permissions;
 pub mod profile;
 pub mod provider;
+pub mod provisioning;
 pub mod skills;
 pub mod tool_stream;
 

@@ -168,6 +168,11 @@ impl IdentityDocument {
         self.reassignments.iter()
     }
 
+    /// Whether an operator registered `issuer` (exact match).
+    pub fn is_trusted_issuer(&self, issuer: &str) -> bool {
+        self.trusted_issuers.contains(issuer)
+    }
+
     /// The principal an external identity maps to, if any.
     pub fn external(&self, identity: &ExternalIdentity) -> Option<&PrincipalId> {
         self.principals

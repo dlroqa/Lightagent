@@ -258,6 +258,13 @@ Multi-user mode is **not activatable** in this slice: nothing in
 
 ## Provisioning interface (contract proposal, not implemented)
 
+> **Superseded by the implemented, not activated contract in
+> [`profile-provisioning.md`](profile-provisioning.md)**, which keeps the
+> `{provision}`-only operator credential, server-derived principals,
+> `PUT /profiles/{profile_id}` with `Idempotency-Key` and server-defined
+> templates, and narrows the rest (§11 there). The text below is kept as the
+> original proposal.
+
 For the separate Cloudflare Workers control website. It is narrow,
 authenticated, idempotent and audited. It can never give the website the
 harness's full privileges.
