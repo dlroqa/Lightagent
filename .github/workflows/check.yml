@@ -93,6 +93,8 @@ jobs:
         run: cargo test -p lightagent-protocol-conformance -- --nocapture
       - name: Service semantics the protocol relies on
         run: cargo test -p lightagent-core --lib provisioning::tests::web_
+      - name: Ledger continuity on real stores (L1, all 13 fixtures)
+        run: cargo test -p lightagent-core --lib provisioning::tests::continuity -- --nocapture
 
   open-terminal-live:
     name: Open Terminal live contract

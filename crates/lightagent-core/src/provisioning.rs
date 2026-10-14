@@ -63,6 +63,15 @@
 //!   explicitly. A failed operation's profile is moved to
 //!   `<home>/provisioning/quarantine/<op>`, never deleted.
 //!
+//! # Ledger continuity
+//!
+//! For `LA-WEB-PROVISIONING/1` (r4 §10.6), an operator explicitly
+//! [initializes](ProvisioningService::initialize) the ledger for one harness
+//! id, and can [retire](ProvisioningService::retire) it.
+//! [`ProvisioningService::check_continuity`] then decides whether the ledger,
+//! the identity store and the profile store still belong together (see
+//! [`continuity`]). A ledger nobody initialized behaves exactly as before.
+//!
 //! Nothing here is reachable from a running server: no startup path builds a
 //! [`ProvisioningService`].
 
@@ -77,8 +86,9 @@ use sha2::{Digest as _, Sha256};
 
 use crate::config::ApprovalPolicy;
 use crate::identity::store::{
-    ExternalIdentity, IdentityDocument, IdentityStore, IdentityStoreError, Outcome,
-    PrincipalStatus, Refusal, open_private, write_durable,
+    ContinuityAction, ExternalIdentity, IdentityDocument, IdentityStore, IdentityStoreError,
+    Outcome, PrincipalStatus, ProvisioningContinuity, Refusal, Transaction, open_private,
+    write_durable,
 };
 use crate::identity::{
     Caller, Capability, OwnershipError, PrincipalId, PrincipalSource, Role, authorize_capability,
@@ -86,6 +96,10 @@ use crate::identity::{
 use crate::ids::hex;
 use crate::limits::RunLimits;
 use crate::profile::{AgentProfile, ProfileId, ProfileStore};
+
+pub mod continuity;
+
+pub use continuity::{ContinuityFailure, LedgerContinuity, valid_harness_id};
 
 /// The ledger schema this build reads and writes.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -236,6 +250,11 @@ pub struct Ledger {
     /// `<provisioner>\0<idempotency key>` → operation id.
     #[serde(default)]
     keys: BTreeMap<String, String>,
+    /// The harness stamp, written only by [`ProvisioningService::initialize`].
+    /// Not serialized while absent, so a ledger nobody initialized keeps its
+    /// exact bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    continuity: Option<LedgerContinuity>,
 }
 
 impl Default for Ledger {
@@ -246,6 +265,7 @@ impl Default for Ledger {
             provisioners: BTreeMap::new(),
             operations: BTreeMap::new(),
             keys: BTreeMap::new(),
+            continuity: None,
         }
     }
 }
@@ -494,6 +514,8 @@ pub(crate) enum Fault {
     ProfileRenamed,
     ProfileCreatedRecorded,
     IdentityCommitted,
+    /// After a revoke's identity transaction, before the ledger records it.
+    RevokeIdentityCommitted,
 }
 
 /// How one step of an operation ended.
@@ -871,6 +893,15 @@ impl ProvisioningService {
         request: Validated,
         now: u64,
     ) -> Result<String, ProvisioningError> {
+        // A retired harness id records no new operation, by any route. Only
+        // an initialized ledger can be retired.
+        if ledger
+            .continuity
+            .as_ref()
+            .is_some_and(|stamp| stamp.retired)
+        {
+            return Err(ProvisioningError::Denied("harness_retired"));
+        }
         if !provisioner.issuers.contains(&request.external.issuer)
             || !identity.is_trusted_issuer(&request.external.issuer)
         {
@@ -975,17 +1006,29 @@ impl ProvisioningService {
                 .get(id)
                 .cloned()
                 .ok_or(ProvisioningError::Corrupt)?;
+            // A retired harness id creates and binds nothing more, not even
+            // for an operation recorded before retirement.
+            if !operation.state.is_terminal()
+                && ledger
+                    .continuity
+                    .as_ref()
+                    .is_some_and(|stamp| stamp.retired)
+            {
+                return Err(ProvisioningError::Denied("harness_retired"));
+            }
             let step = match operation.state {
                 OperationState::Pending => self
                     .materialize(&operation)
-                    .map(|()| OperationState::ProfileCreated),
+                    .map(|()| (OperationState::ProfileCreated, None)),
                 OperationState::ProfileCreated => self
-                    .bind(&operation, actor, now)
-                    .map(|()| OperationState::Completed),
+                    .bind(&operation, actor, now, Stamp::of(ledger))
+                    .map(|seen| (OperationState::Completed, seen)),
                 _ => return self.status_of(&operation),
             };
             match step {
-                Ok(next) => {
+                Ok((next, seen)) => {
+                    // Saved with the state change, in one ledger write.
+                    record_seen(ledger, seen);
                     self.transition(ledger, id, next, None, now)?;
                     if next == OperationState::ProfileCreated {
                         self.crash_point(Fault::ProfileCreatedRecorded)?;
@@ -1094,8 +1137,17 @@ impl ProvisioningService {
     }
 
     /// Create or resolve the principal, record it as the owner and bind the
-    /// profile: one identity transaction, idempotent by operation.
-    fn bind(&self, operation: &Operation, actor: &Caller, now: u64) -> Result<(), Step> {
+    /// profile: one identity transaction, idempotent by operation. For an
+    /// initialized ledger (`stamp`), the same transaction advances the
+    /// identity store's continuity marker, and the result is the sequence
+    /// and generation the ledger records next.
+    fn bind(
+        &self,
+        operation: &Operation,
+        actor: &Caller,
+        now: u64,
+        stamp: Option<Stamp>,
+    ) -> Result<Option<Seen>, Step> {
         if !self.marker_matches(operation) {
             return Err(Step::Fail("profile_unavailable"));
         }
@@ -1130,16 +1182,46 @@ impl ProvisioningService {
                         return Err(IdentityStoreError::Ownership(OwnershipError::Conflict));
                     }
                     tx.assign_owner(&operation.profile, &operation.principal)?;
-                    Ok(())
+                    stamp
+                        .as_ref()
+                        .map(|stamp| stamp.advance(tx, &operation.id, ContinuityAction::Bind))
+                        .transpose()
                 });
         match outcome {
-            Ok(Outcome::Applied { .. } | Outcome::Replayed { .. }) => {
+            Ok(Outcome::Applied { generation, value }) => {
                 self.crash_point(Fault::IdentityCommitted)
                     .map_err(Step::Retry)?;
-                Ok(())
+                Ok(value.map(|sequence| Seen {
+                    sequence,
+                    generation,
+                }))
+            }
+            Ok(Outcome::Replayed { generation }) => {
+                self.crash_point(Fault::IdentityCommitted)
+                    .map_err(Step::Retry)?;
+                stamp
+                    .as_ref()
+                    .map(|stamp| self.replayed(stamp, generation))
+                    .transpose()
+                    .map_err(Step::Retry)
             }
             Err(error) => Err(identity_step(error)),
         }
+    }
+
+    /// What the ledger records after an identity transaction that had
+    /// already been applied: the store's current marker, which must be this
+    /// ledger's. Under the ledger lock, nothing else advances it meanwhile.
+    fn replayed(&self, stamp: &Stamp, generation: u64) -> Result<Seen, ProvisioningError> {
+        let document = self.identity_document()?;
+        let marker = document
+            .provisioning_continuity()
+            .filter(|marker| marker.continuity_id == stamp.continuity_id)
+            .ok_or(ProvisioningError::Unavailable)?;
+        Ok(Seen {
+            sequence: marker.sequence,
+            generation,
+        })
     }
 
     /// Move a failed operation's profile out of `profiles/`, if it is still
@@ -1258,6 +1340,7 @@ impl ProvisioningService {
                 }
             }
             let key = format!("provisioning-revoke:{}", operation.id);
+            let stamp = Stamp::of(&ledger);
             let outcome =
                 self.identity
                     .transact(&actor, now, Some((&key, &operation.fingerprint)), |tx| {
@@ -1272,10 +1355,23 @@ impl ProvisioningService {
                             }
                             Some(_) => tx.remove_profile(&operation.profile),
                             None => Ok(()),
-                        }
+                        }?;
+                        // An initialized ledger's marker advances in this
+                        // same transaction.
+                        stamp
+                            .as_ref()
+                            .map(|stamp| stamp.advance(tx, &operation.id, ContinuityAction::Revoke))
+                            .transpose()
                     });
-            match outcome {
-                Ok(_) => {}
+            let seen = match outcome {
+                Ok(Outcome::Applied { generation, value }) => value.map(|sequence| Seen {
+                    sequence,
+                    generation,
+                }),
+                Ok(Outcome::Replayed { generation }) => stamp
+                    .as_ref()
+                    .map(|stamp| self.replayed(stamp, generation))
+                    .transpose()?,
                 Err(IdentityStoreError::Ownership(OwnershipError::Conflict)) => {
                     return Err(ProvisioningError::Conflict("ownership_changed"));
                 }
@@ -1283,7 +1379,10 @@ impl ProvisioningService {
                     return Err(ProvisioningError::Denied("not_a_provisioner"));
                 }
                 Err(_) => return Err(ProvisioningError::Unavailable),
-            }
+            };
+            self.crash_point(Fault::RevokeIdentityCommitted)?;
+            // Saved with the state change, in one ledger write.
+            record_seen(&mut ledger, seen);
             self.transition(
                 &mut ledger,
                 &operation.id,
@@ -1383,6 +1482,165 @@ impl ProvisioningService {
             outcome(&result),
         );
         result
+    }
+
+    /// Stamp the ledger for `harness_id` (r4 §10.6): the only way a harness
+    /// id gets a trusted ledger. Operator `administer` only.
+    ///
+    /// Refused while anything shows earlier provisioning: a stamp (live or
+    /// retired), a recorded operation or idempotency key, staged or
+    /// quarantined profiles, a profile marker, the identity store's
+    /// continuity marker, a provisioning idempotency record, or a principal
+    /// mapped to an external identity. Absence of a ledger never counts as a
+    /// clean state on its own: these traces decide. A refused id is retired,
+    /// and a replacement harness gets a new id. Provisioner registrations
+    /// are kept.
+    pub fn initialize(
+        &self,
+        actor: &Caller,
+        harness_id: &str,
+    ) -> Result<LedgerContinuity, ProvisioningError> {
+        Self::require_administrator(actor)?;
+        if !valid_harness_id(harness_id) {
+            return Err(ProvisioningError::Invalid("invalid_harness_id"));
+        }
+        let now = (self.now)();
+        let result = self.exclusive(|| {
+            let mut ledger = self.load()?;
+            if ledger.continuity.is_some() {
+                return Err(ProvisioningError::Conflict("already_initialized"));
+            }
+            if !ledger.operations.is_empty()
+                || !ledger.keys.is_empty()
+                || has_entries(&self.dir.join(STAGING))?
+                || has_entries(&self.dir.join(QUARANTINE))?
+            {
+                return Err(ProvisioningError::Conflict("provisioning_history_exists"));
+            }
+            if !self.profile_markers()?.is_empty() {
+                return Err(ProvisioningError::Conflict("profile_markers_exist"));
+            }
+            let identity = self.identity_document()?;
+            if identity.provisioning_continuity().is_some() {
+                return Err(ProvisioningError::Conflict("identity_continuity_exists"));
+            }
+            if identity
+                .principals()
+                .any(|principal| principal.external.is_some())
+                || identity.has_idempotency_key_with_prefix("provisioning")
+            {
+                return Err(ProvisioningError::Conflict("provisioned_identities_exist"));
+            }
+            let stamp = LedgerContinuity {
+                harness_id: harness_id.to_owned(),
+                continuity_id: random_hex::<16>()?,
+                initialized_unix: now,
+                retired: false,
+                retired_unix: 0,
+                identity_sequence_seen: 0,
+                identity_generation_seen: 0,
+            };
+            ledger.continuity = Some(stamp.clone());
+            self.save(&mut ledger)?;
+            Ok(stamp)
+        });
+        self.audit(
+            now,
+            Event {
+                action: "ledger_initialized",
+                actor: Some(&actor.principal.id),
+                ..Event::default()
+            },
+            outcome(&result),
+        );
+        result
+    }
+
+    /// Retire `harness_id` (r4 §10.6): permanent. The ledger keeps its
+    /// operations and is marked retired, so the continuity check fails (C1)
+    /// and no new operation is recorded by any route. Nothing is deleted:
+    /// profiles, ownership, principals and credentials stay as they are for
+    /// the operator. Status and revocation keep working. Operator
+    /// `administer` only; idempotent.
+    pub fn retire(&self, actor: &Caller, harness_id: &str) -> Result<(), ProvisioningError> {
+        Self::require_administrator(actor)?;
+        let now = (self.now)();
+        let result = if std::fs::symlink_metadata(self.dir.join(STATE)).is_err() {
+            Err(ProvisioningError::Invalid("not_initialized"))
+        } else {
+            self.exclusive(|| {
+                let mut ledger = self.load()?;
+                let stamp = ledger
+                    .continuity
+                    .as_mut()
+                    .ok_or(ProvisioningError::Invalid("not_initialized"))?;
+                if stamp.harness_id != harness_id {
+                    return Err(ProvisioningError::Invalid("harness_id_mismatch"));
+                }
+                if stamp.retired {
+                    return Ok(());
+                }
+                stamp.retired = true;
+                stamp.retired_unix = now;
+                self.save(&mut ledger)
+            })
+        };
+        self.audit(
+            now,
+            Event {
+                action: "ledger_retired",
+                actor: Some(&actor.principal.id),
+                ..Event::default()
+            },
+            outcome(&result),
+        );
+        result
+    }
+
+    /// The r4 §10.6 continuity check (C1–C3) for `harness_id`, from the
+    /// durable stores, under the ledger lock. A gateway runs it at start, at
+    /// activation and after every restore, and serves only while it passes.
+    /// It changes nothing: a missing ledger is reported without creating
+    /// one.
+    pub fn check_continuity(&self, harness_id: &str) -> Result<(), ContinuityError> {
+        if std::fs::symlink_metadata(self.dir.join(STATE)).is_err() {
+            return Err(ContinuityError::Failed(ContinuityFailure::NoLedger));
+        }
+        let verdict = self.exclusive(|| {
+            let ledger = self.load()?;
+            let identity = self.identity_document()?;
+            let markers = self.profile_markers()?;
+            Ok(continuity::evaluate(
+                harness_id, &ledger, &identity, &markers,
+            ))
+        })?;
+        verdict.map_err(ContinuityError::Failed)
+    }
+
+    /// The token of every `.provisioning-operation` marker in the profile
+    /// store (`<home>/profiles/*/`), whether or not the profile is complete.
+    /// An unreadable entry is an error, never skipped.
+    fn profile_markers(&self) -> Result<BTreeSet<String>, ProvisioningError> {
+        let mut markers = BTreeSet::new();
+        let entries = match std::fs::read_dir(self.home.join("profiles")) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(markers),
+            Err(_) => return Err(ProvisioningError::Unavailable),
+        };
+        for entry in entries {
+            let path = entry?.path();
+            if !path.is_dir() {
+                continue;
+            }
+            match std::fs::read_to_string(path.join(MARKER_FILE)) {
+                Ok(token) => {
+                    markers.insert(token.trim().to_owned());
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => return Err(ProvisioningError::Unavailable),
+            }
+        }
+        Ok(markers)
     }
 
     fn audit(&self, now: u64, event: Event<'_>, outcome: String) {
@@ -1513,6 +1771,103 @@ fn identity_step(error: IdentityStoreError) -> Step {
             Step::Retry(ProvisioningError::Denied("not_a_provisioner"))
         }
         _ => Step::Retry(ProvisioningError::Unavailable),
+    }
+}
+
+/// Why a continuity check did not pass: the stores disagree, or one could
+/// not be read. Either way a gateway does not serve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ContinuityError {
+    #[error(transparent)]
+    Failed(ContinuityFailure),
+    #[error(transparent)]
+    Storage(#[from] ProvisioningError),
+}
+
+/// Whether `dir` exists and holds anything.
+fn has_entries(dir: &Path) -> Result<bool, ProvisioningError> {
+    match std::fs::read_dir(dir) {
+        Ok(mut entries) => Ok(entries.next().is_some()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(ProvisioningError::Unavailable),
+    }
+}
+
+/// What an initialized ledger hands a bind or revoke transaction.
+struct Stamp {
+    continuity_id: String,
+    sequence_seen: u64,
+    generation: u64,
+}
+
+impl Stamp {
+    fn of(ledger: &Ledger) -> Option<Self> {
+        ledger.continuity.as_ref().map(|stamp| Self {
+            continuity_id: stamp.continuity_id.clone(),
+            sequence_seen: stamp.identity_sequence_seen,
+            generation: ledger.generation,
+        })
+    }
+
+    /// Advance the identity store's continuity marker inside `tx`, so it
+    /// commits with the ownership change. Refuses, and so writes nothing,
+    /// unless the store's marker follows from this ledger:
+    ///
+    /// - absent, before the ledger's first bind or revoke; or
+    /// - this continuity id at exactly the sequence the ledger saw; or
+    /// - one ahead of it **for this same operation and action**: the
+    ///   transaction of an interrupted call, applied again because its
+    ///   idempotency record was pruned.
+    ///
+    /// While another operation's transaction is in flight (one ahead), every
+    /// other bind or revoke is refused and stays retryable, so the identity
+    /// store is never more than one transaction ahead of the ledger. A store
+    /// restored to an older copy, or one that belongs to another ledger, is
+    /// never advanced, so the rollback stays visible.
+    fn advance(
+        &self,
+        tx: &mut Transaction<'_>,
+        operation: &str,
+        action: ContinuityAction,
+    ) -> Result<u64, IdentityStoreError> {
+        let seen = self.sequence_seen;
+        let current = match tx.document().provisioning_continuity() {
+            None if seen == 0 => 0,
+            Some(marker)
+                if marker.continuity_id == self.continuity_id
+                    && (marker.sequence == seen
+                        || (Some(marker.sequence) == seen.checked_add(1)
+                            && marker.last_operation == operation
+                            && marker.last_action == action)) =>
+            {
+                marker.sequence
+            }
+            _ => return Err(IdentityStoreError::Refused(Refusal::ContinuityMismatch)),
+        };
+        let sequence = current.checked_add(1).ok_or(IdentityStoreError::Corrupt)?;
+        tx.set_provisioning_continuity(ProvisioningContinuity {
+            continuity_id: self.continuity_id.clone(),
+            sequence,
+            ledger_generation_seen: self.generation,
+            last_operation: operation.to_owned(),
+            last_action: action,
+        })?;
+        Ok(sequence)
+    }
+}
+
+/// The identity sequence and generation a committed bind or revoke left.
+#[derive(Clone, Copy)]
+struct Seen {
+    sequence: u64,
+    generation: u64,
+}
+
+/// Record `seen` in the ledger's stamp. Never lowers either value.
+fn record_seen(ledger: &mut Ledger, seen: Option<Seen>) {
+    if let (Some(stamp), Some(seen)) = (ledger.continuity.as_mut(), seen) {
+        stamp.identity_sequence_seen = stamp.identity_sequence_seen.max(seen.sequence);
+        stamp.identity_generation_seen = stamp.identity_generation_seen.max(seen.generation);
     }
 }
 
