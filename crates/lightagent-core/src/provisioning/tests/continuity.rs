@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use sha2::{Digest as _, Sha256};
+use sha2::Sha256;
 
 use super::*;
 use crate::ids::hex;
