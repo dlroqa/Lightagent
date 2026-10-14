@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 
 use sha2::{Digest, Sha256};
 
+pub mod continuity;
 pub mod model;
 pub mod ordering;
 pub mod web;

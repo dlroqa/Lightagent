@@ -1,5 +1,5 @@
 //! Runs Web's candidate `LA-WEB-PROVISIONING/1` fixtures, byte for byte as
-//! mirrored under `docs/integrations/web/la-web-provisioning-1-r3/`, through
+//! mirrored under `docs/integrations/web/la-web-provisioning-1-r4/`, through
 //! this crate's independent verifier.
 //!
 //! The mirror is pinned by the compatibility digest below. Any change to the
@@ -17,15 +17,16 @@ use serde_json::Value as Json;
 use sha2::{Digest, Sha256};
 
 /// SHA-256 of the exact bytes of `MANIFEST.json` for candidate
-/// `la-web-provisioning-1/r3`, committed in Web `15f196c` and delivered as a
-/// verified `git bundle` (r1 `030537b8…` and r2 `8649b453…` are superseded).
+/// `la-web-provisioning-1/r4`, committed in Web `f70789e` and delivered as a
+/// verified `git bundle` (r1 `030537b8…`, r2 `8649b453…` and r3 `bd410d38…`
+/// are superseded).
 const COMPATIBILITY_DIGEST: &str =
-    "bd410d38aab5890eb8ba97cedbd41a3913046f8d1fd90ff4c6d9a171c9d94a8d";
+    "454066f8fb75e886119c401e4a45ec15ebf2b83115165b2e1f85180abfd29a43";
 const FIXTURES: &str = "protocol/la-web-provisioning-1";
 
 fn mirror() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/integrations/web/la-web-provisioning-1-r3")
+        .join("../../docs/integrations/web/la-web-provisioning-1-r4")
 }
 
 fn bytes(path: &str) -> Vec<u8> {
@@ -55,7 +56,7 @@ fn the_mirror_is_the_pinned_candidate() {
     );
     let manifest: Json = serde_json::from_slice(&manifest_bytes).unwrap();
     assert_eq!(manifest["protocol"], "LA-WEB-PROVISIONING/1");
-    assert_eq!(manifest["fixtureSet"], "la-web-provisioning-1/r3");
+    assert_eq!(manifest["fixtureSet"], "la-web-provisioning-1/r4");
 
     let spec = &manifest["specification"];
     let spec_bytes = bytes(s(&spec["path"]));
@@ -578,6 +579,8 @@ fn every_create_resolution_case_is_reproduced() {
         let plan = serde_json::json!({
             "present": web::plan(&resolution, true),
             "absent": web::plan(&resolution, false),
+            "retiredPresent": web::plan_retired(&resolution, true),
+            "retiredAbsent": web::plan_retired(&resolution, false),
         });
         if plan != case["plan"] {
             failures.push(format!(
@@ -600,7 +603,7 @@ fn every_create_resolution_case_is_reproduced() {
         cases.len()
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    assert_eq!(cases.len(), 26);
+    assert_eq!(cases.len(), 29);
 }
 
 fn race_attempts(scenario: &Json) -> Vec<Attempt> {
@@ -811,7 +814,7 @@ fn a_one_second_backward_step_defeats_step_14_but_not_the_fence() {
 
 // --- r3: refusal finality, ordering model, adversarial search --------------
 
-use lightagent_protocol_conformance::ordering::{self, Delivery, Rules, Scenario, Tx};
+use lightagent_protocol_conformance::ordering::{self, Delivery, Recovery, Rules, Scenario, Tx};
 
 /// `errors.json`'s `createResolution` is exactly §11's class mapping.
 #[test]
@@ -837,6 +840,9 @@ fn rules(value: &Json) -> Rules {
         nonce_retained_until_fenced: flag("nonceRetainedUntilFenced"),
         protocol_refusals_final: flag("protocolRefusalsFinal"),
         journal_before_send: flag("journalBeforeSend"),
+        restore_raises_fence: flag("restoreRaisesFence"),
+        ledger_continuity_check: flag("ledgerContinuityCheck"),
+        profile_unavailable_rules_out: flag("profileUnavailableRulesOut"),
     }
 }
 
@@ -889,13 +895,45 @@ fn scenario(value: &Json) -> Scenario {
         restarts: u64_list(&value["restarts"]),
         housekeeping: u64_list(&value["housekeeping"]),
         key_trusted_from: value["keyTrustedFrom"].as_u64().unwrap_or(0),
-        ledger_restores: Vec::new(),
+        recoveries: value["recoveries"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|r| {
+                        let has = |store: &str| {
+                            r["restore"].as_array().unwrap().iter().any(|x| x == store)
+                        };
+                        Recovery {
+                            at: r["at"].as_u64().unwrap(),
+                            ledger: has("ledger"),
+                            identity: has("identity"),
+                            nonces: has("nonces"),
+                            fence: has("fence"),
+                            fence_to: r["fenceTo"].as_u64().unwrap_or(0),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
-/// All 10 `ordering-model.json` scenarios under all 10 rule sets, through
-/// the independent model: answers, operation, Web's conclusion, the moment
-/// it concluded `failed`, and whether that was unsafe.
+fn run_json(run: &ordering::Run) -> Json {
+    serde_json::json!({
+        "answers": run.answers,
+        "operation": run.operation.as_ref().map(|(state, by)| serde_json::json!({"state": state, "recordedBy": by})),
+        "binding": run.binding.map(|by| serde_json::json!({"createdBy": by})),
+        "failedClosed": run.failed_closed,
+        "web": resolution_json(&run.web),
+        "failedAt": run.failed_at,
+        "unsafe": run.unsafe_,
+    })
+}
+
+/// All 17 `ordering-model.json` scenarios under all 14 rule sets, through
+/// the independent model: answers, operation, surviving binding, whether
+/// the gateway failed closed, Web's conclusion, when it concluded `failed`,
+/// and whether that was unsafe.
 #[test]
 fn every_ordering_scenario_is_reproduced_under_every_rule_set() {
     let registry = web_registry();
@@ -908,14 +946,7 @@ fn every_ordering_scenario_is_reproduced_under_every_rule_set() {
         let id = s(&case["id"]);
         let model = scenario(&case["scenario"]);
         for (name, flags) in rule_sets {
-            let run = ordering::simulate(&registry, &model, rules(flags));
-            let got = serde_json::json!({
-                "answers": run.answers,
-                "operation": run.operation.as_ref().map(|(state, by)| serde_json::json!({"state": state, "recordedBy": by})),
-                "web": resolution_json(&run.web),
-                "failedAt": run.failed_at,
-                "unsafe": run.unsafe_,
-            });
+            let got = run_json(&ordering::simulate(&registry, &model, rules(flags)));
             if got != case["results"][name] {
                 failures.push(format!(
                     "{id} / {name}: expected {}, got {got}",
@@ -932,17 +963,17 @@ fn every_ordering_scenario_is_reproduced_under_every_rule_set() {
         evaluated - failures.len()
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    assert_eq!((scenarios.len(), rule_sets.len()), (10, 10));
+    assert_eq!((scenarios.len(), rule_sets.len()), (17, 14));
 }
 
-/// The review's own search over RC5 and RC6 hazards (independent of Web's
-/// seeds and generator): copies, clock offsets and steps, restarts, nonce
-/// housekeeping, late keys, lock waits, long holds, lost answers, crashes
-/// after recording, and unjournaled sends. Full r3 never lets Web conclude
-/// `failed` while an operation exists; each ablation that removes one
-/// mechanism the broad search can reach lets it.
+/// The review's own search (independent of Web's seeds and generator):
+/// copies, clock offsets and steps, restarts, nonce housekeeping, late keys,
+/// lock waits, long holds, lost answers, crashes after recording and
+/// unjournaled sends. Full r4 (and r3, outside recoveries) never lets Web
+/// conclude `failed` while an operation or binding exists. Each ablation
+/// that the broad search can reach does.
 #[test]
-fn r3_holds_on_random_adversarial_schedules_and_each_rule_is_needed() {
+fn r4_holds_on_random_adversarial_schedules_and_each_rule_is_needed() {
     let registry = web_registry();
     let doc = json("ordering-model.json");
     const RUNS: usize = 40_000;
@@ -953,16 +984,22 @@ fn r3_holds_on_random_adversarial_schedules_and_each_rule_is_needed() {
         let mut violations = 0;
         for _ in 0..RUNS {
             let model = ordering::random_scenario(&mut rng, false);
-            violations += ordering::simulate(&registry, &model, rules).violates_s(&model) as usize;
+            violations += ordering::simulate(&registry, &model, rules).violates_s() as usize;
         }
         counts.insert(name.clone(), violations);
     }
     println!("random adversarial schedules ({RUNS} each): {counts:?}");
-    assert_eq!(counts["r3"], 0);
-    assert_eq!(counts["r3-without-wall-clock-deadline"], 0);
+    for safe in [
+        "r4",
+        "r3",
+        "r3-without-wall-clock-deadline",
+        "r4-without-continuity-check",
+    ] {
+        assert_eq!(counts[safe], 0, "{safe}");
+    }
     // Broad schedules reach these ablations. The fence, its durability
     // before unlock and nonce retention need narrow hazards: the fixtures
-    // above and `a_one_second_backward_step_defeats_step_14_but_not_the_fence`
+    // and `a_one_second_backward_step_defeats_step_14_but_not_the_fence`
     // cover them (Web's broad search shows the same split, §18).
     for ablation in [
         "r2",
@@ -978,18 +1015,57 @@ fn r3_holds_on_random_adversarial_schedules_and_each_rule_is_needed() {
     }
 }
 
-/// Counterexample to r3 §10.5's restore rule ("initializing a new ledger for
-/// an existing harness id": `F := max(F, T + 150)`). The fence excludes old
-/// copies, but not a fresh R4 resend of the same job. The new ledger has no
-/// operation for the key, while the identity store still binds the user, so
-/// `begin` refuses PROFILE_UNAVAILABLE on the merits after `u`'s horizon, and
-/// R3 concludes `failed` for a profile the user owns. Reproduced against the
-/// real service in `web_a_fresh_ledger_answers_a_merits_refusal_for_a_bound_profile`.
+/// Recovery family (the review's own generator, `random_recovery_scenario`):
+/// one create, one recovery of a random non-empty subset of {ledger,
+/// identity, nonces, fence}, then resends at or after the horizon. r4 is
+/// never unsafe. r3, and r4 without its continuity check, are. Broad
+/// schedules with a recovery are added to the same check.
 #[test]
-fn a_new_ledger_for_an_existing_harness_id_breaks_r3() {
+fn r4_holds_under_partial_recoveries() {
+    let registry = web_registry();
+    let doc = json("ordering-model.json");
+    const RUNS: usize = 40_000;
+    let mut counts = BTreeMap::new();
+    for name in [
+        "r4",
+        "r3",
+        "r4-without-continuity-check",
+        "r4-profile-unavailable-rules-out",
+        "r4-restore-without-fence-raise",
+    ] {
+        let rules = rules(&doc["ruleSets"][name]);
+        let mut rng = Rng::new(0x1a5e_0004);
+        let mut violations = 0;
+        for _ in 0..RUNS {
+            let model = ordering::random_recovery_scenario(&mut rng);
+            violations += ordering::simulate(&registry, &model, rules).violates_s() as usize;
+        }
+        counts.insert(name, violations);
+    }
+    println!("random recovery schedules ({RUNS} each): {counts:?}");
+    assert_eq!(counts["r4"], 0);
+    let mut rng = Rng::new(0x1a5e_0005);
+    let broad = (0..RUNS)
+        .filter(|_| {
+            let model = ordering::random_scenario(&mut rng, true);
+            ordering::simulate(&registry, &model, Rules::R4).violates_s()
+        })
+        .count();
+    println!("broad schedules with a recovery under r4 ({RUNS}): {broad} unsafe");
+    assert_eq!(broad, 0);
+    assert!(counts["r3"] > 0);
+    assert!(counts["r4-without-continuity-check"] > 0);
+}
+
+/// The r3 counterexample (RC7), deterministically, plus the variants the
+/// brief names that `ordering-model.json` does not already state: under r4
+/// the gateway fails closed, no binding is altered, and Web never concludes
+/// `failed`.
+#[test]
+fn rc7_counterexamples_fail_closed_under_r4() {
     let registry = web_registry();
     const T0: u64 = 1_791_000_000;
-    let model = Scenario {
+    let job = |quota_until: u64, recovery: Recovery, u_crashes: bool| Scenario {
         transmissions: vec![
             Tx {
                 issued_at: T0,
@@ -1001,6 +1077,11 @@ fn a_new_ledger_for_an_existing_harness_id_breaks_r3() {
                 expires_at: T0 + 460,
                 journaled: true,
             },
+            Tx {
+                issued_at: T0 + 500,
+                expires_at: T0 + 560,
+                journaled: true,
+            },
         ],
         deliveries: vec![
             Delivery {
@@ -1009,7 +1090,7 @@ fn a_new_ledger_for_an_existing_harness_id_breaks_r3() {
                 lock_at: None,
                 hold_for: 1,
                 answer_to_web: false,
-                crash_after_record: false,
+                crash_after_record: u_crashes,
             },
             Delivery {
                 transmission: 1,
@@ -1019,34 +1100,208 @@ fn a_new_ledger_for_an_existing_harness_id_breaks_r3() {
                 answer_to_web: true,
                 crash_after_record: false,
             },
+            Delivery {
+                transmission: 2,
+                arrives_at: T0 + 501,
+                lock_at: None,
+                hold_for: 1,
+                answer_to_web: true,
+                crash_after_record: false,
+            },
         ],
-        quota: vec![(0, u64::MAX)],
-        ledger_restores: vec![T0 + 200],
+        quota: vec![(0, quota_until)],
+        recoveries: vec![recovery],
         ..Scenario::default()
     };
-    let run = ordering::simulate(&registry, &model, Rules::R3);
-    assert_eq!(run.answers, ["OPERATION:completed", "PROFILE_UNAVAILABLE"]);
+    let at = T0 + 200;
+    let fresh = Recovery {
+        at,
+        ledger: true,
+        nonces: true,
+        fence: true,
+        ..Recovery::default()
+    };
+    let ledger_only = Recovery {
+        at,
+        ledger: true,
+        ..Recovery::default()
+    };
+    let identity_only = Recovery {
+        at,
+        identity: true,
+        ..Recovery::default()
+    };
+    let everything = Recovery {
+        at,
+        ledger: true,
+        identity: true,
+        nonces: true,
+        fence: true,
+        fence_to: 0,
+    };
+    for (name, model) in [
+        (
+            "fresh ledger, kept identity",
+            job(u64::MAX, fresh.clone(), false),
+        ),
+        ("fresh ledger, quota refusal", job(T0 + 50, fresh, false)),
+        (
+            "older ledger, newer identity",
+            job(u64::MAX, ledger_only.clone(), false),
+        ),
+        (
+            "older identity, newer ledger",
+            job(u64::MAX, identity_only, false),
+        ),
+        // The lost ledger had only `u`'s pending record: nothing is bound,
+        // so the resend may create the profile.
+        ("lost ledger, pending u", job(u64::MAX, ledger_only, true)),
+        ("consistent restore", job(u64::MAX, everything, false)),
+    ] {
+        let r3 = ordering::simulate(&registry, &model, Rules::R3);
+        let r4 = ordering::simulate(&registry, &model, Rules::R4);
+        println!(
+            "{name}: r3 {:?} unsafe={} | r4 {:?} failed_closed={}",
+            r3.web, r3.unsafe_, r4.web, r4.failed_closed
+        );
+        assert!(!r4.unsafe_, "{name}");
+        assert!(
+            !matches!(r4.web, Resolution::Failed { .. }) || r4.binding.is_none(),
+            "{name}"
+        );
+        if r4.failed_closed {
+            assert_eq!(
+                r4.binding,
+                r3.binding.or(r4.binding),
+                "{name}: no binding altered"
+            );
+            assert!(
+                r4.answers[1..]
+                    .iter()
+                    .all(|a| a == "LEDGER_CONTINUITY_FAILED"),
+                "{name}"
+            );
+            assert!(matches!(r4.web, Resolution::Attention { .. }), "{name}");
+        }
+    }
+    // r3 is unsafe on the first two, as reported.
+    assert!(
+        ordering::simulate(
+            &registry,
+            &job(
+                u64::MAX,
+                Recovery {
+                    at,
+                    ledger: true,
+                    nonces: true,
+                    fence: true,
+                    ..Recovery::default()
+                },
+                false
+            ),
+            Rules::R3
+        )
+        .unsafe_
+    );
+}
+
+/// §10.6 C1–C3 over all 13 `ledger-continuity.json` cases.
+#[test]
+fn every_ledger_continuity_case_is_reproduced() {
+    use lightagent_protocol_conformance::continuity::{self, LedgerState};
+    let doc = json("ledger-continuity.json");
+    let strings = |v: &Json| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|x| s(x).to_owned())
+            .collect()
+    };
+    let cases = doc["cases"].as_array().unwrap();
+    for case in cases {
+        let input = &case["input"];
+        let ledger = (!input["ledger"].is_null()).then(|| LedgerState {
+            harness_id: input["ledger"]["harnessId"].as_str().map(str::to_owned),
+            retired: input["ledger"]["retired"].as_bool().unwrap(),
+            operations: input["ledger"]["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| (s(&o["operationId"]).to_owned(), s(&o["state"]).to_owned()))
+                .collect(),
+        });
+        let got = match continuity::check(
+            s(&input["configuredHarnessId"]),
+            ledger.as_ref(),
+            &strings(&input["identityProvisioningRecords"]),
+            &strings(&input["profileMarkers"]),
+        ) {
+            Ok(()) => serde_json::json!({"serve": true}),
+            Err(reason) => serde_json::json!({"serve": false, "reason": reason}),
+        };
+        assert_eq!(got, case["expect"], "{}", case["id"]);
+    }
+    println!(
+        "ledger-continuity.json: {}/{} as expected",
+        cases.len(),
+        cases.len()
+    );
+    assert_eq!(cases.len(), 13);
+}
+
+/// `LEDGER_CONTINUITY_FAILED` is a 503, `protocol`, `transmission-only` code:
+/// never evidence, and never a failed job.
+#[test]
+fn ledger_continuity_failed_is_never_evidence() {
+    let registry = web_registry();
+    let entry = &registry.codes["LEDGER_CONTINUITY_FAILED"];
+    assert_eq!((entry.http, entry.class.as_str()), (503, "protocol"));
+    assert_eq!(web::create_resolution(&entry.class), "transmission-only");
+    let t = |issued_at: u64, outcome: Outcome| Transmission {
+        issued_at,
+        expires_at: issued_at + 60,
+        outcome,
+    };
+    let lcf = || Outcome::Refused {
+        code: "LEDGER_CONTINUITY_FAILED".to_owned(),
+    };
+    // Alone, repeated, or after every other transmission was refused: never failed.
+    for journal in [
+        vec![t(0, lcf())],
+        vec![t(0, lcf()), t(200, lcf()), t(400, lcf())],
+        vec![t(0, Outcome::Uncertain), t(200, lcf())],
+    ] {
+        assert!(!matches!(
+            web::resolve_create_job(&registry, &journal),
+            Resolution::Failed { .. }
+        ));
+    }
+    // R3a: PROFILE_UNAVAILABLE with an open transmission needs attention,
+    // while another merits refusal still rules the same transmission out.
+    let pu = Outcome::Refused {
+        code: "PROFILE_UNAVAILABLE".to_owned(),
+    };
+    let quota = Outcome::Refused {
+        code: "QUOTA_EXCEEDED".to_owned(),
+    };
     assert_eq!(
-        run.web,
+        web::resolve_create_job(&registry, &[t(0, Outcome::Uncertain), t(200, pu.clone())]),
+        Resolution::Attention {
+            code: "PROFILE_UNAVAILABLE_WHILE_OPEN".to_owned()
+        }
+    );
+    assert_eq!(
+        web::resolve_create_job(&registry, &[t(0, Outcome::Uncertain), t(200, quota)]),
+        Resolution::Failed {
+            code: "QUOTA_EXCEEDED".to_owned()
+        }
+    );
+    // Without an open transmission, PROFILE_UNAVAILABLE is an ordinary final
+    // merits refusal (a profile id genuinely in use).
+    assert_eq!(
+        web::resolve_create_job(&registry, &[t(0, pu)]),
         Resolution::Failed {
             code: "PROFILE_UNAVAILABLE".to_owned()
         }
     );
-    assert_eq!(
-        run.bound,
-        Some(0),
-        "the identity store still binds the user"
-    );
-    assert!(run.violates_s(&model));
-
-    // The same search with a ledger replacement added to every schedule.
-    let mut rng = Rng::new(0x1a5e_0004);
-    let violations = (0..20_000)
-        .filter(|_| {
-            let model = ordering::random_scenario(&mut rng, true);
-            ordering::simulate(&registry, &model, Rules::R3).violates_s(&model)
-        })
-        .count();
-    println!("random schedules with a ledger replacement under r3: {violations}/20000 violate S");
-    assert!(violations > 0);
 }

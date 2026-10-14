@@ -1,8 +1,10 @@
 //! An independent, event-driven model of one harness serving one
-//! `profile.create` job, written from r3 §9.2 (nonces), §10 (steps 10–16),
-//! §10.5 (the execution fence) and §13.2/§13.10 (Web's resolution over its
-//! journal). Each r3 rule is a switch, so `ordering-model.json`'s ablations
-//! can be replayed, and the review's own adversarial schedules can be run.
+//! `profile.create` job, written from the specification: §9.2 (nonces), §10
+//! (steps 10–16), §10.5 (the execution fence and the restore rule), §10.6
+//! (ledger continuity, r4), and §13.2/§13.10 (Web's resolution over its
+//! journal, including R3a). Each rule is a switch, so `ordering-model.json`'s
+//! ablations can be replayed, and the review's own adversarial schedules,
+//! including partial recoveries, can be run.
 //!
 //! The only thing taken from the fixtures rather than the specification is
 //! the timing convention: a call holds the lock for `holdFor` seconds
@@ -22,6 +24,13 @@ pub struct Rules {
     pub nonce_retained_until_fenced: bool,
     pub protocol_refusals_final: bool,
     pub journal_before_send: bool,
+    /// §10.5: a recovery raises the fence to `T + 150`.
+    pub restore_raises_fence: bool,
+    /// §10.6 (r4, P8): the gateway fails closed on a C1–C3 failure.
+    pub ledger_continuity_check: bool,
+    /// r3: `PROFILE_UNAVAILABLE` rules out open transmissions like any
+    /// merits refusal. r4's R3a turns that off.
+    pub profile_unavailable_rules_out: bool,
 }
 
 impl Rules {
@@ -33,7 +42,28 @@ impl Rules {
         nonce_retained_until_fenced: true,
         protocol_refusals_final: false,
         journal_before_send: true,
+        restore_raises_fence: true,
+        ledger_continuity_check: false,
+        profile_unavailable_rules_out: true,
     };
+    pub const R4: Rules = Rules {
+        ledger_continuity_check: true,
+        profile_unavailable_rules_out: false,
+        ..Rules::R3
+    };
+}
+
+/// A recovery at real time `at` (also the operator-verified time `T`): the
+/// listed stores go back to their state before the job began; the fence to
+/// `fence_to`.
+#[derive(Clone, Debug, Default)]
+pub struct Recovery {
+    pub at: u64,
+    pub ledger: bool,
+    pub identity: bool,
+    pub nonces: bool,
+    pub fence: bool,
+    pub fence_to: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -67,9 +97,7 @@ pub struct Scenario {
     pub housekeeping: Vec<u64>,
     /// Real time from which the signing key is trusted (step 10).
     pub key_trusted_from: u64,
-    /// Restores of the ledger (`fresh_ledger`) under r3's §10.5 restore rule,
-    /// at real time `at`, with operator-verified time `at` (`T`).
-    pub ledger_restores: Vec<u64>,
+    pub recoveries: Vec<Recovery>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,7 +110,9 @@ pub struct Run {
     pub unsafe_: bool,
     /// The user owns the profile at the end (the identity store's binding),
     /// created by this transmission. A ledger replacement does not remove it.
-    pub bound: Option<usize>,
+    pub binding: Option<usize>,
+    /// The gateway failed closed on the continuity check (§10.6).
+    pub failed_closed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -111,8 +141,8 @@ pub fn simulate(registry: &Registry, scenario: &Scenario, rules: Rules) -> Run {
     for &t in &s.restarts {
         events.push((t, Kind::Restart, 0));
     }
-    for &t in &s.ledger_restores {
-        events.push((t, Kind::Restore, 0));
+    for (r, recovery) in s.recoveries.iter().enumerate() {
+        events.push((recovery.at, Kind::Restore, r));
     }
     for &t in &s.housekeeping {
         events.push((t, Kind::Housekeeping, 0));
@@ -132,6 +162,7 @@ pub fn simulate(registry: &Registry, scenario: &Scenario, rules: Rules) -> Run {
     // store's binding (which a ledger restore does not touch).
     let mut operation: Option<(&'static str, usize)> = None;
     let mut bound: Option<usize> = None;
+    let mut failed_closed = false;
     // The profile directory and ownership record, which `begin` checks
     // ("profile id unknown everywhere") and a ledger restore leaves alone.
     let mut profile_known = false;
@@ -153,10 +184,33 @@ pub fn simulate(registry: &Registry, scenario: &Scenario, rules: Rules) -> Run {
                 }
             }
             Kind::Restore => {
-                // §10.5: a new ledger for this harness id. Operations are
-                // lost; the fence becomes max(restored, T + 150).
-                operation = None;
-                fence = fence.max(now + 150);
+                let r = &s.recoveries[i];
+                if r.ledger {
+                    operation = None;
+                }
+                if r.identity {
+                    bound = None;
+                }
+                if r.nonces {
+                    nonces.clear();
+                }
+                if r.fence {
+                    fence = r.fence_to;
+                    pending_fence = None;
+                }
+                // `begin` sees the profile through the identity and profile
+                // stores, which this model restores together.
+                profile_known = bound.is_some() || operation.is_some();
+                if rules.restore_raises_fence {
+                    fence = fence.max(now + 150);
+                }
+                // §10.6 C2: a binding whose operation the ledger lacks. C3: a
+                // completed operation without its identity record.
+                let c2 = bound.is_some() && operation.is_none();
+                let c3 = matches!(operation, Some(("completed", _))) && bound.is_none();
+                if rules.ledger_continuity_check && (c2 || c3) {
+                    failed_closed = true;
+                }
             }
             Kind::Housekeeping => {
                 let c = clock(now);
@@ -177,7 +231,10 @@ pub fn simulate(registry: &Registry, scenario: &Scenario, rules: Rules) -> Run {
                 let d = &s.deliveries[i];
                 let tx = &s.transmissions[d.transmission];
                 let c = clock(now);
-                let refusal = if now < s.key_trusted_from {
+                let refusal = if failed_closed {
+                    // Answered before step 1, changing nothing.
+                    Some("LEDGER_CONTINUITY_FAILED")
+                } else if now < s.key_trusted_from {
                     Some("UNKNOWN_KEY")
                 } else if tx.issued_at > c + SKEW {
                     Some("NOT_YET_VALID")
@@ -204,7 +261,9 @@ pub fn simulate(registry: &Registry, scenario: &Scenario, rules: Rules) -> Run {
                 let release = acquired + d.hold_for;
                 let c = clock(acquired);
                 let deadline = tx.expires_at + SKEW;
-                let answer = if (rules.execution_deadline && c >= deadline)
+                let answer = if failed_closed {
+                    "LEDGER_CONTINUITY_FAILED".to_owned()
+                } else if (rules.execution_deadline && c >= deadline)
                     || (rules.fence && deadline <= fence)
                 {
                     "EXPIRED".to_owned()
@@ -220,13 +279,19 @@ pub fn simulate(registry: &Registry, scenario: &Scenario, rules: Rules) -> Run {
                         }
                     }
                     match operation {
-                        Some((_, by)) => {
+                        // `resume` drives a recorded `pending` operation to
+                        // completion (and binds); a terminal one is returned
+                        // as recorded, with no new binding (P4, S1).
+                        Some(("pending", by)) => {
                             operation = Some(("completed", by));
                             bound = Some(by);
                             "OPERATION:completed".to_owned()
                         }
-                        None if profile_known => "PROFILE_UNAVAILABLE".to_owned(),
+                        Some((state, _)) => format!("OPERATION:{state}"),
+                        // PR #26 `begin` order: quota (with issuer, template
+                        // and ledger capacity) before the profile id check.
                         None if !quota_free(acquired) => "QUOTA_EXCEEDED".to_owned(),
+                        None if profile_known => "PROFILE_UNAVAILABLE".to_owned(),
                         None if d.crash_after_record => {
                             operation = Some(("pending", d.transmission));
                             profile_known = true;
@@ -274,7 +339,12 @@ pub fn simulate(registry: &Registry, scenario: &Scenario, rules: Rules) -> Run {
                 }
             })
             .collect();
-        resolve_create_job_with(registry, &journal, rules.protocol_refusals_final)
+        resolve_create_job_with(
+            registry,
+            &journal,
+            rules.protocol_refusals_final,
+            rules.profile_unavailable_rules_out,
+        )
     };
     let mut moments: Vec<u64> = answered_at
         .iter()
@@ -287,8 +357,13 @@ pub fn simulate(registry: &Registry, scenario: &Scenario, rules: Rules) -> Run {
     let failed_at = moments
         .into_iter()
         .find(|&at| matches!(resolve_at(Some(at)), Resolution::Failed { .. }));
-    let unsafe_ = failed_at
-        .is_some_and(|at| operation.is_some_and(|(_, by)| s.transmissions[by].issued_at <= at));
+    // Only transmissions Web had issued when it concluded count: a failed job
+    // is never sent again.
+    let issued_by = |t: usize, at: u64| s.transmissions[t].issued_at <= at;
+    let unsafe_ = failed_at.is_some_and(|at| {
+        operation.is_some_and(|(_, by)| issued_by(by, at))
+            || bound.is_some_and(|t| issued_by(t, at))
+    });
     let web = resolve_at(None);
     Run {
         answers,
@@ -296,7 +371,8 @@ pub fn simulate(registry: &Registry, scenario: &Scenario, rules: Rules) -> Run {
         web,
         failed_at,
         unsafe_,
-        bound,
+        binding: bound,
+        failed_closed,
     }
 }
 
@@ -374,8 +450,22 @@ pub fn random_scenario(rng: &mut crate::model::Rng, restore: bool) -> Scenario {
         restarts: (0..rng.range(0, 2)).map(|_| at(rng, 0, 900)).collect(),
         housekeeping: (0..rng.range(0, 2)).map(|_| at(rng, 0, 900)).collect(),
         key_trusted_from: if rng.chance(30) { at(rng, 0, 300) } else { 0 },
-        ledger_restores: if restore {
-            vec![at(rng, 0, 900)]
+        recoveries: if restore {
+            let mut r = Recovery {
+                at: at(rng, 0, 900),
+                ledger: rng.chance(50),
+                identity: rng.chance(50),
+                nonces: rng.chance(50),
+                fence: rng.chance(50),
+                fence_to: 0,
+            };
+            if !(r.ledger || r.identity || r.nonces || r.fence) {
+                r.ledger = true;
+            }
+            if r.fence && rng.chance(50) {
+                r.fence_to = at(rng, -100, 200);
+            }
+            vec![r]
         } else {
             Vec::new()
         },
@@ -383,19 +473,91 @@ pub fn random_scenario(rng: &mut crate::model::Rng, restore: bool) -> Scenario {
 }
 
 impl Run {
-    /// Web concluded `failed`, while the job's operation exists or the user
-    /// owns the profile.
-    pub fn violates_s(&self, scenario: &Scenario) -> bool {
-        // Only transmissions Web had issued when it concluded count: a
-        // failed job is never sent again.
-        let issued_by = |t: usize, at: u64| scenario.transmissions[t].issued_at <= at;
+    /// Web concluded `failed`, while an operation or binding exists from a
+    /// transmission it had issued by then (invariant S violated).
+    pub fn violates_s(&self) -> bool {
         self.unsafe_
-            || self.failed_at.is_some_and(|at| {
-                self.bound.is_some_and(|t| issued_by(t, at))
-                    || self
-                        .operation
-                        .as_ref()
-                        .is_some_and(|(_, by)| issued_by(*by, at))
-            })
+    }
+}
+
+/// The recovery hazard family (the review's own generator): one create `u`
+/// that completes, crashes after recording, or is refused (sometimes with a
+/// duplicate copy), its answer often lost; then one recovery of a random
+/// non-empty subset of {ledger, identity, nonces, fence}, with the fence
+/// going back to 0 or an older value; then 1–3 resends at or after `u`'s
+/// horizon, under a quota window, with a clock offset of ±30 s and up to one
+/// step of ±60 s.
+pub fn random_recovery_scenario(rng: &mut crate::model::Rng) -> Scenario {
+    const T0: i64 = 1_791_000_000;
+    let at = |rng: &mut crate::model::Rng, lo: i64, hi: i64| (T0 + rng.range(lo, hi)) as u64;
+    let u_lifetime = rng.range(1, 120);
+    let mut transmissions = vec![Tx {
+        issued_at: T0 as u64,
+        expires_at: (T0 + u_lifetime) as u64,
+        journaled: true,
+    }];
+    let horizon = T0 + u_lifetime + 60;
+    let mut deliveries = vec![Delivery {
+        transmission: 0,
+        arrives_at: at(rng, 0, 2),
+        lock_at: None,
+        hold_for: 1,
+        answer_to_web: !rng.chance(70),
+        crash_after_record: rng.chance(20),
+    }];
+    if rng.chance(25) {
+        deliveries.push(Delivery {
+            transmission: 0,
+            arrives_at: at(rng, 3, 90),
+            lock_at: None,
+            hold_for: 1,
+            answer_to_web: false,
+            crash_after_record: false,
+        });
+    }
+    let recovery_at = at(rng, 5, 400);
+    let mut issued = horizon + rng.range(0, 1) * rng.range(0, 300);
+    for _ in 0..rng.range(1, 3) {
+        let t = transmissions.len();
+        transmissions.push(Tx {
+            issued_at: issued as u64,
+            expires_at: (issued + rng.range(1, 120)) as u64,
+            journaled: true,
+        });
+        deliveries.push(Delivery {
+            transmission: t,
+            arrives_at: (issued + rng.range(0, 2)) as u64,
+            lock_at: None,
+            hold_for: 1,
+            answer_to_web: !rng.chance(20),
+            crash_after_record: false,
+        });
+        issued += rng.range(0, 200);
+    }
+    let mut recovery = Recovery {
+        at: recovery_at,
+        ledger: rng.chance(50),
+        identity: rng.chance(50),
+        nonces: rng.chance(50),
+        fence: rng.chance(50),
+        fence_to: 0,
+    };
+    if !(recovery.ledger || recovery.identity || recovery.nonces || recovery.fence) {
+        recovery.ledger = true;
+    }
+    if recovery.fence && rng.chance(50) {
+        recovery.fence_to = at(rng, -100, 100);
+    }
+    let mut clock = vec![(0, rng.range(-30, 30))];
+    if rng.chance(30) {
+        clock.push((at(rng, 0, 600), rng.range(-60, 60)));
+    }
+    Scenario {
+        transmissions,
+        deliveries,
+        clock,
+        quota: vec![(at(rng, -10, 300), at(rng, 0, 900))],
+        recoveries: vec![recovery],
+        ..Scenario::default()
     }
 }

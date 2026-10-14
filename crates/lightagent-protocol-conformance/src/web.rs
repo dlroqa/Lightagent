@@ -302,17 +302,19 @@ pub fn create_resolution(class: &str) -> &'static str {
     }
 }
 
-/// §13.2 R1–R3 over every transmission of one create job (r3).
+/// §13.2 R1–R3 with R3a over every transmission of one create job (r4).
 pub fn resolve_create_job(registry: &Registry, transmissions: &[Transmission]) -> Resolution {
-    resolve_create_job_with(registry, transmissions, false)
+    resolve_create_job_with(registry, transmissions, false, false)
 }
 
 /// R1–R3, optionally with r2's rule that `protocol` refusals are final (the
-/// `r3-protocol-refusals-final` ablation).
+/// `r3-protocol-refusals-final` ablation), and optionally with r3's rule that
+/// `PROFILE_UNAVAILABLE` rules out open transmissions (no R3a).
 pub fn resolve_create_job_with(
     registry: &Registry,
     transmissions: &[Transmission],
     protocol_refusals_final: bool,
+    profile_unavailable_rules_out: bool,
 ) -> Resolution {
     // R1, with two operation ids for one key as an anomaly.
     let operations: Vec<(&str, &str)> = transmissions
@@ -377,6 +379,15 @@ pub fn resolve_create_job_with(
             Outcome::Operation { .. } => false,
         })
         .collect();
+    let refused_with = |wanted: &str| refusals.iter().any(|(_, code, _)| *code == wanted);
+    // R3a (r4): with an open transmission, PROFILE_UNAVAILABLE may come from a
+    // ledger that forgot an operation whose binding survives.
+    if !profile_unavailable_rules_out && !open.is_empty() && refused_with("PROFILE_UNAVAILABLE") {
+        return Resolution::Attention {
+            code: "PROFILE_UNAVAILABLE_WHILE_OPEN".to_owned(),
+        };
+    }
+    let continuity = refused_with("LEDGER_CONTINUITY_FAILED");
     if open.is_empty() {
         return match refusals.last() {
             Some((_, code, _)) => Resolution::Failed {
@@ -398,7 +409,22 @@ pub fn resolve_create_job_with(
         Some((_, code, _)) if ruled_out => Resolution::Failed {
             code: (*code).to_owned(),
         },
+        // R3a: an otherwise unresolved job on a failed-closed harness.
+        _ if continuity => Resolution::Attention {
+            code: "LEDGER_CONTINUITY_FAILED".to_owned(),
+        },
         _ => Resolution::Unresolved,
+    }
+}
+
+/// §10.6 (r4): on a retired harness Web sends nothing. Anything still to do
+/// becomes operator attention, and so does every live (`completed`) profile,
+/// which needs the operator's migration or recovery decision (step 4).
+pub fn plan_retired(resolution: &Resolution, desired_present: bool) -> &'static str {
+    let live = matches!(resolution, Resolution::Resolved { state, .. } if state == "completed");
+    match plan(resolution, desired_present) {
+        "none" if !live => "none",
+        _ => "operator-attention",
     }
 }
 

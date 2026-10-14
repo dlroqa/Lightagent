@@ -20,4 +20,4 @@
 
 # Mirror of Web's LA-WEB-PROVISIONING/1 candidate. Hashed by its manifest, so
 # its bytes are kept exactly as committed, on every platform.
-docs/integrations/web/la-web-provisioning-1-r3/** -text
+docs/integrations/web/la-web-provisioning-1-r4/** -text
