@@ -1993,3 +1993,5 @@ fn web_continuity_inputs_are_observable_on_the_real_stores() {
         Some(completed.principal_id)
     );
 }
+
+mod continuity;

@@ -6,6 +6,21 @@ All notable Lightagent changes are documented here.
 
 ### Security
 
+- Provisioning-ledger continuity (`LA-WEB-PROVISIONING/1` r4 §10.6, L1),
+  not activated.
+  - An operator explicitly `initialize`s the provisioning ledger for one
+    harness id. It is stamped with the harness id and a random continuity
+    id, and is never stamped implicitly.
+  - `initialize` is refused while any earlier provisioning trace remains.
+    `retire` is permanent and deletes nothing.
+  - `check_continuity` evaluates C1–C3 and changes nothing. Its evidence:
+    the stamp, a provisioning-only identity sequence (committed in the same
+    identity transaction as each bind or revoke), the identity generation,
+    and every profile marker, checked on its own.
+  - All 13 frozen `ledger-continuity.json` cases are reproduced on real
+    stores.
+  - Installations that are not initialized are unchanged byte for byte.
+  - Details: `docs/architecture/provisioning-ledger-continuity.md`.
 - Profile provisioning for the account-control website, not activated.
   A least-privilege boundary (`lightagent_core::provisioning`) provisions a
   profile for an external user and binds its ownership.

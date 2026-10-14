@@ -103,6 +103,35 @@ struct Idempotency {
     at_unix: u64,
 }
 
+/// The provisioning transaction that last advanced
+/// [`ProvisioningContinuity`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuityAction {
+    Bind,
+    Revoke,
+}
+
+/// The identity store's half of provisioning-ledger continuity
+/// (`LA-WEB-PROVISIONING/1` r4 §10.6). It is written only by a provisioning
+/// bind or revoke transaction of an explicitly initialized ledger, in the
+/// same transaction as the ownership change. Every field is required: a
+/// partial record does not parse, so the store fails closed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProvisioningContinuity {
+    /// The ledger's random continuity id.
+    pub continuity_id: String,
+    /// How many provisioning bind and revoke transactions this store has
+    /// applied. Nothing else advances it: unlike the document generation,
+    /// ordinary operator transactions leave it alone.
+    pub sequence: u64,
+    /// The ledger generation when that transaction ran.
+    pub ledger_generation_seen: u64,
+    /// The operation that transaction belonged to.
+    pub last_operation: String,
+    pub last_action: ContinuityAction,
+}
+
 /// The whole durable authorization state. Holds no secret: credentials are
 /// verifiers only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +152,11 @@ pub struct IdentityDocument {
     reassignments: VecDeque<Reassignment>,
     #[serde(default)]
     idempotency: BTreeMap<String, Idempotency>,
+    /// Absent until an initialized provisioning ledger binds or revokes, and
+    /// then never written by anything else. Not serialized while absent, so
+    /// a document without it keeps its exact bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provisioning_continuity: Option<ProvisioningContinuity>,
 }
 
 impl Default for IdentityDocument {
@@ -137,6 +171,7 @@ impl Default for IdentityDocument {
             bindings: BTreeMap::new(),
             reassignments: VecDeque::new(),
             idempotency: BTreeMap::new(),
+            provisioning_continuity: None,
         }
     }
 }
@@ -171,6 +206,18 @@ impl IdentityDocument {
     /// Whether an operator registered `issuer` (exact match).
     pub fn is_trusted_issuer(&self, issuer: &str) -> bool {
         self.trusted_issuers.contains(issuer)
+    }
+
+    /// The provisioning-ledger continuity marker, if a provisioning
+    /// transaction of an initialized ledger has written one.
+    pub fn provisioning_continuity(&self) -> Option<&ProvisioningContinuity> {
+        self.provisioning_continuity.as_ref()
+    }
+
+    /// Whether a retained idempotency record's key starts with `prefix`.
+    /// Records are pruned, so `false` proves nothing about older ones.
+    pub fn has_idempotency_key_with_prefix(&self, prefix: &str) -> bool {
+        self.idempotency.keys().any(|key| key.starts_with(prefix))
     }
 
     /// The principal an external identity maps to, if any.
@@ -225,6 +272,8 @@ pub enum Refusal {
     OperatorOnlyRestriction,
     UnknownCredential,
     IdempotencyConflict,
+    /// The provisioning continuity marker does not follow from the ledger's.
+    ContinuityMismatch,
 }
 
 impl Refusal {
@@ -241,6 +290,7 @@ impl Refusal {
             Self::OperatorOnlyRestriction => "operator_only_restriction",
             Self::UnknownCredential => "unknown_credential",
             Self::IdempotencyConflict => "idempotency_conflict",
+            Self::ContinuityMismatch => "continuity_mismatch",
         }
     }
 }
@@ -708,6 +758,18 @@ impl Transaction<'_> {
 
     pub fn document(&self) -> &IdentityDocument {
         &self.document
+    }
+
+    /// Replace the provisioning continuity marker. Only the provisioning
+    /// ledger calls this, inside its bind and revoke transactions, so the
+    /// marker commits with the ownership change or not at all.
+    pub fn set_provisioning_continuity(
+        &mut self,
+        continuity: ProvisioningContinuity,
+    ) -> Result<(), IdentityStoreError> {
+        self.require(Capability::Provision)?;
+        self.document.provisioning_continuity = Some(continuity);
+        Ok(())
     }
 
     /// Accept external identities from `issuer` (an exact `https://` URL).
