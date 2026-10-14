@@ -1123,40 +1123,40 @@ fn continuity_uninitialized_documents_keep_their_shape() {
 // profile is created and nothing is bound, by resend or reconcile.
 #[test]
 fn continuity_retirement_stops_operations_recorded_before_it() {
-    let world = initialized();
-    world.service.inject(Fault::PendingRecorded);
+    let retired = initialized();
+    retired.service.inject(Fault::PendingRecorded);
     assert!(
-        world
+        retired
             .provision("idk_fixturecreate00000000001", &web_request(P1))
             .is_err()
     );
-    world.service.inject(Fault::ProfileCreatedRecorded);
+    retired.service.inject(Fault::ProfileCreatedRecorded);
     assert!(
-        world
+        retired
             .provision("idk_fixturecreate00000000002", &web_request(P2))
             .is_err()
     );
-    world.service.retire(&operator(), HARNESS).unwrap();
+    retired.service.retire(&operator(), HARNESS).unwrap();
     for (key, id) in [
         ("idk_fixturecreate00000000001", P1),
         ("idk_fixturecreate00000000002", P2),
     ] {
         assert_eq!(
-            world.provision(key, &web_request(id)).unwrap_err(),
+            retired.provision(key, &web_request(id)).unwrap_err(),
             ProvisioningError::Denied("harness_retired")
         );
     }
-    let report = world.service.reconcile(&operator()).unwrap();
+    let report = retired.service.reconcile(&operator()).unwrap();
     assert_eq!(report.still_pending, 2);
-    assert_eq!(operation_for(&world, P1).state, OperationState::Pending);
+    assert_eq!(operation_for(&retired, P1).state, OperationState::Pending);
     assert_eq!(
-        operation_for(&world, P2).state,
+        operation_for(&retired, P2).state,
         OperationState::ProfileCreated
     );
-    assert!(!world.profile_dir(P1).exists());
-    assert!(world.profile_dir(P2).exists(), "kept, never deleted");
-    assert!(world.effective().get(&profile(P2)).is_none());
-    assert_eq!(world.marker(), None);
+    assert!(!retired.profile_dir(P1).exists());
+    assert!(retired.profile_dir(P2).exists(), "kept, never deleted");
+    assert!(retired.effective().get(&profile(P2)).is_none());
+    assert_eq!(retired.marker(), None);
 
     let staged = world();
     std::fs::create_dir_all(staged.service.root().join(STAGING).join("old")).unwrap();
