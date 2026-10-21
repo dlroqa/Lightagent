@@ -108,7 +108,8 @@ jobs:
     # models through the real worker runtime against local fixtures. It
     # needs an operator-approved endpoint: secret SUBAGENT_EVAL_BASE_URL,
     # optional secret SUBAGENT_EVAL_API_KEY, variable SUBAGENT_EVAL_MODELS
-    # (comma-separated). Without them it records BLOCKED, never a pass.
+    # (comma-separated). It reads them only on a manual dispatch; pull
+    # requests and a missing endpoint record BLOCKED, never a pass.
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -123,7 +124,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: subagents
+      - name: Report that live evaluation does not run here
+        if: github.event_name != 'workflow_dispatch'
+        run: |
+          {
+            echo "### Role evaluation (live): BLOCKED"
+            echo
+            echo "Live models run only on a manual dispatch with an operator-approved"
+            echo "endpoint (docs/subagents/live-evaluation-proposal.md); pull requests never"
+            echo "read its secrets. Nothing was evaluated; this is not a pass."
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Run the recorded role evaluation
+        if: github.event_name == 'workflow_dispatch'
         env:
           LIGHTAGENT_EVAL_BASE_URL: ${{ secrets.SUBAGENT_EVAL_BASE_URL }}
           LIGHTAGENT_EVAL_API_KEY: ${{ secrets.SUBAGENT_EVAL_API_KEY }}
@@ -134,9 +146,8 @@ jobs:
             {
               echo "### Role evaluation (live): BLOCKED"
               echo
-              echo "No operator-approved model endpoint is configured for this repository."
-              echo "Nothing was evaluated; this is not a pass. The deterministic scoring"
-              echo "tests run in the check workflow."
+              echo "No operator-approved model endpoint is configured. Nothing was evaluated;"
+              echo "this is not a pass."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi

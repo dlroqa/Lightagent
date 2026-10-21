@@ -356,6 +356,17 @@ pub trait RunFactory: Send + Sync + 'static {
         Err("a profile-scoped tool catalog is not available in this embedding".to_owned())
     }
 
+    /// Each specialist role's readiness for a run of `profile` (the active
+    /// one when `None`) started with `trust`. The default refuses, keeping it
+    /// operator-only where the embedding cannot compute it.
+    async fn workers_for(
+        &self,
+        _profile: Option<&ProfileId>,
+        _trust: RunTrust,
+    ) -> Result<serde_json::Value, String> {
+        Err("specialist readiness is not available in this embedding".to_owned())
+    }
+
     /// The Jev status an ordinary user of `profile` may see: that profile's
     /// own permissions and latest classification only (no endpoint,
     /// verification, threshold, model or other profile's state). The default
@@ -766,6 +777,15 @@ impl RunManager {
         trust: RunTrust,
     ) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
         self.factory.tools_for(profile, trust).await
+    }
+
+    /// Each specialist role's readiness for a run of `profile` with `trust`.
+    pub async fn workers_for(
+        &self,
+        profile: Option<&ProfileId>,
+        trust: RunTrust,
+    ) -> Result<serde_json::Value, String> {
+        self.factory.workers_for(profile, trust).await
     }
 
     /// The Jev status an ordinary user of `profile` may see.

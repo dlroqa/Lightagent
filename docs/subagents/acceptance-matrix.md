@@ -1,0 +1,28 @@
+# Specialist subagents: acceptance matrix
+
+Each acceptance item of the build specification (§9), with the kind of evidence behind it. The four kinds are never mixed:
+
+| Kind | What it proves | Where |
+| --- | --- | --- |
+| **Seeded baseline** | That the gap existed, and that it is closed. Each test failed at the baseline and was un-ignored by the stage that closed it. | `crates/lightagent-tools/tests/subagent_baseline.rs`, `lightagent` `seeded_*` |
+| **Deterministic operational** | Mechanics with a scripted model but **real tools**: real egress-guarded fetches to loopback fixtures, real confined workspace I/O, a real approval engine, and a GitHub REST stand-in. | `specialists.rs`, `actions_broker.rs`, `coder_workflow.rs`, `worker_approvals.rs`, `workers/tests.rs`, `serve.rs`, `budget.rs`, `e2e/delivery.mjs` |
+| **Live infrastructure** | The same tools against **real GitHub Actions** on hosted runners, at the PR's exact SHA. | `subagents` workflow job "Tester broker (live GitHub Actions)" |
+| **Live model competence** | What a real model achieves on the recorded tasks. | `role_eval.rs` `live_role_evaluation`: **BLOCKED**, because no approved endpoint exists (`live-evaluation-proposal.md`) |
+
+A scripted test never stands in for model competence.
+
+| # | Specification item | Seeded | Deterministic operational | Live infrastructure | Live model |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Researcher: search, fetch, RAG; citations resolve; private egress and unauthorized corpus fail; timeouts | gaps 3, 4 | `the_researcher_searches_and_fetches_through_the_runs_web_context` (real fetch, sources, unverified citation flagged); `the_researchers_private_egress_is_refused_and_reported`; RAG is the lead's profile-scoped tool (`worker_base`); wrap-up margin before the delegate timeout | — | BLOCKED (`res-1..3`) |
+| 2 | Coder: patch at a recorded SHA, hosted build and test, out-of-scope and stale-base denial | — | `the_coder_returns_a_scoped_patch_tied_to_its_base`; `a_patch_without_a_scope_or_outside_it_is_refused`; `a_patch_on_a_moved_file_or_checkout_is_never_applied`; `a_commit_is_a_fast_forward_of_exactly_the_patch_base` | `live_the_coders_patch_is_committed_and_verified_on_actions` (`rustc --test` at the new SHA passes, at the base fails) | BLOCKED (`cod-1`) |
+| 3 | Reviewer: findings with locations, clean control, write denial | — | `the_reviewer_reads_the_workspace_and_cannot_write_it` | — | BLOCKED (`rev-1`, `rev-2` clean control) |
+| 4 | Tester: dispatch and inspect, one pass and one fail, exact SHA, unauthorized workflow, ref or input denied | — | `actions_broker.rs`: correlation, no duplicate dispatch, pass and fail, logs without the token, refusals, another workflow's run unreadable, tester role end to end | `live_the_broker_reports_a_passing_and_a_failing_hosted_run` | BLOCKED (`tst-1`) |
+| 5 | Skills: role skill context, private overrides, `skill.read`, unavailable skills, widening attempts | gap 3 | `every_role_has_a_versioned_skill_and_a_bounded_ceiling`; role skill in the system prompt (researcher test); `with_default` keeps profile overrides; skills grant no tools (ceiling tests) | — | — |
+| 6 | Tenant isolation: data, assignments, guessed ids, legacy arguments | — | `a_worker_of_another_owner_is_refused_and_never_substituted` (and no other profile named in the error); `the_legacy_profile_argument_is_for_trusted_operator_runs_only`; `legacy_resolution_is_refused_to_an_untrusted_run`; workers get only the lead's contexts. Cross-tenant memory, session and event isolation rests on the existing profile-scoped API tests. | — | — |
+| 7 | Dynamic policy: withdrawn tools, grants, ownership mid-run | — | `a_withdrawn_assignment_stops_the_worker_and_withholds_its_results`; `a_withdrawn_authority_resumes_nothing`; the lead's call guard composed into the child | — | — |
+| 8 | Approvals: no bypass, read-only workers cannot escalate, waiting, denial, timeout and cancellation visible | gap N4 | `worker_approvals.rs`: approval always asked, preview binds the exact action, runs once, decline, expiry, cancellation, revocation; `the_reviewer_…cannot_write_it` | — | — |
+| 9 | Limits: depth, cumulative budget, concurrency, fairness, no duplication, teardown | gaps 6, N1, N2 | `budget.rs` unit tests; `seeded_workers_share_one_tool_call_budget`; `seeded_no_worker_starts_below_the_maximum_depth`; admission FIFO, timeout and cancellation | render scenario `delegated-worker-resumed-after-drop` (no duplicate after reconnect) | — |
+| 10 | UI and SSE: worker progress, sources, terminal states, no stuck spinner | gap 7 | `seeded_a_worker_reports_its_lifecycle_to_the_parent` | Web UI render scenarios `delegated-researcher-completes`, `delegated-coder-blocked`, `delegated-worker-resumed-after-drop` (hosted browser) | — |
+| 11 | Compatibility: legacy use, disabled subagents, CLI, API and ACP, provisioning, Jev, required CI | gap 1 | `legacy_resolution_provisions_missing_role_profiles_…`; the existing `tests/delegate.rs`, `tool_policy.rs` and revocation tests unchanged; readiness API test | the full `check` matrix (11 jobs) green at every stage head; LA-WEB-PROVISIONING/1 r4 fixtures green and unchanged | — |
+
+Not built, and reported as such rather than as evidence: a per-tenant execution sandbox; website preset selection (`docs/integrations/web/subagent-presets-handoff.md`); live model evaluation.
