@@ -712,6 +712,34 @@ pub struct SubagentsConfig {
     pub max_children_per_agent: u8,
     /// Role profile names a delegated task may request.
     pub allowed_roles: Vec<String>,
+    /// How a role without an explicit assignment is resolved. `builtin` (the
+    /// default) runs the typed built-in worker; `legacy_profiles` restores the
+    /// earlier behavior of cloning the lead into profiles named after the
+    /// roles, as a rollback.
+    pub resolution: WorkerResolution,
+    /// Operator routes: a model per role (`researcher = "model-id"`). A
+    /// route takes effect only for a model also in `approved_models`;
+    /// otherwise the role runs on the lead's model and its readiness says so.
+    pub role_models: BTreeMap<String, String>,
+    /// The models a role route may select.
+    pub approved_models: Vec<String>,
+    /// Whether an operator run's `agent.delegate` still accepts the legacy
+    /// `profile` argument. Untrusted runs never may.
+    pub legacy_profile_argument: bool,
+}
+
+/// How a role without an explicit assignment is resolved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerResolution {
+    /// The typed built-in worker. A profile named after the role that a
+    /// person customized is still used, and reported, until it is assigned
+    /// or superseded explicitly.
+    #[default]
+    Builtin,
+    /// The earlier behavior: a profile named after the role, created from
+    /// the lead when missing.
+    LegacyProfiles,
 }
 
 impl Default for SubagentsConfig {
@@ -727,6 +755,10 @@ impl Default for SubagentsConfig {
                 "reviewer".to_owned(),
                 "tester".to_owned(),
             ],
+            resolution: WorkerResolution::Builtin,
+            role_models: BTreeMap::new(),
+            approved_models: Vec::new(),
+            legacy_profile_argument: true,
         }
     }
 }
@@ -1581,6 +1613,18 @@ impl Config {
                 return Err(ConfigError::Invalid(
                     "subagents.allowed_roles must contain non-empty roles".to_owned(),
                 ));
+            }
+        }
+        for (role, model) in &self.subagents.role_models {
+            if crate::workers::WorkerRole::parse(role).is_none() {
+                return Err(ConfigError::Invalid(format!(
+                    "subagents.role_models has an unknown role {role:?}"
+                )));
+            }
+            if model.trim().is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "subagents.role_models.{role} must name a model"
+                )));
             }
         }
         {

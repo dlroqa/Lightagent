@@ -36,6 +36,7 @@ pub mod policy;
 pub mod registry;
 pub mod sandbox;
 pub mod schema;
+pub mod worker;
 pub mod workspace;
 
 pub use context::{
@@ -47,4 +48,5 @@ pub use executor::{BoundedExecutor, CallGuard, DEFAULT_PER_CALL_TIMEOUT};
 pub use output::clamp;
 pub use registry::ToolRegistry;
 pub use schema::{SchemaError, validate};
+pub use worker::{BuiltinResolver, WorkerResolver, WorkerSpec, WorkerTarget, WorkerValidity};
 pub use workspace::Workspace;

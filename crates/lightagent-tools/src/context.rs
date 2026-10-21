@@ -7,20 +7,22 @@
 //! [`Delegation`] bundle with the worker profile store, the provider factory and
 //! the registry and bounds a worker run is given.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
     Arc,
     atomic::{AtomicU8, Ordering},
 };
 use std::time::{Duration, SystemTime};
 
-use lightagent_core::identity::{RunAuthorization, revoked_message};
+use lightagent_core::identity::{RunAuthorization, RunTrust, revoked_message};
 use lightagent_core::{
-    ApprovalPolicy, ProfileStore, ProviderFactory, RunId, RunLimits, SkillStore,
+    ApprovalPolicy, ProfileStore, ProviderFactory, RunId, RunLimits, SkillStore, ToolPolicyMode,
 };
 use tokio_util::sync::CancellationToken;
 
+use crate::executor::CallGuard;
 use crate::registry::ToolRegistry;
+use crate::worker::WorkerResolver;
 use crate::workspace::Workspace;
 
 /// The time source a tool reads.
@@ -80,6 +82,20 @@ pub struct Delegation {
     /// only by calls made from the same executor and therefore cannot be used
     /// by a descendant to consume its parent's allowance.
     pub(crate) children: Arc<AtomicU8>,
+    /// Resolves a role or a legacy profile target to a worker. `None` keeps
+    /// the legacy resolution through `profiles` and `subagents.roles`.
+    pub resolver: Option<Arc<dyn WorkerResolver>>,
+    /// The originating run's trust. An untrusted run's worker tools are
+    /// evaluated under the strict policy, as its own are.
+    pub trust: RunTrust,
+    /// The run's `tools.profile_policy`, applied to a worker profile's own
+    /// `toolsets` exactly as it is to the lead's.
+    pub profile_policy: ToolPolicyMode,
+    /// The MCP servers reached over HTTP, for the worker's tool policy.
+    pub network_mcp_servers: BTreeSet<String>,
+    /// The originating run's per-call guard (its current profile policy),
+    /// re-checked at every worker tool call too.
+    pub call_guard: Option<CallGuard>,
 }
 
 /// A server-provided role preset. The model supplies only a role id; the
@@ -146,6 +162,11 @@ impl Delegation {
             approval_floor: None,
             depth: 0,
             children: Arc::new(AtomicU8::new(0)),
+            resolver: None,
+            trust: RunTrust::LocalOperator,
+            profile_policy: ToolPolicyMode::Off,
+            network_mcp_servers: BTreeSet::new(),
+            call_guard: None,
         }
     }
 
@@ -157,9 +178,30 @@ impl Delegation {
             .map(|preset| preset.profile.as_str())
     }
 
-    /// Whether a child can itself be offered `agent.delegate`.
+    /// The deepest worker generation hierarchical delegation allows.
+    fn max_depth(&self) -> u8 {
+        self.subagents.max_depth.min(2)
+    }
+
+    /// Whether this execution may start a worker: the worker sits one level
+    /// below it, which must not pass the maximum depth. Legacy delegation
+    /// (hierarchy off) is one level deep: only the lead holds a context.
+    pub fn may_start_worker(&self) -> Result<(), String> {
+        let limit = if self.subagents.enabled {
+            self.max_depth()
+        } else {
+            1
+        };
+        if self.depth.saturating_add(1) > limit {
+            return Err(format!("the subagent depth limit ({limit}) is reached"));
+        }
+        Ok(())
+    }
+
+    /// Whether a worker started here may itself be offered `agent.delegate`:
+    /// only when one more generation still fits under the maximum depth.
     pub fn permits_nested_delegation(&self) -> bool {
-        self.subagents.enabled && self.depth < self.subagents.max_depth.min(2)
+        self.subagents.enabled && self.depth.saturating_add(2) <= self.max_depth()
     }
 
     /// Reserve one direct child. Reservations are monotonic for the lifetime
@@ -194,6 +236,11 @@ impl Delegation {
             approval_floor: self.approval_floor,
             depth: self.depth.saturating_add(1),
             children: Arc::new(AtomicU8::new(0)),
+            resolver: self.resolver.clone(),
+            trust: self.trust,
+            profile_policy: self.profile_policy,
+            network_mcp_servers: self.network_mcp_servers.clone(),
+            call_guard: self.call_guard.clone(),
         }
     }
 }

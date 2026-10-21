@@ -25,6 +25,7 @@ mod remote_credentials;
 mod serve;
 mod setup;
 mod slash;
+mod workers;
 
 use std::io::IsTerminal as _;
 use std::process::ExitCode;
@@ -546,15 +547,19 @@ pub(crate) fn default_profile(config: &Config) -> Result<AgentProfile, String> {
     Ok(profile)
 }
 
-/// Create the built-in worker profiles the first time autonomous delegation is
-/// enabled. Existing profiles are never changed: people can tune a specialist
-/// persona, model, or policy and it will be preserved for later runs.
+/// Under `subagents.resolution = "legacy_profiles"` only (the rollback),
+/// create the role profiles the earlier behavior cloned from the lead.
+/// Existing profiles are never changed: people can tune a specialist persona,
+/// model, or policy and it will be preserved for later runs. With the
+/// built-in catalog, roles need no profiles, so none are created.
 pub(crate) fn ensure_subagent_profiles(
     store: &ProfileStore,
     config: &Config,
     lead: &AgentProfile,
 ) -> Result<(), String> {
-    if !config.subagents.enabled {
+    if !config.subagents.enabled
+        || config.subagents.resolution != lightagent_core::WorkerResolution::LegacyProfiles
+    {
         return Ok(());
     }
 
@@ -577,6 +582,15 @@ pub(crate) fn ensure_subagent_profiles(
         }
     }
     Ok(())
+}
+
+/// Whether `profile` is exactly what [`ensure_subagent_profiles`] generated
+/// for `role`, rather than a profile a person customized. A generated one is
+/// superseded by the built-in worker; a customized one keeps being used.
+pub(crate) fn is_generated_subagent_profile(profile: &AgentProfile, role: &str) -> bool {
+    profile.name == format!("{role} subagent")
+        && profile.description == format!("Focused {role} worker for bounded delegated tasks.")
+        && profile.persona.ends_with(subagent_role_instruction(role))
 }
 
 fn subagent_role_instruction(role: &str) -> &'static str {
@@ -1795,13 +1809,14 @@ mod tests {
     }
 
     #[test]
-    fn autonomous_subagents_provision_missing_role_profiles_without_overwriting_them() {
+    fn legacy_resolution_provisions_missing_role_profiles_without_overwriting_them() {
         let home = std::env::temp_dir().join(format!(
             "lightagent-subagent-profiles-{}",
             lightagent_core::RunId::new().as_str()
         ));
         let store = ProfileStore::new(&home);
-        let config = Config::default();
+        let mut config = Config::default();
+        config.subagents.resolution = lightagent_core::WorkerResolution::LegacyProfiles;
         let lead = default_profile(&config).unwrap();
 
         ensure_subagent_profiles(&store, &config, &lead).unwrap();
@@ -1813,20 +1828,24 @@ mod tests {
                 .persona
                 .contains("research specialist")
         );
+        assert!(is_generated_subagent_profile(
+            &store.load(&researcher).unwrap(),
+            "researcher"
+        ));
 
         let mut customized = store.load(&researcher).unwrap();
         customized.persona = "Keep my custom researcher persona.".to_owned();
         store.save(&customized).unwrap();
         ensure_subagent_profiles(&store, &config, &lead).unwrap();
         assert_eq!(store.load(&researcher).unwrap().persona, customized.persona);
+        assert!(!is_generated_subagent_profile(&customized, "researcher"));
 
         std::fs::remove_dir_all(home).unwrap();
     }
 
-    /// Gap 1: built-in workers are cloned into ordinary profiles named after
-    /// their roles, copying whichever lead ran first.
+    /// Gap 1 (closed): built-in workers are not cloned into ordinary
+    /// profiles named after their roles.
     #[test]
-    #[ignore = "seeded: gap 1 (built-in workers as profiles), closed in stage B"]
     fn seeded_built_in_workers_create_no_profiles() {
         let home = std::env::temp_dir().join(format!(
             "lightagent-subagent-builtins-{}",

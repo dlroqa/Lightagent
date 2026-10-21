@@ -33,6 +33,7 @@ pub mod provider;
 pub mod provisioning;
 pub mod skills;
 pub mod tool_stream;
+pub mod workers;
 
 pub use config::{
     AgentConfig, ApprovalPolicy, Config, ConfigError, ConfigStore, DUCKDUCKGO_SEARCH_ENDPOINT,
@@ -40,7 +41,7 @@ pub use config::{
     JevClassificationMode, JevConfig, JevRoutingGrant, JevRoutingInput, JevRoutingPermission,
     McpConfig, McpServerEntry, OpenTerminalConfig, PlatformConfig, PlatformEndpointConfig,
     QdrantConfig, SavedProvider, SecretRef, SecurityConfig, SubagentsConfig, ToolPolicyMode,
-    ToolsConfig, WebConfig, WebSearchConfig,
+    ToolsConfig, WebConfig, WebSearchConfig, WorkerResolution,
 };
 pub use event::{AgentEvent, ClassificationDiagnostics, StopReason};
 pub use ids::RunId;
@@ -67,3 +68,7 @@ pub use provider::{
 };
 pub use skills::{Skill, SkillStore, skill_dirs};
 pub use tool_stream::ToolCallAccumulator;
+pub use workers::{
+    AssignmentTarget, BuiltinWorker, Readiness, RoleReadiness, WorkerAssignment,
+    WorkerAssignments, WorkerRole,
+};
