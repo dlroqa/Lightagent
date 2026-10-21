@@ -31,3 +31,4 @@ pub use terminal::TerminalRun;
 pub use web::{
     WebFetch, WebSearch, WebSearchHit, fetch_text, fetch_text_authorized, search_results,
 };
+pub use worker_approval::{AgentDeclineWorker, AgentResumeWorker};
