@@ -32,10 +32,10 @@ use lightagent_core::{
     PolicyEngine, ProfileId, RiskClass, RunConfig, RunLimits, RunOutcome, Scope, StopReason,
     Suspended, ToolOutcome, ToolProgress,
 };
-use tokio::sync::mpsc::UnboundedReceiver;
-use tokio_util::sync::CancellationToken;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio_util::sync::CancellationToken;
 
 use crate::budget::Grant;
 use crate::context::{Clock, Delegation, SkillContext, ToolCtx};

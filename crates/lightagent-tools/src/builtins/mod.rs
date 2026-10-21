@@ -28,7 +28,6 @@ pub use open_terminal::OpenTerminalRun;
 pub use research::AgentResearch;
 pub use skill::SkillRead;
 pub use terminal::TerminalRun;
-pub use worker_approval::{AgentDeclineWorker, AgentResumeWorker};
 pub use web::{
     WebFetch, WebSearch, WebSearchHit, fetch_text, fetch_text_authorized, search_results,
 };

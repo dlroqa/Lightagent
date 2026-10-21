@@ -35,7 +35,10 @@ async fn decide(args: &Value, ctx: &ToolCtx, granted: bool) -> ToolOutcome {
     let Some(delegation) = ctx.delegation.clone() else {
         return ToolOutcome::error("delegation is not enabled for this run");
     };
-    let handle = args.get("handle").and_then(Value::as_str).unwrap_or_default();
+    let handle = args
+        .get("handle")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     resume_worker(&delegation, handle, granted, ctx).await
 }
 

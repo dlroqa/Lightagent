@@ -139,7 +139,10 @@ fn report(outcome: &ToolOutcome) -> Value {
 /// Delegate the change and return the parked worker's handle.
 async fn park(ctx: &ToolCtx) -> String {
     let outcome = AgentDelegate::new()
-        .call(&json!({ "role": "coder", "task": "Make one() return 1." }), ctx)
+        .call(
+            &json!({ "role": "coder", "task": "Make one() return 1." }),
+            ctx,
+        )
         .await;
     let parked = report(&outcome);
     assert!(!outcome.is_error, "{}", outcome.content);
@@ -229,7 +232,11 @@ async fn an_expired_or_cancelled_approval_resumes_nothing() {
     ctx.cancel.cancel();
     let cancelled = resume(&ctx, &handle).await;
     assert!(cancelled.is_error);
-    assert!(cancelled.content.contains("cancelled"), "{}", cancelled.content);
+    assert!(
+        cancelled.content.contains("cancelled"),
+        "{}",
+        cancelled.content
+    );
     assert_eq!(scratch.file(), BEFORE);
 }
 
