@@ -403,6 +403,70 @@ app's evidence:
   configured, and their timeouts;
 - the profile's `max_turns` and `max_tool_calls`.
 
+### Collecting the evidence (read-only, redacted)
+
+Every step reads; none changes the installation. Never paste API keys,
+bearer tokens, cookies, prompts, answers or tool output.
+
+1. **Version.** Run `lightagent --version`. A version from before this PR
+   has no `stop_reason` field and no event ids. Its saved sessions record
+   the run status, not the stop reason.
+2. **Run id.** In the browser's DevTools → Network, find the
+   `…/runs/<run-id>/events` request for the affected answer. Alternatively,
+   read the session's run ids (step 4).
+3. **Run endpoint.** This works only while the same `lightagent serve`
+   process is running, because runs are held in memory. Use the port it was
+   started with (default 8735). Skip the header when no API key is set.
+
+   ```sh
+   curl -sS -H "Authorization: Bearer $LIGHTAGENT_API_KEY" \
+     http://127.0.0.1:8735/api/lightagent/v1/runs/<run-id> \
+     | jq '{status, events, stop_reason, pending: (.pending_approval != null), revocation}'
+   ```
+
+   Then the terminal event only (ids and names, plus the stop reason; no
+   content):
+
+   ```sh
+   curl -sSN --max-time 30 -H "Authorization: Bearer $LIGHTAGENT_API_KEY" \
+     http://127.0.0.1:8735/api/lightagent/v1/runs/<run-id>/events \
+     | grep -E '^(id|event):|"reason"' | grep -v '"content"'
+   ```
+4. **Saved session**, metadata only. The file is
+   `${LIGHTAGENT_HOME:-$HOME/.lightagent}/profiles/<profile>/sessions/<session-id>.json`:
+
+   ```sh
+   jq '{runs: [.runs[] | {run_id, stop_reason,
+        tools: [.tools[] | {tool, outcome, truncated, duration_ms}]}]}' <session-id>.json
+   ```
+5. **Browser network evidence.** In DevTools → Network, filter on `events`.
+   For each request, record:
+   - the status code and timing;
+   - any `?after=` value;
+   - the `Last-Event-ID` request header;
+   - the **EventStream** tab's *Id* and *Type* columns only.
+
+   Also note console errors that mention `EventSource` or `/runs/`. Do not
+   export a HAR file: it contains message content and credentials.
+6. **Server log** for the minutes around the run. If the service runs under
+   systemd, use `journalctl --user -u <service> --since … --until …`;
+   otherwise use the terminal running `lightagent serve`. Remove anything
+   secret or private before sharing, for example by piping through
+   `grep -viE 'bearer|authorization|api[_-]?key|token|cookie'`. Do not
+   include prompts or answers.
+7. **Limits and retrieval configuration.** These are global values; profile
+   overrides are in the profile's `profile.json` under `limits`.
+
+   ```sh
+   for key in agent.max_turns agent.max_tool_calls agent.wall_clock_secs \
+       web.enabled web.timeout_secs web.search.max_results rag.realtime_enabled \
+       platform.infinity.timeout_secs platform.qdrant.timeout_secs \
+       platform.jev.timeout_secs; do printf '%s=' "$key"; lightagent config get "$key"; done
+   jq '.limits' "${LIGHTAGENT_HOME:-$HOME/.lightagent}/profiles/<profile>/profile.json"
+   ```
+
+   Report `web.search.endpoint` only as "set" or "not set".
+
 ## Validation record
 
 All builds, tests and renders ran on GitHub-hosted runners. Locally, the
@@ -423,5 +487,14 @@ checked only by CI (`cargo fmt --all --check` in `scripts/check.sh`).
 | `38d2a11` | [39607176247](https://github.com/dlroqa/Lightagent/actions/runs/39607176247) | Rust green again. The render failed again: Playwright request routing never saw the `EventSource` request (0 stream requests). It also exposed a real UI bug: a connection fault showed "The run failed." (finding 3d). |
 | `4419b84` | [39608861697](https://github.com/dlroqa/Lightagent/actions/runs/39608861697) | Render green, with all 5 delivery scenarios exercised through a real proxy. The browser resumed with `Last-Event-ID` 7 and 6; the dead-stream case made 4 bounded `?after=1` recoveries and then reported the gap. Screenshots and `delivery/report.json` are in the `lightagent-web-screens` artifact. Linux, macOS, paired E2E, Qdrant + Infinity, package smoke, provisioning fixtures, Open Terminal, sandbox and revocation measurement passed, and so did the Windows check. **All 11 jobs green.** |
 
-The PR's own `pull_request` run validates the final head, which adds only this
-record.
+### Review round (PR #30)
+
+| Tested SHA | Workflow run | Result |
+|---|---|---|
+| `0e85bb3` | check [39610362287](https://github.com/dlroqa/Lightagent/actions/runs/39610362287), Jev [39610362251](https://github.com/dlroqa/Lightagent/actions/runs/39610362251) | All green (the pre-review head). |
+| `6ed0a98` | check [39650299128](https://github.com/dlroqa/Lightagent/actions/runs/39650299128) | `cargo fmt --check` failed on 7 hand-formatted lines, so clippy and the tests did not run. Two new render scenarios expected a reconnect, which the fixed client correctly never makes; their UI assertions passed. The other jobs passed. |
+| `42c26ba` | check [39650818618](https://github.com/dlroqa/Lightagent/actions/runs/39650818618) | Linux, macOS and the render (all 8 scenarios) green. Windows failed `cancellation_during_fetches_ends_the_call_promptly`: the fixed 200 ms cancel fired before Windows had connected to `localhost`, leaving no connection to close (a test race). |
+| `6bc882a` | check [39652078980](https://github.com/dlroqa/Lightagent/actions/runs/39652078980), Jev [39652079012](https://github.com/dlroqa/Lightagent/actions/runs/39652079012) | **All 12 jobs green.** The render's 8 delivery scenarios exercised their streams: resumes after events 7 and 6; four bounded `?after=1` recoveries in the two gap cases; exactly one stream request in the restart and revocation cases (no retry loop). |
+
+The final head adds only this record and the evidence procedure above. Its
+own `pull_request` run is the validation of record for merge.
