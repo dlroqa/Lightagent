@@ -21,17 +21,23 @@
 //! the default policy pauses the run for approval before a worker ever starts.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use lightagent_core::identity::{AuthorizedProvider, Denial, RunAuthorization};
 use lightagent_core::{
-    AgentEvent, AgentLoop, PolicyEngine, ProfileId, RiskClass, RunConfig, RunLimits, RunOutcome,
-    Scope, StopReason, ToolOutcome, ToolProgress,
+    AgentError, AgentEvent, AgentLoop, AgentProvider, ApprovalDecision, ApprovalRequest,
+    PolicyEngine, ProfileId, RiskClass, RunConfig, RunLimits, RunOutcome, Scope, StopReason,
+    Suspended, ToolOutcome, ToolProgress,
 };
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio_util::sync::CancellationToken;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::budget::Grant;
 use crate::context::{Clock, Delegation, SkillContext, ToolCtx};
 use crate::definition::{Tool, ToolDefinition};
 use crate::executor::BoundedExecutor;
@@ -49,6 +55,89 @@ const MAX_SOURCES: usize = 24;
 /// Time kept back from the delegate timeout so a worker wraps up with what it
 /// has instead of being cut off with nothing.
 const WRAP_UP_MARGIN_SECS: u64 = 20;
+/// How long a worker waits, parked, for its pending action to be approved.
+pub const APPROVAL_TTL: Duration = Duration::from_secs(600);
+
+type WorkerLoop = AgentLoop<AuthorizedProvider<Arc<dyn AgentProvider>>, BoundedExecutor>;
+
+/// A worker run in progress: everything needed to finish it, or to park it
+/// while its pending action waits for a person.
+struct WorkerRun {
+    child: WorkerLoop,
+    events: UnboundedReceiver<AgentEvent>,
+    tracker: Tracker,
+    spec: WorkerSpec,
+    offered: Vec<String>,
+    grant: Option<Grant>,
+    cancel: CancellationToken,
+}
+
+/// A worker paused on one exact action that needs approval.
+struct Parked {
+    run: WorkerRun,
+    suspended: Box<Suspended>,
+    request: ApprovalRequest,
+    expires: Instant,
+}
+
+/// The run's parked workers, by one-time handle. A handle names exactly one
+/// pending worker action; taking it removes it, so it can never be replayed.
+/// Dropped with the run, which drops every worker still waiting.
+#[derive(Clone, Default)]
+pub struct ParkedWorkers {
+    inner: Arc<Mutex<BTreeMap<String, Parked>>>,
+}
+
+impl ParkedWorkers {
+    /// A fresh, unguessable handle.
+    fn new_handle() -> String {
+        let id: String = lightagent_core::RunId::new()
+            .as_str()
+            .chars()
+            .filter(char::is_ascii_hexdigit)
+            .take(16)
+            .collect();
+        format!("wk-{id}")
+    }
+
+    fn park(&self, handle: String, parked: Parked) -> bool {
+        match self.inner.lock() {
+            Ok(mut inner) => {
+                inner.insert(handle, parked);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn take(&self, handle: &str) -> Option<Parked> {
+        self.inner.lock().ok()?.remove(handle)
+    }
+
+    /// What approving `handle` would let run, for the approval prompt:
+    /// the worker, the exact tool, its risk and its arguments.
+    pub fn describe(&self, handle: &str) -> Option<String> {
+        let inner = self.inner.lock().ok()?;
+        let parked = inner.get(handle)?;
+        Some(format!(
+            "worker={} tool={} risk={} args={}",
+            parked.run.spec.label,
+            parked.request.tool,
+            parked.request.risk.as_str(),
+            parked.request.arguments_preview
+        ))
+    }
+
+    /// How many workers are waiting.
+    pub fn len(&self) -> usize {
+        self.inner.lock().map(|inner| inner.len()).unwrap_or(0)
+    }
+
+    /// Whether no worker is waiting.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
 
 /// The `agent.delegate` tool.
 pub struct AgentDelegate {
@@ -422,42 +511,89 @@ pub async fn run_worker(
     config.parent = ctx.run.clone();
 
     ctx.report(progress("worker.started", None));
-    let (sink, mut events) = tokio::sync::mpsc::unbounded_channel();
-    let child = AgentLoop::new(provider, executor, config);
-    let run = child.run_streaming(request.task, cancel, sink);
-    tokio::pin!(run);
-    let mut tracker = Tracker::new(limits.max_tool_calls);
+    let (sink, events) = tokio::sync::mpsc::unbounded_channel();
+    let mut run = WorkerRun {
+        child: AgentLoop::new(provider, executor, config),
+        events,
+        tracker: Tracker::new(limits.max_tool_calls),
+        spec,
+        offered,
+        grant,
+        cancel,
+    };
+    let result = {
+        let future = run
+            .child
+            .run_streaming(request.task, run.cancel.clone(), sink);
+        observe(future, &mut run.events, &mut run.tracker, ctx).await
+    };
+    conclude(delegation, run, result, ctx)
+}
+
+/// Drive `future` while recording the worker's events and reporting them.
+async fn observe<R>(
+    future: impl Future<Output = R>,
+    events: &mut UnboundedReceiver<AgentEvent>,
+    tracker: &mut Tracker,
+    ctx: &ToolCtx,
+) -> R {
+    tokio::pin!(future);
     let result = loop {
         tokio::select! {
-            result = &mut run => break result,
+            result = &mut future => break result,
             Some(event) = events.recv() => tracker.observe(&event, ctx),
         }
     };
     while let Ok(event) = events.try_recv() {
         tracker.observe(&event, ctx);
     }
-    let used_tool_calls = u32::try_from(tracker.finished.len()).unwrap_or(u32::MAX);
-    if let (Some(budget), Some(grant)) = (&delegation.budget, grant) {
-        budget.settle(grant, tracker.turns, used_tool_calls);
-    }
+    result
+}
 
+/// Return what the worker did not use of its grant.
+fn settle(delegation: &Delegation, run: &WorkerRun) {
+    let used_tool_calls = u32::try_from(run.tracker.finished.len()).unwrap_or(u32::MAX);
+    if let (Some(budget), Some(grant)) = (&delegation.budget, run.grant) {
+        budget.settle(grant, run.tracker.turns, used_tool_calls);
+    }
+}
+
+/// Finish a worker step: park it on a pending approval, or settle its
+/// budget and return its result.
+fn conclude(
+    delegation: &Delegation,
+    run: WorkerRun,
+    result: Result<RunOutcome, AgentError>,
+    ctx: &ToolCtx,
+) -> ToolOutcome {
     // A worker whose run was revoked, or whose assignment was withdrawn,
     // while it worked hands nothing back, not even a partial answer.
-    if let Err(reason) = ctx.authorized() {
+    let revoked = ctx.authorized().err().or_else(|| {
+        run.spec
+            .validity
+            .as_ref()
+            .and_then(|validity| validity().err())
+    });
+    if let Some(reason) = revoked {
+        settle(delegation, &run);
         ctx.report(progress("worker.cancelled", Some("revoked")));
         return ToolOutcome::error(reason);
     }
-    if let Some(validity) = &spec.validity
-        && let Err(reason) = validity()
-    {
-        ctx.report(progress("worker.cancelled", Some("revoked")));
-        return ToolOutcome::error(reason);
-    }
-
-    let (outcome, status) = if spec.typed_result {
-        typed_outcome(&spec, &offered, result, &tracker)
+    let result = match result {
+        Ok(RunOutcome::AwaitingApproval {
+            events,
+            request,
+            suspended,
+        }) if run.spec.typed_result => {
+            return park(delegation, run, &events, request, suspended, ctx);
+        }
+        other => other,
+    };
+    settle(delegation, &run);
+    let (outcome, status) = if run.spec.typed_result {
+        typed_outcome(&run.spec, &run.offered, result, &run.tracker)
     } else {
-        let outcome = legacy_outcome(&spec, result);
+        let outcome = legacy_outcome(&run.spec, result);
         let status = if outcome.is_error {
             "failed"
         } else {
@@ -467,6 +603,119 @@ pub async fn run_worker(
     };
     ctx.report(progress(&format!("worker.{status}"), Some(status)));
     outcome
+}
+
+/// Park a worker on its pending action and tell the lead how a person can
+/// approve or decline exactly that action.
+fn park(
+    delegation: &Delegation,
+    run: WorkerRun,
+    events: &[AgentEvent],
+    request: ApprovalRequest,
+    suspended: Box<Suspended>,
+    ctx: &ToolCtx,
+) -> ToolOutcome {
+    let handle = ParkedWorkers::new_handle();
+    let approval = json!({
+        "handle": handle,
+        "tool": request.tool,
+        "risk": request.risk.as_str(),
+        "arguments_preview": request.arguments_preview,
+        "expires_in_secs": delegation.approval_ttl.as_secs(),
+    });
+    let limitations = vec![format!(
+        "the worker is waiting for approval of '{}'; nothing ran. Call agent.resume_worker \
+         with handle {handle} to ask the user to approve exactly this action, or \
+         agent.decline_worker to let the worker continue without it",
+        request.tool
+    )];
+    let (outcome, _) = build_report(ReportParts {
+        spec: &run.spec,
+        offered: &run.offered,
+        tracker: &run.tracker,
+        status: "awaiting_approval",
+        stop: None,
+        events,
+        limitations,
+        blocked_on: Some(request.tool.clone()),
+        approval: Some(approval),
+    });
+    let parked = Parked {
+        run,
+        suspended,
+        request,
+        expires: Instant::now() + delegation.approval_ttl,
+    };
+    if !delegation.parked.park(handle, parked) {
+        return ToolOutcome::error("the worker could not be parked for approval");
+    }
+    ctx.report(progress("worker.awaiting_approval", Some("parked")));
+    outcome
+}
+
+/// Resume the worker parked under `handle` with a person's decision on its
+/// pending action: `granted` runs exactly that action, otherwise the worker
+/// continues without it. Expired, cancelled, revoked or unknown handles
+/// resume nothing.
+pub async fn resume_worker(
+    delegation: &Delegation,
+    handle: &str,
+    granted: bool,
+    ctx: &ToolCtx,
+) -> ToolOutcome {
+    let Some(parked) = delegation.parked.take(handle) else {
+        return ToolOutcome::error(
+            "no worker is waiting under that handle: it finished, expired, was cancelled or was \
+             already answered",
+        );
+    };
+    let Parked {
+        mut run,
+        suspended,
+        request,
+        expires,
+    } = parked;
+    let refusal = if Instant::now() >= expires {
+        Some("the worker's approval request expired; the action did not run".to_owned())
+    } else if run.cancel.is_cancelled() || ctx.cancel.is_cancelled() {
+        Some("the run was cancelled; the action did not run".to_owned())
+    } else {
+        ctx.authorized().err().or_else(|| {
+            run.spec
+                .validity
+                .as_ref()
+                .and_then(|validity| validity().err())
+        })
+    };
+    if let Some(reason) = refusal {
+        settle(delegation, &run);
+        ctx.report(progress("worker.cancelled", Some("not_resumed")));
+        return ToolOutcome::error(reason);
+    }
+    let _admitted = match &delegation.admission {
+        Some(admission) if delegation.depth == 0 => {
+            let queued = || ctx.report(progress("worker.queued", None));
+            match admission.admit(&ctx.cancel, queued).await {
+                Ok(admitted) => Some(admitted),
+                Err(reason) => {
+                    settle(delegation, &run);
+                    return ToolOutcome::error(reason);
+                }
+            }
+        }
+        _ => None,
+    };
+    let decision = if granted {
+        ApprovalDecision::grant(request.id.clone())
+    } else {
+        ApprovalDecision::deny(request.id.clone())
+    };
+    ctx.report(progress("worker.resumed", None));
+    let result = {
+        let future = run.child.resume(suspended, decision, run.cancel.clone());
+        observe(future, &mut run.events, &mut run.tracker, ctx).await
+    };
+    conclude(delegation, run, result, ctx)
 }
 
 /// A progress report of `stage`, with the outcome on the last one.
@@ -609,6 +858,9 @@ struct WorkerReport {
     usage: Usage,
     limitations: Vec<String>,
     notes: Vec<&'static str>,
+    /// Present while the worker waits for approval of one exact action.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approval: Option<Value>,
 }
 
 /// The typed result of a role worker. A failure is still a typed result, so
@@ -662,7 +914,46 @@ fn typed_outcome(
         limitations.push(format!("at least one '{name}' call failed"));
     }
 
-    let answer = bounded(final_content(&events), MAX_ANSWER_BYTES);
+    build_report(ReportParts {
+        spec,
+        offered,
+        tracker,
+        status,
+        stop,
+        events: &events,
+        limitations,
+        blocked_on,
+        approval: None,
+    })
+}
+
+/// What a typed result is made from.
+struct ReportParts<'a> {
+    spec: &'a WorkerSpec,
+    offered: &'a [String],
+    tracker: &'a Tracker,
+    status: &'static str,
+    stop: Option<StopReason>,
+    events: &'a [AgentEvent],
+    limitations: Vec<String>,
+    blocked_on: Option<String>,
+    approval: Option<Value>,
+}
+
+/// The typed result, with its sources and citations checked.
+fn build_report(parts: ReportParts<'_>) -> (ToolOutcome, &'static str) {
+    let ReportParts {
+        spec,
+        offered,
+        tracker,
+        status,
+        stop,
+        events,
+        mut limitations,
+        blocked_on,
+        approval,
+    } = parts;
+    let answer = bounded(final_content(events), MAX_ANSWER_BYTES);
     let mut sources = Vec::new();
     let mut returned = BTreeSet::new();
     for call in tracker.finished.iter().filter(|call| call.ok) {
@@ -720,6 +1011,7 @@ fn typed_outcome(
         },
         limitations,
         notes: spec.notes.clone(),
+        approval,
     };
     let content = serde_json::to_string(&report)
         .unwrap_or_else(|_| format!("{{\"schema\":\"{RESULT_SCHEMA}\",\"status\":\"failed\"}}"));

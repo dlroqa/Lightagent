@@ -221,9 +221,20 @@ impl BoundedExecutor {
                 .ok()
                 .map(|args| redact(args).to_string())
                 .unwrap_or_else(|| preview(&call.arguments)),
+            // What approving lets run: the parked worker's exact action.
+            crate::builtins::AgentResumeWorker::NAME => self
+                .resumed_action(&call.arguments)
+                .unwrap_or_else(|| "no worker is waiting under this handle".to_owned()),
             _ => preview(&call.arguments),
         };
         ApprovalRequest::new(call.name.clone(), risk, scopes, arguments_preview)
+    }
+
+    /// The action a resume call would let run, from its handle.
+    fn resumed_action(&self, arguments: &str) -> Option<String> {
+        let args = serde_json::from_str::<Value>(arguments).ok()?;
+        let handle = args.get("handle")?.as_str()?;
+        self.delegation.as_ref()?.parked.describe(handle)
     }
 
     fn blocked_terminal_call(&self, call: &ToolCall) -> Option<String> {
@@ -316,10 +327,15 @@ impl BoundedExecutor {
             tool.definition().risk,
             tool.definition().scopes.clone(),
         );
-        let need = match self.policy.lock() {
+        let mut need = match self.policy.lock() {
             Ok(policy) => policy.evaluate(&request, self.clock.now()),
             Err(_) => return ToolOutcome::error("the approval policy is unavailable"),
         };
+        if call.name == crate::builtins::AgentResumeWorker::NAME
+            && matches!(need, ApprovalNeed::AutoApprove)
+        {
+            need = ApprovalNeed::Require(request.clone());
+        }
         match need {
             ApprovalNeed::Deny(reason) => return ToolOutcome::error(reason),
             ApprovalNeed::Require(_) => {
@@ -416,10 +432,17 @@ impl ToolInvoker for BoundedExecutor {
             return ApprovalNeed::Deny(reason);
         }
         let request = self.request_for(call, risk, scopes);
-        let need = match self.policy.lock() {
+        let mut need = match self.policy.lock() {
             Ok(policy) => policy.evaluate(&request, self.clock.now()),
             Err(_) => ApprovalNeed::Deny("the approval policy is unavailable".into()),
         };
+        // A worker's paused action is always a person's decision, even in a
+        // session allowed to run without restrictions.
+        if call.name == crate::builtins::AgentResumeWorker::NAME
+            && matches!(need, ApprovalNeed::AutoApprove)
+        {
+            need = ApprovalNeed::Require(request.clone());
+        }
         if let ApprovalNeed::Require(request) = &need {
             if let Ok(mut pending) = self.pending.lock() {
                 pending.insert(
