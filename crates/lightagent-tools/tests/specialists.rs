@@ -281,7 +281,7 @@ async fn the_researcher_searches_and_fetches_through_the_runs_web_context() {
     assert_eq!(calls.len(), 2);
     assert!(calls.iter().all(|call| call["ok"] == true), "{calls:?}");
     // The fetched page is a source; the invented citation is flagged.
-    assert_eq!(strings(&report["sources"]), [page.clone()]);
+    assert_eq!(strings(&report["sources"]), std::slice::from_ref(&page));
     assert_eq!(
         strings(&report["unverified_citations"]),
         ["https://invented.test/claim"]

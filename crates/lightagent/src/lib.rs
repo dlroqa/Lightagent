@@ -117,6 +117,11 @@ enum Command {
         #[command(subcommand)]
         action: Option<SessionsAction>,
     },
+    /// Show each specialist role's readiness, or assign a role to a worker.
+    Workers {
+        #[command(subcommand)]
+        action: Option<WorkersAction>,
+    },
     /// Serve the Lightagent HTTP API (runs, sessions, tools, approvals + SSE).
     Serve {
         /// Address to bind.
@@ -203,6 +208,37 @@ enum ConfigAction {
 enum ToolsAction {
     /// List tools available to the active profile, including connected extensions.
     List,
+}
+
+#[derive(Subcommand)]
+enum WorkersAction {
+    /// Each role's readiness: its worker, model, skill, tools and reasons.
+    Status {
+        /// The lead profile (default: the active one).
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// Assign a role to the built-in worker or to a private worker profile.
+    Assign {
+        /// researcher, coder, reviewer or tester.
+        role: String,
+        /// A worker profile with the same owner as the lead profile.
+        #[arg(long, conflicts_with = "builtin", required_unless_present = "builtin")]
+        worker: Option<String>,
+        /// Pin the built-in worker, superseding a profile named after the role.
+        #[arg(long)]
+        builtin: bool,
+        /// The lead profile (default: the active one).
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// Remove a role's assignment, so the role resolves as if it had none.
+    Revoke {
+        role: String,
+        /// The lead profile (default: the active one).
+        #[arg(long)]
+        profile: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -398,6 +434,10 @@ async fn dispatch(cli: Cli) -> Result<(), String> {
         }
         Some(Command::Profiles { action }) => {
             profiles_cmd(action.unwrap_or(ProfilesAction::List), cli.json)
+        }
+        Some(Command::Workers { action }) => {
+            let action = action.unwrap_or(WorkersAction::Status { profile: None });
+            workers_cmd(action, cli.json).await
         }
         Some(Command::Extensions { action }) => match action.unwrap_or(ExtensionsAction::List) {
             ExtensionsAction::List => extensions::list(cli.json),
@@ -820,6 +860,105 @@ async fn tools_list(json: bool) -> Result<(), String> {
     }
     print!("{out}");
     Ok(())
+}
+
+// --- workers ----------------------------------------------------------------
+
+/// The tools a run of `lead` would have under its tool policy, as an
+/// operator: what its workers are drawn from.
+async fn lead_tools(root: &std::path::Path, config: &Config, lead: &AgentProfile) -> ToolRegistry {
+    let profiles = ProfileStore::new(root);
+    let profile_dir = profiles.handle(&lead.id).dir().to_path_buf();
+    let extensions = chat::load_extensions(root, &profile_dir);
+    let skills = chat::load_skills(root, &profile_dir, &extensions, config);
+    let registry =
+        chat::configured_registry(config, &profile_dir, &extensions, !skills.is_empty()).await;
+    let trust = lightagent_core::identity::RunTrust::LocalOperator;
+    chat::tool_policy(config, &extensions, &registry, lead, trust).apply(&registry)
+}
+
+fn worker_role(raw: &str) -> Result<lightagent_core::WorkerRole, String> {
+    lightagent_core::WorkerRole::parse(raw)
+        .ok_or_else(|| format!("unknown role {raw:?}: use researcher, coder, reviewer or tester"))
+}
+
+async fn workers_cmd(action: WorkersAction, json: bool) -> Result<(), String> {
+    let paths = paths()?;
+    let config = load_config(&paths)?;
+    let profiles = ProfileStore::new(paths.root());
+    match action {
+        WorkersAction::Status { profile } => {
+            let lead = chat::resolve_profile(&profiles, &config, profile)?;
+            let tools = lead_tools(paths.root(), &config, &lead).await;
+            let trust = lightagent_core::identity::RunTrust::LocalOperator;
+            let report = workers::readiness(paths.root(), &config, &lead, trust, &tools);
+            if json {
+                let value = serde_json::to_value(&report).map_err(|error| error.to_string())?;
+                println!("{value}");
+                return Ok(());
+            }
+            let mut out = format!("Workers for {}:\n", lead.id.as_str());
+            for entry in report {
+                let reasons = if entry.reasons.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", entry.reasons.join(", "))
+                };
+                out.push_str(&format!(
+                    "  {:<10} {:<17} {}{reasons}\n",
+                    entry.role.as_str(),
+                    entry.state.as_str(),
+                    entry.worker
+                ));
+            }
+            print!("{out}");
+            Ok(())
+        }
+        WorkersAction::Assign {
+            role,
+            worker,
+            builtin: _,
+            profile,
+        } => {
+            let lead = chat::resolve_profile(&profiles, &config, profile)?;
+            let role = worker_role(&role)?;
+            let target = match worker {
+                Some(id) => lightagent_core::AssignmentTarget::Profile {
+                    profile: ProfileId::new(&id).map_err(|error| error.to_string())?,
+                },
+                None => lightagent_core::AssignmentTarget::Builtin,
+            };
+            let assignment = workers::assign(paths.root(), &lead.id, role, target)?;
+            if json {
+                let value = serde_json::to_value(&assignment).map_err(|error| error.to_string())?;
+                println!("{value}");
+            } else {
+                println!(
+                    "Assigned {} for {} ({}).",
+                    role.as_str(),
+                    lead.id.as_str(),
+                    assignment.id
+                );
+            }
+            Ok(())
+        }
+        WorkersAction::Revoke { role, profile } => {
+            let lead = chat::resolve_profile(&profiles, &config, profile)?;
+            let role = worker_role(&role)?;
+            let dir = profiles.handle(&lead.id).dir().to_path_buf();
+            let removed = lightagent_core::WorkerAssignments::new(lead.id.clone(), &dir)
+                .revoke(role)
+                .map_err(|error| error.to_string())?;
+            if json {
+                println!("{}", serde_json::json!({ "role": role, "revoked": removed }));
+            } else if removed {
+                println!("Revoked the {} assignment of {}.", role.as_str(), lead.id.as_str());
+            } else {
+                println!("{} had no {} assignment.", lead.id.as_str(), role.as_str());
+            }
+            Ok(())
+        }
+    }
 }
 
 // --- profiles ---------------------------------------------------------------
