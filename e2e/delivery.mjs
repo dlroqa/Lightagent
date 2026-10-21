@@ -281,7 +281,8 @@ const SCENARIOS = [
     status: () => ({ status: "running" }),
     expect: {
       once: ["Per the researcher, Zephyr shipped on September 10, 2026."],
-      present: ["Asked the researcher to", "Completed"],
+      present: [`Delegated work for “${DELEGATED_TASK}”: Worker finished`],
+      controls: ["Asked the researcher to", "Completed"],
       absent: ["could not be recovered", "Blocked on approval"],
     },
   },
@@ -306,7 +307,8 @@ const SCENARIOS = [
     status: () => ({ status: "running" }),
     expect: {
       once: ["The coder could not write the file without your approval."],
-      present: ["Asked the coder to", "Blocked on approval"],
+      present: ["Delegated work for “Make one() return 1”: Worker stopped before an approval"],
+      controls: ["Asked the coder to", "Blocked on approval"],
       absent: ["Worker finished"],
     },
   },
@@ -332,7 +334,8 @@ const SCENARIOS = [
     status: () => ({ status: "running" }),
     expect: {
       once: ["The researcher found partial evidence."],
-      present: ["Partial"],
+      present: [`Delegated work for “${DELEGATED_TASK}”: Worker finished`],
+      controls: ["Partial"],
       absent: ["could not be recovered"],
       reconnectedAfter: 5,
     },
@@ -467,6 +470,9 @@ async function runScenario(browser, base, dir, scenario) {
     await page.screenshot({ path: `${dir}/${scenario.name}-status-control.png` });
     if (scenario.expect.badge && !controls.includes(scenario.expect.badge)) {
       failures.push(`${scenario.name}: expected the run badge “${scenario.expect.badge}”`);
+    }
+    for (const needle of scenario.expect.controls ?? []) {
+      if (!controls.includes(needle)) failures.push(`${scenario.name}: expected “${needle}” in Status Control`);
     }
 
     for (const needle of scenario.expect.present) {
