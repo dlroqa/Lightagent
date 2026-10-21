@@ -522,18 +522,26 @@ mod tests {
     /// connection is served on its own task, so a stalled source stalls only
     /// itself. `/search/<scenario>` lists the scenario's sources; `/fast`
     /// answers at once, `/broken*` with HTTP 500. `/slow` and `/search/hang`
-    /// never answer: they are held open, and the returned count goes up each
-    /// time the client closes one of them.
-    async fn stub() -> (u16, Arc<AtomicUsize>) {
+    /// never answer: they are held open. `held` counts those that arrived,
+    /// `closed` those the client then closed.
+    struct Stub {
+        port: u16,
+        held: Arc<AtomicUsize>,
+        closed: Arc<AtomicUsize>,
+    }
+
+    async fn stub() -> Stub {
         let listener = tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .await
             .unwrap();
         let port = listener.local_addr().unwrap().port();
+        let held = Arc::new(AtomicUsize::new(0));
         let closed = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&closed);
+        let (arrivals, closes) = (Arc::clone(&held), Arc::clone(&closed));
         tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
-                let closed = Arc::clone(&counter);
+                let held = Arc::clone(&arrivals);
+                let closed = Arc::clone(&closes);
                 tokio::spawn(async move {
                     let mut request = vec![0; 4096];
                     let Ok(read) = socket.read(&mut request).await else {
@@ -547,6 +555,7 @@ mod tests {
                         .unwrap_or("/")
                         .to_owned();
                     if path == "/slow" || path.starts_with("/search/hang") {
+                        held.fetch_add(1, Ordering::SeqCst);
                         // A read of zero bytes is the client closing it.
                         let mut probe = [0u8; 1];
                         let held = socket.read(&mut probe);
@@ -565,7 +574,7 @@ mod tests {
                 });
             }
         });
-        (port, closed)
+        Stub { port, held, closed }
     }
 
     fn stub_route(port: u16, path: &str) -> (&'static str, &'static str, String) {
@@ -646,7 +655,28 @@ mod tests {
     }
 
     async fn retrieve(tool: &RealtimeRag, scenario: &str, cancel: CancellationToken) -> Run {
-        let (port, closed) = stub().await;
+        retrieve_with(tool, scenario, cancel, false).await
+    }
+
+    /// [`retrieve`], optionally cancelling `cancel` as soon as the stub holds
+    /// a request open, so the cancellation lands while a fetch is in flight
+    /// however long the platform takes to connect.
+    async fn retrieve_with(
+        tool: &RealtimeRag,
+        scenario: &str,
+        cancel: CancellationToken,
+        cancel_once_held: bool,
+    ) -> Run {
+        let Stub { port, held, closed } = stub().await;
+        if cancel_once_held {
+            let trigger = cancel.clone();
+            tokio::spawn(async move {
+                while held.load(Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                trigger.cancel();
+            });
+        }
         let (progress, mut reports) = tokio::sync::mpsc::unbounded_channel();
         let ctx = ToolCtx::new(cancel)
             .with_web(web_for(port, scenario))
@@ -782,14 +812,8 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_during_fetches_ends_the_call_promptly() {
-        let cancel = CancellationToken::new();
-        let trigger = cancel.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            trigger.cancel();
-        });
         let tool = RealtimeRag::new(None, 4, 4, 500, 80);
-        let run = retrieve(&tool, "slowonly", cancel).await;
+        let run = retrieve_with(&tool, "slowonly", CancellationToken::new(), true).await;
         assert!(run.elapsed < Duration::from_secs(5), "{:?}", run.elapsed);
         assert!(run.output.is_error);
         assert!(run.output.content.contains("cancelled"));
