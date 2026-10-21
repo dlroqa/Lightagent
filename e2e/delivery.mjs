@@ -180,6 +180,31 @@ const SCENARIOS = [
 
 const occurrences = (haystack, needle) => haystack.split(needle).length - 1;
 
+/**
+ * A real session with one real, quickly failing run (the harness's model is
+ * unreachable), so the Agent screen opens it as a conversation rather than as
+ * a new chat. The scripted run under test is then sent into it.
+ */
+async function seededSession(base, title) {
+  const api = async (path, init = {}) => {
+    const response = await fetch(`${base}/api/lightagent/v1${path}`, {
+      headers: { "content-type": "application/json" },
+      ...init,
+    });
+    if (!response.ok) throw new Error(`${init.method ?? "GET"} ${path} answered ${response.status}`);
+    return response.json();
+  };
+  const { id } = await api("/sessions", { method: "POST", body: "{}" });
+  await api("/runs", { method: "POST", body: JSON.stringify({ message: title, session_id: id }) });
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    const session = await api(`/sessions/${encodeURIComponent(id)}`);
+    if (session.runs.length > 0) return id;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`the seed run for “${title}” did not finish`);
+}
+
 async function runScenario(browser, base, dir, scenario) {
   const failures = [];
   const context = await browser.newContext({ viewport: { width: 1280, height: 1100 }, colorScheme: "dark" });
@@ -220,9 +245,14 @@ async function runScenario(browser, base, dir, scenario) {
   });
 
   try {
+    // The seed is created before the route is used: its run is a real one.
+    const title = `delivery ${scenario.name}`;
+    await seededSession(base, title);
     await page.goto(`${base}/#/`, { waitUntil: "domcontentloaded" });
-    await page.getByText("Where should we begin?").waitFor({ timeout: 15000 });
-    await page.locator("textarea").first().fill(QUESTION);
+    await page.getByText(title, { exact: true }).first().click({ timeout: 15000 });
+    const composer = page.locator(".chat-composer textarea");
+    await composer.waitFor({ timeout: 15000 });
+    await composer.fill(QUESTION);
     await page.getByRole("button", { name: "Send message" }).click();
 
     const wanted = [...scenario.expect.once, ...scenario.expect.present];
