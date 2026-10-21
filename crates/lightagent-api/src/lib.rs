@@ -1277,7 +1277,11 @@ async fn create_run(
                     match sessions.load(&id) {
                         Ok(mut session) => {
                             let events = run.events().await;
-                            session.record_run_events(&events, &format!("{status:?}"));
+                            // The stop reason, as the terminal saves it, so a
+                            // reloaded session still says why a run ended.
+                            let stop =
+                                stop_reason_of(&events).unwrap_or_else(|| format!("{status:?}"));
+                            session.record_run_events(&events, &stop);
                             if let Err(error) = sessions.save(&session) {
                                 eprintln!("could not save agent session {id:?}: {error}");
                             }
@@ -1364,11 +1368,15 @@ async fn get_run(
 ) -> Response {
     match authorized_run(&state, &headers, &id, Scope::RunsRead).await {
         Ok((run, _)) => {
+            let events = run.events().await;
             let mut body = json!({
                 "id": run.id(),
                 "status": run.status().await,
-                "events": run.events().await.len(),
+                "events": events.len(),
                 "pending_approval": run.pending().await,
+                // Additive: why a terminal run stopped (`EndTurn`,
+                // `MaxTokens`, `Incomplete`, …); null while it runs.
+                "stop_reason": stop_reason_of(&events),
             });
             // Only a revoked (multi-user) run carries this, as a fixed code.
             if let Some(denial) = run.revocation() {
@@ -1380,15 +1388,46 @@ async fn get_run(
     }
 }
 
+/// Where a client asks an event stream to resume.
+#[derive(Deserialize)]
+struct EventsQuery {
+    /// The id of the last event the client already has.
+    #[serde(default)]
+    after: Option<usize>,
+}
+
+/// The first buffer position a stream sends: one past the last event id the
+/// client reports, from `?after=` or the `Last-Event-ID` a reconnecting
+/// `EventSource` sends, whichever is later. An unreadable header is ignored
+/// (the client deduplicates by id); none means the whole run.
+fn resume_position(headers: &HeaderMap, query: &EventsQuery) -> usize {
+    let header = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<usize>().ok());
+    [header, query.after]
+        .into_iter()
+        .flatten()
+        .map(|last| last.saturating_add(1))
+        .max()
+        .unwrap_or(0)
+}
+
 async fn run_events(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(query): Query<EventsQuery>,
 ) -> Response {
     match authorized_run(&state, &headers, &id, Scope::RunsRead).await {
-        Ok((run, guard)) => Sse::new(event_stream(run, guard))
-            .keep_alive(KeepAlive::default())
-            .into_response(),
+        Ok((run, guard)) => {
+            // A cursor past the buffer resumes at its end rather than waiting
+            // for events that may never exist.
+            let start = resume_position(&headers, &query).min(run.events().await.len());
+            Sse::new(event_stream(run, guard, start))
+                .keep_alive(KeepAlive::default())
+                .into_response()
+        }
         Err(response) => *response,
     }
 }
@@ -1918,6 +1957,15 @@ async fn respond_approval(
     Json(json!({ "run": state_run.id(), "delivered": delivered })).into_response()
 }
 
+/// The stop reason of a run's terminal event, spelled as the `run.completed`
+/// payload spells it.
+fn stop_reason_of(events: &[AgentEvent]) -> Option<String> {
+    events.iter().rev().find_map(|event| match event {
+        AgentEvent::RunCompleted { reason } => Some(format!("{reason:?}")),
+        _ => None,
+    })
+}
+
 fn not_found(id: &str) -> Response {
     (
         StatusCode::NOT_FOUND,
@@ -1938,16 +1986,19 @@ fn internal(message: &str) -> Response {
 /// arrives.
 const STREAM_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// A run's events as an SSE stream: buffered history first, then the live tail,
-/// ending when the run reaches a terminal state.
+/// A run's events as an SSE stream from buffer position `start`: buffered
+/// history first, then the live tail, ending after the run's terminal event.
+/// Every frame's `id` is its buffer position, so a reconnect resumes in order
+/// with nothing repeated or skipped.
 fn event_stream(
     run: Arc<RunState>,
     guard: Option<StreamGuard>,
+    start: usize,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     struct Cursor {
         run: Arc<RunState>,
         seen: usize,
-        queue: VecDeque<AgentEvent>,
+        queue: VecDeque<(usize, AgentEvent)>,
         finished: bool,
         guard: Option<StreamGuard>,
         rechecks: tokio::sync::watch::Receiver<u64>,
@@ -1956,7 +2007,7 @@ fn event_stream(
     stream::unfold(
         Cursor {
             run,
-            seen: 0,
+            seen: start,
             queue: VecDeque::new(),
             finished: false,
             guard,
@@ -1969,8 +2020,8 @@ fn event_stream(
                 if cursor.guard.as_ref().is_some_and(|allowed| !allowed()) {
                     return None;
                 }
-                if let Some(event) = cursor.queue.pop_front() {
-                    return Some((Ok(sse::to_sse(&event)), cursor));
+                if let Some((position, event)) = cursor.queue.pop_front() {
+                    return Some((Ok(sse::to_sse_with_id(&event, position)), cursor));
                 }
                 if cursor.finished {
                     return None;
@@ -1992,8 +2043,9 @@ fn event_stream(
                 } else {
                     cursor.run.wait_from(cursor.seen).await
                 };
+                let first = cursor.seen;
                 cursor.seen += new_events.len();
-                cursor.queue.extend(new_events);
+                cursor.queue.extend((first..).zip(new_events));
                 if status.is_terminal() {
                     cursor.finished = true;
                 }

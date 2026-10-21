@@ -1846,6 +1846,14 @@ textarea {
   font-size: 12px;
 }
 
+.tool-call__progress {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
 .tool-call__details {
   display: flex;
   flex-direction: column;

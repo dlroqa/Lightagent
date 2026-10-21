@@ -433,6 +433,9 @@ pub struct ToolCtx {
     /// process (a remote request, a delegated worker). `None` for a run that
     /// is not revocable.
     pub authorization: Option<RunAuthorization>,
+    /// Where the call may report progress while it runs. `None` when the
+    /// caller does not stream it.
+    pub progress: Option<lightagent_core::ToolProgressSink>,
 }
 
 impl ToolCtx {
@@ -448,6 +451,20 @@ impl ToolCtx {
             open_terminal: None,
             skills: None,
             authorization: None,
+            progress: None,
+        }
+    }
+
+    /// Stream this call's progress reports to `progress`.
+    pub fn with_progress(mut self, progress: lightagent_core::ToolProgressSink) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+
+    /// Report how far the call has got. A no-op when nobody listens.
+    pub fn report(&self, progress: lightagent_core::ToolProgress) {
+        if let Some(sink) = &self.progress {
+            let _ = sink.send(progress);
         }
     }
 

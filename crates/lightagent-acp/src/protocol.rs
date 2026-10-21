@@ -98,7 +98,10 @@ pub fn stop_reason(reason: &StopReason) -> &'static str {
     match reason {
         StopReason::Cancelled => "cancelled",
         StopReason::MaxTurns => "max_turn_requests",
-        StopReason::Error => "refusal",
+        StopReason::MaxTokens => "max_tokens",
+        // ACP has no early-end reason; a stream that stopped before the turn
+        // finished is reported like a failure, never as `end_turn`.
+        StopReason::Error | StopReason::Incomplete => "refusal",
         _ => "end_turn",
     }
 }
@@ -176,6 +179,8 @@ mod tests {
         assert_eq!(stop_reason(&StopReason::Cancelled), "cancelled");
         assert_eq!(stop_reason(&StopReason::EndTurn), "end_turn");
         assert_eq!(stop_reason(&StopReason::Error), "refusal");
+        assert_eq!(stop_reason(&StopReason::MaxTokens), "max_tokens");
+        assert_eq!(stop_reason(&StopReason::Incomplete), "refusal");
     }
 
     #[test]

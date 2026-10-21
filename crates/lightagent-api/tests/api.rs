@@ -335,6 +335,166 @@ async fn a_run_can_be_created_and_streamed_over_sse() {
     assert!(body.contains("run.completed"));
 }
 
+/// One SSE frame: its id, event name and data.
+#[derive(Debug, PartialEq)]
+struct Frame {
+    id: Option<usize>,
+    name: String,
+    data: String,
+}
+
+fn frames(body: &str) -> Vec<Frame> {
+    body.split("\n\n")
+        .filter_map(|block| {
+            let mut frame = Frame {
+                id: None,
+                name: String::new(),
+                data: String::new(),
+            };
+            for line in block.lines() {
+                if let Some(id) = line.strip_prefix("id: ") {
+                    frame.id = id.trim().parse().ok();
+                } else if let Some(name) = line.strip_prefix("event: ") {
+                    frame.name = name.to_owned();
+                } else if let Some(data) = line.strip_prefix("data: ") {
+                    frame.data.push_str(data);
+                }
+            }
+            (!frame.name.is_empty()).then_some(frame)
+        })
+        .collect()
+}
+
+/// Start a run and read its whole stream once it has ended.
+async fn finished_run(addr: &str, auth: &[(&str, &str)]) -> (String, Vec<Frame>) {
+    let (status, body) = http(
+        addr,
+        "POST",
+        "/api/lightagent/v1/runs",
+        auth,
+        Some(r#"{"message":"what time is it?"}"#),
+    )
+    .await;
+    assert_eq!(status, 202, "{body}");
+    let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, body) = http(
+        addr,
+        "GET",
+        &format!("/api/lightagent/v1/runs/{id}/events"),
+        auth,
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    (id, frames(&body))
+}
+
+#[tokio::test]
+async fn every_event_is_numbered_in_order_and_the_stream_ends_after_its_terminal_event() {
+    let addr = spawn_server(app_state(AuthConfig::open())).await;
+    let (_, all) = finished_run(&addr, &[]).await;
+    assert!(all.len() > 4, "{all:?}");
+    for (position, frame) in all.iter().enumerate() {
+        assert_eq!(frame.id, Some(position), "{frame:?}");
+    }
+    let last = all.last().unwrap();
+    assert_eq!(last.name, "run.completed");
+    let data: serde_json::Value = serde_json::from_str(&last.data).unwrap();
+    assert_eq!(data["reason"], "EndTurn");
+    assert_eq!(data["complete"], true);
+}
+
+#[tokio::test]
+async fn a_reconnecting_stream_resumes_after_the_last_event_it_saw() {
+    let addr = spawn_server(app_state(AuthConfig::open())).await;
+    let (id, all) = finished_run(&addr, &[]).await;
+    let events = format!("/api/lightagent/v1/runs/{id}/events");
+    let tail = |from: usize| -> Vec<(Option<usize>, String)> {
+        all[from..]
+            .iter()
+            .map(|frame| (frame.id, frame.name.clone()))
+            .collect()
+    };
+    let resumed = |body: &str| -> Vec<(Option<usize>, String)> {
+        frames(body)
+            .into_iter()
+            .map(|frame| (frame.id, frame.name))
+            .collect()
+    };
+
+    // `?after=` (what the Web UI sends when it reopens a stream).
+    let (status, body) = http(&addr, "GET", &format!("{events}?after=2"), &[], None).await;
+    assert_eq!(status, 200);
+    assert_eq!(resumed(&body), tail(3), "nothing repeated, nothing skipped");
+
+    // `Last-Event-ID` (what a browser's EventSource sends on its own).
+    let (_, body) = http(&addr, "GET", &events, &[("Last-Event-ID", "4")], None).await;
+    assert_eq!(resumed(&body), tail(5));
+
+    // Both: the later cursor wins.
+    let (_, body) = http(
+        &addr,
+        "GET",
+        &format!("{events}?after=4"),
+        &[("Last-Event-ID", "1")],
+        None,
+    )
+    .await;
+    assert_eq!(resumed(&body), tail(5));
+
+    // An unreadable header is ignored: the whole run, which a client
+    // deduplicates by id.
+    let (_, body) = http(&addr, "GET", &events, &[("Last-Event-ID", "x")], None).await;
+    assert_eq!(resumed(&body), tail(0));
+
+    // A cursor at or past the end of a finished run: nothing more, and the
+    // stream still ends.
+    let last = all.len() - 1;
+    let (status, body) = http(&addr, "GET", &format!("{events}?after={last}"), &[], None).await;
+    assert_eq!(status, 200);
+    assert!(frames(&body).is_empty(), "{body}");
+    let (status, body) = http(&addr, "GET", &format!("{events}?after=99999"), &[], None).await;
+    assert_eq!(status, 200);
+    assert!(frames(&body).is_empty(), "{body}");
+
+    // A malformed explicit cursor is a client error.
+    let (status, _) = http(&addr, "GET", &format!("{events}?after=soon"), &[], None).await;
+    assert_eq!(status, 400);
+}
+
+#[tokio::test]
+async fn a_resumed_stream_keeps_the_same_authentication() {
+    let addr = spawn_server(app_state(AuthConfig::keyed("agent-key", [Scope::Admin]))).await;
+    let auth = [("Authorization", "Bearer agent-key")];
+    let (id, _) = finished_run(&addr, &auth).await;
+    let events = format!("/api/lightagent/v1/runs/{id}/events?after=0");
+    let (status, _) = http(&addr, "GET", &events, &[("Last-Event-ID", "0")], None).await;
+    assert_eq!(status, 401, "a cursor never stands in for a credential");
+    let (status, _) = http(&addr, "GET", &events, &auth, None).await;
+    assert_eq!(status, 200);
+}
+
+#[tokio::test]
+async fn a_finished_run_reports_why_it_stopped() {
+    let addr = spawn_server(app_state(AuthConfig::open())).await;
+    let (id, _) = finished_run(&addr, &[]).await;
+    let (status, body) = http(
+        &addr,
+        "GET",
+        &format!("/api/lightagent/v1/runs/{id}"),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let run: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(run["status"], "completed");
+    assert_eq!(run["stop_reason"], "EndTurn");
+}
+
 #[tokio::test]
 async fn a_saved_session_is_reused_by_follow_up_runs_and_new_sessions_are_empty() {
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -379,6 +539,8 @@ async fn a_saved_session_is_reused_by_follow_up_runs_and_new_sessions_are_empty(
                     assert_eq!(saved.messages.len(), (index + 1) * 2);
                     assert_eq!(saved.messages[index * 2].content, message);
                     assert_eq!(saved.title, "hello");
+                    // The run's stop reason is saved, not just its status.
+                    assert_eq!(saved.runs[index].stop_reason.as_deref(), Some("EndTurn"));
                     break;
                 }
                 tokio::task::yield_now().await;

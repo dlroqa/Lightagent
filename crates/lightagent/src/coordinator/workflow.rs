@@ -395,6 +395,32 @@ mod tests {
     }
 
     #[test]
+    fn a_confident_no_retrieval_category_never_withholds_retrieval() {
+        // "Search the web for …" classified, confidently and wrongly, as
+        // conversation: the policy adds nothing and takes nothing away, so
+        // the model still has every retrieval tool the run was given.
+        let tools: &'static [&'static str] = &["web.search", "web.fetch"];
+        let mut case = Case::new(TaskCategory::Conversation, tools);
+        case.confidence = 0.99;
+        let registry = registry(tools);
+        let before = registry.names();
+        let report = report(case.mode, case.category, case.confidence);
+        let policy = PolicyEngine::new(case.policy.clone());
+        let decision = evaluate(&WorkflowInputs {
+            report: &report,
+            registry: &registry,
+            policy: &policy,
+            limits: &case.limits,
+            config: &case.config,
+            cancelled: false,
+        });
+        assert_eq!(decision.eligibility, Eligibility::DefaultBehavior);
+        assert!(!decision.applied && decision.guidance.is_none());
+        assert_eq!(registry.names(), before, "no tool is removed");
+        assert_eq!(registry.names().len(), 2);
+    }
+
+    #[test]
     fn shadow_mode_and_the_default_setting_never_apply_guidance() {
         let mut shadow = Case::new(TaskCategory::Research, &["web.search"]);
         shadow.mode = JevClassificationMode::Shadow;

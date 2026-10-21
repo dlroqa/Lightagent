@@ -19,6 +19,16 @@
 //! what it gathered, or pause the run ([`RunOutcome::OutOfTime`]) so an
 //! interactive caller can ask whether to continue.
 //!
+//! The turn and tool-call budgets get the same treatment without a pause: the
+//! last turn the budget allows is reserved, once tools have run, for that
+//! tool-less answer, so a run never ends on tool results nobody read.
+//!
+//! A turn the provider did not finish is never mistaken for an answer: a
+//! token-limited turn ends with [`StopReason::MaxTokens`] and a stream that
+//! stopped without a completion signal with [`StopReason::Incomplete`]. Either
+//! way the text that arrived is kept, and a tool call that may have been cut
+//! short is not run.
+//!
 //! [`approval_for`]: crate::invoker::ToolInvoker::approval_for
 
 use std::collections::BTreeMap;
@@ -48,6 +58,52 @@ pub type AgentEventSink = tokio::sync::mpsc::UnboundedSender<AgentEvent>;
 const WRAP_UP_INSTRUCTION: &str = "The time budget for this request has run out, so no more \
     tools can be called. Answer the original request now, as well as you can, from the tool \
     results above, and say briefly if anything is incomplete.";
+
+/// The instruction for the last turn the turn budget allows, once tools have
+/// run. Like [`WRAP_UP_INSTRUCTION`], it rides on that one request only.
+const TURN_BUDGET_INSTRUCTION: &str = "This is the last step allowed for this request, so no \
+    more tools can be called. Answer the original request now from the tool results above, \
+    cite the sources you used, and say briefly what is missing or could not be checked.";
+
+/// The instruction for the turn after the tool-call budget ran out.
+const TOOL_CALL_BUDGET_INSTRUCTION: &str = "The tool-call budget for this request has run out, \
+    so no more tools can be called. Answer the original request now from the tool results \
+    above, cite the sources you used, and say briefly what is missing or could not be checked.";
+
+/// The most progress reports forwarded for one tool call, so a chatty tool
+/// cannot flood the event log.
+const MAX_PROGRESS_PER_CALL: usize = 64;
+
+/// Why a run is taking its final, tool-less turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WrapUp {
+    /// The wall clock ran out with unread tool results.
+    WallClock,
+    /// This is the last turn the turn budget allows, and tools have run.
+    TurnBudget,
+    /// The tool-call budget ran out inside a batch.
+    ToolCallBudget,
+}
+
+impl WrapUp {
+    fn instruction(self) -> &'static str {
+        match self {
+            Self::WallClock => WRAP_UP_INSTRUCTION,
+            Self::TurnBudget => TURN_BUDGET_INSTRUCTION,
+            Self::ToolCallBudget => TOOL_CALL_BUDGET_INSTRUCTION,
+        }
+    }
+
+    /// The stop reason a wrap-up answer records: the budget, not the model,
+    /// ended the run.
+    fn reason(self) -> StopReason {
+        match self {
+            Self::WallClock => StopReason::WallClockExceeded,
+            Self::TurnBudget => StopReason::MaxTurns,
+            Self::ToolCallBudget => StopReason::MaxToolCalls,
+        }
+    }
+}
 
 /// What a run does when its wall-clock budget runs out while tool results the
 /// model has not read yet are waiting.
@@ -221,9 +277,9 @@ struct Driver {
     /// When set, each emitted event is also sent here live, for a streaming
     /// caller. Persisted across a suspend so a resume keeps streaming.
     sink: Option<AgentEventSink>,
-    /// Set once the wall clock has run out and the run owes its final,
-    /// tool-less answer turn.
-    wrap_up: bool,
+    /// Set once a budget has run out and the run owes its final, tool-less
+    /// answer turn.
+    wrap_up: Option<WrapUp>,
 }
 
 impl Driver {
@@ -235,6 +291,22 @@ impl Driver {
             let _ = sink.send(event.clone());
         }
         self.events.push(event);
+    }
+
+    /// Whether any tool result is in the conversation. Restored history holds
+    /// only user and assistant messages, so a tool result is this run's.
+    fn has_tool_results(&self) -> bool {
+        self.messages
+            .iter()
+            .any(|message| message.role == Role::Tool)
+    }
+
+    /// End the run with `reason`.
+    fn end(&mut self, reason: StopReason) -> TurnResult {
+        self.emit(AgentEvent::RunCompleted { reason });
+        TurnResult::Finished(Box::new(RunOutcome::Completed {
+            events: std::mem::take(&mut self.events),
+        }))
     }
 }
 
@@ -400,7 +472,7 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             call_counts: BTreeMap::new(),
             pending: None,
             sink,
-            wrap_up: false,
+            wrap_up: None,
         };
         driver.emit(AgentEvent::RunStarted {
             run,
@@ -479,7 +551,7 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
         let mut driver = suspended.driver;
         match how {
             Continuation::Extend => driver.started = Instant::now(),
-            Continuation::WrapUp => driver.wrap_up = true,
+            Continuation::WrapUp => driver.wrap_up = Some(WrapUp::WallClock),
         }
         self.drive(driver, cancel).await
     }
@@ -552,7 +624,7 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
     ) -> Result<TurnResult, AgentError> {
         // The budget is checked before the turn is counted, so a pause that is
         // later continued does not spend a turn.
-        if !driver.wrap_up
+        if driver.wrap_up.is_none()
             && let Some(budget) = driver.limits.wall_clock()
             && driver.started.elapsed() >= budget
         {
@@ -578,18 +650,29 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
                     });
                     return Ok(TurnResult::OutOfTime(elapsed));
                 }
-                WallClockPolicy::WrapUp => driver.wrap_up = true,
+                WallClockPolicy::WrapUp => driver.wrap_up = Some(WrapUp::WallClock),
             }
+        }
+
+        // The last turn the budget allows is kept for an answer once tools
+        // have run: offered tools there, a model would gather more evidence
+        // and the run would end before anyone read it. The budget is not
+        // extended; with no tool results yet, the turn is an ordinary one.
+        if driver.wrap_up.is_none()
+            && driver.turn.saturating_add(1) >= driver.limits.max_turns
+            && driver.has_tool_results()
+        {
+            driver.wrap_up = Some(WrapUp::TurnBudget);
         }
 
         driver.turn += 1;
 
-        // The final turn after the clock ran out offers no tools and says why,
+        // The final turn after a budget ran out offers no tools and says why,
         // so the model answers from what it has instead of asking for more.
         // The instruction rides on this one request only.
-        let (messages, tools) = if driver.wrap_up {
+        let (messages, tools) = if let Some(wrap_up) = driver.wrap_up {
             let mut messages = driver.messages.clone();
-            messages.push(ProviderMessage::user(WRAP_UP_INSTRUCTION));
+            messages.push(ProviderMessage::user(wrap_up.instruction()));
             (messages, Vec::new())
         } else {
             (driver.messages.clone(), self.invoker.schemas())
@@ -653,30 +736,26 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             }
         }
 
-        let (reason, usage) = finish.unwrap_or((FinishReason::Stop, None));
+        // A stream that ended without its terminal event did not say the turn
+        // was finished.
+        let (reason, usage) = finish.unwrap_or((FinishReason::Incomplete, None));
         driver.emit(AgentEvent::TurnCompleted { usage });
 
-        // The wrap-up turn is the last one whatever it produced: its answer
-        // stands, and any tool calls it asked for anyway are not run. The stop
-        // reason still records that the clock, not the model, ended the run.
-        if driver.wrap_up && !matches!(reason, FinishReason::Error) {
-            driver.emit(AgentEvent::RunCompleted {
-                reason: StopReason::WallClockExceeded,
-            });
-            return Ok(TurnResult::Finished(Box::new(RunOutcome::Completed {
-                events: std::mem::take(&mut driver.events),
-            })));
-        }
-
         match reason {
-            FinishReason::Stop | FinishReason::Length => {
-                driver.emit(AgentEvent::RunCompleted {
-                    reason: StopReason::EndTurn,
-                });
-                Ok(TurnResult::Finished(Box::new(RunOutcome::Completed {
-                    events: std::mem::take(&mut driver.events),
-                })))
+            // A turn cut short ends the run: its text is already in the log,
+            // and a tool call it was streaming is not run, because its
+            // arguments may be truncated. Nothing is retried.
+            FinishReason::Length => Ok(driver.end(StopReason::MaxTokens)),
+            FinishReason::Incomplete => Ok(driver.end(StopReason::Incomplete)),
+            // The wrap-up turn is the last one whatever it produced: its
+            // answer stands, and any tool calls it asked for anyway are not
+            // run. The stop reason still records that a budget, not the
+            // model, ended the run.
+            FinishReason::Stop | FinishReason::ToolCalls if driver.wrap_up.is_some() => {
+                let reason = driver.wrap_up.map_or(StopReason::EndTurn, WrapUp::reason);
+                Ok(driver.end(reason))
             }
+            FinishReason::Stop => Ok(driver.end(StopReason::EndTurn)),
             FinishReason::Error => {
                 driver.emit(AgentEvent::Error {
                     message: "the provider ended the turn with an error".to_owned(),
@@ -725,10 +804,7 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
 
             driver.tool_calls_made += 1;
             if driver.tool_calls_made > driver.limits.max_tool_calls {
-                driver.emit(AgentEvent::RunCompleted {
-                    reason: StopReason::MaxToolCalls,
-                });
-                return BatchResult::Completed;
+                return out_of_tool_calls(driver, index);
             }
 
             let key = format!("{}\u{0}{}", call.name, call.arguments);
@@ -774,12 +850,38 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
     }
 
     /// Run one approved call: start, invoke, append its result, complete.
+    /// Progress the tool reports while it runs is forwarded as
+    /// [`AgentEvent::ToolProgress`], up to [`MAX_PROGRESS_PER_CALL`] reports.
     async fn run_call(&self, driver: &mut Driver, call: &ToolCall, cancel: &CancellationToken) {
         driver.emit(AgentEvent::ToolCallStarted {
             id: call.id.clone(),
             name: call.name.clone(),
         });
-        let outcome = self.invoker.invoke(call, cancel.clone()).await;
+        let (progress, mut reports) = tokio::sync::mpsc::unbounded_channel();
+        let invocation = self
+            .invoker
+            .invoke_with_progress(call, cancel.clone(), progress);
+        tokio::pin!(invocation);
+        let mut forwarded = 0;
+        let mut forward = |driver: &mut Driver, progress| {
+            if forwarded < MAX_PROGRESS_PER_CALL {
+                forwarded += 1;
+                driver.emit(AgentEvent::ToolProgress {
+                    id: call.id.clone(),
+                    progress,
+                });
+            }
+        };
+        let outcome = loop {
+            tokio::select! {
+                outcome = &mut invocation => break outcome,
+                Some(report) = reports.recv() => forward(driver, report),
+            }
+        };
+        // Reports sent just before the tool returned still precede its result.
+        while let Ok(report) = reports.try_recv() {
+            forward(driver, report);
+        }
         driver.messages.push(ProviderMessage::tool_result(
             call.id.clone(),
             outcome.content.clone(),
@@ -789,6 +891,47 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             outcome,
         });
     }
+}
+
+/// The tool-call budget ran out at the call at `index` of the pending
+/// batch. That call and the rest of the batch do not run; each gets a
+/// controlled result so the conversation stays well-formed. When the turn
+/// budget leaves room, the run owes a tool-less answer from what earlier
+/// calls returned; otherwise it ends here.
+fn out_of_tool_calls(driver: &mut Driver, index: usize) -> BatchResult {
+    let unrun: Vec<ToolCall> = driver
+        .pending
+        .as_ref()
+        .map(|batch| batch.calls[index..].to_vec())
+        .unwrap_or_default();
+    for (offset, call) in unrun.iter().enumerate() {
+        if offset > 0 {
+            driver.emit(AgentEvent::ToolCallRequested { call: call.clone() });
+        }
+        let outcome = ToolOutcome::error(format!(
+            "'{}' did not run: the tool-call budget for this request is used up",
+            call.name
+        ));
+        driver.messages.push(ProviderMessage::tool_result(
+            call.id.clone(),
+            outcome.content.clone(),
+        ));
+        driver.emit(AgentEvent::ToolCallCompleted {
+            id: call.id.clone(),
+            outcome,
+        });
+    }
+    if let Some(batch) = driver.pending.as_mut() {
+        batch.next = batch.calls.len();
+    }
+    if driver.turn < driver.limits.max_turns && driver.wrap_up.is_none() {
+        driver.wrap_up = Some(WrapUp::ToolCallBudget);
+        return BatchResult::Done;
+    }
+    driver.emit(AgentEvent::RunCompleted {
+        reason: StopReason::MaxToolCalls,
+    });
+    BatchResult::Completed
 }
 
 #[cfg(test)]
@@ -976,11 +1119,13 @@ mod tests {
                 reason: StopReason::MaxTurns
             })
         ));
+        // The second, last turn was the reserved answer turn: offered no
+        // tools, and the call it asked for anyway did not run.
         let declined = events
             .iter()
             .filter(|event| matches!(event, AgentEvent::ToolCallCompleted { outcome, .. } if outcome.is_error))
             .count();
-        assert_eq!(declined, 2);
+        assert_eq!(declined, 1);
     }
 
     #[tokio::test]
@@ -1350,5 +1495,419 @@ mod tests {
 
         assert!(inspector.requests()[1].tools.is_empty());
         assert_eq!(stop_reason(&events), Some(StopReason::WallClockExceeded));
+    }
+
+    fn content(events: &[AgentEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Content { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn turn_ending(text: &str, reason: Option<FinishReason>) -> Vec<ProviderEvent> {
+        let mut turn = vec![
+            ProviderEvent::RoleStarted,
+            ProviderEvent::Content(text.to_owned()),
+        ];
+        if let Some(reason) = reason {
+            turn.push(ProviderEvent::Finished {
+                reason,
+                usage: None,
+            });
+        }
+        turn
+    }
+
+    fn tool_runs(events: &[AgentEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::ToolCallStarted { .. }))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_token_limited_answer_is_kept_and_reported_as_cut_off() {
+        let mock = MockProvider::new(vec![turn_ending(
+            "The first half of",
+            Some(FinishReason::Length),
+        )]);
+        let agent = AgentLoop::new(mock, NullInvoker, RunConfig::new("m"));
+        let events = agent
+            .run("go", CancellationToken::new())
+            .await
+            .expect("run")
+            .into_events();
+        assert_eq!(content(&events), "The first half of");
+        assert_eq!(stop_reason(&events), Some(StopReason::MaxTokens));
+        assert!(!StopReason::MaxTokens.is_complete());
+    }
+
+    #[tokio::test]
+    async fn a_token_limited_tool_call_is_not_run() {
+        let truncated = vec![
+            ProviderEvent::ToolCallDelta {
+                index: 0,
+                id: Some("call_1".into()),
+                name: Some("datetime.now".into()),
+                arguments: Some("{\"zo".into()),
+            },
+            ProviderEvent::Finished {
+                reason: FinishReason::Length,
+                usage: None,
+            },
+        ];
+        let agent = AgentLoop::new(
+            MockProvider::new(vec![truncated]),
+            ScriptedInvoker {
+                need: ApprovalNeed::AutoApprove,
+            },
+            RunConfig::new("m"),
+        );
+        let events = agent
+            .run("go", CancellationToken::new())
+            .await
+            .expect("run")
+            .into_events();
+        assert_eq!(tool_runs(&events), 0);
+        assert_eq!(stop_reason(&events), Some(StopReason::MaxTokens));
+    }
+
+    #[tokio::test]
+    async fn an_unfinished_stream_keeps_its_text_and_is_not_an_answer() {
+        let mock = MockProvider::new(vec![turn_ending("Partial evidence says", None)]);
+        let agent = AgentLoop::new(mock, NullInvoker, RunConfig::new("m"));
+        let events = agent
+            .run("go", CancellationToken::new())
+            .await
+            .expect("run")
+            .into_events();
+        assert_eq!(content(&events), "Partial evidence says");
+        assert_eq!(stop_reason(&events), Some(StopReason::Incomplete));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Error { .. })),
+            "an early end is reported by its stop reason, not as a failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_incomplete_turn_with_partial_tool_arguments_runs_no_tool() {
+        let partial = vec![
+            ProviderEvent::ToolCallDelta {
+                index: 0,
+                id: Some("call_1".into()),
+                name: Some("datetime.now".into()),
+                arguments: Some("{\"q\":\"half".into()),
+            },
+            ProviderEvent::Finished {
+                reason: FinishReason::Incomplete,
+                usage: None,
+            },
+        ];
+        let agent = AgentLoop::new(
+            MockProvider::new(vec![partial]),
+            ScriptedInvoker {
+                need: ApprovalNeed::AutoApprove,
+            },
+            RunConfig::new("m"),
+        );
+        let events = agent
+            .run("go", CancellationToken::new())
+            .await
+            .expect("run")
+            .into_events();
+        assert_eq!(
+            tool_runs(&events),
+            0,
+            "a possibly truncated call never runs"
+        );
+        assert_eq!(stop_reason(&events), Some(StopReason::Incomplete));
+    }
+
+    fn limited(max_turns: u32, max_tool_calls: u32) -> RunConfig {
+        let mut config = RunConfig::new("m");
+        config.limits = RunLimits {
+            max_turns,
+            max_tool_calls,
+            wall_clock_secs: None,
+            ..RunLimits::default()
+        };
+        config
+    }
+
+    #[tokio::test]
+    async fn the_last_permitted_turn_answers_from_the_gathered_evidence() {
+        let mock = MockProvider::new(vec![
+            tool_turn(),
+            tool_turn_with("call_2"),
+            stop_turn("answer with sources"),
+        ]);
+        let inspector = mock.clone();
+        let agent = AgentLoop::new(
+            mock,
+            ScriptedInvoker {
+                need: ApprovalNeed::AutoApprove,
+            },
+            limited(3, 100),
+        );
+        let events = agent
+            .run("research", CancellationToken::new())
+            .await
+            .expect("run")
+            .into_events();
+
+        let requests = inspector.requests();
+        assert_eq!(requests.len(), 3, "the budget is not extended");
+        assert!(
+            !requests[1].tools.is_empty(),
+            "earlier turns keep their tools"
+        );
+        assert!(
+            requests[2].tools.is_empty(),
+            "the last turn offers no tools"
+        );
+        assert_eq!(
+            requests[2].messages.last().map(|m| m.content.as_str()),
+            Some(TURN_BUDGET_INSTRUCTION)
+        );
+        assert!(
+            requests[2]
+                .messages
+                .iter()
+                .any(|m| m.role == Role::Tool && m.content == "2026-09-01T00:00:00Z"),
+            "the answer turn reads every tool result"
+        );
+        assert_eq!(tool_runs(&events), 2);
+        assert_eq!(content(&events), "answer with sources");
+        assert_eq!(stop_reason(&events), Some(StopReason::MaxTurns));
+    }
+
+    #[tokio::test]
+    async fn a_last_turn_without_tool_results_is_an_ordinary_turn() {
+        let mock = MockProvider::new(vec![stop_turn("plain")]);
+        let inspector = mock.clone();
+        let agent = AgentLoop::new(
+            mock,
+            ScriptedInvoker {
+                need: ApprovalNeed::AutoApprove,
+            },
+            limited(1, 100),
+        );
+        let events = agent
+            .run("hi", CancellationToken::new())
+            .await
+            .expect("run")
+            .into_events();
+        assert!(!inspector.requests()[0].tools.is_empty());
+        assert_eq!(stop_reason(&events), Some(StopReason::EndTurn));
+    }
+
+    #[tokio::test]
+    async fn a_token_limited_final_answer_reports_the_token_limit() {
+        let mock = MockProvider::new(vec![
+            tool_turn(),
+            turn_ending("cut", Some(FinishReason::Length)),
+        ]);
+        let agent = AgentLoop::new(
+            mock,
+            ScriptedInvoker {
+                need: ApprovalNeed::AutoApprove,
+            },
+            limited(2, 100),
+        );
+        let events = agent
+            .run("go", CancellationToken::new())
+            .await
+            .expect("run")
+            .into_events();
+        assert_eq!(content(&events), "cut");
+        assert_eq!(stop_reason(&events), Some(StopReason::MaxTokens));
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_tool_call_budget_still_gets_an_answer() {
+        let two_calls = vec![
+            ProviderEvent::ToolCallDelta {
+                index: 0,
+                id: Some("call_a".into()),
+                name: Some("datetime.now".into()),
+                arguments: Some("{}".into()),
+            },
+            ProviderEvent::ToolCallDelta {
+                index: 1,
+                id: Some("call_b".into()),
+                name: Some("datetime.now".into()),
+                arguments: Some("{\"again\":true}".into()),
+            },
+            ProviderEvent::Finished {
+                reason: FinishReason::ToolCalls,
+                usage: None,
+            },
+        ];
+        let mock = MockProvider::new(vec![two_calls, stop_turn("from one result")]);
+        let inspector = mock.clone();
+        let agent = AgentLoop::new(
+            mock,
+            ScriptedInvoker {
+                need: ApprovalNeed::AutoApprove,
+            },
+            limited(8, 1),
+        );
+        let events = agent
+            .run("go", CancellationToken::new())
+            .await
+            .expect("run")
+            .into_events();
+
+        assert_eq!(
+            tool_runs(&events),
+            1,
+            "the call past the budget does not run"
+        );
+        let requests = inspector.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].tools.is_empty());
+        assert_eq!(
+            requests[1].messages.last().map(|m| m.content.as_str()),
+            Some(TOOL_CALL_BUDGET_INSTRUCTION)
+        );
+        // Every requested call has a result, so the replay is well-formed.
+        let results = requests[1]
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .count();
+        assert_eq!(results, 2);
+        assert_eq!(content(&events), "from one result");
+        assert_eq!(stop_reason(&events), Some(StopReason::MaxToolCalls));
+    }
+
+    fn tool_turn_with(id: &str) -> Vec<ProviderEvent> {
+        vec![
+            ProviderEvent::RoleStarted,
+            ProviderEvent::ToolCallDelta {
+                index: 0,
+                id: Some(id.to_owned()),
+                name: Some("datetime.now".into()),
+                arguments: Some(format!("{{\"n\":\"{id}\"}}")),
+            },
+            ProviderEvent::Finished {
+                reason: FinishReason::ToolCalls,
+                usage: None,
+            },
+        ]
+    }
+
+    /// A provider that plays `scripts` and then never answers, so a test can
+    /// cancel a run in the middle of a model turn.
+    struct StallingProvider {
+        inner: MockProvider,
+        scripted: usize,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AgentProvider for StallingProvider {
+        async fn stream(
+            &self,
+            request: ProviderRequest,
+            cancel: CancellationToken,
+        ) -> Result<crate::provider::ProviderStream, crate::provider::ProviderError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call < self.scripted {
+                return self.inner.stream(request, cancel).await;
+            }
+            Ok(futures_util::stream::pending().boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_during_the_final_answer_keeps_the_evidence() {
+        let provider = StallingProvider {
+            inner: MockProvider::new(vec![tool_turn()]),
+            scripted: 1,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let agent = AgentLoop::new(
+            provider,
+            ScriptedInvoker {
+                need: ApprovalNeed::AutoApprove,
+            },
+            limited(2, 100),
+        );
+        let cancel = CancellationToken::new();
+        let trigger = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            trigger.cancel();
+        });
+        let events = tokio::time::timeout(Duration::from_secs(5), agent.run("go", cancel))
+            .await
+            .expect("cancellation ends the stalled answer turn")
+            .expect("run")
+            .into_events();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolCallCompleted { outcome, .. } if !outcome.is_error
+        )));
+        assert_eq!(stop_reason(&events), Some(StopReason::Cancelled));
+    }
+
+    /// An invoker whose tool reports two stages before it returns.
+    struct ReportingInvoker;
+
+    #[async_trait]
+    impl ToolInvoker for ReportingInvoker {
+        fn schemas(&self) -> Vec<ToolSchema> {
+            ScriptedInvoker {
+                need: ApprovalNeed::AutoApprove,
+            }
+            .schemas()
+        }
+
+        async fn invoke(&self, _call: &ToolCall, _cancel: CancellationToken) -> ToolOutcome {
+            ToolOutcome::ok("no progress")
+        }
+
+        async fn invoke_with_progress(
+            &self,
+            _call: &ToolCall,
+            _cancel: CancellationToken,
+            progress: crate::invoker::ToolProgressSink,
+        ) -> ToolOutcome {
+            let _ = progress.send(crate::invoker::ToolProgress::stage("searching"));
+            tokio::task::yield_now().await;
+            let _ = progress
+                .send(crate::invoker::ToolProgress::stage("completed").with_outcome("evidence"));
+            ToolOutcome::ok("evidence")
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_progress_is_forwarded_in_order_before_the_result() {
+        let mock = MockProvider::new(vec![tool_turn(), stop_turn("done")]);
+        let agent = AgentLoop::new(mock, ReportingInvoker, RunConfig::new("m"));
+        let events = agent
+            .run("go", CancellationToken::new())
+            .await
+            .expect("run")
+            .into_events();
+        let order: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolCallStarted { .. } => Some("started"),
+                AgentEvent::ToolProgress { id, progress } => {
+                    assert_eq!(id, "call_1");
+                    Some(progress.stage.as_str())
+                }
+                AgentEvent::ToolCallCompleted { .. } => Some("result"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(order, ["started", "searching", "completed", "result"]);
     }
 }

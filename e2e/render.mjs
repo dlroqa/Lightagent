@@ -4,6 +4,7 @@
 
 import { mkdir } from "node:fs/promises";
 import { chromium } from "playwright";
+import { checkDeliveryStates } from "./delivery.mjs";
 import { checkJevStates } from "./jev.mjs";
 
 const BASE = (process.env.PANEL_BASE ?? "http://127.0.0.1:8735").replace(/\/+$/, "");
@@ -342,6 +343,13 @@ async function main() {
   }
 
   await context.close();
+
+  // Run delivery: dropped, resumed and dead streams, stop reasons, progress.
+  try {
+    failures.push(...(await checkDeliveryStates(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`delivery states: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   // Last: these states change the server's Jev settings.
   try {

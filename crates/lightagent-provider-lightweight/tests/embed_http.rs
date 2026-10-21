@@ -43,3 +43,28 @@ async fn embeds_over_http() {
     assert_eq!(vectors[0], vec![0.1, 0.2, 0.3]);
     assert_eq!(vectors[1], vec![0.4, 0.5, 0.6]);
 }
+
+#[tokio::test]
+async fn a_stalled_embeddings_server_fails_within_the_timeout() {
+    // Accepts and reads, then never answers.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming().flatten() {
+            held.push(stream);
+        }
+    });
+    let client = EmbeddingClient::new(format!("http://127.0.0.1:{port}"), None)
+        .unwrap()
+        .with_timeout(Duration::from_secs(1));
+    let started = std::time::Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.embed("test-model", &["hello".to_owned()]),
+    )
+    .await
+    .expect("the client's own timeout ends the request");
+    assert!(result.is_err());
+    assert!(started.elapsed() < Duration::from_secs(5));
+}

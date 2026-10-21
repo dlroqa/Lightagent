@@ -4,6 +4,41 @@ All notable Lightagent changes are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Research runs now report how they really ended, and the Web UI no longer
+  loses or hides their output.
+  - A provider stream that ends without a finish reason or `[DONE]` now
+    stops the run as `Incomplete` instead of passing as a normal answer. A
+    token-limited answer stops as `MaxTokens` (it used to be `EndTurn`).
+    The text that arrived is kept, and a tool call that may have been cut
+    short does not run. An explicit finish reason followed by end of
+    stream is still a valid end.
+  - Once tools have run, the last turn the budget allows is a tool-less
+    answer turn. This also applies after the tool-call budget runs out. A
+    run no longer ends on tool results nobody read. The budget is not
+    extended.
+  - `rag.realtime` works to one 45-second deadline, inside the tool's
+    60-second limit. It takes pages as they arrive and keeps the snippets
+    of slow or failed sources, naming each one. If semantic ranking runs
+    out of time, it falls back to lexical order. Embedding requests now
+    time out (default 30 s; Infinity uses `platform.infinity.timeout_secs`)
+    instead of waiting indefinitely.
+  - Run events carry SSE ids. `GET /runs/{id}/events` resumes from
+    `Last-Event-ID` or `?after=`. The Web UI accepts events strictly in
+    order, so a reconnect no longer duplicates the transcript. When the run
+    has ended but its terminal event is missing, the UI replays the rest of
+    the stream before it marks the run done.
+  - Additive API fields: `run.completed` has `complete`, `GET /runs/{id}`
+    has `stop_reason`, and sessions saved by the API store the stop reason
+    (for example `EndTurn`) instead of the run status. A new
+    `tool.progress` event reports retrieval stages.
+  - The Web UI shows why a run stopped early, shows retrieval progress on
+    the tool row, and shows partial text that used to stay in the reasoning
+    panel. It also displays the Jev routing and classification events it
+    previously dropped, labelled as advisory.
+  - Details: `docs/architecture/rag-delivery-completeness.md`.
+
 ### Security
 
 - Provisioning-ledger continuity (`LA-WEB-PROVISIONING/1` r4 §10.6, L1),
