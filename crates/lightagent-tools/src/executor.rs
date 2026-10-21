@@ -32,6 +32,12 @@ use crate::schema;
 /// prompt, a log or an approval UI.
 const PREVIEW_MAX_BYTES: usize = 200;
 
+/// The per-call timeout the harness gives a tool that has no operator setting
+/// of its own (Open Terminal and delegation have one). A tool with an internal
+/// deadline keeps it inside this bound, so the model sees the tool's own
+/// result rather than a bare timeout.
+pub const DEFAULT_PER_CALL_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Decides, at each call, whether a tool is still permitted for this run.
 pub type CallGuard = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 

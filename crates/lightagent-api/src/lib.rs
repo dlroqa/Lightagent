@@ -1368,15 +1368,17 @@ async fn get_run(
 ) -> Response {
     match authorized_run(&state, &headers, &id, Scope::RunsRead).await {
         Ok((run, _)) => {
-            let events = run.events().await;
+            // Read in place: polled during stream faults, so it copies
+            // nothing from the run's buffer.
+            let stop_reason = run.stop_reason().await.map(|reason| format!("{reason:?}"));
             let mut body = json!({
                 "id": run.id(),
                 "status": run.status().await,
-                "events": events.len(),
+                "events": run.event_count().await,
                 "pending_approval": run.pending().await,
                 // Additive: why a terminal run stopped (`EndTurn`,
                 // `MaxTokens`, `Incomplete`, …); null while it runs.
-                "stop_reason": stop_reason_of(&events),
+                "stop_reason": stop_reason,
             });
             // Only a revoked (multi-user) run carries this, as a fixed code.
             if let Some(denial) = run.revocation() {
@@ -1423,7 +1425,7 @@ async fn run_events(
         Ok((run, guard)) => {
             // A cursor past the buffer resumes at its end rather than waiting
             // for events that may never exist.
-            let start = resume_position(&headers, &query).min(run.events().await.len());
+            let start = resume_position(&headers, &query).min(run.event_count().await);
             Sse::new(event_stream(run, guard, start))
                 .keep_alive(KeepAlive::default())
                 .into_response()

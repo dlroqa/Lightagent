@@ -24,8 +24,14 @@ export interface RunEvent {
  *   through the terminal event.
  * - `incomplete`: the run ended, but its remaining events could not be
  *   recovered; the saved session holds what the server recorded.
+ * - `unavailable`: the run can no longer be read from here — the server no
+ *   longer knows it (a restart), or this browser's access was withdrawn — so
+ *   how it ended is unknown. Nothing is invented about its outcome.
+ *
+ * These describe delivery to this browser only. How the run itself ended is
+ * its terminal event (`run.failed`, a stop reason), which is reported apart.
  */
-export type Delivery = "live" | "complete" | "recovered" | "incomplete";
+export type Delivery = "live" | "complete" | "recovered" | "incomplete" | "unavailable";
 
 /** The named events the API emits, listened for individually as SSE requires. */
 const EVENT_NAMES = [
@@ -49,6 +55,10 @@ const EVENT_NAMES = [
 const TERMINAL = new Set(["run.completed", "run.cancelled", "run.failed"]);
 /** Reconnects made after the browser gives up on a stream, before the gap is reported. */
 const MAX_RECOVERIES = 4;
+/** Consecutive connections that fail to open before the run is reported unavailable. */
+const MAX_FAILED_CONNECTIONS = 10;
+/** Answers from the run endpoint that mean this browser cannot read the run any more. */
+const GONE = /^(401|403|404):/;
 
 /**
  * Stream a run's events over SSE. Returns the events so far, whether the run
@@ -82,6 +92,8 @@ export function useRunEvents(runId: string | null): { events: RunEvent[]; done: 
     let faulted = false;
     let lastId = -1;
     let recoveries = 0;
+    // Connections that failed in a row; reset whenever one opens.
+    let failedConnections = 0;
     let statusTimer: number | undefined;
     let reconnectTimer: number | undefined;
 
@@ -137,6 +149,9 @@ export function useRunEvents(runId: string | null): { events: RunEvent[]; done: 
       // and no polling runs. When the stream faults, probe the run once now and
       // keep a fallback poll until the stream recovers or the run is seen
       // terminal; ordered ids keep the poll from double-rendering anything.
+      next.onopen = () => {
+        if (source === next) failedConnections = 0;
+      };
       next.onerror = () => {
         if (closed || source !== next) return;
         faulted = true;
@@ -159,10 +174,15 @@ export function useRunEvents(runId: string | null): { events: RunEvent[]; done: 
 
     const scheduleReconnect = () => {
       if (closed || reconnectTimer !== undefined) return;
+      failedConnections += 1;
+      if (failedConnections > MAX_FAILED_CONNECTIONS) {
+        finish("unavailable");
+        return;
+      }
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = undefined;
         reconnect();
-      }, Math.min(1000 * 2 ** recoveries, 8000));
+      }, Math.min(500 * 2 ** failedConnections, 8000));
     };
 
     const checkStatus = async () => {
@@ -181,8 +201,14 @@ export function useRunEvents(runId: string | null): { events: RunEvent[]; done: 
           ? current
           : [...current, { type: `run.${run.status}`, data: { reason: run.stop_reason ?? null, recovered: false } }]);
         finish("incomplete");
-      } catch {
-        // Let the stream reconnect; a failed status probe is not completion.
+      } catch (cause) {
+        // The run is gone or no longer this browser's to read: stop asking,
+        // and claim nothing about how it ended.
+        if (cause instanceof Error && GONE.test(cause.message)) {
+          finish("unavailable");
+          return;
+        }
+        // Otherwise let the stream reconnect; a failed probe is not completion.
       }
     };
 

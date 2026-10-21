@@ -29,7 +29,11 @@ All notable Lightagent changes are documented here.
     order, so a reconnect no longer duplicates the transcript. When the run
     has ended but its terminal event is missing, the UI replays the rest of
     the stream before it marks the run done. A dropped connection no
-    longer shows a false "The run failed." notice.
+    longer shows a false "The run failed." notice. If the run can no longer
+    be read (the service restarted, or access was withdrawn), the UI stops
+    retrying, keeps what arrived, and says the outcome is unknown.
+  - A delegated worker that stopped early now says so at the end of its
+    result, instead of passing partial text as a finished answer.
   - Additive API fields: `run.completed` has `complete`, `GET /runs/{id}`
     has `stop_reason`, and sessions saved by the API store the stop reason
     (for example `EndTurn`) instead of the run status. A new

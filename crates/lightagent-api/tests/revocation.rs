@@ -425,6 +425,12 @@ async fn expiry_ends_streams_and_runs_and_stales_approvals() {
         .expect("an expired subscriber's stream must end")
         .unwrap();
     assert_eq!(run.status().await, RunStatus::Running);
+    // Reconnecting with a resume cursor is refused like a fresh stream: a
+    // cursor never stands in for a credential that has lapsed.
+    let resume = format!("/api/lightagent/v1/runs/{}/events?after=0", run.id());
+    let (status, body) = http(&addr, "GET", &resume, &world.alice_short, None).await;
+    assert_eq!(status, 401, "{body}");
+    assert!(!body.contains("run.started"), "{body}");
 
     // The run's own credential expires.
     world.clock.store(T0 + 1_000, Ordering::SeqCst);

@@ -16,7 +16,7 @@ use lightagent_core::ProfileId;
 use lightagent_core::identity::{AuthorizedProvider, RunAuthorization};
 use lightagent_core::{
     AgentEvent, AgentLoop, PolicyEngine, RiskClass, RunConfig, RunLimits, RunOutcome, Scope,
-    ToolOutcome,
+    StopReason, ToolOutcome,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -217,7 +217,7 @@ impl Tool for AgentDelegate {
             return ToolOutcome::error(reason);
         }
         match result {
-            Ok(RunOutcome::Completed { events }) => ToolOutcome::ok(final_content(&events)),
+            Ok(RunOutcome::Completed { events }) => ToolOutcome::ok(worker_answer(&events)),
             Ok(RunOutcome::AwaitingApproval { .. }) => ToolOutcome::error(format!(
                 "worker '{}' paused awaiting approval, which delegation cannot grant",
                 profile_name
@@ -262,6 +262,23 @@ fn intersect_caps(base: &RunLimits, max_turns: Option<u32>, max_seconds: Option<
     limits
 }
 
+/// The worker's answer, followed by why it stopped when it did not finish the
+/// answer itself, so the delegating model never takes a cut-short or
+/// budget-limited answer for a whole one.
+fn worker_answer(events: &[AgentEvent]) -> String {
+    let answer = final_content(events);
+    let stopped = events.iter().rev().find_map(|event| match event {
+        AgentEvent::RunCompleted { reason } => Some(*reason),
+        _ => None,
+    });
+    let early = stopped.filter(|reason| !reason.is_complete());
+    match early.and_then(StopReason::explanation) {
+        Some(why) if answer.is_empty() => format!("(The worker did not finish: {why}.)"),
+        Some(why) => format!("{answer}\n\n(The worker did not finish its answer: {why}.)"),
+        None => answer,
+    }
+}
+
 /// The worker's visible answer: every [`AgentEvent::Content`] fragment joined.
 fn final_content(events: &[AgentEvent]) -> String {
     let mut answer = String::new();
@@ -302,5 +319,35 @@ mod tests {
             AgentEvent::Content { text: "2".into() },
         ];
         assert_eq!(final_content(&events), "42");
+    }
+
+    #[test]
+    fn a_worker_answer_says_when_the_worker_stopped_early() {
+        let finished = vec![
+            AgentEvent::Content { text: "42".into() },
+            AgentEvent::RunCompleted {
+                reason: StopReason::EndTurn,
+            },
+        ];
+        assert_eq!(worker_answer(&finished), "42");
+        let cut = vec![
+            AgentEvent::Content {
+                text: "The first half".into(),
+            },
+            AgentEvent::RunCompleted {
+                reason: StopReason::Incomplete,
+            },
+        ];
+        assert_eq!(
+            worker_answer(&cut),
+            "The first half\n\n(The worker did not finish its answer: the model stream ended early; the answer may be incomplete.)"
+        );
+        let nothing = vec![AgentEvent::RunCompleted {
+            reason: StopReason::MaxTurns,
+        }];
+        assert_eq!(
+            worker_answer(&nothing),
+            "(The worker did not finish: the run reached its turn limit.)"
+        );
     }
 }

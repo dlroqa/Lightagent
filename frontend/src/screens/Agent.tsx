@@ -221,7 +221,7 @@ const TERMINAL_EVENTS = ["run.completed", "run.cancelled", "run.failed"];
  * `answered` says whether any answer text arrived. Reasons a newer server may
  * add are left unsaid rather than guessed at.
  */
-function describeStop(reason: string, answered: boolean, delivery: Delivery): { label: string; text: string } | null {
+function describeStop(reason: string, answered: boolean): { label: string; text: string } | null {
   const limit = (what: string) => answered
     ? `Research reached its ${what}, so this answer was written from the evidence gathered so far.`
     : `Research reached its ${what} before an answer was written. The tool results above are what it found.`;
@@ -246,11 +246,26 @@ function describeStop(reason: string, answered: boolean, delivery: Delivery): { 
       notice = { label: "limit reached", text: "The run stopped because it kept repeating the same tool call." };
       break;
   }
-  if (delivery === "incomplete") {
-    const gap = "Some live output could not be recovered; the saved conversation shows what the server recorded.";
-    return { label: "incomplete", text: notice ? `${notice.text} ${gap}` : gap };
-  }
   return notice;
+}
+
+/**
+ * Whether this browser may have missed part of the run, in words. Kept apart
+ * from how the run ended: a delivery gap is never reported as a run failure,
+ * and a run failure never hides a delivery gap.
+ */
+function describeDelivery(delivery: Delivery): { label: string; text: string } | null {
+  switch (delivery) {
+    case "incomplete":
+      return { label: "incomplete", text: "Some live output could not be recovered; the saved conversation shows what the server recorded." };
+    case "unavailable":
+      return {
+        label: "unavailable",
+        text: "This run can no longer be followed from this browser (the service may have restarted, or access was withdrawn), so how it ended is unknown. What arrived is shown; reopen the conversation for what the server saved.",
+      };
+    default:
+      return null;
+  }
 }
 
 /**
@@ -263,7 +278,7 @@ function describeClassification(data: Record<string, unknown>): string | null {
   switch (text(data.outcome)) {
     case "classified": {
       const category = text(data.category) || "unknown";
-      const applied = data.workflow_applied === true ? "guidance applied" : "advisory only";
+      const applied = data.workflow_applied === true ? "advisory; guidance added" : "advisory only";
       return `Jev classified this as ${category} (${applied})${latency}`;
     }
     case "low_confidence":
@@ -282,9 +297,10 @@ function describeClassification(data: Record<string, unknown>): string | null {
  * deltas. Hold each unfinished model turn in the reasoning panel until its
  * outcome is known: a tool request makes it reasoning, while a finished run
  * (however it finished) promotes it to the answer, so text from a turn that
- * was cut short is shown rather than stranded in the reasoning panel.
+ * was cut short is shown rather than stranded in the reasoning panel. `done`
+ * does the same when delivery ended without a terminal event to say so.
  */
-function foldModelOutput(events: RunEvent[]): { answer: string; reasoning: string } {
+function foldModelOutput(events: RunEvent[], done: boolean): { answer: string; reasoning: string } {
   let answer = "";
   let reasoning = "";
   let turnContent = "";
@@ -308,6 +324,11 @@ function foldModelOutput(events: RunEvent[]): { answer: string; reasoning: strin
     }
   }
 
+  if (done) {
+    answer += pendingTurnContent + turnContent;
+    pendingTurnContent = "";
+    turnContent = "";
+  }
   return { answer, reasoning: reasoning + pendingTurnContent + turnContent };
 }
 
@@ -368,7 +389,7 @@ export function Agent() {
     textarea.style.height = `${textarea.scrollHeight}px`;
   }, []);
 
-  const { answer, reasoning } = useMemo(() => foldModelOutput(events), [events]);
+  const { answer, reasoning } = useMemo(() => foldModelOutput(events, done), [done, events]);
   const tools = useMemo(() => foldTools(events), [events]);
   const routingStatus = useMemo(() => {
     const event = [...events].reverse().find((row) => row.type === "routing.selected");
@@ -420,12 +441,13 @@ export function Agent() {
     if (runId !== null) {
       if (!done) return null;
       const terminal = [...events].reverse().find((row) => TERMINAL_EVENTS.includes(row.type));
-      return describeStop(text(terminal?.data.reason), answer.trim().length > 0, delivery);
+      return describeStop(text(terminal?.data.reason), answer.trim().length > 0);
     }
     const last = session?.runs[session.runs.length - 1];
     const lastMessage = session?.messages[session.messages.length - 1];
-    return last?.stop_reason ? describeStop(last.stop_reason, lastMessage?.role === "assistant", "complete") : null;
-  }, [answer, delivery, done, events, runId, session]);
+    return last?.stop_reason ? describeStop(last.stop_reason, lastMessage?.role === "assistant") : null;
+  }, [answer, done, events, runId, session]);
+  const deliveryNotice = runId !== null && done ? describeDelivery(delivery) : null;
   const pending = useMemo(() => {
     if (done) return null;
     let open: { toolCallId: string; tool: string } | null = null;
@@ -843,6 +865,8 @@ export function Agent() {
           ? { tone: "danger" as const, label: "error", detail: failure }
           : cancelled
             ? { tone: "warn" as const, label: "cancelled", detail: "The active run was cancelled." }
+            : deliveryNotice
+              ? { tone: "warn" as const, label: deliveryNotice.label, detail: deliveryNotice.text }
             : done && stopNotice
               ? { tone: "warn" as const, label: stopNotice.label, detail: stopNotice.text }
             : activeTool
@@ -1109,6 +1133,9 @@ export function Agent() {
                     <div className="notice notice--warn" role="status" style={{ marginTop: 10 }}>{stopNotice.text}</div>
                   )}
                   {failure && <div className="notice notice--danger" style={{ marginTop: 10 }}>{failure}</div>}
+                  {deliveryNotice && (
+                    <div className="notice notice--warn" role="status" style={{ marginTop: 10 }}>{deliveryNotice.text}</div>
+                  )}
                   <div ref={end} />
                 </div>
               </div>

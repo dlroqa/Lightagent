@@ -204,6 +204,20 @@ impl RunState {
         self.events.lock().await.clone()
     }
 
+    /// How many events are buffered, without copying them.
+    pub async fn event_count(&self) -> usize {
+        self.events.lock().await.len()
+    }
+
+    /// Why the run stopped, once its terminal event is buffered.
+    pub async fn stop_reason(&self) -> Option<StopReason> {
+        let events = self.events.lock().await;
+        events.iter().rev().find_map(|event| match event {
+            AgentEvent::RunCompleted { reason } => Some(*reason),
+            _ => None,
+        })
+    }
+
     /// The pending approval, if the run is waiting for one.
     pub async fn pending(&self) -> Option<PendingApproval> {
         self.pending.lock().await.clone()

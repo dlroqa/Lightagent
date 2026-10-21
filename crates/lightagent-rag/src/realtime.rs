@@ -400,6 +400,7 @@ fn limit_chars(text: &str, cap: usize) -> String {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use lightagent_tools::{WebContext, WebPolicy};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -520,14 +521,19 @@ mod tests {
     /// A loopback stand-in for a search backend and its sources. Every
     /// connection is served on its own task, so a stalled source stalls only
     /// itself. `/search/<scenario>` lists the scenario's sources; `/fast`
-    /// answers at once, `/slow` never within a test, `/broken*` with HTTP 500.
-    async fn stub() -> u16 {
+    /// answers at once, `/broken*` with HTTP 500. `/slow` and `/search/hang`
+    /// never answer: they are held open, and the returned count goes up each
+    /// time the client closes one of them.
+    async fn stub() -> (u16, Arc<AtomicUsize>) {
         let listener = tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .await
             .unwrap();
         let port = listener.local_addr().unwrap().port();
+        let closed = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&closed);
         tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
+                let closed = Arc::clone(&counter);
                 tokio::spawn(async move {
                     let mut request = vec![0; 4096];
                     let Ok(read) = socket.read(&mut request).await else {
@@ -540,10 +546,17 @@ mod tests {
                         .and_then(|line| line.split_whitespace().nth(1))
                         .unwrap_or("/")
                         .to_owned();
-                    let (status, content_type, body) = stub_route(port, &path);
-                    if path == "/slow" {
-                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    if path == "/slow" || path.starts_with("/search/hang") {
+                        // A read of zero bytes is the client closing it.
+                        let mut probe = [0u8; 1];
+                        let held = socket.read(&mut probe);
+                        let waited = tokio::time::timeout(Duration::from_secs(30), held).await;
+                        if let Ok(Ok(0)) = waited {
+                            closed.fetch_add(1, Ordering::SeqCst);
+                        }
+                        return;
                     }
+                    let (status, content_type, body) = stub_route(port, &path);
                     let response = format!(
                         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
@@ -552,7 +565,7 @@ mod tests {
                 });
             }
         });
-        port
+        (port, closed)
     }
 
     fn stub_route(port: u16, path: &str) -> (&'static str, &'static str, String) {
@@ -617,10 +630,23 @@ mod tests {
         output: ToolOutcome,
         elapsed: Duration,
         stages: Vec<ToolProgress>,
+        /// Requests the stub saw the client close before answering them.
+        closed: Arc<AtomicUsize>,
+    }
+
+    /// Whether the stub sees `count` held requests closed within two seconds.
+    async fn closed_by_client(run: &Run, count: usize) -> bool {
+        for _ in 0..40 {
+            if run.closed.load(Ordering::SeqCst) >= count {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
     }
 
     async fn retrieve(tool: &RealtimeRag, scenario: &str, cancel: CancellationToken) -> Run {
-        let port = stub().await;
+        let (port, closed) = stub().await;
         let (progress, mut reports) = tokio::sync::mpsc::unbounded_channel();
         let ctx = ToolCtx::new(cancel)
             .with_web(web_for(port, scenario))
@@ -638,6 +664,7 @@ mod tests {
             output,
             elapsed,
             stages,
+            closed,
         }
     }
 
@@ -680,6 +707,7 @@ mod tests {
             "{names:?}"
         );
         assert_eq!(last_outcome(&run.stages), Some("partial"));
+        assert!(closed_by_client(&run, 1).await, "the unfinished fetch is closed");
     }
 
     #[tokio::test]
@@ -763,6 +791,28 @@ mod tests {
         assert!(run.output.is_error);
         assert!(run.output.content.contains("cancelled"));
         assert_eq!(last_outcome(&run.stages), Some("failed"));
+        assert!(closed_by_client(&run, 1).await, "the cancelled fetch is closed");
+    }
+
+    #[tokio::test]
+    async fn a_search_that_never_answers_ends_inside_the_deadline() {
+        let run = retrieve(&short_deadline(), "hang", CancellationToken::new()).await;
+        assert!(run.elapsed < Duration::from_secs(5), "{:?}", run.elapsed);
+        assert!(run.output.is_error);
+        let text = &run.output.content;
+        assert!(text.contains("did not answer in time"), "{text}");
+        assert_eq!(last_outcome(&run.stages), Some("failed"));
+        assert!(closed_by_client(&run, 1).await, "the search request is closed");
+    }
+
+    #[test]
+    fn the_whole_retrieval_fits_inside_the_tool_timeout_with_margin() {
+        // Search, fetches, embedding and ranking all end by the deadline; the
+        // lexical fallback and assembly after it are local and fast. The
+        // margin keeps the tool's own result from losing to the timeout.
+        let margin = Duration::from_secs(10);
+        assert!(RETRIEVAL_DEADLINE + margin <= lightagent_tools::DEFAULT_PER_CALL_TIMEOUT);
+        assert!(RANKING_RESERVE < RETRIEVAL_DEADLINE);
     }
 
     #[test]

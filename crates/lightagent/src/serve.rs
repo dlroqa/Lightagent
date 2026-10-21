@@ -477,7 +477,7 @@ impl LightweightRunFactory {
         let mut executor = BoundedExecutor::new(
             registry,
             PolicyEngine::new(profile.approval_policy.into()),
-            Duration::from_secs(60),
+            lightagent_tools::DEFAULT_PER_CALL_TIMEOUT,
             262_144,
         )
         .with_run(RunId::new())
@@ -950,6 +950,126 @@ pub(crate) mod routing_tests {
             let body: serde_json::Value = serde_json::from_str(body).unwrap();
             assert!(body["questions"].get("route").is_none());
             assert!(body["questions"].get("task").is_some());
+        }
+        std::fs::remove_dir_all(scratch).ok();
+    }
+
+    /// Jev classification fails, times out, answers garbage, is refused for
+    /// the profile, or confidently says no retrieval is needed: every run
+    /// still completes and offers the model exactly the retrieval tools a run
+    /// without Jev offers. Classification is advisory; it never gates a tool.
+    #[tokio::test]
+    async fn a_failed_or_refused_classification_never_withholds_retrieval() {
+        use crate::coordinator::test_support::{answer, jev_stub};
+        let (gateway, chats) = gateway_stub().await;
+        let (unavailable, _) = jev_stub(503, "{}".to_owned(), Duration::ZERO).await;
+        let slow_answer = answer("research", 0.95);
+        let (slow, _) = jev_stub(200, slow_answer, Duration::from_secs(5)).await;
+        let (malformed, _) = jev_stub(200, "{\"answers\":".to_owned(), Duration::ZERO).await;
+        let no_retrieval = answer("conversation", 0.99);
+        let (confident, _) = jev_stub(200, no_retrieval, Duration::ZERO).await;
+        let (research, _) = jev_stub(200, answer("research", 0.99), Duration::ZERO).await;
+        let scratch = std::env::temp_dir().join(format!(
+            "lightagent-jev-advisory-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // (case, Jev endpoint, profile permitted to classify, outcome)
+        let cases = [
+            ("off", None, false, None),
+            ("unavailable", Some(unavailable), true, Some("failed")),
+            ("timeout", Some(slow), true, Some("failed")),
+            ("malformed", Some(malformed), true, Some("failed")),
+            ("denied", Some(confident.clone()), false, Some("skipped")),
+            ("confident_no_retrieval", Some(confident), true, Some("classified")),
+            ("research_guided", Some(research), true, Some("classified")),
+        ];
+        let count = cases.len();
+        for (label, jev, permitted, outcome) in cases {
+            let root = scratch.join(label);
+            let mut config = lightagent_core::Config::default();
+            config.inference.base_url = gateway.clone();
+            config.memory.inject_recent = 0;
+            config.web.enabled = true;
+            config.web.search.endpoint = Some(lightagent_core::DUCKDUCKGO_SEARCH_ENDPOINT.to_owned());
+            config.rag.realtime_enabled = true;
+            if let Some(jev) = jev {
+                config.platform.jev.endpoint.enabled = true;
+                config.platform.jev.endpoint.base_url = Some(jev);
+                config.platform.jev.timeout_secs = 1;
+                config.platform.jev.classification.mode =
+                    lightagent_core::JevClassificationMode::Active;
+                config.platform.jev.classification.workflow_guidance = true;
+                if permitted {
+                    config.platform.jev.classification.allowed_profiles = vec!["lead".to_owned()];
+                }
+            }
+            ConfigStore::at(&LightagentPaths::rooted_at(&root))
+                .save(&config)
+                .unwrap();
+            let store = ProfileStore::new(&root);
+            let lead = lightagent_core::AgentProfile::new(
+                lightagent_core::ProfileId::new("lead").unwrap(),
+                "Lead",
+                "Persona",
+                "Auto",
+            );
+            store.create(&lead).unwrap();
+            store.set_active(&lead.id).unwrap();
+            let factory = LightweightRunFactory {
+                root: root.clone(),
+                jev: crate::coordinator::JevState::new(),
+            };
+            let (sink, mut events) = tokio::sync::mpsc::unbounded_channel();
+            let (_decide, decisions) = tokio::sync::mpsc::unbounded_channel();
+            let status = factory
+                .run(
+                    StartRun {
+                        message: "search the web for today's battery news".to_owned(),
+                        history: vec![],
+                        profile: None,
+                        model: None,
+                        cwd: None,
+                    },
+                    sink,
+                    CancellationToken::new(),
+                    decisions,
+                )
+                .await;
+            let mut seen = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                seen.push(event);
+            }
+            assert_eq!(status, RunStatus::Completed, "{label}: {seen:?}");
+            let classified = seen.iter().find_map(|event| match event {
+                AgentEvent::TaskClassified { diagnostics } => Some(diagnostics.outcome.clone()),
+                _ => None,
+            });
+            assert_eq!(classified.as_deref(), outcome, "{label}");
+        }
+
+        let chats = chats.lock().unwrap().clone();
+        assert_eq!(chats.len(), count, "one model turn per run");
+        let offered = |body: &str| -> Vec<String> {
+            let body: serde_json::Value = serde_json::from_str(body).unwrap();
+            let mut names: Vec<String> = body["tools"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+                .collect();
+            names.sort();
+            names
+        };
+        let baseline = offered(&chats[0]);
+        for tool in ["rag.realtime", "web.search", "web.fetch"] {
+            assert!(baseline.iter().any(|name| name == tool), "{tool}: {baseline:?}");
+        }
+        for (at, body) in chats.iter().enumerate() {
+            assert_eq!(offered(body), baseline, "run {at} offered other tools");
         }
         std::fs::remove_dir_all(scratch).ok();
     }

@@ -460,9 +460,12 @@ async fn a_reconnecting_stream_resumes_after_the_last_event_it_saw() {
     assert_eq!(status, 200);
     assert!(frames(&body).is_empty(), "{body}");
 
-    // A malformed explicit cursor is a client error.
-    let (status, _) = http(&addr, "GET", &format!("{events}?after=soon"), &[], None).await;
-    assert_eq!(status, 400);
+    // A malformed or negative explicit cursor is a client error.
+    for cursor in ["soon", "-1", "1.5"] {
+        let path = format!("{events}?after={cursor}");
+        let (status, _) = http(&addr, "GET", &path, &[], None).await;
+        assert_eq!(status, 400, "{cursor}");
+    }
 }
 
 #[tokio::test]

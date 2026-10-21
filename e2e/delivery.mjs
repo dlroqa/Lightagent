@@ -179,6 +179,61 @@ const SCENARIOS = [
       absent: ["Partial evidence", "sources read"],
     },
   },
+  {
+    // The service restarted mid-run: the run is unknown to it now. The UI
+    // keeps what arrived, stops retrying, and says nothing about how the run
+    // ended, because it does not know.
+    name: "unavailable-after-restart",
+    frames: [started, delta("Half an answer")],
+    stream(attempt, cursor, frames) {
+      if (attempt === 0) return { frames: body(frames) };
+      return { status: 404 };
+    },
+    status: () => ({ httpStatus: 404 }),
+    expect: {
+      once: ["Half an answer"],
+      present: ["This run can no longer be followed from this browser"],
+      absent: ["The run failed", "could not be recovered"],
+      badge: "unavailable",
+      reconnectedAfter: 1,
+    },
+  },
+  {
+    // Access was withdrawn during recovery: the same honest end, no retry loop.
+    name: "access-revoked-during-recovery",
+    frames: [started, delta("Before the revocation")],
+    stream(attempt, cursor, frames) {
+      if (attempt === 0) return { frames: body(frames) };
+      return { status: 401 };
+    },
+    status: () => ({ httpStatus: 401 }),
+    expect: {
+      once: ["Before the revocation"],
+      present: ["This run can no longer be followed from this browser"],
+      absent: ["The run failed"],
+      badge: "unavailable",
+      reconnectedAfter: 1,
+    },
+  },
+  {
+    // The run really failed on the server, and the browser also missed its
+    // end. Both are said, separately: the failure is the server's report, the
+    // gap is delivery's.
+    name: "failed-run-with-delivery-gap",
+    frames: [started, delta("Partial findings so far")],
+    stream(attempt, cursor, frames) {
+      if (attempt === 0) return { frames: body(frames) };
+      return { status: 503 };
+    },
+    status: () => ({ status: "failed", stop_reason: "Error" }),
+    expect: {
+      once: ["Partial findings so far"],
+      present: ["The run failed.", "Some live output could not be recovered"],
+      absent: [],
+      badge: "error",
+      reconnectedAfter: 1,
+    },
+  },
 ];
 
 const occurrences = (haystack, needle) => haystack.split(needle).length - 1;
@@ -234,8 +289,8 @@ async function scriptedProxy(base, scenario, streams) {
         streams.push(record);
         const reply = scenario.stream(attempt, cursorOf(record), scenario.frames);
         if (reply.status) {
-          response.writeHead(reply.status, { "content-type": "text/plain" });
-          return response.end("unavailable");
+          response.writeHead(reply.status, { "content-type": "application/json" });
+          return response.end(JSON.stringify({ error: "unavailable" }));
         }
         // The whole scripted body, then the connection ends: to the browser,
         // a stream that dropped exactly there.
@@ -243,7 +298,9 @@ async function scriptedProxy(base, scenario, streams) {
         return response.end(reply.frames);
       }
       if (request.method === "GET" && url.pathname === `/api/lightagent/v1/runs/${RUN}`) {
-        return json(200, { id: RUN, events: scenario.frames.length, pending_approval: null, stop_reason: null, ...scenario.status() });
+        const reported = scenario.status();
+        if (reported.httpStatus) return json(reported.httpStatus, { error: `no run '${RUN}'` });
+        return json(200, { id: RUN, events: scenario.frames.length, pending_approval: null, stop_reason: null, ...reported });
       }
       const headers = Object.fromEntries(
         Object.entries(request.headers).filter(([name]) => !DROP_REQUEST.has(name)),

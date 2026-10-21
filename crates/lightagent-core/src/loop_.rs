@@ -1910,4 +1910,88 @@ mod tests {
             .collect();
         assert_eq!(order, ["started", "searching", "completed", "result"]);
     }
+
+    /// A turn that asks for `size` distinct tool calls at once.
+    fn batch_turn(size: u32) -> Vec<ProviderEvent> {
+        let mut turn = vec![ProviderEvent::RoleStarted];
+        for index in 0..size {
+            turn.push(ProviderEvent::ToolCallDelta {
+                index,
+                id: Some(format!("call_{index}")),
+                name: Some("datetime.now".into()),
+                arguments: Some(format!("{{\"n\":{index}}}")),
+            });
+        }
+        turn.push(ProviderEvent::Finished {
+            reason: FinishReason::ToolCalls,
+            usage: None,
+        });
+        turn
+    }
+
+    /// Every assistant message that asked for tools is followed by exactly
+    /// one result per call, in order.
+    fn well_formed(messages: &[ProviderMessage]) -> bool {
+        for (at, message) in messages.iter().enumerate() {
+            for (offset, call) in message.tool_calls.iter().enumerate() {
+                let Some(result) = messages.get(at + 1 + offset) else {
+                    return false;
+                };
+                if result.role != Role::Tool || result.tool_call_id.as_ref() != Some(&call.id) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Whether `message` is the instruction of a budget's answer turn.
+    fn says_why(message: Option<&ProviderMessage>) -> bool {
+        let said = message.map_or("", |message| message.content.as_str());
+        said == TURN_BUDGET_INSTRUCTION || said == TOOL_CALL_BUDGET_INSTRUCTION
+    }
+
+    #[tokio::test]
+    async fn the_reserved_answer_turn_never_exceeds_any_budget() {
+        for max_turns in 0..=4 {
+            for max_tool_calls in 0..=4 {
+                for size in 1..=3 {
+                    let case = format!("turns {max_turns}, calls {max_tool_calls}, batch {size}");
+                    let mock = MockProvider::looping(vec![batch_turn(size)]);
+                    let inspector = mock.clone();
+                    let agent = AgentLoop::new(
+                        mock,
+                        ScriptedInvoker {
+                            need: ApprovalNeed::AutoApprove,
+                        },
+                        limited(max_turns, max_tool_calls),
+                    );
+                    let events = agent
+                        .run("go", CancellationToken::new())
+                        .await
+                        .expect("run")
+                        .into_events();
+                    let requests = inspector.requests();
+
+                    // A run always takes its first turn, as before this change.
+                    let turns = u32::try_from(requests.len()).unwrap();
+                    assert!(turns <= max_turns.max(1), "{case}: {turns} requests");
+                    let ran = u32::try_from(tool_runs(&events)).unwrap();
+                    assert!(ran <= max_tool_calls, "{case}: {ran} tools ran");
+                    assert!(stop_reason(&events).is_some(), "{case}: no terminal event");
+                    for (at, request) in requests.iter().enumerate() {
+                        assert!(well_formed(&request.messages), "{case}: request {at}");
+                        assert_eq!(request.max_tokens, None, "{case}: token settings");
+                    }
+                    let answer_turns = requests.iter().filter(|r| r.tools.is_empty()).count();
+                    assert!(answer_turns <= 1, "{case}: {answer_turns} tool-less turns");
+                    let toolless_last = requests.last().is_some_and(|r| r.tools.is_empty());
+                    assert!(answer_turns == 0 || toolless_last, "{case}: answer turn not last");
+                    if let Some(last) = requests.last().filter(|r| r.tools.is_empty()) {
+                        assert!(says_why(last.messages.last()), "{case}: says why");
+                    }
+                }
+            }
+        }
+    }
 }

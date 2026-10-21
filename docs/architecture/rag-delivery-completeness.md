@@ -223,6 +223,169 @@ flowchart TD
 - **Live provider check.** Run a paired test against the Lightweight gateway
   for how it ends streams. The paired-E2E job exercises the mock gateway only.
 
+## Review verification (PR #30)
+
+Each review point was checked against the PR head. Changes made during the
+review are marked **(review)**.
+
+### 1. Synthesis budget
+
+- **Turns.** The reserved answer turn is the last turn the budget already
+  allows (`turn + 1 >= max_turns`, once tool results exist), not an extra
+  one. After the tool-call budget runs out, the answer turn is taken only
+  while `turn < max_turns`. Otherwise the run ends `MaxToolCalls` with no
+  further request. A run always takes its first turn, as it did before
+  (`max_turns = 0` still allows one).
+- **Tool calls.** No call past `max_tool_calls` runs. The rest of the batch
+  gets controlled error results, so the conversation stays well formed. The
+  answer turn offers no tools, and calls it asks for anyway are not run.
+- **Tokens.** There is no per-run token budget in `RunLimits`. The answer
+  turn sends the same `max_tokens` (none) as every other turn, and a model
+  token limit ends it as `MaxTokens`. Its request is the conversation plus
+  one instruction message, with no tool schemas. It is therefore smaller than
+  an ordinary turn, but it is one more request than the old early end made.
+  If that request overflows the model's context, the provider refuses it and
+  the run ends `Error`. The tool results are kept in the log.
+- **Wall clock.** Unchanged: the budget is checked at every turn boundary,
+  and the answer turn is never started past it (the existing wall-clock
+  wrap-up applies instead). As with every turn, a turn already in flight
+  finishes.
+- **Proof (review).** `the_reserved_answer_turn_never_exceeds_any_budget`
+  covers every combination of `max_turns` 0–4, `max_tool_calls` 0–4 and
+  batches of 1–3 calls, in 75 cases. It asserts:
+  - requests ≤ `max(max_turns, 1)`;
+  - tool runs ≤ `max_tool_calls`;
+  - every requested call has a result;
+  - only the last request is tool-less, and it says why;
+  - token settings are unchanged;
+  - a terminal event is always emitted.
+
+### 2. Deadline composition
+
+- **Phases.** One deadline (45 s) bounds the whole call. Search and the
+  fetches must end by `deadline − 10 s`. Embedding and semantic ranking must
+  end by the deadline. The lexical fallback and the result assembly that
+  follow are local CPU work over at most 8 sources, with no network.
+- **Margin (review).** The executor's per-call timeout is now a named
+  constant, `lightagent_tools::DEFAULT_PER_CALL_TIMEOUT` (60 s), used by the
+  API and terminal executors. A test asserts `RETRIEVAL_DEADLINE + 10 s ≤`
+  that constant, so the two cannot drift apart unnoticed.
+- **Cleanup (review).** Tests confirm the client closes outstanding
+  connections when:
+  - the fetch deadline passes (`a_slow_source_costs_only_itself`);
+  - the run is cancelled (`cancellation_during_fetches_ends_the_call_promptly`);
+  - search never answers (`a_search_that_never_answers_ends_inside_the_deadline`).
+
+  Dropping the futures aborts their requests. A DNS lookup already running
+  on a blocking thread (`tokio::net::lookup_host`) may finish after the drop;
+  its answer is discarded and nothing is sent.
+- **Evidence.** At the deadline, everything already fetched, and every
+  search snippet, is kept and ranked. On cancellation the call returns
+  "cancelled" without evidence, which is appropriate: the run is being torn
+  down, and the executor reports the cancellation in any case.
+
+### 3. Event recovery
+
+- **Cursors.** `?after=` must be an unsigned integer (`-1`, `1.5` and
+  `soon` → 400, tested). An unreadable `Last-Event-ID` is ignored, and the
+  client deduplicates by id. A cursor past the buffer resumes at its end.
+- **Order.** Ids are buffer positions. The server replays strictly after the
+  cursor, and the client accepts only `lastId + 1`, reopening from `lastId`
+  on a gap.
+- **Terminal race.** On the server, the event forwarder is drained before the
+  terminal status is set (`forwarder.await` precedes `set_status`), so a
+  stream that sees the run as terminal has already buffered the terminal
+  event. On the client, a terminal status triggers a replay, never a
+  synthetic end. The replay is bounded to 4 tries; after that, the run is
+  ended with the status and stop reason the server reported.
+- **Retention.** Run buffers are never trimmed, so every cursor up to the
+  buffer length replays exactly. A trimmed window does not exist and cannot
+  be hit. After a restart the run is unknown (404).
+- **Unknown run or withdrawn access (review).** A 401, 403 or 404 from the
+  run endpoint now ends recovery as `delivery: "unavailable"`. Recovery used
+  to retry forever. Nothing is said about how the run ended, and what arrived
+  is kept. Consecutive failed connections are capped at 10, with backoff.
+- **Authorization.** Every resume goes through the same `authorized_run`
+  check and multi-user stream guard. Tests confirm:
+  - a missing credential with a cursor gets 401;
+  - a non-owner with a cursor gets the identical 404;
+  - (review) an expired subscriber credential with a cursor gets 401 and no
+    events.
+- **Partial output (review).** When delivery ends without a terminal event,
+  any text still held is shown as the answer.
+- **Delivery vs. failure (review).** The delivery notice is now separate from
+  the stop reason and from backend failure, and it is shown even when the
+  run failed or was cancelled. A run failure is shown only when the server
+  reports one. Render scenarios cover a restart (404), revocation (401) and a
+  real failure combined with a delivery gap.
+
+### 4. Compatibility
+
+- **API and events.** All changes are additive:
+  - `id:` lines on events;
+  - the `tool.progress` event;
+  - `complete` on `run.completed`;
+  - `stop_reason` on `GET /runs/{id}`.
+
+  Existing names and fields are unchanged; the paired contract E2E passes.
+- **Stop reasons and `[DONE]`.** `MaxTokens` and `Incomplete` replace the
+  `EndTurn` that truncated or broken turns used to report. That is the
+  intended behavior change. An explicit finish reason followed by EOF, and
+  `[DONE]` without a finish reason, both remain normal ends (tested).
+- **Run status.** `RunStatus` is `completed` for both new reasons, so clients
+  that read only `status` see no change. `stop_reason` and `complete` tell
+  them apart.
+- **Consumers of the new reasons:**
+  - CLI: prints the code and an explanation.
+  - ACP: `max_tokens`, or `refusal` for `Incomplete`.
+  - Saved sessions: the real reason. Older saved values (`Completed`) stay
+    and are ignored by the UI.
+  - An older Web UI bundle shows `completed`.
+- **Delegation (review).** A worker that stopped early used to hand its
+  partial text to the parent as a finished answer. Its result now ends with
+  the reason (`a_worker_answer_says_when_the_worker_stopped_early`).
+- **Rust API.** `FinishReason` and `StopReason` gained variants. They are
+  exhaustive public enums, so this is breaking for out-of-tree exhaustive
+  matches; there are none in this workspace. `ToolCtx` gained a public
+  field, and `ToolInvoker::invoke_with_progress` has a default
+  implementation.
+
+### 5. Resource use
+
+- **Progress events.** At most 64 per tool call. `rag.realtime` sends about
+  3 plus one per source (≤ 12). Per run the total is bounded by
+  `max_tool_calls × 64` (default ≤ 2,048 small records), and typically a
+  dozen per retrieval. This adds to each retained run but does not create
+  unbounded growth within a run. The pre-existing problem remains: finished
+  runs are never evicted (see *Not implemented*).
+- **Replay.** A resumed stream copies only the events after its cursor.
+  (review) Resuming and `GET /runs/{id}`, which the client polls every 2 s
+  during faults, no longer copy the run's whole buffer: they use
+  `event_count()` and `stop_reason()`. Session save still copies it once, as
+  before.
+- **Client.** The event list no longer duplicates on reconnect. Retries and
+  polling end when the run ends, becomes unavailable, or exhausts recovery.
+
+### 6. Jev
+
+- **Labels.** Displayed lines always say advisory: "advisory only" or
+  "advisory; guidance added" (review). Failure and skip lines say the run
+  continued normally.
+- **Cannot block retrieval (review).**
+  `a_failed_or_refused_classification_never_withholds_retrieval` runs the
+  real run factory with retrieval configured, with Jev:
+  - off;
+  - unavailable (503);
+  - timing out;
+  - malformed;
+  - denied for the profile;
+  - confidently "conversation";
+  - "research" with guidance on.
+
+  Every run completes, and the provider receives the identical tool set,
+  including `rag.realtime`, `web.search` and `web.fetch`.
+- **Routing.** No retrieval routing is added.
+
 ## Reproduction status
 
 The user's incident has **not** been reproduced on an installed application.
@@ -243,9 +406,15 @@ app's evidence:
 ## Validation record
 
 All builds, tests and renders ran on GitHub-hosted runners. Locally, the
-work was limited to reading and editing source, git, the `gh` CLI, and
-`rustfmt` on the edited Rust files. No compilation, tests, linting, type
-checking, servers or browsers were run locally.
+work was limited to reading and editing source, git, and the `gh` CLI.
+
+**Policy exception (recorded).** Before review, `rustfmt` was run locally on
+the edited Rust files, three times: before commit `6fd3a45`, and on
+`crates/lightagent-rag/src/realtime.rs` twice before `c2a84c4`. Formatting is
+executable validation under this task's policy, so those runs were outside it.
+No compilation, tests, linting, type checking, servers or browsers were run
+locally. From the review onward, nothing was formatted locally; formatting is
+checked only by CI (`cargo fmt --all --check` in `scripts/check.sh`).
 
 | Tested SHA | Workflow run | Result |
 |---|---|---|
