@@ -56,3 +56,46 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           # Compilation failures must not hide behind the report.
           grep -Eq '^test result:' "$out"
+
+  broker-live:
+    name: Tester broker (live GitHub Actions)
+    # Same-repository pull requests and manual runs only: a fork's code never
+    # receives this job's token. The token can dispatch, read and cancel
+    # workflow runs here and read contents, nothing else, and ends with the job.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: write
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: subagents
+      - name: Dispatch and read the fixture workflow through the broker
+        env:
+          LIGHTAGENT_BROKER_LIVE_TOKEN: ${{ github.token }}
+          LIGHTAGENT_BROKER_LIVE_REPOSITORY: ${{ github.repository }}
+          LIGHTAGENT_BROKER_LIVE_REF: ${{ github.head_ref || github.ref_name }}
+          LIGHTAGENT_BROKER_LIVE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -o pipefail
+          cargo test -p lightagent-tools --test actions_broker -- --ignored --nocapture live_ \
+            2>&1 | tee "$RUNNER_TEMP/broker.log"
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "### Tester broker, live"
+            echo
+            echo '```'
+            grep -E '^(EVIDENCE|BLOCKED)' "$RUNNER_TEMP/broker.log" || echo "no evidence lines"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

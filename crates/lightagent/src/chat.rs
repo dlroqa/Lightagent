@@ -29,9 +29,9 @@ use lightagent_store::{
     Session, SessionId, SessionStore, StoredMessage, model_history as build_model_history,
 };
 use lightagent_tools::{
-    BoundedExecutor, OpenTerminalContext, OpenTerminalPolicy, SkillContext, SubagentPolicy,
-    SubagentRole, Tool, ToolRegistry, WebContext, WebPolicy, Workspace, WorkspaceContext,
-    WorkspacePolicy,
+    ActionsContext, ActionsPolicy, BoundedExecutor, OpenTerminalContext, OpenTerminalPolicy,
+    SkillContext, SubagentPolicy, SubagentRole, Tool, ToolRegistry, WebContext, WebPolicy,
+    Workspace, WorkspaceContext, WorkspacePolicy,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -383,7 +383,57 @@ pub(crate) fn configured_builtin_registry(config: &Config, has_skills: bool) -> 
     if !has_skills {
         registry = registry.without("skill.read");
     }
+    if actions_configured(config) {
+        use lightagent_tools::builtins::{
+            ActionsCancel, ActionsDispatch, ActionsLogs, ActionsStatus,
+        };
+        registry = registry
+            .with(Arc::new(ActionsDispatch::new()))
+            .with(Arc::new(ActionsStatus::new()))
+            .with(Arc::new(ActionsLogs::new()))
+            .with(Arc::new(ActionsCancel::new()));
+    }
     registry
+}
+
+/// Whether the GitHub Actions workflow broker is configured: enabled, with a
+/// repository and at least one allowlisted workflow.
+fn actions_configured(config: &Config) -> bool {
+    let actions = &config.platform.github_actions;
+    actions.endpoint.enabled && actions.repository.is_some() && !actions.workflows.is_empty()
+}
+
+/// The run-local workflow broker, when configured. The token is resolved
+/// here, held only in memory, and never sent anywhere but the API root.
+pub(crate) fn actions_context(config: &Config) -> Option<ActionsContext> {
+    if !actions_configured(config) {
+        return None;
+    }
+    let actions = &config.platform.github_actions;
+    let api_base = actions
+        .endpoint
+        .base_url
+        .as_deref()
+        .unwrap_or("https://api.github.com")
+        .trim_end_matches('/')
+        .to_owned();
+    lightagent_provider_lightweight::ensure_provider();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(actions.request_timeout_secs.max(1)))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("lightagent/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .ok()?;
+    let policy = ActionsPolicy {
+        api_base,
+        repository: actions.repository.clone()?,
+        token: actions.endpoint.api_key.as_ref().and_then(|key| key.resolve()),
+        workflows: actions.workflows.clone(),
+        poll_interval: Duration::from_secs(actions.poll_interval_secs.max(1)),
+        max_wait: Duration::from_secs(actions.max_wait_secs),
+        max_log_bytes: actions.max_log_bytes,
+    };
+    Some(ActionsContext::new(client, policy))
 }
 
 /// Assemble the tools actually available to an active profile, including
@@ -894,6 +944,9 @@ async fn build_chat_runtime(
     }
     if let Some(open_terminal) = open_terminal_context(config) {
         executor = executor.with_open_terminal(open_terminal);
+    }
+    if let Some(actions) = actions_context(config) {
+        executor = executor.with_actions(actions);
     }
     let mut run_profile = profile.clone();
     if !skills.is_empty() {

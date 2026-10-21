@@ -22,7 +22,8 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::context::{
-    Clock, Delegation, OpenTerminalContext, SkillContext, ToolCtx, WebContext, WorkspaceContext,
+    ActionsContext, Clock, Delegation, OpenTerminalContext, SkillContext, ToolCtx, WebContext,
+    WorkspaceContext,
 };
 use crate::output::clamp;
 use crate::registry::ToolRegistry;
@@ -57,6 +58,7 @@ pub struct BoundedExecutor {
     web: Option<WebContext>,
     workspace: Option<WorkspaceContext>,
     open_terminal: Option<OpenTerminalContext>,
+    actions: Option<ActionsContext>,
     skills: Option<SkillContext>,
 }
 
@@ -83,6 +85,7 @@ impl BoundedExecutor {
             web: None,
             workspace: None,
             open_terminal: None,
+            actions: None,
             skills: None,
         }
     }
@@ -178,6 +181,12 @@ impl BoundedExecutor {
         self
     }
 
+    /// Enable the `actions.*` tools with the run's workflow broker.
+    pub fn with_actions(mut self, actions: ActionsContext) -> Self {
+        self.actions = Some(actions);
+        self
+    }
+
     /// The risk and scopes a call would carry, from its tool's definition.
     fn classify(&self, call: &ToolCall) -> Option<(RiskClass, Vec<Scope>)> {
         self.registry
@@ -248,6 +257,9 @@ impl BoundedExecutor {
         }
         if let Some(skills) = &self.skills {
             ctx = ctx.with_skills(skills.clone());
+        }
+        if let Some(actions) = &self.actions {
+            ctx = ctx.with_actions(actions.clone());
         }
         if let Some(authorization) = &self.authorization {
             ctx = ctx.with_authorization(authorization.clone());
@@ -346,6 +358,12 @@ impl BoundedExecutor {
             self.delegation
                 .as_ref()
                 .map_or(self.per_call, |delegation| delegation.delegate_timeout)
+        } else if call.name.starts_with("actions.") {
+            // A broker call waits within its own bounds (locating a run,
+            // `wait_seconds`); the timeout leaves room for them.
+            self.actions.as_ref().map_or(self.per_call, |actions| {
+                self.per_call + actions.policy.max_wait + Duration::from_secs(60)
+            })
         } else {
             self.per_call
         };

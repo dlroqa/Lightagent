@@ -1,0 +1,39 @@
+name: subagent fixture
+run-name: subagent fixture ${{ inputs.mode || 'pass' }} ${{ inputs.correlation || github.event_name }}
+
+# A deliberately tiny workflow for the tester specialist's live broker check
+# (the `subagents` workflow): `mode: pass` succeeds and `mode: fail` fails its
+# one step, so the broker must report each as it is. It checks out nothing,
+# runs no repository code and has no permissions. The pull_request trigger
+# only registers the workflow so the broker can dispatch it on a branch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [pass, fail]
+        default: pass
+      correlation:
+        type: string
+        default: ''
+  pull_request:
+    paths: ['.github/workflows/subagent-fixture.yml']
+
+permissions: {}
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check
+        env:
+          MODE: ${{ inputs.mode || 'pass' }}
+        run: |
+          echo "fixture mode $MODE at $GITHUB_SHA"
+          if [ "$MODE" = fail ]; then
+            echo "FAIL: deliberate fixture failure"
+            exit 1
+          fi
