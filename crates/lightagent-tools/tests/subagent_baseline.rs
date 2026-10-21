@@ -278,10 +278,9 @@ async fn seeded_no_worker_starts_below_the_maximum_depth() {
     assert!(worker.requests().is_empty());
 }
 
-/// Gap 6: every worker gets the whole remaining parent allowance, so two
-/// workers together exceed the run's tool-call ceiling.
+/// Gap 6 (closed): workers draw from one tree budget, so two workers
+/// together never exceed the run's tool-call allowance.
 #[tokio::test]
-#[ignore = "seeded: gap 6 (tree budget), closed in stage E"]
 async fn seeded_workers_share_one_tool_call_budget() {
     let home = ScratchHome::new();
     let store = worker_store(&home.path, |_| {});
@@ -297,10 +296,12 @@ async fn seeded_workers_share_one_tool_call_budget() {
         final_turn("second"),
     ]);
     let mut delegation = delegation(store, worker, registry);
-    delegation.limit_ceiling = Some(RunLimits {
+    let allowance = RunLimits {
         max_tool_calls: 2,
         ..RunLimits::default()
-    });
+    };
+    delegation.limit_ceiling = Some(allowance);
+    delegation.budget = Some(lightagent_tools::TreeBudget::new(&allowance, 8));
     let ctx = ToolCtx::new(CancellationToken::new()).with_delegation(delegation);
     let task = json!({ "profile": "worker", "task": "tick twice" });
     let _ = delegate(&ctx, task.clone()).await;

@@ -199,6 +199,16 @@ function describeProgress(data: Record<string, unknown>): string | undefined {
   const total = typeof data.total === "number" ? data.total : undefined;
   const counted = done !== undefined && total !== undefined ? `${done} of ${total}` : "";
   switch (text(data.stage)) {
+    case "worker.queued": return "Waiting for a free worker…";
+    case "worker.started": return "Worker started…";
+    case "worker.tool": return counted ? `Worker working (tool call ${counted})…` : "Worker working…";
+    case "worker.awaiting_approval": return "Worker needs an approval it cannot get";
+    case "worker.completed": return "Worker finished";
+    case "worker.partial": return "Worker returned partial results";
+    case "worker.timed_out": return "Worker ran out of time";
+    case "worker.blocked": return "Worker stopped before an approval";
+    case "worker.failed": return "Worker failed";
+    case "worker.cancelled": return "Worker stopped";
     case "searching": return "Searching…";
     case "fetching": return counted ? `Reading sources (${counted})…` : "Reading sources…";
     case "ranking": return "Ranking passages…";
@@ -1459,6 +1469,7 @@ function ToolRow({ tool }: { tool: ToolCall }) {
   const active = tool.status === "requested" || tool.status === "running";
   const [open, setOpen] = useState(active);
   const activity = describeTool(tool);
+  const report = workerReport(tool);
 
   useEffect(() => {
     setOpen(active);
@@ -1480,9 +1491,111 @@ function ToolRow({ tool }: { tool: ToolCall }) {
       </summary>
       <div className="tool-call__details">
         {tool.arguments && tool.arguments !== "{}" && <code className="muted" style={{ fontSize: 12, overflowWrap: "anywhere" }}>{tool.arguments}</code>}
-        {tool.result && <span style={{ fontSize: 13, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{tool.result}</span>}
+        {tool.result && (report ? <WorkerResult report={report} /> : (
+          <span style={{ fontSize: 13, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{tool.result}</span>
+        ))}
       </div>
     </details>
+  );
+}
+
+/** A specialist worker's typed result (`lightagent.worker_result.v1`). */
+interface WorkerReport {
+  status: string;
+  worker: string;
+  role: string | null;
+  model: string;
+  skills: string[];
+  answer: string;
+  sources: string[];
+  unverified_citations: string[];
+  limitations: string[];
+  blocked_on: string | null;
+}
+
+/** The typed result of an `agent.delegate` call, when it returned one. */
+function workerReport(tool: ToolCall): WorkerReport | null {
+  if (tool.name !== "agent.delegate") return null;
+  try {
+    const value: unknown = JSON.parse(tool.result);
+    if (!value || typeof value !== "object") return null;
+    const data = value as Record<string, unknown>;
+    if (data.schema !== "lightagent.worker_result.v1") return null;
+    const list = (key: string) => Array.isArray(data[key])
+      ? (data[key] as unknown[]).filter((item): item is string => typeof item === "string")
+      : [];
+    return {
+      status: text(data.status),
+      worker: text(data.worker),
+      role: typeof data.role === "string" ? data.role : null,
+      model: text(data.model),
+      skills: list("skills"),
+      answer: text(data.answer),
+      sources: list("sources"),
+      unverified_citations: list("unverified_citations"),
+      limitations: list("limitations"),
+      blocked_on: typeof data.blocked_on === "string" ? data.blocked_on : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Each worker status in words and a tone; never colour alone. */
+const WORKER_STATUS: Record<string, { label: string; tone: string }> = {
+  completed: { label: "Completed", tone: "ok" },
+  partial: { label: "Partial", tone: "warn" },
+  timed_out: { label: "Timed out", tone: "warn" },
+  blocked: { label: "Blocked on approval", tone: "danger" },
+  failed: { label: "Failed", tone: "danger" },
+  cancelled: { label: "Cancelled", tone: "neutral" },
+};
+
+function WorkerResult({ report }: { report: WorkerReport }) {
+  const status = WORKER_STATUS[report.status] ?? { label: report.status || "Unknown", tone: "neutral" };
+  const safeLink = (url: string) => /^https?:\/\//.test(url);
+  return (
+    <div className="worker-result">
+      <div className="worker-result__meta">
+        <span className={`pill pill--${status.tone}`}>{status.label}</span>
+        <span className="muted">
+          {report.worker}
+          {report.model && ` · ${report.model}`}
+          {report.skills.length > 0 && ` · ${report.skills.join(", ")}`}
+        </span>
+      </div>
+      {report.blocked_on && (
+        <p className="worker-result__note">It stopped before running {report.blocked_on}, which needs an approval; it did not run.</p>
+      )}
+      {report.answer && <div className="worker-result__answer">{report.answer}</div>}
+      {report.sources.length > 0 && (
+        <div>
+          <div className="worker-result__heading">Sources</div>
+          <ul className="worker-result__list">
+            {report.sources.map((source) => (
+              <li key={source}>
+                {safeLink(source)
+                  ? <a href={source} target="_blank" rel="noreferrer noopener">{source}</a>
+                  : source}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {report.unverified_citations.length > 0 && (
+        <p className="worker-result__note" role="note">
+          Not verified: the answer cites {report.unverified_citations.join(", ")}, which no tool returned.
+        </p>
+      )}
+      {report.limitations.length > 0 && (
+        <div>
+          <div className="worker-result__heading">Limitations</div>
+          <ul className="worker-result__list">
+            {report.limitations.map((limitation) => <li key={limitation}>{limitation}</li>)}
+          </ul>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1508,7 +1621,11 @@ function describeTool(tool: ToolCall): { verb: string; subject: string; kind: To
     case "rag.search": return { verb: "Searched documents for", subject: stringArg("query") || "passages", kind: "search" };
     case "terminal.run":
     case "open_terminal.run": return { verb: "Ran", subject: stringArg("command") || "a command", kind: "terminal" };
-    case "agent.delegate": return { verb: "Asked an agent to", subject: stringArg("task") || "help", kind: "tool" };
+    case "agent.delegate": return {
+      verb: stringArg("role") ? `Asked the ${stringArg("role")} to` : "Asked an agent to",
+      subject: stringArg("task") || "help",
+      kind: "tool",
+    };
     default: return { verb: "Used", subject: tool.name, kind: "tool" };
   }
 }

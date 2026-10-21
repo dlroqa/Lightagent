@@ -26,6 +26,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod budget;
 pub mod builtins;
 pub mod context;
 pub mod definition;
@@ -39,6 +40,7 @@ pub mod schema;
 pub mod worker;
 pub mod workspace;
 
+pub use budget::{Admission, Grant, TreeBudget};
 pub use context::{
     ActionsContext, ActionsPolicy, Clock, Delegation, OpenTerminalContext, OpenTerminalPolicy,
     SkillContext, SubagentPolicy, SubagentRole, ToolCtx, WebContext, WebPolicy, WorkspaceContext,
