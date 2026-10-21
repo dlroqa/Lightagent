@@ -249,4 +249,10 @@ checking, servers or browsers were run locally.
 
 | Tested SHA | Workflow run | Result |
 |---|---|---|
-| _filled in as runs complete_ | | |
+| `6fd3a45` | [39604696968](https://github.com/dlroqa/Lightagent/actions/runs/39604696968) | Failed: `lightagent-rag` did not compile. The fetch stream in `rag.realtime`, built from a closure that returns an async block and held across awaits, broke the `Send` bound of `#[async_trait]` ("`FnOnce` is not general enough"). Every job that builds the workspace failed for this reason. |
+| `c2a84c4` | [39605330785](https://github.com/dlroqa/Lightagent/actions/runs/39605330785) | Rust green on Linux, macOS and Windows: fmt, clippy `-D warnings`, the full workspace tests, the provisioning feature, paired Lightweight E2E, Qdrant + Infinity, and package smoke. The Web UI render failed: the new scenarios mocked `POST /runs`, so the session stayed empty and the screen kept the welcome layout (a test-harness defect). |
+| `38d2a11` | [39607176247](https://github.com/dlroqa/Lightagent/actions/runs/39607176247) | Rust green again. The render failed again: Playwright request routing never saw the `EventSource` request (0 stream requests). It also exposed a real UI bug: a connection fault showed "The run failed." (finding 3d). |
+| `4419b84` | [39608861697](https://github.com/dlroqa/Lightagent/actions/runs/39608861697) | Render green, with all 5 delivery scenarios exercised through a real proxy. The browser resumed with `Last-Event-ID` 7 and 6; the dead-stream case made 4 bounded `?after=1` recoveries and then reported the gap. Screenshots and `delivery/report.json` are in the `lightagent-web-screens` artifact. Linux, macOS, paired E2E, Qdrant + Infinity, package smoke, provisioning fixtures, Open Terminal, sandbox and revocation measurement passed, and so did the Windows check. **All 11 jobs green.** |
+
+The PR's own `pull_request` run validates the final head, which adds only this
+record.
