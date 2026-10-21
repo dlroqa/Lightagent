@@ -1823,6 +1823,29 @@ mod tests {
         std::fs::remove_dir_all(home).unwrap();
     }
 
+    /// Gap 1: built-in workers are cloned into ordinary profiles named after
+    /// their roles, copying whichever lead ran first.
+    #[test]
+    #[ignore = "seeded: gap 1 (built-in workers as profiles), closed in stage B"]
+    fn seeded_built_in_workers_create_no_profiles() {
+        let home = std::env::temp_dir().join(format!(
+            "lightagent-subagent-builtins-{}",
+            lightagent_core::RunId::new().as_str()
+        ));
+        let store = ProfileStore::new(&home);
+        let config = Config::default();
+        let lead = default_profile(&config).unwrap();
+        ensure_subagent_profiles(&store, &config, &lead).unwrap();
+        let created = config
+            .subagents
+            .allowed_roles
+            .iter()
+            .filter(|role| store.load(&ProfileId::new(role.as_str()).unwrap()).is_ok())
+            .count();
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(created, 0, "built-in roles were cloned into profiles");
+    }
+
     #[test]
     fn singular_profile_command_and_plural_alias_parse() {
         for command in ["profile", "profiles"] {
