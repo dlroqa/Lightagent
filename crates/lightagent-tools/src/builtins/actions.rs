@@ -73,7 +73,10 @@ async fn api(
         .request(method, format!("{}{path}", policy.api_base))
         .header("accept", "application/vnd.github+json")
         .header("x-github-api-version", "2022-11-28")
-        .header("user-agent", concat!("lightagent/", env!("CARGO_PKG_VERSION")));
+        .header(
+            "user-agent",
+            concat!("lightagent/", env!("CARGO_PKG_VERSION")),
+        );
     if let Some(token) = &policy.token {
         request = request.bearer_auth(token);
     }
@@ -605,7 +608,11 @@ async fn logs(actions: &ActionsContext, run_id: u64, job_id: u64) -> Result<Stri
     let repository = &actions.policy.repository;
     let path = format!("/repos/{repository}/actions/jobs/{job_id}/logs");
     let reply = api(actions, Method::GET, &path, None).await?;
-    let Some(location) = reply.location.clone().filter(|_| reply.status.is_redirection()) else {
+    let Some(location) = reply
+        .location
+        .clone()
+        .filter(|_| reply.status.is_redirection())
+    else {
         return Err(api_error("reading the job log", &reply));
     };
     // The download URL is pre-signed: the token is never sent to it.

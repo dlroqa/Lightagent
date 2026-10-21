@@ -427,7 +427,11 @@ pub(crate) fn actions_context(config: &Config) -> Option<ActionsContext> {
     let policy = ActionsPolicy {
         api_base,
         repository: actions.repository.clone()?,
-        token: actions.endpoint.api_key.as_ref().and_then(|key| key.resolve()),
+        token: actions
+            .endpoint
+            .api_key
+            .as_ref()
+            .and_then(|key| key.resolve()),
         workflows: actions.workflows.clone(),
         poll_interval: Duration::from_secs(actions.poll_interval_secs.max(1)),
         max_wait: Duration::from_secs(actions.max_wait_secs),

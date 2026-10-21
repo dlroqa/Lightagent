@@ -102,7 +102,11 @@ fn answer(api: &mut Api, port: u16, seen: &Seen) -> (u16, String, String) {
             api.runs.iter().find(|run| run["id"] == id).cloned()
         };
         let Some(found) = found else {
-            return (404, String::new(), json!({ "message": "Not Found" }).to_string());
+            return (
+                404,
+                String::new(),
+                json!({ "message": "Not Found" }).to_string(),
+            );
         };
         if tail.starts_with("jobs") {
             let conclusion = found["conclusion"].clone();
@@ -126,9 +130,17 @@ fn answer(api: &mut Api, port: u16, seen: &Seen) -> (u16, String, String) {
         return (302, location, String::new());
     }
     if path.starts_with("/blob/") {
-        return (200, String::new(), "step 1 ok\nFAIL: expected 1, got 2\n".to_owned());
+        return (
+            200,
+            String::new(),
+            "step 1 ok\nFAIL: expected 1, got 2\n".to_owned(),
+        );
     }
-    (404, String::new(), json!({ "message": "Not Found" }).to_string())
+    (
+        404,
+        String::new(),
+        json!({ "message": "Not Found" }).to_string(),
+    )
 }
 
 async fn github() -> GitHub {
@@ -370,7 +382,11 @@ async fn unauthorized_workflows_refs_inputs_and_stale_shas_are_refused() {
         ActionsCancel::new().call(&other, &ctx).await,
     ] {
         assert!(outcome.is_error);
-        assert!(outcome.content.contains("not a run of an allowlisted workflow"));
+        assert!(
+            outcome
+                .content
+                .contains("not a run of an allowlisted workflow")
+        );
     }
     // No result ever carries the token.
     let ok = dispatch(&ctx, "pass").await;
@@ -380,7 +396,9 @@ async fn unauthorized_workflows_refs_inputs_and_stale_shas_are_refused() {
 #[tokio::test]
 async fn without_a_broker_the_tools_refuse() {
     let ctx = ToolCtx::new(CancellationToken::new());
-    let outcome = ActionsStatus::new().call(&json!({ "run_id": 1 }), &ctx).await;
+    let outcome = ActionsStatus::new()
+        .call(&json!({ "run_id": 1 }), &ctx)
+        .await;
     assert!(outcome.is_error);
     assert!(outcome.content.contains("no workflow broker"));
 }
@@ -461,7 +479,10 @@ async fn the_tester_verifies_through_the_broker_and_reports_the_run() {
     )));
     let ctx = ctx(&github).with_delegation(delegation);
     let outcome = lightagent_tools::builtins::AgentDelegate::new()
-        .call(&json!({ "role": "tester", "task": "Verify the fixture." }), &ctx)
+        .call(
+            &json!({ "role": "tester", "task": "Verify the fixture." }),
+            &ctx,
+        )
         .await;
     let _ = std::fs::remove_dir_all(&home);
     let result = report(&outcome);
