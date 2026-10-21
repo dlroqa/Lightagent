@@ -417,6 +417,7 @@ impl LightweightRunFactory {
         if trust == RunTrust::RemoteUser
             && config.subagents.enabled
             && config.subagents.remote_research
+            && config.subagents.resolution == lightagent_core::WorkerResolution::Builtin
         {
             registry.insert(Arc::new(lightagent_tools::builtins::AgentResearch::new()));
         }
@@ -1672,6 +1673,7 @@ pub(crate) mod routing_tests {
             run_through_factory_with(config, "hi", listed, RunTrust::RemoteUser).await;
         let names = tool_names(&bodies[0]);
         assert!(!names.contains(&"agent.delegate".to_owned()), "{names:?}");
+        assert!(!names.contains(&"agent.research".to_owned()), "{names:?}");
     }
 
     #[tokio::test]
