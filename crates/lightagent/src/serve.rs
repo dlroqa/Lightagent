@@ -984,7 +984,12 @@ pub(crate) mod routing_tests {
             ("timeout", Some(slow), true, Some("failed")),
             ("malformed", Some(malformed), true, Some("failed")),
             ("denied", Some(confident.clone()), false, Some("skipped")),
-            ("confident_no_retrieval", Some(confident), true, Some("classified")),
+            (
+                "confident_no_retrieval",
+                Some(confident),
+                true,
+                Some("classified"),
+            ),
             ("research_guided", Some(research), true, Some("classified")),
         ];
         let count = cases.len();
@@ -994,7 +999,8 @@ pub(crate) mod routing_tests {
             config.inference.base_url = gateway.clone();
             config.memory.inject_recent = 0;
             config.web.enabled = true;
-            config.web.search.endpoint = Some(lightagent_core::DUCKDUCKGO_SEARCH_ENDPOINT.to_owned());
+            config.web.search.endpoint =
+                Some(lightagent_core::DUCKDUCKGO_SEARCH_ENDPOINT.to_owned());
             config.rag.realtime_enabled = true;
             if let Some(jev) = jev {
                 config.platform.jev.endpoint.enabled = true;
@@ -1066,7 +1072,10 @@ pub(crate) mod routing_tests {
         };
         let baseline = offered(&chats[0]);
         for tool in ["rag.realtime", "web.search", "web.fetch"] {
-            assert!(baseline.iter().any(|name| name == tool), "{tool}: {baseline:?}");
+            assert!(
+                baseline.iter().any(|name| name == tool),
+                "{tool}: {baseline:?}"
+            );
         }
         for (at, body) in chats.iter().enumerate() {
             assert_eq!(offered(body), baseline, "run {at} offered other tools");

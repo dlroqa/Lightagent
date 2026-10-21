@@ -1986,7 +1986,10 @@ mod tests {
                     let answer_turns = requests.iter().filter(|r| r.tools.is_empty()).count();
                     assert!(answer_turns <= 1, "{case}: {answer_turns} tool-less turns");
                     let toolless_last = requests.last().is_some_and(|r| r.tools.is_empty());
-                    assert!(answer_turns == 0 || toolless_last, "{case}: answer turn not last");
+                    assert!(
+                        answer_turns == 0 || toolless_last,
+                        "{case}: answer turn not last"
+                    );
                     if let Some(last) = requests.last().filter(|r| r.tools.is_empty()) {
                         assert!(says_why(last.messages.last()), "{case}: says why");
                     }

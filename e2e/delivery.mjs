@@ -195,7 +195,7 @@ const SCENARIOS = [
       present: ["This run can no longer be followed from this browser"],
       absent: ["The run failed", "could not be recovered"],
       badge: "unavailable",
-      reconnectedAfter: 1,
+      maxStreams: 2,
     },
   },
   {
@@ -212,7 +212,7 @@ const SCENARIOS = [
       present: ["This run can no longer be followed from this browser"],
       absent: ["The run failed"],
       badge: "unavailable",
-      reconnectedAfter: 1,
+      maxStreams: 2,
     },
   },
   {
@@ -375,6 +375,13 @@ async function runScenario(browser, base, dir, scenario) {
     }
     for (const needle of scenario.expect.absent) {
       if (text.includes(needle)) failures.push(`${scenario.name}: did not expect “${needle}”`);
+    }
+    if (scenario.expect.maxStreams !== undefined) {
+      // Long enough for a retry loop to show itself if one were running.
+      await page.waitForTimeout(3000);
+      if (streams.length > scenario.expect.maxStreams) {
+        failures.push(`${scenario.name}: kept reconnecting (${streams.length} stream requests) after the run became unavailable`);
+      }
     }
     if (scenario.expect.reconnectedAfter !== undefined) {
       const resumed = streams.slice(1).map(cursorOf);

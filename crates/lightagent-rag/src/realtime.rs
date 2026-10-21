@@ -707,7 +707,10 @@ mod tests {
             "{names:?}"
         );
         assert_eq!(last_outcome(&run.stages), Some("partial"));
-        assert!(closed_by_client(&run, 1).await, "the unfinished fetch is closed");
+        assert!(
+            closed_by_client(&run, 1).await,
+            "the unfinished fetch is closed"
+        );
     }
 
     #[tokio::test]
@@ -791,7 +794,10 @@ mod tests {
         assert!(run.output.is_error);
         assert!(run.output.content.contains("cancelled"));
         assert_eq!(last_outcome(&run.stages), Some("failed"));
-        assert!(closed_by_client(&run, 1).await, "the cancelled fetch is closed");
+        assert!(
+            closed_by_client(&run, 1).await,
+            "the cancelled fetch is closed"
+        );
     }
 
     #[tokio::test]
@@ -802,7 +808,10 @@ mod tests {
         let text = &run.output.content;
         assert!(text.contains("did not answer in time"), "{text}");
         assert_eq!(last_outcome(&run.stages), Some("failed"));
-        assert!(closed_by_client(&run, 1).await, "the search request is closed");
+        assert!(
+            closed_by_client(&run, 1).await,
+            "the search request is closed"
+        );
     }
 
     #[test]
