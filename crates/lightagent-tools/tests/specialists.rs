@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use lightagent_core::{
-    AgentProvider, ApprovalPolicy, FinishReason, MockProvider, ModelRouting, ProviderError,
-    ProviderEvent, ProfileStore, Role, RunId, ToolOutcome,
+    AgentProvider, ApprovalPolicy, FinishReason, MockProvider, ModelRouting, ProfileStore,
+    ProviderError, ProviderEvent, Role, RunId, ToolOutcome,
 };
 use lightagent_tools::egress::Resolver;
 use lightagent_tools::{
@@ -47,10 +47,8 @@ struct Scratch {
 
 impl Scratch {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "lightagent-specialists-{}",
-            RunId::new().as_str()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("lightagent-specialists-{}", RunId::new().as_str()));
         std::fs::create_dir_all(&path).unwrap();
         Self { path }
     }
@@ -70,9 +68,7 @@ struct Fixture {
 
 /// Serve `pages(port, path)`, which knows the fixture's own port so a page
 /// can link back to it.
-async fn fixture(
-    pages: impl Fn(u16, &str) -> Option<String> + Send + Sync + 'static,
-) -> Fixture {
+async fn fixture(pages: impl Fn(u16, &str) -> Option<String> + Send + Sync + 'static) -> Fixture {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let paths = Arc::new(Mutex::new(Vec::new()));
@@ -91,19 +87,17 @@ async fn fixture(
                     }
                 }
                 let head = String::from_utf8_lossy(&bytes).into_owned();
-                let path = head
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap_or("/")
-                    .to_owned();
+                let path = head.split_whitespace().nth(1).unwrap_or("/").to_owned();
                 log.lock().unwrap().push(path.clone());
                 let response = match pages(port, &path) {
                     Some(body) => format!(
                         "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                         body.len()
                     ),
-                    None => "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-                        .to_owned(),
+                    None => {
+                        "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                            .to_owned()
+                    }
                 };
                 let _ = stream.write_all(response.as_bytes()).await;
                 let _ = stream.shutdown().await;
@@ -146,7 +140,10 @@ fn web(search: &Fixture) -> WebContext {
     let mut context = WebContext::new(client, Arc::new(policy));
     let answers = HashMap::from([
         ("docs.test".to_owned(), IpAddr::V4(Ipv4Addr::LOCALHOST)),
-        ("internal.test".to_owned(), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7))),
+        (
+            "internal.test".to_owned(),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7)),
+        ),
     ]);
     context.resolver = Arc::new(Table { answers });
     context
@@ -275,7 +272,10 @@ async fn the_researcher_searches_and_fetches_through_the_runs_web_context() {
     assert_eq!(strings(&report["skills"]), ["worker-researcher@1"]);
     // The tool calls really ran, against the fixture.
     let paths = server.paths.lock().unwrap().clone();
-    assert!(paths.iter().any(|path| path.starts_with("/search?")), "{paths:?}");
+    assert!(
+        paths.iter().any(|path| path.starts_with("/search?")),
+        "{paths:?}"
+    );
     assert!(paths.iter().any(|path| path == "/spec"), "{paths:?}");
     let calls = report["tool_calls"].as_array().unwrap();
     assert_eq!(calls.len(), 2);
@@ -289,7 +289,12 @@ async fn the_researcher_searches_and_fetches_through_the_runs_web_context() {
     // A read-only role is never offered writes, commands or delegation, even
     // though the lead has them.
     let offered = strings(&report["tools_offered"]);
-    for tool in ["fs.write", "terminal.run", "open_terminal.run", "agent.delegate"] {
+    for tool in [
+        "fs.write",
+        "terminal.run",
+        "open_terminal.run",
+        "agent.delegate",
+    ] {
         assert!(!offered.contains(&tool.to_owned()), "{tool} in {offered:?}");
     }
     // The role skill reached the worker as its instructions.
@@ -297,7 +302,11 @@ async fn the_researcher_searches_and_fetches_through_the_runs_web_context() {
     let system = &requests[0].messages[0];
     assert_eq!(system.role, Role::System);
     assert!(system.content.contains("# Role skill: worker-researcher@1"));
-    assert!(system.content.contains("Never invent, complete or guess a citation"));
+    assert!(
+        system
+            .content
+            .contains("Never invent, complete or guess a citation")
+    );
 }
 
 #[tokio::test]
@@ -305,7 +314,11 @@ async fn the_researchers_private_egress_is_refused_and_reported() {
     let home = Scratch::new();
     let server = fixture(|_, _| None).await;
     let worker = MockProvider::new(vec![
-        call("w1", "web.fetch", json!({ "url": "http://internal.test/admin" })),
+        call(
+            "w1",
+            "web.fetch",
+            json!({ "url": "http://internal.test/admin" }),
+        ),
         answer("No evidence was retrieved."),
     ]);
     let ctx = ToolCtx::new(CancellationToken::new())
@@ -317,7 +330,9 @@ async fn the_researchers_private_egress_is_refused_and_reported() {
     assert!(strings(&report["sources"]).is_empty());
     let limitations = strings(&report["limitations"]);
     assert!(
-        limitations.iter().any(|line| line.contains("'web.fetch' call failed")),
+        limitations
+            .iter()
+            .any(|line| line.contains("'web.fetch' call failed")),
         "{limitations:?}"
     );
 }
@@ -327,13 +342,15 @@ async fn the_reviewer_reads_the_workspace_and_cannot_write_it() {
     let home = Scratch::new();
     let root = Scratch::new();
     let code = "pub fn ratio(a: u32, b: u32) -> u32 {\n    a / b\n}\n";
-    let ctx = ToolCtx::new(CancellationToken::new()).with_workspace(workspace(
-        &root.path,
-        &[("src/lib.rs", code)],
-    ));
+    let ctx = ToolCtx::new(CancellationToken::new())
+        .with_workspace(workspace(&root.path, &[("src/lib.rs", code)]));
     let worker = MockProvider::new(vec![
         call("w1", "fs.read", json!({ "path": "src/lib.rs" })),
-        call("w2", "fs.write", json!({ "path": "src/lib.rs", "content": "" })),
+        call(
+            "w2",
+            "fs.write",
+            json!({ "path": "src/lib.rs", "content": "" }),
+        ),
         answer("1. High: src/lib.rs:2 divides by `b` unchecked; `ratio(1, 0)` panics."),
     ]);
     let ctx = ctx.with_delegation(lead(&home.path, worker.clone()));
@@ -453,10 +470,8 @@ async fn a_withdrawn_assignment_stops_the_worker_and_withholds_its_results() {
         answer("secret evidence"),
     ]);
     let mut delegation = lead(&home.path, worker.clone());
-    delegation.worker_registry = ToolRegistry::new().with(Arc::new(Withdraw(
-        Arc::clone(&revoked),
-        definition,
-    )));
+    delegation.worker_registry =
+        ToolRegistry::new().with(Arc::new(Withdraw(Arc::clone(&revoked), definition)));
     let routing = ModelRouting {
         model: "lead-model".to_owned(),
         ..ModelRouting::default()

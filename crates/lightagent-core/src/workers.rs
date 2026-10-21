@@ -238,8 +238,7 @@ impl BuiltinWorker {
             body: self.skill.to_owned(),
             version: None,
         };
-        Skill::from_markdown(self.skill, self.role.as_str())
-            .unwrap_or_else(fallback)
+        Skill::from_markdown(self.skill, self.role.as_str()).unwrap_or_else(fallback)
     }
 
     /// The tool ceiling as toolset entries.
@@ -506,8 +505,7 @@ impl WorkerAssignments {
         let Ok(bytes) = serde_json::to_vec_pretty(&file) else {
             return Err(AssignmentError::Unwritable);
         };
-        crate::paths::write_private(&self.path, &bytes)
-            .map_err(|_| AssignmentError::Unwritable)
+        crate::paths::write_private(&self.path, &bytes).map_err(|_| AssignmentError::Unwritable)
     }
 }
 

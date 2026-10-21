@@ -108,10 +108,7 @@ fn assignments_are_one_per_role_and_survive_a_reload() {
     assert_ne!(first.id, second.id);
     let reloaded = WorkerAssignments::new(owner, &dir);
     assert_eq!(reloaded.list().unwrap(), vec![second.clone()]);
-    assert_eq!(
-        reloaded.get(WorkerRole::Researcher).unwrap(),
-        Some(second)
-    );
+    assert_eq!(reloaded.get(WorkerRole::Researcher).unwrap(), Some(second));
     assert_eq!(reloaded.get(WorkerRole::Coder).unwrap(), None);
     assert!(reloaded.revoke(WorkerRole::Researcher).unwrap());
     assert!(!reloaded.revoke(WorkerRole::Researcher).unwrap());

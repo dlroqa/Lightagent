@@ -69,6 +69,6 @@ pub use provider::{
 pub use skills::{Skill, SkillStore, skill_dirs};
 pub use tool_stream::ToolCallAccumulator;
 pub use workers::{
-    AssignmentTarget, BuiltinWorker, Readiness, RoleReadiness, WorkerAssignment,
-    WorkerAssignments, WorkerRole,
+    AssignmentTarget, BuiltinWorker, Readiness, RoleReadiness, WorkerAssignment, WorkerAssignments,
+    WorkerRole,
 };

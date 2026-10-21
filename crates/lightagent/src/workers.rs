@@ -146,7 +146,11 @@ impl HarnessResolver {
     fn builtin_spec(&self, role: WorkerRole) -> WorkerSpec {
         let mut spec = self.builtin.spec(role);
         spec.limits = spec.limits.intersect(&self.lead_limits);
-        if self.config.subagents.role_models.contains_key(role.as_str())
+        if self
+            .config
+            .subagents
+            .role_models
+            .contains_key(role.as_str())
             && !self.builtin.routes.contains_key(&role)
         {
             spec.notes.push("model_route_not_approved");

@@ -98,7 +98,10 @@ fn a_role_resolves_to_the_built_in_under_the_leads_authority() {
     assert_eq!(spec.skill_labels(), ["worker-researcher@1"]);
     assert!(spec.typed_result && !spec.nested);
     assert!(spec.within_ceiling("web.fetch") && !spec.within_ceiling("fs.write"));
-    assert_eq!(spec.limits.max_turns, 3, "the lead's limits bound a built-in");
+    assert_eq!(
+        spec.limits.max_turns, 3,
+        "the lead's limits bound a built-in"
+    );
     assert!(spec.validity.is_none());
     // Resolving creates no profile.
     let store = home.store();
@@ -126,7 +129,10 @@ fn a_generated_legacy_profile_is_superseded_and_a_customized_one_is_kept() {
     assert_eq!(spec.notes, ["legacy_profile"]);
     assert!(spec.persona.starts_with("My tuned researcher."));
     assert!(spec.persona.contains("# Role skill: worker-researcher@1"));
-    assert!(!spec.within_ceiling("fs.write"), "the role ceiling still applies");
+    assert!(
+        !spec.within_ceiling("fs.write"),
+        "the role ceiling still applies"
+    );
 }
 
 #[test]
@@ -175,7 +181,10 @@ fn a_worker_of_another_owner_is_refused_and_never_substituted() {
         .err()
         .expect("refused");
     assert!(error.contains("may not use"), "{error}");
-    assert!(!error.contains("theirs") && !error.contains("bob"), "{error}");
+    assert!(
+        !error.contains("theirs") && !error.contains("bob"),
+        "{error}"
+    );
 
     // The same owner is accepted.
     home.profile("mine", |_| {});
@@ -269,5 +278,9 @@ fn readiness_reports_each_role_with_its_reasons() {
     let mut off = Config::default();
     off.subagents.enabled = false;
     let report = readiness(&home.root, &off, &lead, operator, &lead_tools);
-    assert!(report.iter().all(|entry| entry.state == Readiness::Disabled));
+    assert!(
+        report
+            .iter()
+            .all(|entry| entry.state == Readiness::Disabled)
+    );
 }
