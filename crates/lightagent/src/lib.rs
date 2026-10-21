@@ -866,11 +866,7 @@ async fn tools_list(json: bool) -> Result<(), String> {
 
 /// The tools a run of `lead` would have under its tool policy, as an
 /// operator: what its workers are drawn from.
-async fn lead_tools(
-    root: &std::path::Path,
-    config: &Config,
-    lead: &AgentProfile,
-) -> ToolRegistry {
+async fn lead_tools(root: &std::path::Path, config: &Config, lead: &AgentProfile) -> ToolRegistry {
     let profiles = ProfileStore::new(root);
     let profile_dir = profiles.handle(&lead.id).dir().to_path_buf();
     let extensions = chat::load_extensions(root, &profile_dir);
@@ -954,7 +950,10 @@ async fn workers_cmd(action: WorkersAction, json: bool) -> Result<(), String> {
                 .revoke(role)
                 .map_err(|error| error.to_string())?;
             if json {
-                println!("{}", serde_json::json!({ "role": role, "revoked": removed }));
+                println!(
+                    "{}",
+                    serde_json::json!({ "role": role, "revoked": removed })
+                );
             } else if removed {
                 println!(
                     "Revoked the {} assignment of {}.",
