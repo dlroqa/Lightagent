@@ -13,9 +13,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use lightagent_core::{
-    AgentProfile, AgentProvider, FinishReason, MockProvider, ModelRouting, ProfileId,
-    ProfileStore, ProviderError, ProviderEvent, RiskClass, Role, RunId, RunLimits, SkillStore,
-    ToolOutcome,
+    AgentProfile, AgentProvider, FinishReason, MockProvider, ModelRouting, ProfileId, ProfileStore,
+    ProviderError, ProviderEvent, RiskClass, Role, RunId, RunLimits, SkillStore, ToolOutcome,
 };
 use lightagent_tools::{
     Delegation, SkillContext, SubagentPolicy, SubagentRole, Tool, ToolCtx, ToolDefinition,
@@ -169,7 +168,9 @@ fn offered(worker: &MockProvider) -> Vec<String> {
 
 /// Call `agent.delegate` directly, as an approved call would run it.
 async fn delegate(ctx: &ToolCtx, args: Value) -> ToolOutcome {
-    lightagent_tools::builtins::AgentDelegate::new().call(&args, ctx).await
+    lightagent_tools::builtins::AgentDelegate::new()
+        .call(&args, ctx)
+        .await
 }
 
 fn skills_with(name: &str, body: &str) -> SkillStore {
@@ -201,7 +202,11 @@ async fn seeded_a_worker_reads_the_skills_its_run_has() {
         final_turn("done"),
     ]);
     let ctx = ToolCtx::new(CancellationToken::new())
-        .with_delegation(delegation(store, worker.clone(), ToolRegistry::worker_default()))
+        .with_delegation(delegation(
+            store,
+            worker.clone(),
+            ToolRegistry::worker_default(),
+        ))
         .with_skills(SkillContext {
             skills: Arc::new(skills_with("method", "Cite every source.")),
         });

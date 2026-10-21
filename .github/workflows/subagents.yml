@@ -38,7 +38,8 @@ jobs:
           key: subagents
       - name: Run the seeded tests
         run: |
-          set -uo pipefail
+          # Actions runs bash with -e; a seeded failure must not end the step.
+          set +e -uo pipefail
           out="$RUNNER_TEMP/seeded.log"
           : > "$out"
           cargo test -p lightagent-tools --test subagent_baseline -- --ignored 2>&1 | tee -a "$out"
