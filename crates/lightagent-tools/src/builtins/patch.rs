@@ -101,10 +101,12 @@ pub struct PatchContext {
 
 /// Whether `path` is inside one of `patterns`: an exact path, or `dir/**`.
 pub fn in_scope(patterns: &[String], path: &str) -> bool {
-    patterns.iter().any(|pattern| match pattern.strip_suffix("/**") {
-        Some(dir) => path.starts_with(&format!("{dir}/")),
-        None => pattern == path,
-    })
+    patterns
+        .iter()
+        .any(|pattern| match pattern.strip_suffix("/**") {
+            Some(dir) => path.starts_with(&format!("{dir}/")),
+            None => pattern == path,
+        })
 }
 
 /// The commit a git checkout rooted at `root` is at, read from its files
@@ -297,7 +299,9 @@ fn propose(args: &Value, ctx: &ToolCtx) -> Result<Value, String> {
     if let Some(scope) = &patches.scope
         && scope.is_empty()
     {
-        return Err("no write scope was given for this task, so no change can be proposed".to_owned());
+        return Err(
+            "no write scope was given for this task, so no change can be proposed".to_owned(),
+        );
     }
     let changes = args
         .get("changes")
@@ -309,15 +313,23 @@ fn propose(args: &Value, ctx: &ToolCtx) -> Result<Value, String> {
     }
     let mut files = Vec::new();
     for change in &changes {
-        let path = change["path"].as_str().unwrap_or_default().trim_start_matches("./");
+        let path = change["path"]
+            .as_str()
+            .unwrap_or_default()
+            .trim_start_matches("./");
         let content = change["content"].as_str().unwrap_or_default();
         if content.len() > ws.policy.max_file_bytes {
-            return Err(format!("{path:?} is over the {}-byte limit", ws.policy.max_file_bytes));
+            return Err(format!(
+                "{path:?} is over the {}-byte limit",
+                ws.policy.max_file_bytes
+            ));
         }
         if let Some(scope) = &patches.scope
             && !in_scope(scope, path)
         {
-            return Err(format!("{path:?} is outside this task's write scope {scope:?}"));
+            return Err(format!(
+                "{path:?} is outside this task's write scope {scope:?}"
+            ));
         }
         if files.iter().any(|file: &PatchFile| file.path == path) {
             return Err(format!("{path:?} appears twice"));
@@ -526,7 +538,9 @@ async fn commit(args: &Value, ctx: &ToolCtx) -> Result<Value, String> {
     let branch = args["branch"].as_str().unwrap_or_default();
     let message = args["message"].as_str().unwrap_or_default();
     if !valid_branch(branch) || !ref_allowed(&actions.policy.commit_refs, branch) {
-        return Err(format!("the branch '{branch}' is not allowlisted for commits"));
+        return Err(format!(
+            "the branch '{branch}' is not allowlisted for commits"
+        ));
     }
     if message.trim().is_empty() || message.len() > MAX_MESSAGE {
         return Err(format!("a commit message is 1 to {MAX_MESSAGE} bytes"));
@@ -560,7 +574,11 @@ async fn commit(args: &Value, ctx: &ToolCtx) -> Result<Value, String> {
         None,
     )
     .await?;
-    let Some(base_tree) = base_commit.body.pointer("/tree/sha").and_then(Value::as_str) else {
+    let Some(base_tree) = base_commit
+        .body
+        .pointer("/tree/sha")
+        .and_then(Value::as_str)
+    else {
         return Err(api_error("reading the base commit", &base_commit));
     };
     let mut entries = Vec::new();
@@ -646,7 +664,10 @@ mod tests {
             "--- a/x.txt\n+++ b/x.txt\n@@ -2,7 +2,7 @@\n b\n c\n d\n-e\n+E\n f\n g\n h\n"
         );
         let created = unified_diff("new.txt", None, "x\n");
-        assert_eq!(created, "--- /dev/null\n+++ b/new.txt\n@@ -1,0 +1,1 @@\n+x\n");
+        assert_eq!(
+            created,
+            "--- /dev/null\n+++ b/new.txt\n@@ -1,0 +1,1 @@\n+x\n"
+        );
     }
 
     #[test]

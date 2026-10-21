@@ -159,11 +159,15 @@ async fn the_coder_returns_a_scoped_patch_tied_to_its_base() {
         ApprovalPolicy::Balanced,
     )));
     let ctx = checkout.context().with_delegation(delegation);
-    let args = json!({ "role": "coder", "task": "Make one() return 1.", "write_scope": ["src/lib.rs"] });
+    let args =
+        json!({ "role": "coder", "task": "Make one() return 1.", "write_scope": ["src/lib.rs"] });
     let report = json_of(&AgentDelegate::new().call(&args, &ctx).await);
     assert_eq!(report["status"], "completed");
     assert_eq!(report["tool_calls"][0]["ok"], true, "in scope");
-    assert_eq!(report["tool_calls"][1]["ok"], false, "src/main.rs is out of scope");
+    assert_eq!(
+        report["tool_calls"][1]["ok"], false,
+        "src/main.rs is out of scope"
+    );
     assert_eq!(checkout.file(), BEFORE, "proposing writes nothing");
     assert_eq!(report["worker"], "builtin:coder@2");
 
@@ -218,14 +222,26 @@ async fn a_patch_on_a_moved_file_or_checkout_is_never_applied() {
     std::fs::write(checkout.path.join("src/lib.rs"), "concurrent edit\n").unwrap();
     let conflict = apply(first).await;
     assert!(conflict.is_error && conflict.content.contains("changed since"));
-    assert_eq!(checkout.file(), "concurrent edit\n", "the other edit survives");
+    assert_eq!(
+        checkout.file(),
+        "concurrent edit\n",
+        "the other edit survives"
+    );
 
     // The checkout moved to another commit.
     std::fs::write(checkout.path.join("src/lib.rs"), BEFORE).unwrap();
     let second = id(&propose(&ctx, &["src/**"], "src/lib.rs", AFTER).await);
-    std::fs::write(checkout.path.join(".git/refs/heads/work"), format!("{OTHER}\n")).unwrap();
+    std::fs::write(
+        checkout.path.join(".git/refs/heads/work"),
+        format!("{OTHER}\n"),
+    )
+    .unwrap();
     let stale = apply(second).await;
-    assert!(stale.is_error && stale.content.contains("stale"), "{}", stale.content);
+    assert!(
+        stale.is_error && stale.content.contains("stale"),
+        "{}",
+        stale.content
+    );
     assert_eq!(checkout.file(), BEFORE);
 }
 
@@ -286,8 +302,12 @@ async fn github(head: &str) -> GitHub {
                     ("GET", p) if p.starts_with(&format!("{base}/commits/")) => {
                         (200, json!({ "tree": { "sha": "tree-base" } }))
                     }
-                    ("POST", p) if p == format!("{base}/blobs") => (201, json!({ "sha": "blob-1" })),
-                    ("POST", p) if p == format!("{base}/trees") => (201, json!({ "sha": "tree-new" })),
+                    ("POST", p) if p == format!("{base}/blobs") => {
+                        (201, json!({ "sha": "blob-1" }))
+                    }
+                    ("POST", p) if p == format!("{base}/trees") => {
+                        (201, json!({ "sha": "tree-new" }))
+                    }
                     ("POST", p) if p == format!("{base}/commits") => (201, json!({ "sha": NEW })),
                     ("PATCH", p) if p == format!("{base}/refs/heads/subagents/coder") => {
                         *branch_head.lock().unwrap() = NEW.to_owned();
@@ -352,10 +372,16 @@ async fn a_commit_is_a_fast_forward_of_exactly_the_patch_base() {
     assert_eq!(done["base"], BASE);
     assert!(done["note"].as_str().unwrap().contains("Not verified yet"));
     let seen = github.seen.lock().unwrap().clone();
-    let tree = seen.iter().find(|(_, path, _)| path.ends_with("/git/trees")).unwrap();
+    let tree = seen
+        .iter()
+        .find(|(_, path, _)| path.ends_with("/git/trees"))
+        .unwrap();
     assert_eq!(tree.2["base_tree"], "tree-base");
     assert_eq!(tree.2["tree"][0]["path"], "src/lib.rs");
-    let created = seen.iter().find(|(m, path, _)| m == "POST" && path.ends_with("/git/commits")).unwrap();
+    let created = seen
+        .iter()
+        .find(|(m, path, _)| m == "POST" && path.ends_with("/git/commits"))
+        .unwrap();
     assert_eq!(created.2["parents"], json!([BASE]));
     let moved = seen.iter().find(|(m, _, _)| m == "PATCH").unwrap();
     assert_eq!(moved.2["force"], false);

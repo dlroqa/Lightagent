@@ -653,7 +653,9 @@ async fn live_the_coders_patch_is_committed_and_verified_on_actions() {
     // A checkout of this commit holding the fixture as it is here.
     let root = std::env::temp_dir().join(format!("lightagent-live-coder-{run}"));
     let fixture = "fixtures/subagents/coder/lib.rs";
-    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(fixture);
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(fixture);
     let before = std::fs::read_to_string(source).unwrap();
     std::fs::create_dir_all(root.join(".git")).unwrap();
     std::fs::create_dir_all(root.join("fixtures/subagents/coder")).unwrap();
@@ -696,9 +698,13 @@ async fn live_the_coders_patch_is_committed_and_verified_on_actions() {
         .with_patches(patches)
         .with_actions(actions);
 
-    let after = before.replace("pub fn one() -> u32 {\n    2\n}", "pub fn one() -> u32 {\n    1\n}");
+    let after = before.replace(
+        "pub fn one() -> u32 {\n    2\n}",
+        "pub fn one() -> u32 {\n    1\n}",
+    );
     assert_ne!(after, before);
-    let args = json!({ "summary": "one() returns 1", "changes": [{ "path": fixture, "content": after }] });
+    let args =
+        json!({ "summary": "one() returns 1", "changes": [{ "path": fixture, "content": after }] });
     let proposed = report(&PatchPropose::new().call(&args, &ctx).await);
     assert_eq!(proposed["base_commit"], sha.as_str());
     let commit_args = json!({
@@ -712,7 +718,10 @@ async fn live_the_coders_patch_is_committed_and_verified_on_actions() {
     let new_sha = committed["commit"].as_str().unwrap().to_owned();
 
     let mut verdicts = Vec::new();
-    for (on, at) in [(scratch.as_str(), new_sha.as_str()), (branch.as_str(), sha.as_str())] {
+    for (on, at) in [
+        (scratch.as_str(), new_sha.as_str()),
+        (branch.as_str(), sha.as_str()),
+    ] {
         let args = json!({
             "workflow": "subagent-fixture.yml",
             "ref": on,
