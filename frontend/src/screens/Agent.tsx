@@ -1117,7 +1117,7 @@ export function Agent() {
                     // in the collapsed tool list, while and after they run.
                     <div key={tool.id} className="routing-status" role="status" aria-live="polite">
                       <Globe size={14} aria-hidden="true" />
-                      <span>{`${tool.name === "rag.realtime" ? "Web research" : tool.name} for “${describeTool(tool).subject}”: ${tool.progress}`}</span>
+                      <span>{`${progressLabel(tool.name)} for “${describeTool(tool).subject}”: ${tool.progress}`}</span>
                     </div>
                   ))}
                   {showLiveAnswer && answer && (
@@ -1482,7 +1482,9 @@ function ToolRow({ tool }: { tool: ToolCall }) {
         <span className="tool-call__label">
           {activity.verb} <span className="tool-call__subject">{activity.subject}</span>
         </span>
-        {tool.status === "error" && <span className="tool-call__status">failed</span>}
+        {report ? (
+          <span className={`pill pill--${workerStatus(report).tone}`}>{workerStatus(report).label}</span>
+        ) : tool.status === "error" && <span className="tool-call__status">failed</span>}
         {tool.progress && <span className="tool-call__progress muted" aria-live="polite">{tool.progress}</span>}
         <span style={{ flex: 1 }} />
         {tool.durationMs !== undefined && (
@@ -1551,8 +1553,19 @@ const WORKER_STATUS: Record<string, { label: string; tone: string }> = {
   cancelled: { label: "Cancelled", tone: "neutral" },
 };
 
+function workerStatus(report: WorkerReport): { label: string; tone: string } {
+  return WORKER_STATUS[report.status] ?? { label: report.status || "Unknown", tone: "neutral" };
+}
+
+/** How a tool's progress line in the transcript names the tool. */
+function progressLabel(name: string): string {
+  if (name === "rag.realtime") return "Web research";
+  if (name === "agent.delegate") return "Delegated work";
+  return name;
+}
+
 function WorkerResult({ report }: { report: WorkerReport }) {
-  const status = WORKER_STATUS[report.status] ?? { label: report.status || "Unknown", tone: "neutral" };
+  const status = workerStatus(report);
   const safeLink = (url: string) => /^https?:\/\//.test(url);
   return (
     <div className="worker-result">
