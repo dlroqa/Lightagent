@@ -565,3 +565,32 @@ async fn research_delegation_stays_a_read_only_researcher_whatever_resolves() {
         .await;
     assert!(refused.is_error);
 }
+
+#[tokio::test]
+async fn legacy_resolution_is_refused_to_an_untrusted_run() {
+    let home = Scratch::new();
+    let store = ProfileStore::new(home.path.clone());
+    store
+        .save(&lightagent_core::AgentProfile::new(
+            lightagent_core::ProfileId::new("worker").unwrap(),
+            "Worker",
+            "You work.",
+            "m",
+        ))
+        .unwrap();
+    let worker = MockProvider::new(vec![answer("should not run")]);
+    let mut delegation = lead(&home.path, worker.clone());
+    delegation.resolver = None;
+    delegation.trust = lightagent_core::identity::RunTrust::RemoteUser;
+    let ctx = ToolCtx::new(CancellationToken::new()).with_delegation(delegation);
+    for args in [
+        json!({ "profile": "worker", "task": "x" }),
+        json!({ "role": "researcher", "task": "x" }),
+    ] {
+        let outcome = lightagent_tools::builtins::AgentDelegate::new()
+            .call(&args, &ctx)
+            .await;
+        assert!(outcome.is_error, "{args}");
+    }
+    assert!(worker.requests().is_empty());
+}
