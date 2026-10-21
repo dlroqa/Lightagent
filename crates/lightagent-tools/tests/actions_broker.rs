@@ -274,7 +274,10 @@ async fn a_dispatch_is_correlated_to_its_exact_sha_and_never_repeated() {
     assert_eq!(posted.len(), 1);
     assert_eq!(posted[0].body["ref"], BRANCH);
     assert_eq!(posted[0].body["inputs"]["mode"], "pass");
-    assert_eq!(posted[0].body["inputs"]["correlation"], correlation.as_str());
+    assert_eq!(
+        posted[0].body["inputs"]["correlation"],
+        correlation.as_str()
+    );
     assert_eq!(
         posted[0].authorization.as_deref(),
         Some(format!("Bearer {TOKEN}").as_str())
