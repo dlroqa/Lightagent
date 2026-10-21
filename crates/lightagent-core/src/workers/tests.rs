@@ -21,7 +21,8 @@ fn every_role_has_a_versioned_skill_and_a_bounded_ceiling() {
         assert_eq!(WorkerRole::parse(role.as_str()), Some(role));
         let skill = worker.skill();
         assert_eq!(skill.name, format!("worker-{}", role.as_str()));
-        assert_eq!(skill.version.as_deref(), Some("1"));
+        let expected = if role == WorkerRole::Coder { "2" } else { "1" };
+        assert_eq!(skill.version.as_deref(), Some(expected));
         assert!(skill.body.len() > 500, "{role:?} skill is not substantive");
         let persona = worker.persona();
         assert!(persona.contains(&skill.body));

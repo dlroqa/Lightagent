@@ -185,7 +185,7 @@ async fn an_approved_action_runs_exactly_once_and_only_after_approval() {
         panic!("resuming a worker's action must ask a person");
     };
     let preview = request.arguments_preview;
-    assert!(preview.contains("worker=builtin:coder@1"), "{preview}");
+    assert!(preview.contains("worker=builtin:coder@2"), "{preview}");
     assert!(preview.contains("tool=fs.write"), "{preview}");
     assert!(preview.contains("risk=mutating"), "{preview}");
 

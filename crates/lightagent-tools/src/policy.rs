@@ -80,7 +80,10 @@ pub fn reach_of(name: &str, network_mcp_servers: &BTreeSet<String>) -> ToolReach
         "actions.dispatch" | "actions.status" | "actions.logs" | "actions.cancel" => {
             ToolReach::RemoteExecution
         }
-        "fs.read" | "fs.list" | "fs.write" => ToolReach::LocalFilesystem,
+        "fs.read" | "fs.list" | "fs.write" | "patch.propose" | "patch.apply" => {
+            ToolReach::LocalFilesystem
+        }
+        "repo.commit" => ToolReach::RemoteExecution,
         "terminal.run" => ToolReach::LocalCommand,
         "agent.delegate" | "agent.resume_worker" | "agent.decline_worker" => ToolReach::Delegation,
         _ => match name

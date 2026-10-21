@@ -229,6 +229,7 @@ fn broker(github: &GitHub) -> ActionsContext {
             repository: "o/r".to_owned(),
             token: Some(TOKEN.to_owned()),
             workflows: vec![workflow],
+            commit_refs: Vec::new(),
             poll_interval: Duration::from_millis(50),
             max_wait: Duration::from_secs(5),
             max_log_bytes: 4096,
@@ -553,6 +554,7 @@ async fn live_the_broker_reports_a_passing_and_a_failing_hosted_run() {
             repository,
             token: Some(token.clone()),
             workflows: vec![workflow],
+            commit_refs: Vec::new(),
             poll_interval: Duration::from_secs(10),
             max_wait: Duration::from_secs(600),
             max_log_bytes: 8192,
@@ -601,4 +603,135 @@ async fn live_the_broker_reports_a_passing_and_a_failing_hosted_run() {
     let refused = ActionsDispatch::new().call(&forged, &ctx).await;
     assert!(refused.is_error && refused.content.contains("not allowlisted"));
     println!("EVIDENCE refusal: {}", refused.content);
+}
+
+/// The live coder check: a patch to the coder fixture, proposed against this
+/// commit, committed to a scratch branch as a fast-forward, then compiled and
+/// tested on a GitHub-hosted runner at the new commit's exact SHA. The same
+/// verification at the base fails, so the pass is the patch's doing. The
+/// scratch branch is deleted afterwards.
+#[tokio::test]
+#[ignore = "live: needs the LIGHTAGENT_BROKER_LIVE_* variables and contents: write"]
+async fn live_the_coders_patch_is_committed_and_verified_on_actions() {
+    use lightagent_tools::builtins::{PatchContext, PatchPropose, RepoCommit};
+    use lightagent_tools::{Workspace, WorkspaceContext, WorkspacePolicy};
+
+    let env = |name: &str| std::env::var(name).unwrap_or_default();
+    let token = env("LIGHTAGENT_BROKER_LIVE_TOKEN");
+    let (repository, branch, sha, run) = (
+        env("LIGHTAGENT_BROKER_LIVE_REPOSITORY"),
+        env("LIGHTAGENT_BROKER_LIVE_REF"),
+        env("LIGHTAGENT_BROKER_LIVE_SHA"),
+        env("GITHUB_RUN_ID"),
+    );
+    if token.is_empty() || repository.is_empty() || sha.is_empty() || run.is_empty() {
+        println!("BLOCKED live coder check: its variables are not set");
+        panic!("the live coder check needs its variables");
+    }
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
+    let scratch = format!("subagents/live-coder-{run}-{}", env("GITHUB_RUN_ATTEMPT"));
+    let refs = format!("https://api.github.com/repos/{repository}/git/refs");
+    let github = |request: reqwest::RequestBuilder| {
+        request
+            .bearer_auth(&token)
+            .header("accept", "application/vnd.github+json")
+            .header("user-agent", "lightagent-live-check")
+    };
+    let created = github(client.post(&refs))
+        .json(&json!({ "ref": format!("refs/heads/{scratch}"), "sha": sha }))
+        .send()
+        .await
+        .unwrap();
+    assert!(created.status().is_success(), "{}", created.status());
+    println!("EVIDENCE scratch branch {scratch} at {sha}");
+
+    // A checkout of this commit holding the fixture as it is here.
+    let root = std::env::temp_dir().join(format!("lightagent-live-coder-{run}"));
+    let fixture = "fixtures/subagents/coder/lib.rs";
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(fixture);
+    let before = std::fs::read_to_string(source).unwrap();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(root.join("fixtures/subagents/coder")).unwrap();
+    std::fs::write(root.join(".git/HEAD"), format!("{sha}\n")).unwrap();
+    std::fs::write(root.join(fixture), &before).unwrap();
+    let workspace = WorkspaceContext {
+        workspace: Arc::new(Workspace::new(&root).unwrap()),
+        policy: Arc::new(WorkspacePolicy {
+            max_file_bytes: 65_536,
+            allow_terminal: false,
+            terminal_timeout: Duration::from_secs(5),
+            terminal_allowlist: Vec::new(),
+        }),
+    };
+    let workflow = AllowedWorkflow {
+        file: "subagent-fixture.yml".to_owned(),
+        refs: vec!["subagents/live-coder-*".to_owned(), branch.clone()],
+        inputs: BTreeMap::from([("mode".to_owned(), vec!["verify".to_owned()])]),
+        correlation_input: Some("correlation".to_owned()),
+    };
+    let actions = ActionsContext::new(
+        client.clone(),
+        ActionsPolicy {
+            api_base: "https://api.github.com".to_owned(),
+            repository: repository.clone(),
+            token: Some(token.clone()),
+            workflows: vec![workflow],
+            commit_refs: vec!["subagents/live-coder-*".to_owned()],
+            poll_interval: Duration::from_secs(10),
+            max_wait: Duration::from_secs(600),
+            max_log_bytes: 8192,
+        },
+    );
+    let patches = PatchContext {
+        scope: Some(vec![fixture.to_owned()]),
+        ..PatchContext::default()
+    };
+    let ctx = ToolCtx::new(CancellationToken::new())
+        .with_workspace(workspace)
+        .with_patches(patches)
+        .with_actions(actions);
+
+    let after = before.replace("pub fn one() -> u32 {\n    2\n}", "pub fn one() -> u32 {\n    1\n}");
+    assert_ne!(after, before);
+    let args = json!({ "summary": "one() returns 1", "changes": [{ "path": fixture, "content": after }] });
+    let proposed = report(&PatchPropose::new().call(&args, &ctx).await);
+    assert_eq!(proposed["base_commit"], sha.as_str());
+    let commit_args = json!({
+        "patch_id": proposed["patch_id"],
+        "branch": scratch,
+        "message": "Make the coder fixture's one() return 1 (live check)",
+    });
+    let committed = RepoCommit::new().call(&commit_args, &ctx).await;
+    println!("EVIDENCE commit: {}", committed.content);
+    let committed = report(&committed);
+    let new_sha = committed["commit"].as_str().unwrap().to_owned();
+
+    let mut verdicts = Vec::new();
+    for (on, at) in [(scratch.as_str(), new_sha.as_str()), (branch.as_str(), sha.as_str())] {
+        let args = json!({
+            "workflow": "subagent-fixture.yml",
+            "ref": on,
+            "sha": at,
+            "inputs": { "mode": "verify" },
+        });
+        let dispatched = report(&ActionsDispatch::new().call(&args, &ctx).await);
+        let status_args = json!({ "run_id": dispatched["run_id"], "wait_seconds": 600 });
+        let status = ActionsStatus::new().call(&status_args, &ctx).await;
+        println!("EVIDENCE verify {on} at {at}: {}", status.content);
+        let status = report(&status);
+        assert_eq!(status["head_sha"], at);
+        verdicts.push(status["verdict"].as_str().unwrap_or_default().to_owned());
+    }
+    let deleted = github(client.delete(format!("{refs}/heads/{scratch}")))
+        .send()
+        .await
+        .unwrap();
+    println!("EVIDENCE scratch branch deleted: {}", deleted.status());
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(verdicts, ["passed", "failed"], "the patch passes, its base fails");
 }
