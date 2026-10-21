@@ -72,7 +72,8 @@ struct Expect {
 }
 
 fn evaluation_set() -> EvaluationSet {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evaluation/subagents/roles.v1.json");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evaluation/subagents/roles.v1.json");
     let text = std::fs::read_to_string(path).unwrap();
     serde_json::from_str(&text).unwrap()
 }
@@ -86,26 +87,45 @@ fn score(expect: &Expect, report: &Value) -> Vec<String> {
     }
     let answer = report["answer"].as_str().unwrap_or("").to_lowercase();
     let has = |needle: &String| answer.contains(&needle.to_lowercase());
-    for needle in expect.answer_contains_all.iter().filter(|needle| !has(needle)) {
+    for needle in expect
+        .answer_contains_all
+        .iter()
+        .filter(|needle| !has(needle))
+    {
         failures.push(format!("answer lacks {needle:?}"));
     }
     if !expect.answer_contains_any.is_empty()
         && !expect.answer_contains_any.iter().any(|needle| has(needle))
     {
-        failures.push(format!("answer has none of {:?}", expect.answer_contains_any));
+        failures.push(format!(
+            "answer has none of {:?}",
+            expect.answer_contains_any
+        ));
     }
-    for needle in expect.answer_contains_none.iter().filter(|needle| has(needle)) {
+    for needle in expect
+        .answer_contains_none
+        .iter()
+        .filter(|needle| has(needle))
+    {
         failures.push(format!("answer has {needle:?}"));
     }
     let strings = |key: &str| -> Vec<String> {
         report[key]
             .as_array()
-            .map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_owned))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     let sources = strings("sources");
     for suffix in &expect.sources_include {
-        if !sources.iter().any(|source| source.ends_with(suffix.as_str())) {
+        if !sources
+            .iter()
+            .any(|source| source.ends_with(suffix.as_str()))
+        {
             failures.push(format!("no source ending {suffix:?}"));
         }
     }
@@ -114,7 +134,12 @@ fn score(expect: &Expect, report: &Value) -> Vec<String> {
     }
     let called: Vec<&str> = report["tool_calls"]
         .as_array()
-        .map(|calls| calls.iter().filter_map(|call| call["name"].as_str()).collect())
+        .map(|calls| {
+            calls
+                .iter()
+                .filter_map(|call| call["name"].as_str())
+                .collect()
+        })
         .unwrap_or_default();
     for tool in &expect.tool_called {
         if !called.contains(&tool.as_str()) {
@@ -143,7 +168,12 @@ fn the_evaluation_set_covers_every_role_with_recorded_thresholds() {
 #[test]
 fn scoring_follows_the_recorded_rules() {
     let set = evaluation_set();
-    let research = &set.tasks.iter().find(|task| task.id == "res-1").unwrap().expect;
+    let research = &set
+        .tasks
+        .iter()
+        .find(|task| task.id == "res-1")
+        .unwrap()
+        .expect;
     let good = json!({
         "status": "completed",
         "answer": "Zephyr shipped on September 10, 2026 (http://docs.test/spec).",
@@ -151,7 +181,11 @@ fn scoring_follows_the_recorded_rules() {
         "unverified_citations": [],
         "tool_calls": [{ "name": "web.fetch", "ok": true }],
     });
-    assert!(score(research, &good).is_empty(), "{:?}", score(research, &good));
+    assert!(
+        score(research, &good).is_empty(),
+        "{:?}",
+        score(research, &good)
+    );
     let invented = json!({
         "status": "completed",
         "answer": "September 10, 2026 per https://made.up/x",
@@ -161,13 +195,21 @@ fn scoring_follows_the_recorded_rules() {
     let failures = score(research, &invented);
     assert!(failures.iter().any(|f| f.contains("no source")));
     assert!(failures.iter().any(|f| f.contains("no tool returned")));
-    let tester = &set.tasks.iter().find(|task| task.id == "tst-1").unwrap().expect;
+    let tester = &set
+        .tasks
+        .iter()
+        .find(|task| task.id == "tst-1")
+        .unwrap()
+        .expect;
     let dispatched_only = json!({
         "status": "completed",
         "answer": format!("Run failed at {SHA}"),
         "tool_calls": [{ "name": "actions.dispatch", "ok": true }],
     });
-    assert_eq!(score(tester, &dispatched_only), ["never called actions.status"]);
+    assert_eq!(
+        score(tester, &dispatched_only),
+        ["never called actions.status"]
+    );
 }
 
 // --- live --------------------------------------------------------------------
@@ -267,7 +309,9 @@ fn page(fixture: &str, port: u16, path: &str) -> Option<String> {
         ("quill-conflict", "/b") => {
             Some("Quill FAQ, older revision: Quill listens on port 9090 by default.".to_owned())
         }
-        ("empty", search) if search.starts_with("/search") => Some(json!({ "results": [] }).to_string()),
+        ("empty", search) if search.starts_with("/search") => {
+            Some(json!({ "results": [] }).to_string())
+        }
         _ => None,
     }
 }
@@ -290,7 +334,12 @@ fn files(fixture: &str) -> Vec<(&'static str, &'static str)> {
 
 /// A minimal GitHub stand-in: `fixture.yml` on `subagents/fixture` at SHA,
 /// whose runs pass in mode pass and fail otherwise.
-fn github(runs: &Mutex<Vec<Value>>, method: &str, path: &str, body: &Value) -> (u16, String, String) {
+fn github(
+    runs: &Mutex<Vec<Value>>,
+    method: &str,
+    path: &str,
+    body: &Value,
+) -> (u16, String, String) {
     let base = "/repos/o/r";
     let ok = |value: Value| (200, String::new(), value.to_string());
     let mut runs = runs.lock().unwrap();
@@ -330,7 +379,11 @@ fn github(runs: &Mutex<Vec<Value>>, method: &str, path: &str, body: &Value) -> (
             return ok(run);
         }
     }
-    (404, String::new(), json!({ "message": "Not Found" }).to_string())
+    (
+        404,
+        String::new(),
+        json!({ "message": "Not Found" }).to_string(),
+    )
 }
 
 struct Table(HashMap<String, IpAddr>);
@@ -429,7 +482,10 @@ async fn run_task(task: &Task, model: &str, factory: Arc<Factory>, root: &Path) 
         model: model.to_owned(),
         ..ModelRouting::default()
     };
-    delegation.resolver = Some(Arc::new(BuiltinResolver::new(routing, ApprovalPolicy::Balanced)));
+    delegation.resolver = Some(Arc::new(BuiltinResolver::new(
+        routing,
+        ApprovalPolicy::Balanced,
+    )));
     let ctx = ToolCtx::new(CancellationToken::new())
         .with_web(web)
         .with_workspace(workspace)
@@ -446,8 +502,10 @@ async fn run_task(task: &Task, model: &str, factory: Arc<Factory>, root: &Path) 
 #[ignore = "live: needs an operator-approved model endpoint (LIGHTAGENT_EVAL_*)"]
 async fn live_role_evaluation() {
     let env = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-    let (Some(base_url), Some(models)) = (env("LIGHTAGENT_EVAL_BASE_URL"), env("LIGHTAGENT_EVAL_MODEL"))
-    else {
+    let (Some(base_url), Some(models)) = (
+        env("LIGHTAGENT_EVAL_BASE_URL"),
+        env("LIGHTAGENT_EVAL_MODEL"),
+    ) else {
         println!("BLOCKED live role evaluation: no approved model endpoint is configured");
         panic!("BLOCKED: LIGHTAGENT_EVAL_BASE_URL and LIGHTAGENT_EVAL_MODEL are required");
     };
@@ -456,11 +514,16 @@ async fn live_role_evaluation() {
         base_url,
         api_key: env("LIGHTAGENT_EVAL_API_KEY"),
     });
-    let root: PathBuf = std::env::temp_dir().join(format!("lightagent-role-eval-{}", RunId::new().as_str()));
+    let root: PathBuf =
+        std::env::temp_dir().join(format!("lightagent-role-eval-{}", RunId::new().as_str()));
     std::fs::create_dir_all(&root).unwrap();
     let mut results = Vec::new();
     let mut below = Vec::new();
-    for model in models.split(',').map(str::trim).filter(|model| !model.is_empty()) {
+    for model in models
+        .split(',')
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
         let mut by_role: BTreeMap<String, (u32, u32)> = BTreeMap::new();
         for task in &set.tasks {
             for attempt in 0..set.thresholds.runs_per_task {
