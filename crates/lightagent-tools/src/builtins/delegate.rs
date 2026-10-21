@@ -301,7 +301,11 @@ pub async fn run_worker(
         _ => None,
     };
     // Every worker in the tree draws from one allowance.
-    let grant = match delegation.budget.as_ref().map(|budget| budget.grant(&limits)) {
+    let grant = match delegation
+        .budget
+        .as_ref()
+        .map(|budget| budget.grant(&limits))
+    {
         Some(Ok(grant)) => {
             limits.max_turns = grant.turns;
             limits.max_tool_calls = grant.tool_calls;

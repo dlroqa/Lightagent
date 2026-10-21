@@ -45,9 +45,7 @@ impl TreeBudget {
     /// A budget of `limits` (normally the lead's own) for at most `workers`
     /// worker runs, its clock starting now.
     pub fn new(limits: &RunLimits, workers: u32) -> Self {
-        let deadline = limits
-            .wall_clock()
-            .map(|budget| Instant::now() + budget);
+        let deadline = limits.wall_clock().map(|budget| Instant::now() + budget);
         Self {
             remaining: Arc::new(Mutex::new(Remaining {
                 turns: limits.max_turns,
@@ -192,7 +190,11 @@ mod tests {
         let first = budget.grant(&limits(8, 4)).unwrap();
         assert_eq!((first.turns, first.tool_calls), (8, 4));
         let second = budget.grant(&limits(8, 4)).unwrap();
-        assert_eq!((second.turns, second.tool_calls), (2, 2), "only what remains");
+        assert_eq!(
+            (second.turns, second.tool_calls),
+            (2, 2),
+            "only what remains"
+        );
         assert!(budget.grant(&limits(8, 4)).is_err(), "nothing remains");
         budget.settle(first, 3, 1);
         assert_eq!(budget.left(), (5, 3));
@@ -219,7 +221,10 @@ mod tests {
         let cancel = CancellationToken::new();
         let held = admission.admit(&cancel, || {}).await.unwrap();
         let mut waited = false;
-        let error = admission.admit(&cancel, || waited = true).await.unwrap_err();
+        let error = admission
+            .admit(&cancel, || waited = true)
+            .await
+            .unwrap_err();
         assert!(waited, "a waiting worker is reported as queued");
         assert!(error.contains("no worker slot"), "{error}");
         drop(held);
