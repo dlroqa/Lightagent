@@ -95,7 +95,7 @@ fn score(expect: &Expect, report: &Value) -> Vec<String> {
         failures.push(format!("answer lacks {needle:?}"));
     }
     if !expect.answer_contains_any.is_empty()
-        && !expect.answer_contains_any.iter().any(|needle| has(needle))
+        && !expect.answer_contains_any.iter().any(&has)
     {
         failures.push(format!(
             "answer has none of {:?}",
