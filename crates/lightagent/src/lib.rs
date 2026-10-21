@@ -260,6 +260,8 @@ enum ProfilesAction {
     },
     /// Make a profile the active one.
     Use { id: String },
+    /// Give a profile an operator-owned capability preset (e.g. `research@1`).
+    Preset { id: String, preset: String },
     /// Delete a profile and all of its local data.
     Delete { id: String },
 }
@@ -1035,6 +1037,19 @@ fn profiles_cmd(action: ProfilesAction, json: bool) -> Result<(), String> {
                 println!("{}", serde_json::json!({ "created": id.as_str() }));
             } else {
                 println!("Created profile '{}'.", id.as_str());
+            }
+            Ok(())
+        }
+        ProfilesAction::Preset { id, preset } => {
+            let id = ProfileId::new(&id).map_err(|error| error.to_string())?;
+            let mut profile = store.load(&id).map_err(|error| error.to_string())?;
+            lightagent_core::provisioning::apply_preset(&mut profile, &preset)
+                .map_err(|error| format!("{error}: known presets are {:?}", lightagent_core::provisioning::PRESETS))?;
+            store.save(&profile).map_err(|error| error.to_string())?;
+            if json {
+                println!("{}", serde_json::json!({ "profile": id.as_str(), "preset": preset }));
+            } else {
+                println!("Profile '{}' now has the {preset} preset.", id.as_str());
             }
             Ok(())
         }

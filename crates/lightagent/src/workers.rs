@@ -38,8 +38,9 @@ use tokio::sync::Semaphore;
 /// Tools a worker is never offered, even when the lead has them: delegation
 /// is added back only where depth allows, Jev's budget belongs to the lead,
 /// and the lead's durable memory is written only by the lead.
-const LEAD_ONLY_TOOLS: [&str; 4] = [
+const LEAD_ONLY_TOOLS: [&str; 5] = [
     "agent.delegate",
+    "agent.research",
     "jev.classify_task",
     "memory.write",
     "memory.reflect",
@@ -420,9 +421,10 @@ pub(crate) fn readiness(
 ) -> Vec<RoleReadiness> {
     let resolver = HarnessResolver::new(root, config, lead, trust);
     let base = worker_base(lead_tools);
+    let research = lead_tools.contains("agent.research");
     WorkerRole::ALL
         .into_iter()
-        .map(|role| role_readiness(&resolver, config, role, trust, &base))
+        .map(|role| role_readiness(&resolver, config, role, trust, &base, research))
         .collect()
 }
 
@@ -432,6 +434,7 @@ fn role_readiness(
     role: WorkerRole,
     trust: RunTrust,
     base: &ToolRegistry,
+    research_granted: bool,
 ) -> RoleReadiness {
     let definition = workers::builtin(role);
     let unready = |state, worker: String, reasons| RoleReadiness {
@@ -458,12 +461,18 @@ fn role_readiness(
             vec!["role_not_allowed"],
         );
     }
-    if trust == RunTrust::RemoteUser {
-        return unready(
-            Readiness::PermissionDenied,
-            definition.label(),
-            vec!["requires_isolation"],
-        );
+    // An untrusted run reaches only the read-only researcher, through
+    // `agent.research` when its profile lists it; the other roles need
+    // execution isolation that does not exist yet.
+    if trust == RunTrust::RemoteUser
+        && (role != WorkerRole::Researcher || !research_granted)
+    {
+        let reason = if role == WorkerRole::Researcher {
+            "research_not_granted"
+        } else {
+            "requires_isolation"
+        };
+        return unready(Readiness::PermissionDenied, definition.label(), vec![reason]);
     }
     if config.subagents.resolution == WorkerResolution::LegacyProfiles {
         return unready(
