@@ -54,19 +54,42 @@ Approval, cancellation and authorization in the current code:
 
 | Stage | Scope | Branch / PR | State |
 | --- | --- | --- | --- |
-| A | Baseline record, seeded regressions, report workflow | `subagents/a-baseline` | in progress |
-| B | Typed built-in catalog, explicit assignments, legacy resolution, worker-runtime factory, depth/scope fixes | — | pending |
-| C | Scoped child contexts, role skills, dynamic guards, readiness and routing validation | — | pending |
-| D | Actions workflow broker; researcher, coder, reviewer and tester fixtures | — | pending |
-| E | Tree budget, approval states, cancellation and revocation, lifecycle events and UI | — | pending |
-| F | Confined `RemoteUser` research path, provisioning presets and assignment contract | — | pending |
-| G | Final CI, role evaluations, handoff | — | pending |
+| A | Baseline record, seeded regressions, report workflow | `subagents/a-baseline`, #31 | done, green |
+| B+C | Typed catalog, role skills, explicit assignments, legacy resolution, one worker-runtime factory, scoped contexts, guards, readiness, routing validation, `lightagent workers` | `subagents/b-catalog`, #32 | done, green |
+| D | GitHub Actions workflow broker; operational role fixtures | `subagents/d-broker`, #33 | see evidence |
+| E | Tree budget, fair admission, lifecycle events, web UI, render scenarios | `subagents/e-budget-events`, #34 | see evidence |
+| F | Confined `agent.research` for untrusted runs, capability presets | `subagents/f-remote-research`, #35 | see evidence |
+| G | Role evaluation set and live harness, documentation | `subagents/g-evidence`, #36 | live evaluation BLOCKED |
+
+Each stage branch is stacked on the previous one, and A is stacked on PR #30.
+
+## Seeded gaps
+
+| Gap | Test | Closed in |
+| --- | --- | --- |
+| 1 Built-in workers created as profiles | `seeded_built_in_workers_create_no_profiles` | B |
+| 3 Child contexts missing | `seeded_a_worker_reads_the_skills_its_run_has` | B |
+| 5 Worker toolsets ignored | `seeded_a_worker_profiles_toolsets_bound_its_tools` | B |
+| N2 `tool_scope` re-widened | `seeded_a_tool_scope_is_never_widened` | B |
+| N1 Depth off by one | `seeded_no_worker_starts_below_the_maximum_depth` | B |
+| 7 No worker progress | `seeded_a_worker_reports_its_lifecycle_to_the_parent` | B |
+| 6 No tree budget | `seeded_workers_share_one_tool_call_budget` | E |
+
+Gaps not covered by a seeded test:
+- Gap 2 (no skills) was closed by the role skills and is tested in `workers/tests.rs` and `specialists.rs`.
+- Gap 4 (no RAG/MCP for workers) was closed because workers now draw from the lead's effective tools (`worker_base`).
+- Gap 8 (untrusted runs) is partly closed by stage F: research only.
+- Gap 9 (mock-only evidence): operational fixture tests were added and the live evaluation is BLOCKED.
+- N3 (serial "parallelism"): rechecked. The lead's instructions never claimed parallel work; only the `SubagentsConfig` doc comment did, and it is corrected. Workers run one at a time per lead run, with one active worker per profile by default.
+- N4 (mutations need approval) is reported as status `blocked`.
+- N5 (routing) is handled by approved routes only.
 
 ## Actions evidence
 
-| SHA | Workflow run | Result |
-| --- | --- | --- |
-| — | — | — |
+| Stage | Tested SHA | Workflow runs | Result |
+| --- | --- | --- | --- |
+| A | `9be758b` | check 39653913064, subagents 39653912976, jev 39653912889 | all green. The seeded report showed 6 of 6 seeded tests failing, as designed. |
+| B+C | `98eef17` | check 39658871077 (11/11 jobs), subagents 39658871113, jev 39658871184 | all green |
 
 ## Resume instructions
 

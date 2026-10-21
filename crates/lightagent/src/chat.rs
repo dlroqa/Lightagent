@@ -72,7 +72,10 @@ pub(crate) fn autonomous_subagent_instructions(config: &Config) -> Option<String
              substantial tracks (for example, separate research questions, implementation plus independent \
              review, or test verification), use the fewest specialists needed, give each a self-contained \
              task, then synthesize their results. Never delegate merely to restate, acknowledge, or perform \
-             an easy task. Existing approval requirements and delegation limits always apply."
+             an easy task. Existing approval requirements and delegation limits always apply. \
+             Each role returns a typed result with a status: treat partial, timed_out, blocked or failed \
+             results as incomplete and say so, cite only the sources it returned, and never present \
+             unverified citations or unrun checks as verified."
         )
     })
 }
