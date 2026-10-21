@@ -457,25 +457,25 @@ async fn list_workers(
     headers: HeaderMap,
     Query(query): Query<ProfileQuery>,
 ) -> Response {
-    let (profile, trust) = match access(&state, &headers, Scope::ToolsRead, query.profile.as_deref())
-    {
-        Ok(Access::Unscoped) => {
-            let profile = match query.profile.as_deref().map(ProfileId::new) {
-                Some(Ok(profile)) => Some(profile),
-                Some(Err(_)) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({ "error": "invalid profile id" })),
-                    )
-                        .into_response();
-                }
-                None => None,
-            };
-            (profile, RunTrust::LocalOperator)
-        }
-        Ok(Access::User(user)) => (Some(user.profile.clone()), RunTrust::RemoteUser),
-        Err(response) => return *response,
-    };
+    let (profile, trust) =
+        match access(&state, &headers, Scope::ToolsRead, query.profile.as_deref()) {
+            Ok(Access::Unscoped) => {
+                let profile = match query.profile.as_deref().map(ProfileId::new) {
+                    Some(Ok(profile)) => Some(profile),
+                    Some(Err(_)) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({ "error": "invalid profile id" })),
+                        )
+                            .into_response();
+                    }
+                    None => None,
+                };
+                (profile, RunTrust::LocalOperator)
+            }
+            Ok(Access::User(user)) => (Some(user.profile.clone()), RunTrust::RemoteUser),
+            Err(response) => return *response,
+        };
     match state.manager.workers_for(profile.as_ref(), trust).await {
         Ok(workers) => Json(json!({ "workers": workers })).into_response(),
         Err(_) if trust == RunTrust::RemoteUser => operator_only(),
