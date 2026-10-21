@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::future::{BoxFuture, FutureExt as _};
 use futures_util::{StreamExt as _, stream};
 use lightagent_core::{RiskClass, Scope, ToolOutcome, ToolProgress};
 use lightagent_tools::builtins::{WebSearchHit, fetch_text_authorized, search_results};
@@ -232,12 +233,18 @@ impl Tool for RealtimeRag {
         ctx.report(ToolProgress::stage("fetching").counted(0, total));
         let mut pages: HashMap<usize, Result<String, String>> = HashMap::new();
         {
-            let mut fetches = stream::iter(candidates.iter().enumerate().map(|(rank, hit)| {
-                let web = web.clone();
-                let url = hit.url.clone();
-                async move { (rank, fetch_text_authorized(&web, &url, ctx).await) }
-            }))
-            .buffer_unordered(MAX_FETCH_CONCURRENCY);
+            // Boxed so the stream held across the awaits below names no
+            // closure type, which keeps this call's future `Send`.
+            let jobs: Vec<BoxFuture<'_, (usize, Result<String, String>)>> = candidates
+                .iter()
+                .enumerate()
+                .map(|(rank, hit)| {
+                    let web = web.clone();
+                    let url = hit.url.clone();
+                    async move { (rank, fetch_text_authorized(&web, &url, ctx).await) }.boxed()
+                })
+                .collect();
+            let mut fetches = stream::iter(jobs).buffer_unordered(MAX_FETCH_CONCURRENCY);
             loop {
                 tokio::select! {
                     _ = ctx.cancel.cancelled() => return failed(ctx, "rag.realtime was cancelled"),
@@ -302,23 +309,22 @@ impl Tool for RealtimeRag {
         // Semantic ranking gets what is left of the deadline; past it, the
         // lexical order (always available, and fast) stands.
         ctx.report(ToolProgress::stage("ranking"));
-        let lexical = || search_passages(query, &passages, None, self.top_k, SEMANTIC_CANDIDATES);
-        let hits = match self.semantic.as_deref() {
-            Some(semantic) => {
-                let ranked = search_passages(
-                    query,
-                    &passages,
-                    Some(semantic),
-                    self.top_k,
-                    SEMANTIC_CANDIDATES,
-                );
-                tokio::select! {
-                    _ = ctx.cancel.cancelled() => return failed(ctx, "rag.realtime was cancelled"),
-                    () = tokio::time::sleep_until(deadline) => lexical().await,
-                    hits = ranked => hits,
+        let semantic = tokio::select! {
+            _ = ctx.cancel.cancelled() => return failed(ctx, "rag.realtime was cancelled"),
+            () = tokio::time::sleep_until(deadline) => None,
+            hits = async {
+                match self.semantic.as_deref() {
+                    Some(semantic) => Some(
+                        search_passages(query, &passages, Some(semantic), self.top_k, SEMANTIC_CANDIDATES)
+                            .await,
+                    ),
+                    None => None,
                 }
-            }
-            None => lexical().await,
+            } => hits,
+        };
+        let hits = match semantic {
+            Some(hits) => hits,
+            None => search_passages(query, &passages, None, self.top_k, SEMANTIC_CANDIDATES).await,
         };
         if hits.is_empty() {
             ctx.report(
