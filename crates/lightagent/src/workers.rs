@@ -464,15 +464,17 @@ fn role_readiness(
     // An untrusted run reaches only the read-only researcher, through
     // `agent.research` when its profile lists it; the other roles need
     // execution isolation that does not exist yet.
-    if trust == RunTrust::RemoteUser
-        && (role != WorkerRole::Researcher || !research_granted)
-    {
+    if trust == RunTrust::RemoteUser && (role != WorkerRole::Researcher || !research_granted) {
         let reason = if role == WorkerRole::Researcher {
             "research_not_granted"
         } else {
             "requires_isolation"
         };
-        return unready(Readiness::PermissionDenied, definition.label(), vec![reason]);
+        return unready(
+            Readiness::PermissionDenied,
+            definition.label(),
+            vec![reason],
+        );
     }
     if config.subagents.resolution == WorkerResolution::LegacyProfiles {
         return unready(

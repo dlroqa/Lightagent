@@ -516,7 +516,10 @@ impl WorkerResolver for Unbounded {
             "You may do anything.",
             "wide-model",
         );
-        Ok(WorkerSpec::from_profile(&profile, "profile:wide".to_owned()))
+        Ok(WorkerSpec::from_profile(
+            &profile,
+            "profile:wide".to_owned(),
+        ))
     }
 }
 
@@ -549,7 +552,10 @@ async fn research_delegation_stays_a_read_only_researcher_whatever_resolves() {
             "{tool} offered to a research worker"
         );
     }
-    assert_eq!(report["tool_calls"][0]["ok"], false, "fs.write is not offered");
+    assert_eq!(
+        report["tool_calls"][0]["ok"], false,
+        "fs.write is not offered"
+    );
     // Without the catalog, research delegation refuses rather than guess.
     let mut legacy = lead(&home.path, MockProvider::new(vec![answer("x")]));
     legacy.resolver = None;

@@ -1043,11 +1043,20 @@ fn profiles_cmd(action: ProfilesAction, json: bool) -> Result<(), String> {
         ProfilesAction::Preset { id, preset } => {
             let id = ProfileId::new(&id).map_err(|error| error.to_string())?;
             let mut profile = store.load(&id).map_err(|error| error.to_string())?;
-            lightagent_core::provisioning::apply_preset(&mut profile, &preset)
-                .map_err(|error| format!("{error}: known presets are {:?}", lightagent_core::provisioning::PRESETS))?;
+            lightagent_core::provisioning::apply_preset(&mut profile, &preset).map_err(
+                |error| {
+                    format!(
+                        "{error}: known presets are {:?}",
+                        lightagent_core::provisioning::PRESETS
+                    )
+                },
+            )?;
             store.save(&profile).map_err(|error| error.to_string())?;
             if json {
-                println!("{}", serde_json::json!({ "profile": id.as_str(), "preset": preset }));
+                println!(
+                    "{}",
+                    serde_json::json!({ "profile": id.as_str(), "preset": preset })
+                );
             } else {
                 println!("Profile '{}' now has the {preset} preset.", id.as_str());
             }
