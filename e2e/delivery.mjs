@@ -282,7 +282,7 @@ const SCENARIOS = [
     expect: {
       once: ["Per the researcher, Zephyr shipped on September 10, 2026."],
       present: ["Asked the researcher to", "Completed"],
-      absent: ["could not be recovered", "failed"],
+      absent: ["could not be recovered", "Blocked on approval"],
     },
   },
   {
@@ -307,7 +307,7 @@ const SCENARIOS = [
     expect: {
       once: ["The coder could not write the file without your approval."],
       present: ["Asked the coder to", "Blocked on approval"],
-      absent: ["Completed"],
+      absent: ["Worker finished"],
     },
   },
   {
