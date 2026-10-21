@@ -100,7 +100,10 @@ export function useRunEvents(runId: string | null): { events: RunEvent[]; done: 
       stopTimers();
     };
 
-    const accept = (name: string, message: MessageEvent) => {
+    const accept = (name: string, message: Event) => {
+      // A connection fault is dispatched as a plain `error` Event, the same
+      // name as the run's own `error` frames: it is not run output.
+      if (!(message instanceof MessageEvent)) return;
       const id = message.lastEventId === "" ? NaN : Number(message.lastEventId);
       if (Number.isInteger(id)) {
         // Already have it (a replay after a reconnect): skip it.
@@ -126,9 +129,9 @@ export function useRunEvents(runId: string | null): { events: RunEvent[]; done: 
       source?.close();
       const next = new EventSource(agentApi.eventsUrl(runId, lastId));
       for (const name of EVENT_NAMES) {
-        next.addEventListener(name, ((message: MessageEvent) => {
+        next.addEventListener(name, (message: Event) => {
           if (source === next) accept(name, message);
-        }) as EventListener);
+        });
       }
       // The healthy path is SSE-driven, so a terminal event closes the stream
       // and no polling runs. When the stream faults, probe the run once now and

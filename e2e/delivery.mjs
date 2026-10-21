@@ -1,12 +1,15 @@
 // Run-delivery states of the Agent screen, rendered against the real harness.
 //
-// Sessions, settings and the page itself come from the live harness API. Only
-// the run endpoints are scripted (POST /runs, GET /runs/{id}, and its SSE
-// stream), so each scenario can drop the stream at an exact event, replay or
-// resume it, or keep it dead after the run ends — the races a real network
-// produces nondeterministically. Every frame carries the id the harness sends,
-// and every reconnect's cursor is recorded and checked.
+// The page is served through a small local proxy in front of the live harness:
+// sessions, settings and the page itself come from the harness, and only the
+// run endpoints are scripted (POST /runs, GET /runs/{id}, and its SSE stream).
+// Each scenario can end the stream at an exact event, replay or resume it, or
+// keep it dead after the run ends — the races a real network produces
+// nondeterministically. A real proxy (not request interception, which does not
+// see EventSource) means the browser's own reconnects, with their
+// Last-Event-ID headers, are what is recorded and checked.
 
+import { createServer } from "node:http";
 import { mkdir, writeFile } from "node:fs/promises";
 
 const RUN = "run-00000000000000000000000000000d11";
@@ -205,50 +208,81 @@ async function seededSession(base, title) {
   throw new Error(`the seed run for “${title}” did not finish`);
 }
 
+/** Request headers not forwarded: hop-by-hop ones, and the proxy's own origin. */
+const DROP_REQUEST = new Set(["host", "connection", "content-length", "origin", "referer", "accept-encoding"]);
+const DROP_RESPONSE = new Set(["connection", "content-length", "content-encoding", "transfer-encoding", "keep-alive"]);
+
+/** Serve `scenario`'s run endpoints and forward everything else to `base`. */
+async function scriptedProxy(base, scenario, streams) {
+  const server = createServer(async (request, response) => {
+    try {
+      const url = new URL(request.url ?? "/", "http://proxy.invalid");
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const payload = Buffer.concat(chunks);
+      const json = (status, value) => {
+        response.writeHead(status, { "content-type": "application/json" });
+        response.end(JSON.stringify(value));
+      };
+      if (request.method === "POST" && url.pathname === "/api/lightagent/v1/runs") {
+        const sent = payload.length ? JSON.parse(payload.toString("utf8")) : {};
+        return json(202, { id: RUN, status: "running", session_id: sent.session_id ?? null });
+      }
+      if (url.pathname === `/api/lightagent/v1/runs/${RUN}/events`) {
+        const record = { after: url.searchParams.get("after"), lastEventId: request.headers["last-event-id"] ?? null };
+        const attempt = streams.length;
+        streams.push(record);
+        const reply = scenario.stream(attempt, cursorOf(record), scenario.frames);
+        if (reply.status) {
+          response.writeHead(reply.status, { "content-type": "text/plain" });
+          return response.end("unavailable");
+        }
+        // The whole scripted body, then the connection ends: to the browser,
+        // a stream that dropped exactly there.
+        response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+        return response.end(reply.frames);
+      }
+      if (request.method === "GET" && url.pathname === `/api/lightagent/v1/runs/${RUN}`) {
+        return json(200, { id: RUN, events: scenario.frames.length, pending_approval: null, stop_reason: null, ...scenario.status() });
+      }
+      const headers = Object.fromEntries(
+        Object.entries(request.headers).filter(([name]) => !DROP_REQUEST.has(name)),
+      );
+      const upstream = await fetch(`${base}${request.url}`, {
+        method: request.method,
+        headers,
+        body: ["GET", "HEAD"].includes(request.method ?? "GET") ? undefined : payload,
+        redirect: "manual",
+      });
+      const kept = {};
+      upstream.headers.forEach((value, name) => {
+        if (!DROP_RESPONSE.has(name)) kept[name] = value;
+      });
+      response.writeHead(upstream.status, kept);
+      response.end(Buffer.from(await upstream.arrayBuffer()));
+    } catch (err) {
+      if (!response.headersSent) response.writeHead(502, { "content-type": "text/plain" });
+      response.end(String(err));
+    }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { server, origin: `http://127.0.0.1:${server.address().port}` };
+}
+
 async function runScenario(browser, base, dir, scenario) {
   const failures = [];
+  const streams = [];
+  const proxy = await scriptedProxy(base, scenario, streams);
   const context = await browser.newContext({ viewport: { width: 1280, height: 1100 }, colorScheme: "dark" });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (err) => errors.push(String(err)));
-  const streams = [];
-
-  await page.route("**/api/lightagent/v1/runs**", async (route) => {
-    const request = route.request();
-    const url = new URL(request.url());
-    if (request.method() === "POST" && url.pathname.endsWith("/runs")) {
-      const sent = request.postDataJSON() ?? {};
-      return route.fulfill({
-        status: 202,
-        contentType: "application/json",
-        body: JSON.stringify({ id: RUN, status: "running", session_id: sent.session_id ?? null }),
-      });
-    }
-    if (url.pathname.endsWith(`/runs/${RUN}/events`)) {
-      const record = { after: url.searchParams.get("after"), lastEventId: request.headers()["last-event-id"] ?? null };
-      const attempt = streams.length;
-      streams.push(record);
-      const reply = scenario.stream(attempt, cursorOf(record), scenario.frames);
-      if (reply.status) {
-        return route.fulfill({ status: reply.status, contentType: "text/plain", body: "unavailable" });
-      }
-      return route.fulfill({ status: 200, contentType: "text/event-stream", headers: { "cache-control": "no-cache" }, body: reply.frames });
-    }
-    if (request.method() === "GET" && url.pathname.endsWith(`/runs/${RUN}`)) {
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ id: RUN, events: scenario.frames.length, pending_approval: null, stop_reason: null, ...scenario.status() }),
-      });
-    }
-    return route.continue();
-  });
 
   try {
-    // The seed is created before the route is used: its run is a real one.
+    // The seed goes to the harness directly: its run is a real one.
     const title = `delivery ${scenario.name}`;
     await seededSession(base, title);
-    await page.goto(`${base}/#/`, { waitUntil: "domcontentloaded" });
+    await page.goto(`${proxy.origin}/#/`, { waitUntil: "domcontentloaded" });
     await page.getByText(title, { exact: true }).first().click({ timeout: 15000 });
     const composer = page.locator(".chat-composer textarea");
     await composer.waitFor({ timeout: 15000 });
@@ -296,6 +330,8 @@ async function runScenario(browser, base, dir, scenario) {
     return { failures, report: { scenario: scenario.name, streams, failures } };
   } finally {
     await context.close();
+    proxy.server.closeAllConnections();
+    await new Promise((resolve) => proxy.server.close(resolve));
   }
 }
 

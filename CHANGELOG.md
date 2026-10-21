@@ -28,7 +28,8 @@ All notable Lightagent changes are documented here.
     `Last-Event-ID` or `?after=`. The Web UI accepts events strictly in
     order, so a reconnect no longer duplicates the transcript. When the run
     has ended but its terminal event is missing, the UI replays the rest of
-    the stream before it marks the run done.
+    the stream before it marks the run done. A dropped connection no
+    longer shows a false "The run failed." notice.
   - Additive API fields: `run.completed` has `complete`, `GET /runs/{id}`
     has `stop_reason`, and sessions saved by the API store the stop reason
     (for example `EndTurn`) instead of the run status. A new
