@@ -742,5 +742,9 @@ async fn live_the_coders_patch_is_committed_and_verified_on_actions() {
         .unwrap();
     println!("EVIDENCE scratch branch deleted: {}", deleted.status());
     let _ = std::fs::remove_dir_all(&root);
-    assert_eq!(verdicts, ["passed", "failed"], "the patch passes, its base fails");
+    assert_eq!(
+        verdicts,
+        ["passed", "failed"],
+        "the patch passes, its base fails"
+    );
 }

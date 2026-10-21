@@ -397,5 +397,8 @@ async fn a_commit_is_a_fast_forward_of_exactly_the_patch_base() {
         .iter()
         .filter(|(method, _, _)| method != "GET")
         .count();
-    assert_eq!(writes, 4, "one blob, tree, commit and ref update; nothing for the refusals");
+    assert_eq!(
+        writes, 4,
+        "one blob, tree, commit and ref update; nothing for the refusals"
+    );
 }
