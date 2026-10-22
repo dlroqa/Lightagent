@@ -41,6 +41,7 @@ The harness is a new, non-required workflow, `sandbox stress`. It runs the live 
 | Base `30f5b2b` (K, unfixed) | 39701848102 | 5 | 300 each | **5** | `cancel-startup 1ms`, `0ms`, `0ms`, `2ms`, `0ms`: `process survived` |
 | Fix `f7c7df6` | 39700020112 (pull request) | 10 | 300 each | **0** | none |
 | Fix `f7c7df6` | 39701181164 | 10 | 300 each | **0** | none |
+| Fix, S head `2fdacb1` (same `bubblewrap.rs`) | 39701803597 (pull request) | 10 | 300 each | **0** | none |
 
 Each failed run stops at its first survivor, so on the base the defect shows up within the first 300 startup cancellations under load. The regular `check` sandbox job, 30 attempts without load, hits it rarely, which matches the single CI failure. Every final head of the stack is also checked by the regular sandbox job.
 
