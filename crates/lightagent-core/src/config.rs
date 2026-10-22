@@ -726,6 +726,16 @@ pub struct SubagentsConfig {
     /// Whether an operator run's `agent.delegate` still accepts the legacy
     /// `profile` argument. Untrusted runs never may.
     pub legacy_profile_argument: bool,
+    /// Workers running at once across the installation (1–32). Read when the
+    /// first worker starts; a change applies after a restart.
+    pub max_active_workers: u32,
+    /// Workers running at once for one requesting profile (1–8).
+    pub max_active_workers_per_profile: u32,
+    /// How long a worker waits for a slot before its delegation fails (1–300).
+    pub queue_timeout_secs: u64,
+    /// Worker runs one lead run may start in all (1–32). Every worker in a
+    /// tree also shares the lead's turns, tool calls and time.
+    pub max_workers_per_run: u32,
 }
 
 /// How a role without an explicit assignment is resolved.
@@ -759,6 +769,10 @@ impl Default for SubagentsConfig {
             role_models: BTreeMap::new(),
             approved_models: Vec::new(),
             legacy_profile_argument: true,
+            max_active_workers: 4,
+            max_active_workers_per_profile: 1,
+            queue_timeout_secs: 30,
+            max_workers_per_run: 6,
         }
     }
 }
@@ -1718,6 +1732,28 @@ impl Config {
             }
         }
         self.validate_github_actions()?;
+        let subagents = &self.subagents;
+        let bounded = [
+            ("max_active_workers", subagents.max_active_workers, 32),
+            (
+                "max_active_workers_per_profile",
+                subagents.max_active_workers_per_profile,
+                8,
+            ),
+            ("max_workers_per_run", subagents.max_workers_per_run, 32),
+        ];
+        for (name, value, maximum) in bounded {
+            if value == 0 || value > maximum {
+                return Err(ConfigError::Invalid(format!(
+                    "subagents.{name} must be between 1 and {maximum}"
+                )));
+            }
+        }
+        if !(1..=300).contains(&subagents.queue_timeout_secs) {
+            return Err(ConfigError::Invalid(
+                "subagents.queue_timeout_secs must be between 1 and 300".to_owned(),
+            ));
+        }
         for (role, model) in &self.subagents.role_models {
             if crate::workers::WorkerRole::parse(role).is_none() {
                 return Err(ConfigError::Invalid(format!(

@@ -16,8 +16,9 @@
 //! With `subagents.resolution = "legacy_profiles"` the earlier behavior is
 //! restored exactly, as a rollback.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use lightagent_core::identity::RunTrust;
@@ -29,8 +30,10 @@ use lightagent_core::{
 };
 use lightagent_extensions::ExtensionStore;
 use lightagent_tools::{
-    BuiltinResolver, CallGuard, Delegation, ToolRegistry, WorkerResolver, WorkerSpec, WorkerTarget,
+    Admission, BuiltinResolver, CallGuard, Delegation, ToolRegistry, TreeBudget, WorkerResolver,
+    WorkerSpec, WorkerTarget,
 };
+use tokio::sync::Semaphore;
 
 /// Tools a worker is never offered, even when the lead has them: delegation
 /// is added back only where depth allows, Jev's budget belongs to the lead,
@@ -78,6 +81,12 @@ pub(crate) fn delegation(inputs: DelegationInputs<'_>) -> Delegation {
         delegation.limit_ceiling = Some(inputs.lead.limits);
         delegation.approval_floor = Some(inputs.lead.approval_policy);
     }
+    // Every worker below this lead shares its turns, tool calls and time.
+    delegation.budget = Some(TreeBudget::new(
+        &inputs.lead.limits,
+        config.subagents.max_workers_per_run,
+    ));
+    delegation.admission = Some(admission(config, &inputs.lead.id));
     if config.subagents.resolution == WorkerResolution::Builtin {
         delegation.resolver = Some(Arc::new(HarnessResolver::new(
             inputs.root,
@@ -87,6 +96,30 @@ pub(crate) fn delegation(inputs: DelegationInputs<'_>) -> Delegation {
         )));
     }
     delegation
+}
+
+/// Worker slots for `profile`: one installation-wide pool and one pool per
+/// requesting profile, both sized when first used.
+fn admission(config: &Config, profile: &ProfileId) -> Admission {
+    static GLOBAL: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    static PROFILES: OnceLock<Mutex<HashMap<String, Arc<Semaphore>>>> = OnceLock::new();
+    let subagents = &config.subagents;
+    let slots = |count: u32| Arc::new(Semaphore::new(usize::try_from(count).unwrap_or(1)));
+    let global = GLOBAL.get_or_init(|| slots(subagents.max_active_workers));
+    let per_profile = subagents.max_active_workers_per_profile;
+    let profile = match PROFILES.get_or_init(Mutex::default).lock() {
+        Ok(mut pools) => Arc::clone(
+            pools
+                .entry(profile.as_str().to_owned())
+                .or_insert_with(|| slots(per_profile)),
+        ),
+        Err(_) => slots(per_profile),
+    };
+    Admission {
+        global: Arc::clone(global),
+        profile,
+        queue_timeout: Duration::from_secs(subagents.queue_timeout_secs),
+    }
 }
 
 /// The tools a worker may be drawn from: the lead's effective tools, without

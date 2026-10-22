@@ -21,6 +21,7 @@ use lightagent_core::{
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+use crate::budget::{Admission, TreeBudget};
 use crate::executor::CallGuard;
 use crate::registry::ToolRegistry;
 use crate::worker::WorkerResolver;
@@ -97,6 +98,12 @@ pub struct Delegation {
     /// The originating run's per-call guard (its current profile policy),
     /// re-checked at every worker tool call too.
     pub call_guard: Option<CallGuard>,
+    /// The allowance the whole delegation tree shares. `None`: each worker
+    /// is bounded only by its own limits and the ceiling, as before.
+    pub budget: Option<TreeBudget>,
+    /// How many workers may run at once. Applied to the lead's workers; a
+    /// nested worker runs inside its parent's slot.
+    pub admission: Option<Admission>,
 }
 
 /// A server-provided role preset. The model supplies only a role id; the
@@ -168,6 +175,8 @@ impl Delegation {
             profile_policy: ToolPolicyMode::Off,
             network_mcp_servers: BTreeSet::new(),
             call_guard: None,
+            budget: None,
+            admission: None,
         }
     }
 
@@ -242,6 +251,8 @@ impl Delegation {
             profile_policy: self.profile_policy,
             network_mcp_servers: self.network_mcp_servers.clone(),
             call_guard: self.call_guard.clone(),
+            budget: self.budget.clone(),
+            admission: self.admission.clone(),
         }
     }
 }

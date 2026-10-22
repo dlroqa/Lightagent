@@ -284,6 +284,40 @@ pub async fn run_worker(
         .max(1);
     let own = limits.wall_clock_secs.unwrap_or(wrap_up);
     limits.wall_clock_secs = Some(own.min(wrap_up));
+
+    // The lead's workers wait for a slot; a nested worker runs inside its
+    // parent's.
+    let _admitted = match &delegation.admission {
+        Some(admission) if delegation.depth == 0 => {
+            let queued = || ctx.report(progress("worker.queued", None));
+            match admission.admit(&ctx.cancel, queued).await {
+                Ok(admitted) => Some(admitted),
+                Err(reason) => {
+                    ctx.report(progress("worker.failed", Some("not_admitted")));
+                    return ToolOutcome::error(reason);
+                }
+            }
+        }
+        _ => None,
+    };
+    // Every worker in the tree draws from one allowance.
+    let grant = match delegation
+        .budget
+        .as_ref()
+        .map(|budget| budget.grant(&limits))
+    {
+        Some(Ok(grant)) => {
+            limits.max_turns = grant.turns;
+            limits.max_tool_calls = grant.tool_calls;
+            limits.wall_clock_secs = grant.seconds.or(limits.wall_clock_secs);
+            Some(grant)
+        }
+        Some(Err(reason)) => {
+            ctx.report(progress("worker.failed", Some("budget_spent")));
+            return ToolOutcome::error(reason);
+        }
+        None => None,
+    };
     let approval = match delegation.approval_floor {
         Some(floor) => spec.approval.stricter(floor),
         None => spec.approval,
@@ -397,6 +431,10 @@ pub async fn run_worker(
     while let Ok(event) = events.try_recv() {
         tracker.observe(&event, ctx);
     }
+    let used_tool_calls = u32::try_from(tracker.finished.len()).unwrap_or(u32::MAX);
+    if let (Some(budget), Some(grant)) = (&delegation.budget, grant) {
+        budget.settle(grant, tracker.turns, used_tool_calls);
+    }
 
     // A worker whose run was revoked, or whose assignment was withdrawn,
     // while it worked hands nothing back, not even a partial answer.
@@ -469,6 +507,7 @@ struct Tracker {
     /// Finished calls, in order.
     finished: Vec<Finished>,
     turns: u32,
+    tokens: u64,
 }
 
 /// One finished worker tool call.
@@ -486,6 +525,7 @@ impl Tracker {
             calls: BTreeMap::new(),
             finished: Vec::new(),
             turns: 0,
+            tokens: 0,
         }
     }
 
@@ -513,7 +553,12 @@ impl Tracker {
             AgentEvent::AwaitingApproval { .. } => {
                 ctx.report(progress("worker.awaiting_approval", None));
             }
-            AgentEvent::TurnCompleted { .. } => self.turns += 1,
+            AgentEvent::TurnCompleted { usage } => {
+                self.turns += 1;
+                if let Some(usage) = usage {
+                    self.tokens += u64::from(usage.total_tokens);
+                }
+            }
             _ => {}
         }
     }
@@ -524,6 +569,15 @@ impl Tracker {
 struct ToolUse {
     name: String,
     ok: bool,
+}
+
+/// What a worker run used.
+#[derive(Debug, Serialize)]
+struct Usage {
+    model_turns: u32,
+    tool_calls: usize,
+    /// Tokens the provider reported; 0 when it reported none.
+    tokens: u64,
 }
 
 /// The typed, bounded result of a role worker.
@@ -547,7 +601,7 @@ struct WorkerReport {
     tool_calls: Vec<ToolUse>,
     /// The tool the worker was waiting to have approved, when blocked.
     blocked_on: Option<String>,
-    model_turns: u32,
+    usage: Usage,
     limitations: Vec<String>,
     notes: Vec<&'static str>,
 }
@@ -654,7 +708,11 @@ fn typed_outcome(
             })
             .collect(),
         blocked_on,
-        model_turns: tracker.turns,
+        usage: Usage {
+            model_turns: tracker.turns,
+            tool_calls: tracker.finished.len(),
+            tokens: tracker.tokens,
+        },
         limitations,
         notes: spec.notes.clone(),
     };

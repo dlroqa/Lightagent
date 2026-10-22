@@ -26,6 +26,31 @@ const toolStarted = ["tool.started", { id: "call_1", name: "rag.realtime" }];
 const progress = (stage, extra = {}) => ["tool.progress", { id: "call_1", stage, completed: null, total: null, outcome: null, ...extra }];
 const evidence = ["tool.output", { id: "call_1", is_error: false, content: "CURRENT WEB EVIDENCE for \"When did Zephyr ship?\"\n[1] Zephyr release\nURL: https://example.com/zephyr\nZephyr shipped on September 10, 2026." }];
 const delta = (content) => ["model.delta", { content }];
+const DELEGATED_TASK = "Find when Zephyr shipped";
+const delegateRequested = (role, task) =>
+  ["tool.requested", { id: "call_w", name: "agent.delegate", arguments: JSON.stringify({ role, task }) }];
+const delegateStarted = ["tool.started", { id: "call_w", name: "agent.delegate" }];
+const workerProgress = (stage, extra = {}) =>
+  ["tool.progress", { id: "call_w", stage, completed: null, total: null, outcome: null, ...extra }];
+const workerResult = (status) => JSON.stringify({
+  schema: "lightagent.worker_result.v1",
+  status,
+  worker: status === "blocked" ? "builtin:coder@1" : "builtin:researcher@1",
+  role: status === "blocked" ? "coder" : "researcher",
+  model: "default-model",
+  model_source: "lead",
+  skills: [status === "blocked" ? "worker-coder@1" : "worker-researcher@1"],
+  tools_offered: [],
+  stop_reason: status === "blocked" ? null : "end_turn",
+  answer: status === "blocked" ? "" : "1. Zephyr shipped on September 10, 2026 (https://example.com/zephyr).",
+  sources: status === "blocked" ? [] : ["https://example.com/zephyr"],
+  unverified_citations: [],
+  tool_calls: [],
+  blocked_on: status === "blocked" ? "fs.write" : null,
+  usage: { model_turns: 2, tool_calls: 2, tokens: 0 },
+  limitations: status === "partial" ? ["the worker did not finish: the run reached its turn limit"] : [],
+  notes: [],
+});
 const turn = ["turn.completed", {}];
 const completed = (reason) => ["run.completed", { reason, complete: reason === "EndTurn" }];
 const classification = (outcome, extra = {}) => ["classification.completed", {
@@ -234,6 +259,87 @@ const SCENARIOS = [
       reconnectedAfter: 1,
     },
   },
+  {
+    // A researcher worker runs, reports its lifecycle, and returns a typed
+    // result the lead synthesizes from.
+    name: "delegated-researcher-completes",
+    frames: [
+      started, turn,
+      delegateRequested("researcher", DELEGATED_TASK), delegateStarted,
+      workerProgress("worker.started"),
+      workerProgress("worker.tool", { completed: 1, total: 16 }),
+      workerProgress("worker.tool", { completed: 2, total: 16 }),
+      workerProgress("worker.completed", { outcome: "completed" }),
+      ["tool.output", { id: "call_w", is_error: false, content: workerResult("completed") }],
+      delta("Per the researcher, Zephyr shipped on September 10, 2026."),
+      turn,
+      completed("EndTurn"),
+    ],
+    stream(attempt, cursor, frames) {
+      return { frames: body(frames, attempt === 0 ? 0 : cursor + 1) };
+    },
+    status: () => ({ status: "running" }),
+    expect: {
+      once: ["Per the researcher, Zephyr shipped on September 10, 2026."],
+      present: [`Delegated work for “${DELEGATED_TASK}”: Worker finished`],
+      controls: ["Asked the researcher to", "Completed"],
+      absent: ["could not be recovered", "Blocked on approval"],
+    },
+  },
+  {
+    // A coder worker reaches a write that needs approval it cannot obtain:
+    // the row says so plainly and never shows success.
+    name: "delegated-coder-blocked",
+    frames: [
+      started, turn,
+      delegateRequested("coder", "Make one() return 1"), delegateStarted,
+      workerProgress("worker.started"),
+      workerProgress("worker.awaiting_approval"),
+      workerProgress("worker.blocked", { outcome: "blocked" }),
+      ["tool.failed", { id: "call_w", is_error: true, content: workerResult("blocked") }],
+      delta("The coder could not write the file without your approval."),
+      turn,
+      completed("EndTurn"),
+    ],
+    stream(attempt, cursor, frames) {
+      return { frames: body(frames, attempt === 0 ? 0 : cursor + 1) };
+    },
+    status: () => ({ status: "running" }),
+    expect: {
+      once: ["The coder could not write the file without your approval."],
+      present: ["Delegated work for “Make one() return 1”: Worker stopped before an approval"],
+      controls: ["Asked the coder to", "Blocked on approval"],
+      absent: ["Worker finished"],
+    },
+  },
+  {
+    // The stream drops while the worker works; the resumed stream must not
+    // repeat the worker's progress or its result.
+    name: "delegated-worker-resumed-after-drop",
+    frames: [
+      started, turn,
+      delegateRequested("researcher", DELEGATED_TASK), delegateStarted,
+      workerProgress("worker.started"),
+      workerProgress("worker.tool", { completed: 1, total: 16 }),
+      workerProgress("worker.completed", { outcome: "completed" }),
+      ["tool.output", { id: "call_w", is_error: false, content: workerResult("partial") }],
+      delta("The researcher found partial evidence."),
+      turn,
+      completed("EndTurn"),
+    ],
+    stream(attempt, cursor, frames) {
+      if (attempt === 0) return { frames: body(frames.slice(0, 6)) };
+      return { frames: body(frames, cursor + 1) };
+    },
+    status: () => ({ status: "running" }),
+    expect: {
+      once: ["The researcher found partial evidence."],
+      present: [`Delegated work for “${DELEGATED_TASK}”: Worker finished`],
+      controls: ["Partial"],
+      absent: ["could not be recovered"],
+      reconnectedAfter: 5,
+    },
+  },
 ];
 
 const occurrences = (haystack, needle) => haystack.split(needle).length - 1;
@@ -364,6 +470,9 @@ async function runScenario(browser, base, dir, scenario) {
     await page.screenshot({ path: `${dir}/${scenario.name}-status-control.png` });
     if (scenario.expect.badge && !controls.includes(scenario.expect.badge)) {
       failures.push(`${scenario.name}: expected the run badge “${scenario.expect.badge}”`);
+    }
+    for (const needle of scenario.expect.controls ?? []) {
+      if (!controls.includes(needle)) failures.push(`${scenario.name}: expected “${needle}” in Status Control`);
     }
 
     for (const needle of scenario.expect.present) {
