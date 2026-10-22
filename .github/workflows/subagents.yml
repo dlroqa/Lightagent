@@ -1,0 +1,58 @@
+name: subagents
+
+# Specialist-subagent evidence. The seeded job runs the regression tests that
+# are still ignored with a `seeded:` reason (one per open baseline gap) and
+# reports which of them pass; it is a report, not a gate, because a seeded
+# test fails by design until its stage closes the gap. Closed gaps lose their
+# `ignore` and run in the required `check` workflow like any other test.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: subagents-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  seeded:
+    name: Seeded subagent gaps (report)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: subagents
+      - name: Run the seeded tests
+        run: |
+          # Actions runs bash with -e; a seeded failure must not end the step.
+          set +e -uo pipefail
+          out="$RUNNER_TEMP/seeded.log"
+          : > "$out"
+          cargo test -p lightagent-tools --test subagent_baseline -- --ignored 2>&1 | tee -a "$out"
+          cargo test -p lightagent --lib seeded_ -- --ignored 2>&1 | tee -a "$out"
+          {
+            echo "### Seeded subagent gaps at \`${GITHUB_SHA}\`"
+            echo
+            echo "A seeded test fails while its gap is open. \`ok\` means the gap is closed and its \`ignore\` can be removed."
+            echo
+            echo '| Test | Result |'
+            echo '| --- | --- |'
+            grep -E '^test .*seeded_.* \.\.\. ' "$out" \
+              | sed -E 's/^test (.*) \.\.\. (.*)$/| `\1` | \2 |/'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Compilation failures must not hide behind the report.
+          grep -Eq '^test result:' "$out"
