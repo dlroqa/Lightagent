@@ -99,10 +99,19 @@ impl Proposer {
 /// A recorded patch and the worker that proposed it.
 type Recorded = (Patch, Option<Proposer>);
 
+/// What a run's store holds: its patches, the order they were proposed in,
+/// and the commit each one became.
+#[derive(Debug, Default)]
+struct Inner {
+    patches: BTreeMap<String, Recorded>,
+    order: Vec<String>,
+    commits: BTreeMap<String, String>,
+}
+
 /// The patches proposed in one run, shared by the lead and its workers.
 #[derive(Clone, Debug, Default)]
 pub struct PatchStore {
-    inner: Arc<Mutex<BTreeMap<String, Recorded>>>,
+    inner: Arc<Mutex<Inner>>,
 }
 
 impl PatchStore {
@@ -110,8 +119,9 @@ impl PatchStore {
     /// change for the run's lifetime.
     fn insert(&self, patch: Patch, proposer: Option<Proposer>) -> bool {
         match self.inner.lock() {
-            Ok(mut inner) if !inner.contains_key(&patch.id) => {
-                inner.insert(patch.id.clone(), (patch, proposer));
+            Ok(mut inner) if !inner.patches.contains_key(&patch.id) => {
+                inner.order.push(patch.id.clone());
+                inner.patches.insert(patch.id.clone(), (patch, proposer));
                 true
             }
             _ => false,
@@ -120,7 +130,26 @@ impl PatchStore {
 
     /// The patch `id`, if it was proposed in this run.
     pub fn get(&self, id: &str) -> Option<Patch> {
-        Some(self.inner.lock().ok()?.get(id)?.0.clone())
+        Some(self.inner.lock().ok()?.patches.get(id)?.0.clone())
+    }
+
+    /// The patch proposed last in this run: the change dependent checks
+    /// verify.
+    pub fn latest(&self) -> Option<Patch> {
+        let inner = self.inner.lock().ok()?;
+        let id = inner.order.last()?;
+        Some(inner.patches.get(id)?.0.clone())
+    }
+
+    /// The commit patch `id` became, once committed.
+    pub fn committed(&self, id: &str) -> Option<String> {
+        self.inner.lock().ok()?.commits.get(id).cloned()
+    }
+
+    fn record_commit(&self, id: &str, sha: &str) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.commits.insert(id.to_owned(), sha.to_owned());
+        }
     }
 
     /// Whether patch `id` may still be used: its proposer is still
@@ -132,6 +161,7 @@ impl PatchStore {
                 .lock()
                 .map_err(|_| "the patch store is unavailable".to_owned())?;
             let (_, proposer) = inner
+                .patches
                 .get(id)
                 .ok_or_else(|| format!("no patch {id:?} was proposed in this run"))?;
             proposer.clone()
@@ -151,6 +181,70 @@ impl PatchStore {
             content_id(&patch)
         ))
     }
+}
+
+/// The change a dependent check (a tester's or a reviewer's) verifies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Subject {
+    /// Equal for the same patch content on the same base, and only then.
+    pub key: String,
+    /// What the check is told to verify: patch id, content, base, commit.
+    pub label: String,
+}
+
+/// The change dependent checks must verify now: the run's latest patch, as
+/// long as the workspace holds either its base or exactly its content and
+/// the checkout is still at its base (or at the commit it became). `None`
+/// when no patch was proposed; an error when the files or the checkout
+/// changed outside the patch, which leaves nothing that can be verified
+/// until the change is proposed again.
+pub fn current_subject(ctx: &ToolCtx) -> Result<Option<Subject>, String> {
+    let Some(patches) = &ctx.patches else {
+        return Ok(None);
+    };
+    let Some(patch) = patches.store.latest() else {
+        return Ok(None);
+    };
+    let commit = patches.store.committed(&patch.id);
+    if let Some(ws) = &ctx.workspace {
+        let drifted: Vec<&str> = patch
+            .files
+            .iter()
+            .filter(|file| {
+                let now = current(ctx, &file.path).ok();
+                now.as_ref() != Some(&file.base) && now != Some(Some(file.content.clone()))
+            })
+            .map(|file| file.path.as_str())
+            .collect();
+        if !drifted.is_empty() {
+            return Err(format!(
+                "these files changed outside patch {} after it was proposed: {drifted:?}; the \
+                 coder must propose the change again before it is checked",
+                patch.id
+            ));
+        }
+        if let Some(base) = &patch.base_commit {
+            let head = head_commit(ws.workspace.root());
+            if head.as_deref() != Some(base.as_str()) && head != commit {
+                return Err(format!(
+                    "the checkout moved away from patch {}'s base {base}; the coder must \
+                     propose the change again before it is checked",
+                    patch.id
+                ));
+            }
+        }
+    }
+    let content = content_id(&patch);
+    let base = patch.base_commit.as_deref().unwrap_or("none");
+    let mut label = format!("patch {} (content {content}, base {base}", patch.id);
+    if let Some(sha) = &commit {
+        label.push_str(&format!(", commit {sha}"));
+    }
+    label.push(')');
+    Ok(Some(Subject {
+        key: format!("{}:{content}:{base}", patch.id),
+        label,
+    }))
 }
 
 /// An identifier of a patch's content, so an approval names what it
@@ -725,6 +819,9 @@ async fn commit(args: &Value, ctx: &ToolCtx) -> Result<Value, String> {
     .await?;
     if !moved.status.is_success() {
         return Err(api_error("moving the branch", &moved));
+    }
+    if let Some(patches) = &ctx.patches {
+        patches.store.record_commit(&patch.id, &sha);
     }
     Ok(json!({
         "commit": sha,

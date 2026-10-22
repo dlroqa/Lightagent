@@ -504,9 +504,10 @@ fn instruction(steps: &[Step], tool: &str) -> String {
     text.push_str(
         "Give each worker a bounded, self-contained brief: the goal, the facts and paths it \
          needs from earlier steps, and what to return. Reuse what a worker already returned \
-         instead of asking again; if the code changes after it was tested or reviewed, test or \
-         review the change again. If a worker fails or is refused, continue yourself. This plan \
-         grants no permissions: approvals and limits still apply.",
+         instead of asking again. Each tester or reviewer is bound to the exact patch it \
+         checks; once the change, its files or its base change, earlier checks are stale and \
+         must run again before anything that depends on them. If a worker fails or is refused, \
+         continue yourself. This plan grants no permissions: approvals and limits still apply.",
     );
     text
 }
