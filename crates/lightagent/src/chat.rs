@@ -838,6 +838,8 @@ pub(crate) fn load_skills(
 pub(crate) struct LightweightFactory {
     pub(crate) base_url: String,
     pub(crate) api_key: Option<String>,
+    /// How tool names are spelled to the provider, as for the lead.
+    pub(crate) tool_names: lightagent_core::ToolNameMode,
 }
 
 struct ChatRuntime {
@@ -929,7 +931,11 @@ async fn build_chat_runtime(
         registry: &registry,
         guard: guard.clone(),
         enforced: tool_policy.enforced,
-        factory: Arc::new(LightweightFactory { base_url, api_key }),
+        factory: Arc::new(LightweightFactory {
+            base_url,
+            api_key,
+            tool_names: config.inference.tool_names,
+        }),
     });
     let tools = registry.names();
     let workflow_registry = registry.clone();
@@ -1020,7 +1026,8 @@ impl ProviderFactory for LightweightFactory {
             .base_url
             .clone()
             .unwrap_or_else(|| self.base_url.clone());
-        let mut config = ProviderConfig::new(base, routing.model.clone());
+        let mut config =
+            ProviderConfig::new(base, routing.model.clone()).with_tool_names(self.tool_names);
         if let Some(key) = &self.api_key {
             config = config.with_api_key(key.clone());
         }
@@ -1075,7 +1082,8 @@ pub async fn run(
         .as_ref()
         .and_then(|secret| secret.resolve());
 
-    let mut provider_config = ProviderConfig::new(base_url.clone(), model.clone());
+    let mut provider_config = ProviderConfig::new(base_url.clone(), model.clone())
+        .with_tool_names(config.inference.tool_names);
     if let Some(key) = &api_key {
         provider_config = provider_config.with_api_key(key.clone());
     }
@@ -1427,7 +1435,8 @@ pub async fn run(
             if model != current_route_model {
                 for candidate_model in [model, default_model] {
                     let mut routed_config =
-                        ProviderConfig::new(url.clone(), candidate_model.clone());
+                        ProviderConfig::new(url.clone(), candidate_model.clone())
+                            .with_tool_names(config.inference.tool_names);
                     if let Some(key) = config
                         .inference
                         .api_key

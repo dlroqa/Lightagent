@@ -140,6 +140,8 @@ jobs:
           LIGHTAGENT_EVAL_BASE_URL: ${{ secrets.SUBAGENT_EVAL_BASE_URL }}
           LIGHTAGENT_EVAL_API_KEY: ${{ secrets.SUBAGENT_EVAL_API_KEY }}
           LIGHTAGENT_EVAL_MODEL: ${{ vars.SUBAGENT_EVAL_MODELS }}
+          # `portable` for endpoints that refuse dotted function names.
+          LIGHTAGENT_EVAL_TOOL_NAMES: ${{ vars.SUBAGENT_EVAL_TOOL_NAMES }}
           LIGHTAGENT_EVAL_OUT: ${{ runner.temp }}/role-eval
         run: |
           if [ -z "$LIGHTAGENT_EVAL_BASE_URL" ] || [ -z "$LIGHTAGENT_EVAL_MODEL" ]; then
