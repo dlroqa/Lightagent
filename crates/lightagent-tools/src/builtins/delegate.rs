@@ -277,7 +277,7 @@ impl Tool for AgentDelegate {
                     "{task}\n\nCheck exactly this change and report only on it: {}.",
                     current.label
                 );
-                subject = Some(current.key);
+                subject = Some(current);
             }
         }
         if let Err(error) = delegation.may_start_worker() {
@@ -285,8 +285,11 @@ impl Tool for AgentDelegate {
         }
         // Turning hierarchy on also caps legacy delegates. With the default
         // disabled policy their long-standing one-level behavior is unchanged.
+        // Past that allowance, only a bounded repair under the run's plan
+        // may start (see `crate::plan`).
         if delegation.subagents.enabled
-            && let Err(error) = delegation.reserve_child()
+            && let Err(limit) = delegation.reserve_child()
+            && let Err(error) = reserve_repair(&delegation, target, subject.as_ref(), &limit, ctx)
         {
             return ToolOutcome::error(error);
         }
@@ -304,10 +307,53 @@ impl Tool for AgentDelegate {
         let role = spec.role;
         let outcome = run_worker(&delegation, spec, request, ctx).await;
         if delegation.depth == 0 && !outcome.is_error {
-            record_plan_progress(&delegation, role, subject.as_deref(), &outcome, ctx);
+            let key = subject.as_ref().map(|subject| subject.key.as_str());
+            record_plan_progress(&delegation, role, key, &outcome, ctx);
         }
         outcome
     }
+}
+
+/// Admit a start past the child allowance as a step of a bounded repair, or
+/// say why not. A check that cannot run leaves its change unverified, and
+/// the refusal says so: an earlier result is never reused for a different
+/// change.
+fn reserve_repair(
+    delegation: &Delegation,
+    target: WorkerTarget<'_>,
+    subject: Option<&crate::builtins::patch::Subject>,
+    limit: &str,
+    ctx: &ToolCtx,
+) -> Result<(), String> {
+    let WorkerTarget::Role(role) = target else {
+        return Err(limit.to_owned());
+    };
+    let change = match subject {
+        Some(subject) => Some(subject.key.clone()),
+        None => crate::builtins::patch::current_subject(ctx)
+            .ok()
+            .flatten()
+            .map(|current| current.key),
+    };
+    let Err(reason) = delegation.reserve_repair(role, change.as_deref()) else {
+        return Ok(());
+    };
+    let Some(subject) = subject else {
+        return Err(format!("{limit}: {reason}"));
+    };
+    if delegation.plan.already_verified(role, &subject.key) {
+        return Err(format!(
+            "the {role} already checked exactly {}: reuse its result",
+            subject.label
+        ));
+    }
+    ctx.report(progress("verification.blocked", Some(role)));
+    Err(format!(
+        "{limit}: {reason}. Verification BLOCKED: the {role} cannot check {} within this \
+         run's limits. Report this change as unverified; an earlier result was for a \
+         different change and must not be reused.",
+        subject.label
+    ))
 }
 
 /// After a planned worker returns: a completed check is recorded against the

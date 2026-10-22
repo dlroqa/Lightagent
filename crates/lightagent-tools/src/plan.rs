@@ -15,12 +15,24 @@
 //! files or the checkout move, every earlier check becomes stale: a role
 //! that depends on a stale check is refused until that check is run again
 //! on the current change.
+//!
+//! How many workers run at once is the admission's concern, and how many an
+//! execution starts in all is the child allowance's. Past that allowance a
+//! planned run may still repair, within a fixed number of rounds: each round
+//! lets the coder revise a change that a check has completed on, and each
+//! planned check then run once more on the new change. A check never runs
+//! twice on the same change, and a coder never revises a change nobody
+//! checked, so a round cannot loop. Every start still shares the run's
+//! turns, tool calls, time and worker count.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 /// The role whose output dependent checks verify.
 const CODER: &str = "coder";
+
+/// The most repair rounds a run may be configured with.
+pub const MAX_REPAIR_ROUNDS: u8 = 2;
 
 /// Each planned role, the roles that must complete before it, and the change
 /// each check verified.
@@ -29,6 +41,10 @@ pub struct RolePlan {
     after: BTreeMap<String, BTreeSet<String>>,
     completed: BTreeSet<String>,
     verified: BTreeMap<String, String>,
+    /// Repair rounds opened: coder starts past the initial allowance.
+    repairs: u8,
+    /// Re-checks each check role has started past the initial allowance.
+    rechecks: BTreeMap<String, u8>,
 }
 
 impl RolePlan {
@@ -41,6 +57,8 @@ impl RolePlan {
                 .collect(),
             completed: BTreeSet::new(),
             verified: BTreeMap::new(),
+            repairs: 0,
+            rechecks: BTreeMap::new(),
         }
     }
 
@@ -95,6 +113,62 @@ impl RolePlan {
             .filter(|(_, verified)| Some(verified.as_str()) != key)
             .map(|(role, _)| role.clone())
             .collect()
+    }
+
+    /// Whether `role` may start past the initial allowance as one step of a
+    /// repair, with at most `max_rounds` rounds. The coder opens a round,
+    /// and only once a check completed on its current change; each check
+    /// then runs once per round, never on a change it already verified.
+    /// `change` is the current change's key.
+    pub fn admit_repair(
+        &mut self,
+        role: &str,
+        change: Option<&str>,
+        max_rounds: u8,
+    ) -> Result<(), String> {
+        if !self.after.contains_key(role) {
+            return Err(format!(
+                "the {role} is not in this run's specialist plan, so it has no repair allowance"
+            ));
+        }
+        let Some(change) = change else {
+            return Err("there is no current change to repair or check".to_owned());
+        };
+        if role == CODER {
+            if !self.verified.values().any(|verified| verified == change) {
+                return Err(
+                    "no check of the coder's current change has completed, so there is nothing \
+                     to repair yet"
+                        .to_owned(),
+                );
+            }
+            if self.repairs >= max_rounds.min(MAX_REPAIR_ROUNDS) {
+                return Err(format!(
+                    "this run's repair rounds ({max_rounds}) are used"
+                ));
+            }
+            self.repairs += 1;
+            return Ok(());
+        }
+        if !self.checks_a_change(role) {
+            return Err(format!(
+                "the {role} does not check the coder's change, so it has no repair allowance"
+            ));
+        }
+        if self.verified.get(role).map(String::as_str) == Some(change) {
+            return Err(format!(
+                "the {role} already checked exactly this change: reuse its result"
+            ));
+        }
+        let used = self.rechecks.get(role).copied().unwrap_or(0);
+        if used >= self.repairs {
+            return Err(format!(
+                "the {role} has no re-check left: each repair round allows one, and {} are open",
+                self.repairs
+            ));
+        }
+        self.rechecks.insert(role.to_owned(), used + 1);
+        Ok(())
     }
 }
 
@@ -196,6 +270,38 @@ impl PlanSlot {
     pub fn snapshot(&self) -> Option<RolePlan> {
         self.inner.lock().ok()?.clone()
     }
+
+    /// Admit one repair start of `role` (see [`RolePlan::admit_repair`]).
+    /// Without a plan there is no repair allowance.
+    pub fn admit_repair(
+        &self,
+        role: &str,
+        change: Option<&str>,
+        max_rounds: u8,
+    ) -> Result<(), String> {
+        let Ok(mut inner) = self.inner.lock() else {
+            return Err("this run's specialist plan is unavailable".to_owned());
+        };
+        match inner.as_mut() {
+            Some(plan) => plan.admit_repair(role, change, max_rounds),
+            None => Err(
+                "this run has no specialist plan, so it has no repair allowance".to_owned(),
+            ),
+        }
+    }
+
+    /// Whether `role` completed its check of exactly the change `key`.
+    pub fn already_verified(&self, role: &str, key: &str) -> bool {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|inner| {
+                inner
+                    .as_ref()
+                    .map(|plan| plan.verified.get(role).map(String::as_str) == Some(key))
+            })
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]
@@ -268,5 +374,38 @@ mod tests {
         assert!(slot.check_fresh("reviewer", "p2", "patch p2").is_ok());
         assert_eq!(slot.stale(Some("p2")), ["reviewer"]);
         assert_eq!(slot.stale(None), ["reviewer", "tester"]);
+    }
+
+    #[test]
+    fn repairs_are_bounded_and_never_repeat_a_check() {
+        let slot = PlanSlot::default();
+        let refused = slot.admit_repair("coder", Some("p1"), 1).unwrap_err();
+        assert!(refused.contains("no specialist plan"), "{refused}");
+        slot.set(Some(plan()));
+        // Nothing checked the change yet: there is nothing to repair.
+        assert!(slot.admit_repair("coder", Some("p1"), 1).is_err());
+        slot.completed("coder");
+        slot.verified("tester", "p1");
+        slot.completed("tester");
+        // A re-check needs an open round.
+        assert!(slot.admit_repair("tester", Some("p2"), 1).is_err());
+        // No rounds configured: no repair.
+        assert!(slot.admit_repair("coder", Some("p1"), 0).is_err());
+        assert!(slot.admit_repair("coder", Some("p1"), 1).is_ok());
+        let refused = slot.admit_repair("coder", Some("p1"), 1).unwrap_err();
+        assert!(refused.contains("repair rounds"), "{refused}");
+        // Each check runs once on the new change, never again on one it
+        // already verified.
+        let refused = slot.admit_repair("tester", Some("p1"), 1).unwrap_err();
+        assert!(refused.contains("reuse its result"), "{refused}");
+        assert!(slot.admit_repair("tester", Some("p2"), 1).is_ok());
+        assert!(slot.admit_repair("tester", Some("p3"), 1).is_err());
+        assert!(slot.admit_repair("reviewer", Some("p2"), 1).is_ok());
+        assert!(slot.admit_repair("reviewer", Some("p2"), 1).is_err());
+        // A role outside the plan, or no current change, repairs nothing.
+        assert!(slot.admit_repair("researcher", Some("p2"), 1).is_err());
+        assert!(slot.admit_repair("tester", None, 1).is_err());
+        assert!(slot.already_verified("tester", "p1"));
+        assert!(!slot.already_verified("tester", "p2"));
     }
 }
