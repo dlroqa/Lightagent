@@ -4,7 +4,7 @@
 //! exact commit on a GitHub-hosted runner. It is not part of the workspace.
 
 pub fn one() -> u32 {
-    2
+    1
 }
 
 #[cfg(test)]
