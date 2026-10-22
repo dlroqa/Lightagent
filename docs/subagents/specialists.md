@@ -48,7 +48,12 @@ A worker also:
   - or the lead calls `agent.decline_worker`, and the worker continues without the action;
   - expiry (10 minutes), cancellation, revocation and a withdrawn assignment are re-checked before anything resumes, and a handle cannot be replayed. Parked workers release their admission slot and are dropped with the run;
 - draws turns, tool calls and time from the **tree budget**. That budget is the lead's limits, with at most `subagents.max_workers_per_run` worker runs. Grants are taken up front and the unused part is returned;
-- is **admitted** through an installation-wide pool and a per-profile pool. Waiting is FIFO, bounded by `queue_timeout_secs`, and cancelled with the run.
+- is **admitted** through an installation-wide pool and a per-profile pool. Waiting is FIFO, bounded by `queue_timeout_secs`, and cancelled with the run;
+- counts against its parent's **child allowance** (`max_children_per_agent`, 1–3, default 3). Past it, a lead with a specialist plan may only **repair**, for `max_repair_rounds` rounds (0–2, default 1):
+  - the coder may revise a change that a check has completed on;
+  - each planned check may then run once on the new change, and never twice on the same change.
+
+  A check that cannot run is refused with "Verification BLOCKED … Report this change as unverified", and emits `verification.blocked`. Concurrency and the shared budgets are unaffected. See `BUILD_AND_MERGE_PLAN.md` §4.
 
 Depth: a worker may start one only while one more generation fits under `subagents.max_depth`. Built-in roles never nest.
 
@@ -120,6 +125,8 @@ max_active_workers = 4            # installation-wide; read when the first worke
 max_active_workers_per_profile = 1
 queue_timeout_secs = 30
 max_workers_per_run = 6
+max_children_per_agent = 3        # workers one execution starts before any repair
+max_repair_rounds = 1             # planned runs only: coder revision + one re-check each
 remote_research = false           # offer untrusted runs agent.research (see below)
 approved_models = []              # models a role route may select
 [subagents.role_models]           # a route takes effect only for an approved model

@@ -25,7 +25,7 @@ No category stands in for another. A scripted test never counts as model compete
 | Endpoint | TypeSafe Jev `POST /v1/systemone` through the shared adapter, the model configured in the `jev-live` environment (default `jev-latest`) |
 | Credential | `TYPESAFE_API_KEY`, already in the `jev-live` environment (manual approval, `master` only). Nothing new is configured. |
 | Inputs | The 24 synthetic, hand-labeled prompts in `evaluation/subagents/selection.v1.json`: 12 the lead should keep and 12 that benefit from workers. They were recorded on 2026-10-21, before any request. |
-| Requests | Exactly one per prompt: the classification request with the 11 typed questions. Default 24, workflow ceiling 48, no retries, one at a time. |
+| Requests | Exactly one per prompt: the classification request with the 11 typed questions. 24 per dispatch (one pass), no retries, one at a time. A second pass is a separate dispatch and approval. |
 | Tokens | Usage is measured and reported. Estimated at about 0.5–1k input tokens per request, so under about 25k input tokens for the whole set. |
 | Cost | No price is recorded in the repository. The request ceiling is the only enforced bound. Reported usage multiplied by the operator's contract price gives the cost. |
 | Stop conditions | A credential error, three failed requests in a row, or the request ceiling. A stopped run fails and is not a pass. |
