@@ -411,6 +411,15 @@ impl LightweightRunFactory {
             budget,
             Arc::clone(&self.jev),
         );
+        // An untrusted run may be offered the read-only researcher, when the
+        // operator turned it on; its strict policy still requires the profile
+        // to list it. Generic delegation stays withheld from it.
+        if trust == RunTrust::RemoteUser
+            && config.subagents.enabled
+            && config.subagents.remote_research
+        {
+            registry.insert(Arc::new(lightagent_tools::builtins::AgentResearch::new()));
+        }
         // The profile's tool policy narrows the enabled tools before anything
         // sees them: the model, the workflow policy, the executor and any
         // delegated worker. It never adds a tool or relaxes an approval.
@@ -1622,6 +1631,32 @@ pub(crate) mod routing_tests {
         )
         .await;
         assert!(tool_names(&legacy[0]).contains(&"terminal.run".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn an_untrusted_run_gets_only_the_read_only_researcher_and_only_when_granted() {
+        let listed = strings(&["web.*", "agent.research", "agent.delegate", "datetime.now"]);
+        let run = |remote_research: bool| {
+            let mut config = tool_config(lightagent_core::ToolPolicyMode::Off);
+            config.subagents.remote_research = remote_research;
+            run_through_factory_with(config, "hi", listed.clone(), RunTrust::RemoteUser)
+        };
+        // Off (the default): nothing that delegates.
+        let (_, _, bodies) = run(false).await;
+        let names = tool_names(&bodies[0]);
+        assert!(!names.contains(&"agent.research".to_owned()), "{names:?}");
+        assert!(!names.contains(&"agent.delegate".to_owned()), "{names:?}");
+        // On: the read-only researcher, never generic delegation.
+        let (status, _, bodies) = run(true).await;
+        assert_eq!(status, RunStatus::Completed);
+        let names = tool_names(&bodies[0]);
+        assert!(names.contains(&"agent.research".to_owned()), "{names:?}");
+        assert!(!names.contains(&"agent.delegate".to_owned()), "{names:?}");
+        // An operator run is not given it: it delegates by role instead.
+        let mut config = tool_config(lightagent_core::ToolPolicyMode::Off);
+        config.subagents.remote_research = true;
+        let (_, _, bodies) = run_through_factory(config, "hi").await;
+        assert!(!tool_names(&bodies[0]).contains(&"agent.research".to_owned()));
     }
 
     #[tokio::test]

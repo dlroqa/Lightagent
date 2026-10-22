@@ -70,6 +70,9 @@ pub fn reach_of(name: &str, network_mcp_servers: &BTreeSet<String>) -> ToolReach
     match name {
         "datetime.now" => ToolReach::Inert,
         "web.fetch" | "web.search" | "rag.realtime" | "jev.classify_task" => ToolReach::Network,
+        // A read-only researcher whose own tools are the run's, each checked
+        // again: it reaches what the run already may, nothing more.
+        "agent.research" => ToolReach::Network,
         "memory.write" | "memory.search" | "memory.reflect" | "session.lookup" | "rag.search"
         | "skill.read" => ToolReach::ProfileData,
         "open_terminal.run" => ToolReach::RemoteExecution,

@@ -14,6 +14,7 @@ pub mod datetime;
 pub mod delegate;
 pub mod fs;
 pub mod open_terminal;
+pub mod research;
 pub mod skill;
 pub mod terminal;
 pub mod web;
@@ -23,6 +24,7 @@ pub use datetime::DateTimeNow;
 pub use delegate::AgentDelegate;
 pub use fs::{FsList, FsRead, FsWrite};
 pub use open_terminal::OpenTerminalRun;
+pub use research::AgentResearch;
 pub use skill::SkillRead;
 pub use terminal::TerminalRun;
 pub use web::{

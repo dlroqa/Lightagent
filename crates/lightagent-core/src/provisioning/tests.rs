@@ -1995,3 +1995,27 @@ fn web_continuity_inputs_are_observable_on_the_real_stores() {
 }
 
 mod continuity;
+
+#[test]
+fn a_preset_sets_only_toolsets_and_approval_and_templates_are_unchanged() {
+    assert_eq!(TEMPLATES, ["assistant"]);
+    let id = ProfileId::new("visitor").unwrap();
+    let mut profile = template_profile("assistant", id, "Visitor").unwrap();
+    let before = profile.clone();
+    apply_preset(&mut profile, "research@1").unwrap();
+    assert!(profile.toolsets.contains(&"agent.research".to_owned()));
+    assert!(!profile.toolsets.iter().any(|tool| tool == "agent.delegate"
+        || tool.starts_with("fs.")
+        || tool.starts_with("terminal")
+        || tool == "all"));
+    assert_eq!(profile.approval_policy, ApprovalPolicy::Balanced);
+    assert_eq!(profile.limits, before.limits);
+    assert_eq!(profile.persona, before.persona);
+    assert_eq!(profile.routing, before.routing);
+    let mut other = before.clone();
+    assert_eq!(
+        apply_preset(&mut other, "everything@1"),
+        Err(ProvisioningError::Invalid("invalid_preset"))
+    );
+    assert_eq!(other, before);
+}

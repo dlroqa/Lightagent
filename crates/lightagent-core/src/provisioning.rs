@@ -453,6 +453,40 @@ pub fn template_profile(
     }
 }
 
+/// Operator-owned capability presets, versioned. An operator gives one to
+/// an existing profile by id; nothing outside the harness can name tools,
+/// paths, endpoints, models or secrets through it. Applying one changes only
+/// the profile's toolsets and approval policy and never creates a profile.
+pub const PRESETS: [&str; 1] = ["research@1"];
+
+/// Give `profile` the preset `id`.
+///
+/// `research@1`: read-only research — web search and fetch, the profile's
+/// own retrieval, skills, and `agent.research` (the read-only researcher
+/// worker) — under the balanced approval policy. An untrusted run of the
+/// profile is still evaluated under the strict tool policy, and is offered
+/// `agent.research` only where `subagents.remote_research` is on.
+pub fn apply_preset(profile: &mut AgentProfile, id: &str) -> Result<(), ProvisioningError> {
+    match id {
+        "research@1" => {
+            profile.toolsets = [
+                "datetime.now",
+                "web.search",
+                "web.fetch",
+                "rag.search",
+                "rag.realtime",
+                "skill.read",
+                "agent.research",
+            ]
+            .map(str::to_owned)
+            .to_vec();
+            profile.approval_policy = ApprovalPolicy::Balanced;
+            Ok(())
+        }
+        _ => Err(ProvisioningError::Invalid("invalid_preset")),
+    }
+}
+
 /// What a provisioner may learn about one of its operations.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct OperationStatus {

@@ -354,7 +354,9 @@ impl BoundedExecutor {
             self.open_terminal
                 .as_ref()
                 .map_or(self.per_call, |remote| remote.policy.execution_timeout)
-        } else if call.name == crate::builtins::AgentDelegate::NAME {
+        } else if call.name == crate::builtins::AgentDelegate::NAME
+            || call.name == crate::builtins::AgentResearch::NAME
+        {
             self.delegation
                 .as_ref()
                 .map_or(self.per_call, |delegation| delegation.delegate_timeout)
