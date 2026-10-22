@@ -151,6 +151,10 @@ pub enum FinishReason {
     Length,
     /// The provider reported an error mid-stream.
     Error,
+    /// The stream ended without a completion signal (no finish reason and no
+    /// terminator): the turn's text or tool arguments may be cut short. Never
+    /// treated as a final answer.
+    Incomplete,
 }
 
 /// One decoded event from a provider stream.

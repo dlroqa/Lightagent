@@ -43,7 +43,7 @@ pub use context::{
     SubagentRole, ToolCtx, WebContext, WebPolicy, WorkspaceContext, WorkspacePolicy,
 };
 pub use definition::{Tool, ToolDefinition};
-pub use executor::{BoundedExecutor, CallGuard};
+pub use executor::{BoundedExecutor, CallGuard, DEFAULT_PER_CALL_TIMEOUT};
 pub use output::clamp;
 pub use registry::ToolRegistry;
 pub use schema::{SchemaError, validate};

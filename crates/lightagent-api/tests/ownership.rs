@@ -612,6 +612,11 @@ async fn knowing_a_run_id_never_authorizes_access_to_it() {
     for (method, path) in [
         ("GET", format!("/api/lightagent/v1/runs/{bobs}")),
         ("GET", format!("/api/lightagent/v1/runs/{bobs}/events")),
+        // A resume cursor reveals nothing more than a fresh stream.
+        (
+            "GET",
+            format!("/api/lightagent/v1/runs/{bobs}/events?after=3"),
+        ),
         ("POST", format!("/api/lightagent/v1/runs/{bobs}/cancel")),
         ("POST", format!("/api/lightagent/v1/approvals/{bobs}")),
     ] {

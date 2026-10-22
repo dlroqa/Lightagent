@@ -889,7 +889,7 @@ async fn build_chat_runtime(
     let mut executor = BoundedExecutor::new(
         registry,
         PolicyEngine::new(profile.approval_policy.into()),
-        Duration::from_secs(60),
+        lightagent_tools::DEFAULT_PER_CALL_TIMEOUT,
         262_144,
     )
     .with_run(RunId::new())
@@ -2195,7 +2195,11 @@ impl ModelRenderer {
             AgentEvent::RunCompleted { reason } if !matches!(reason, StopReason::EndTurn) => {
                 self.stop_thinking();
                 self.finish_section();
-                eprintln!("(run ended: {reason:?})");
+                // The code stays for scripts; the words say what it means.
+                match reason.explanation() {
+                    Some(why) => eprintln!("(run ended: {reason:?}: {why})"),
+                    None => eprintln!("(run ended: {reason:?})"),
+                }
             }
             AgentEvent::RunCompleted { .. } => {
                 self.stop_thinking();

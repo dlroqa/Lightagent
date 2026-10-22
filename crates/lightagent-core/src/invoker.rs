@@ -52,6 +52,50 @@ impl ToolOutcome {
     }
 }
 
+/// How far a running tool has got. Every string is a fixed vocabulary value
+/// the tool chooses (`searching`, `fetching`, `ranking`, `completed`, …),
+/// never text from its arguments or results.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolProgress {
+    /// The stage the tool is in.
+    pub stage: String,
+    /// Items finished in this stage, when it counts them.
+    pub completed: Option<u32>,
+    /// Items in this stage, when known.
+    pub total: Option<u32>,
+    /// How the tool's work turned out, on its last report only.
+    pub outcome: Option<String>,
+}
+
+impl ToolProgress {
+    /// A report of `stage` with no counts.
+    pub fn stage(stage: impl Into<String>) -> Self {
+        Self {
+            stage: stage.into(),
+            completed: None,
+            total: None,
+            outcome: None,
+        }
+    }
+
+    /// Add how many of `total` items are finished.
+    pub fn counted(mut self, completed: usize, total: usize) -> Self {
+        self.completed = Some(u32::try_from(completed).unwrap_or(u32::MAX));
+        self.total = Some(u32::try_from(total).unwrap_or(u32::MAX));
+        self
+    }
+
+    /// Add the tool's outcome.
+    pub fn with_outcome(mut self, outcome: impl Into<String>) -> Self {
+        self.outcome = Some(outcome.into());
+        self
+    }
+}
+
+/// Where a running tool sends its [`ToolProgress`]. A send to a closed sink is
+/// ignored: progress never affects the tool.
+pub type ToolProgressSink = tokio::sync::mpsc::UnboundedSender<ToolProgress>;
+
 /// A tool as declared to the model: name, description and a JSON Schema for its
 /// arguments. This is the OpenAI `function` shape, minus the wrapper.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -97,6 +141,18 @@ pub trait ToolInvoker: Send + Sync {
 
     /// Run one tool call to a result.
     async fn invoke(&self, call: &ToolCall, cancel: CancellationToken) -> ToolOutcome;
+
+    /// Run one tool call, letting the tool report progress to `progress` while
+    /// it runs. The default ignores the sink, so an invoker whose tools report
+    /// nothing needs no change.
+    async fn invoke_with_progress(
+        &self,
+        call: &ToolCall,
+        cancel: CancellationToken,
+        _progress: ToolProgressSink,
+    ) -> ToolOutcome {
+        self.invoke(call, cancel).await
+    }
 
     /// Persist a remembered grant for `call`.
     ///

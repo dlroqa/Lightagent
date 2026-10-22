@@ -4,6 +4,10 @@
 //! `model.delta`, `tool.requested`, `approval.required`, `run.completed`, …), so
 //! a browser or a script reads the run by the `event:` name and the JSON `data:`
 //! without knowing the Rust enum.
+//!
+//! Each frame also carries an `id:`, the event's position in the run's buffer
+//! (see [`to_sse_with_id`]), so a client that reconnects resumes after the last
+//! event it saw instead of receiving the run again.
 
 use axum::response::sse::Event;
 use lightagent_core::{AgentEvent, StopReason};
@@ -18,6 +22,7 @@ pub fn name(event: &AgentEvent) -> &'static str {
         AgentEvent::TaskClassified { .. } => "classification.completed",
         AgentEvent::ToolCallRequested { .. } => "tool.requested",
         AgentEvent::ToolCallStarted { .. } => "tool.started",
+        AgentEvent::ToolProgress { .. } => "tool.progress",
         AgentEvent::ToolCallCompleted { outcome, .. } => {
             if outcome.is_error {
                 "tool.failed"
@@ -107,6 +112,13 @@ pub fn data(event: &AgentEvent) -> serde_json::Value {
             "arguments": call.arguments,
         }),
         AgentEvent::ToolCallStarted { id, name } => json!({ "id": id, "name": name }),
+        AgentEvent::ToolProgress { id, progress } => json!({
+            "id": id,
+            "stage": progress.stage,
+            "completed": progress.completed,
+            "total": progress.total,
+            "outcome": progress.outcome,
+        }),
         AgentEvent::ToolCallCompleted { id, outcome } => json!({
             "id": id,
             "is_error": outcome.is_error,
@@ -127,7 +139,12 @@ pub fn data(event: &AgentEvent) -> serde_json::Value {
             "total_tokens": usage.total_tokens,
         }),
         AgentEvent::TurnCompleted { usage: None } => json!({}),
-        AgentEvent::RunCompleted { reason } => json!({ "reason": format!("{reason:?}") }),
+        // `reason` is unchanged; `complete` is additive: true only when the
+        // model ended its own answer, so a client need not know every reason.
+        AgentEvent::RunCompleted { reason } => json!({
+            "reason": format!("{reason:?}"),
+            "complete": reason.is_complete(),
+        }),
         AgentEvent::Error { message } => json!({ "message": message }),
         _ => json!({}),
     }
@@ -138,6 +155,13 @@ pub fn to_sse(event: &AgentEvent) -> Event {
     Event::default()
         .event(name(event))
         .data(data(event).to_string())
+}
+
+/// [`to_sse`] with the event's position in the run's buffer as its SSE `id`.
+/// Ids start at 0 and increase by one per event, so they are both a resume
+/// cursor (`Last-Event-ID`) and a duplicate check.
+pub fn to_sse_with_id(event: &AgentEvent, position: usize) -> Event {
+    to_sse(event).id(position.to_string())
 }
 
 #[cfg(test)]
@@ -246,6 +270,43 @@ mod tests {
                 reason: StopReason::EndTurn
             }),
             "run.completed"
+        );
+    }
+
+    #[test]
+    fn completion_says_whether_the_model_finished_its_answer() {
+        let done = data(&AgentEvent::RunCompleted {
+            reason: StopReason::EndTurn,
+        });
+        assert_eq!(done, json!({"reason": "EndTurn", "complete": true}));
+        for reason in [
+            StopReason::MaxTokens,
+            StopReason::Incomplete,
+            StopReason::MaxTurns,
+            StopReason::MaxToolCalls,
+        ] {
+            let event = AgentEvent::RunCompleted { reason };
+            assert_eq!(name(&event), "run.completed");
+            assert_eq!(data(&event)["complete"], false);
+        }
+        assert_eq!(
+            data(&AgentEvent::RunCompleted {
+                reason: StopReason::Incomplete
+            })["reason"],
+            "Incomplete"
+        );
+    }
+
+    #[test]
+    fn tool_progress_is_its_own_named_event() {
+        let event = AgentEvent::ToolProgress {
+            id: "call_1".into(),
+            progress: lightagent_core::ToolProgress::stage("fetching").counted(2, 5),
+        };
+        assert_eq!(name(&event), "tool.progress");
+        assert_eq!(
+            data(&event),
+            json!({"id": "call_1", "stage": "fetching", "completed": 2, "total": 5, "outcome": null})
         );
     }
 

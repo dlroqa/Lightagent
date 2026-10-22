@@ -24,6 +24,8 @@ export interface RunView {
   status: string;
   events: number;
   pending_approval: PendingApproval | null;
+  /** Why a terminal run stopped (`EndTurn`, `MaxTokens`, `Incomplete`, …). Absent from older servers. */
+  stop_reason?: string | null;
 }
 
 export interface SessionSummary {
@@ -377,5 +379,9 @@ export const agentApi = {
       method: "POST",
       body: JSON.stringify({ approve }),
     }),
-  eventsUrl: (id: string) => `${BASE}/runs/${id}/events`,
+  /** The run's event stream; `after` resumes after the event with that id. */
+  eventsUrl: (id: string, after?: number) =>
+    after === undefined || after < 0
+      ? `${BASE}/runs/${id}/events`
+      : `${BASE}/runs/${id}/events?after=${after}`,
 };

@@ -399,7 +399,11 @@ pub(crate) fn semantic_embedder(config: &Config) -> Option<Arc<dyn SemanticEmbed
             .api_key
             .as_ref()
             .and_then(|secret| secret.resolve());
-        let client = EmbeddingClient::infinity(base_url, api_key).ok()?;
+        // The configured Infinity timeout bounds semantic ranking too, not
+        // only the remote index.
+        let client = EmbeddingClient::infinity(base_url, api_key)
+            .ok()?
+            .with_timeout(Duration::from_secs(infinity.timeout_secs));
         return Some(Arc::new(ProviderSemanticEmbedder {
             client,
             model: infinity.embedding_model.clone(),

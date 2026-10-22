@@ -32,6 +32,12 @@ use crate::schema;
 /// prompt, a log or an approval UI.
 const PREVIEW_MAX_BYTES: usize = 200;
 
+/// The per-call timeout the harness gives a tool that has no operator setting
+/// of its own (Open Terminal and delegation have one). A tool with an internal
+/// deadline keeps it inside this bound, so the model sees the tool's own
+/// result rather than a bare timeout.
+pub const DEFAULT_PER_CALL_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Decides, at each call, whether a tool is still permitted for this run.
 pub type CallGuard = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
@@ -248,55 +254,16 @@ impl BoundedExecutor {
         }
         ctx
     }
-}
 
-#[async_trait]
-impl ToolInvoker for BoundedExecutor {
-    fn schemas(&self) -> Vec<ToolSchema> {
-        self.registry.schemas()
-    }
-
-    fn approval_for(&self, call: &ToolCall) -> ApprovalNeed {
-        // An undeclared tool is not blocked here; it is rejected at `invoke`
-        // with a controlled result, so approval only ever gates a real tool.
-        let Some((risk, scopes)) = self.classify(call) else {
-            return ApprovalNeed::AutoApprove;
-        };
-        // A revoked run asks no one: nothing it requests may run.
-        if let Some(reason) = self.unauthorized() {
-            return ApprovalNeed::Deny(reason);
-        }
-        if self.guard_refuses(&call.name) {
-            return ApprovalNeed::Deny(format!(
-                "the tool '{}' is no longer permitted for this run",
-                call.name
-            ));
-        }
-        if let Some(reason) = self.blocked_terminal_call(call) {
-            return ApprovalNeed::Deny(reason);
-        }
-        let request = self.request_for(call, risk, scopes);
-        let need = match self.policy.lock() {
-            Ok(policy) => policy.evaluate(&request, self.clock.now()),
-            Err(_) => ApprovalNeed::Deny("the approval policy is unavailable".into()),
-        };
-        if let ApprovalNeed::Require(request) = &need {
-            if let Ok(mut pending) = self.pending.lock() {
-                pending.insert(
-                    call.id.clone(),
-                    (
-                        request.clone(),
-                        format!("{}\0{}", call.name, call.arguments),
-                    ),
-                );
-            } else {
-                return ApprovalNeed::Deny("the approval tracker is unavailable".into());
-            }
-        }
-        need
-    }
-
-    async fn invoke(&self, call: &ToolCall, cancel: CancellationToken) -> ToolOutcome {
+    /// Run one call: the checks [`invoke`](ToolInvoker::invoke) documents,
+    /// then the tool under its per-call timeout, with `progress` (if any) on
+    /// its context.
+    async fn execute(
+        &self,
+        call: &ToolCall,
+        cancel: CancellationToken,
+        progress: Option<lightagent_core::ToolProgressSink>,
+    ) -> ToolOutcome {
         let Some(tool) = self.registry.get(&call.name) else {
             return ToolOutcome::error(format!("the tool '{}' is not available", call.name));
         };
@@ -365,7 +332,10 @@ impl ToolInvoker for BoundedExecutor {
             }
         }
 
-        let ctx = self.ctx(cancel.clone());
+        let mut ctx = self.ctx(cancel.clone());
+        if let Some(progress) = progress {
+            ctx = ctx.with_progress(progress);
+        }
         // Remote command duration is an explicit operator setting. The run's
         // cancellation token and approval boundary still apply unchanged.
         let per_call = if call.name == crate::builtins::OpenTerminalRun::NAME {
@@ -397,6 +367,66 @@ impl ToolInvoker for BoundedExecutor {
             content: clamp(outcome.content, self.max_output_bytes),
             is_error: outcome.is_error,
         }
+    }
+}
+
+#[async_trait]
+impl ToolInvoker for BoundedExecutor {
+    fn schemas(&self) -> Vec<ToolSchema> {
+        self.registry.schemas()
+    }
+
+    fn approval_for(&self, call: &ToolCall) -> ApprovalNeed {
+        // An undeclared tool is not blocked here; it is rejected at `invoke`
+        // with a controlled result, so approval only ever gates a real tool.
+        let Some((risk, scopes)) = self.classify(call) else {
+            return ApprovalNeed::AutoApprove;
+        };
+        // A revoked run asks no one: nothing it requests may run.
+        if let Some(reason) = self.unauthorized() {
+            return ApprovalNeed::Deny(reason);
+        }
+        if self.guard_refuses(&call.name) {
+            return ApprovalNeed::Deny(format!(
+                "the tool '{}' is no longer permitted for this run",
+                call.name
+            ));
+        }
+        if let Some(reason) = self.blocked_terminal_call(call) {
+            return ApprovalNeed::Deny(reason);
+        }
+        let request = self.request_for(call, risk, scopes);
+        let need = match self.policy.lock() {
+            Ok(policy) => policy.evaluate(&request, self.clock.now()),
+            Err(_) => ApprovalNeed::Deny("the approval policy is unavailable".into()),
+        };
+        if let ApprovalNeed::Require(request) = &need {
+            if let Ok(mut pending) = self.pending.lock() {
+                pending.insert(
+                    call.id.clone(),
+                    (
+                        request.clone(),
+                        format!("{}\0{}", call.name, call.arguments),
+                    ),
+                );
+            } else {
+                return ApprovalNeed::Deny("the approval tracker is unavailable".into());
+            }
+        }
+        need
+    }
+
+    async fn invoke(&self, call: &ToolCall, cancel: CancellationToken) -> ToolOutcome {
+        self.execute(call, cancel, None).await
+    }
+
+    async fn invoke_with_progress(
+        &self,
+        call: &ToolCall,
+        cancel: CancellationToken,
+        progress: lightagent_core::ToolProgressSink,
+    ) -> ToolOutcome {
+        self.execute(call, cancel, Some(progress)).await
     }
 
     fn remember(&self, decision: &ApprovalDecision, call: &ToolCall) {

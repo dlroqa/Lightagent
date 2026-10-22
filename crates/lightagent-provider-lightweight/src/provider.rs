@@ -7,6 +7,11 @@
 //! tool-call deltas, an empty-`choices` usage chunk, a `[DONE]` terminator and
 //! a terminal `error` chunk — and it depends only on `lightagent-core`, never
 //! on any `lightweight-*` crate.
+//!
+//! A turn is finished only when the stream says so: a `finish_reason` (which
+//! stays valid if the body then ends without `[DONE]`) or a `[DONE]`. A body
+//! that ends with neither is reported as [`FinishReason::Incomplete`], never
+//! as a successful stop, so a cut connection cannot pass for an answer.
 
 use std::collections::VecDeque;
 
@@ -269,6 +274,8 @@ struct Translation {
     cancel: CancellationToken,
     role_seen: bool,
     finish_reason: Option<FinishReason>,
+    /// Whether a `[DONE]` terminator arrived.
+    done: bool,
     usage: Option<Usage>,
     finished: bool,
     emitted_finish: bool,
@@ -286,6 +293,7 @@ fn translate(
         cancel,
         role_seen: false,
         finish_reason: None,
+        done: false,
         usage: None,
         finished: false,
         emitted_finish: false,
@@ -325,7 +333,8 @@ fn translate(
                 }
                 None => {
                     // End of body. Emit a terminal Finished if the stream ended
-                    // without a `[DONE]`, so the loop always sees one.
+                    // without a `[DONE]`, so the loop always sees one; without
+                    // a finish reason either, it says the turn is incomplete.
                     state.finished = true;
                     if !state.emitted_finish {
                         let event = finish_event(&mut state);
@@ -341,6 +350,7 @@ fn translate(
 /// Fold one decoded SSE event into the translation state.
 fn absorb(state: &mut Translation, event: &SseEvent) {
     if event.is_done() {
+        state.done = true;
         state.finished = true;
         if !state.emitted_finish {
             let event = finish_event(state);
@@ -429,9 +439,15 @@ fn absorb(state: &mut Translation, event: &SseEvent) {
 /// Build the terminal Finished event from whatever the stream established.
 fn finish_event(state: &mut Translation) -> ProviderEvent {
     state.emitted_finish = true;
+    let reason = match state.finish_reason {
+        Some(reason) => reason,
+        // `[DONE]` without a reason still ends the turn deliberately.
+        None if state.done => FinishReason::Stop,
+        // The body ended with no completion signal at all.
+        None => FinishReason::Incomplete,
+    };
     ProviderEvent::Finished {
-        // A stream that ended without saying why is treated as a plain stop.
-        reason: state.finish_reason.unwrap_or(FinishReason::Stop),
+        reason,
         usage: state.usage,
     }
 }
@@ -487,5 +503,105 @@ mod tests {
         let body = build_body(&config, &request);
         assert_eq!(body["messages"][0]["role"], "tool");
         assert_eq!(body["messages"][0]["tool_call_id"], "call_1");
+    }
+
+    fn frames(frames: &[&str]) -> BoxStream<'static, reqwest::Result<Bytes>> {
+        let chunks: Vec<reqwest::Result<Bytes>> = frames
+            .iter()
+            .map(|frame| Ok(Bytes::from(format!("data: {frame}\n\n"))))
+            .collect();
+        stream::iter(chunks).boxed()
+    }
+
+    async fn decode(frames_in: &[&str]) -> Vec<Result<ProviderEvent, ProviderError>> {
+        translate(frames(frames_in), CancellationToken::new())
+            .collect()
+            .await
+    }
+
+    fn finish_of(events: &[Result<ProviderEvent, ProviderError>]) -> Vec<FinishReason> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Ok(ProviderEvent::Finished { reason, .. }) => Some(*reason),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const ROLE: &str = r#"{"choices":[{"index":0,"delta":{"role":"assistant"}}]}"#;
+    const HALF: &str = r#"{"choices":[{"index":0,"delta":{"content":"The answer is"}}]}"#;
+
+    #[tokio::test]
+    async fn a_finish_reason_then_eof_is_a_valid_stop() {
+        let stop = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+        let events = decode(&[ROLE, HALF, stop]).await;
+        assert_eq!(finish_of(&events), [FinishReason::Stop]);
+    }
+
+    #[tokio::test]
+    async fn a_finish_reason_and_done_finish_once() {
+        let stop = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+        let events = decode(&[ROLE, HALF, stop, "[DONE]"]).await;
+        assert_eq!(finish_of(&events), [FinishReason::Stop]);
+    }
+
+    #[tokio::test]
+    async fn done_without_a_reason_is_a_deliberate_stop() {
+        let events = decode(&[ROLE, HALF, "[DONE]"]).await;
+        assert_eq!(finish_of(&events), [FinishReason::Stop]);
+    }
+
+    #[tokio::test]
+    async fn eof_without_any_completion_signal_is_incomplete() {
+        let events = decode(&[ROLE, HALF]).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Ok(ProviderEvent::Content(text)) if text == "The answer is")),
+            "the partial text is still delivered"
+        );
+        assert_eq!(finish_of(&events), [FinishReason::Incomplete]);
+    }
+
+    #[tokio::test]
+    async fn eof_inside_tool_call_arguments_is_incomplete() {
+        let call = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"rag.realtime","arguments":"{\"query\":\"wh"}}]}}]}"#;
+        let events = decode(&[ROLE, call]).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Ok(ProviderEvent::ToolCallDelta { .. })))
+        );
+        assert_eq!(finish_of(&events), [FinishReason::Incomplete]);
+    }
+
+    #[tokio::test]
+    async fn a_length_finish_is_reported_as_length() {
+        let length = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}"#;
+        let events = decode(&[ROLE, HALF, length, "[DONE]"]).await;
+        assert_eq!(finish_of(&events), [FinishReason::Length]);
+    }
+
+    #[tokio::test]
+    async fn a_broken_body_after_text_is_a_stream_error() {
+        // Building a client needs the crypto provider; an invalid URL is the
+        // cheapest offline way to get a reqwest::Error.
+        tls::ensure_provider();
+        let failing = Err::<Bytes, _>(
+            reqwest::Client::new()
+                .get("not a url")
+                .build()
+                .expect_err("an invalid URL fails to build"),
+        );
+        let body =
+            stream::iter(vec![Ok(Bytes::from(format!("data: {HALF}\n\n"))), failing]).boxed();
+        let events: Vec<_> = translate(body, CancellationToken::new()).collect().await;
+        assert!(matches!(
+            events.first(),
+            Some(Ok(ProviderEvent::Content(_)))
+        ));
+        assert!(matches!(events.last(), Some(Err(ProviderError::Stream(_)))));
+        assert!(finish_of(&events).is_empty());
     }
 }

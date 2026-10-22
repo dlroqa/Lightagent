@@ -7,7 +7,7 @@
 //! the wire frame that carried it.
 
 use crate::ids::RunId;
-use crate::invoker::{ToolCall, ToolOutcome};
+use crate::invoker::{ToolCall, ToolOutcome, ToolProgress};
 use crate::permissions::ApprovalId;
 use crate::provider::Usage;
 
@@ -16,7 +16,8 @@ use crate::provider::Usage;
 pub enum StopReason {
     /// The model produced a final answer.
     EndTurn,
-    /// The run hit its turn budget.
+    /// The run hit its turn budget. When tool results were waiting, the last
+    /// turn was a tool-less answer from them.
     MaxTurns,
     /// The run hit its tool-call budget.
     MaxToolCalls,
@@ -24,10 +25,38 @@ pub enum StopReason {
     RepeatedToolCalls,
     /// The run exceeded its wall-clock budget.
     WallClockExceeded,
+    /// The model's answer was cut off at its output-token limit.
+    MaxTokens,
+    /// The provider stream ended without saying the turn was finished, so the
+    /// answer may be cut short. What arrived is kept.
+    Incomplete,
     /// The run was cancelled.
     Cancelled,
     /// The run failed — see the preceding [`AgentEvent::Error`].
     Error,
+}
+
+impl StopReason {
+    /// Whether the model ended its own answer. Every other reason means the
+    /// answer, if any, was cut short or written under a budget.
+    pub fn is_complete(self) -> bool {
+        self == Self::EndTurn
+    }
+
+    /// A short sentence for a person, for every reason but a normal end.
+    pub fn explanation(self) -> Option<&'static str> {
+        match self {
+            Self::EndTurn => None,
+            Self::MaxTurns => Some("the run reached its turn limit"),
+            Self::MaxToolCalls => Some("the run reached its tool-call limit"),
+            Self::RepeatedToolCalls => Some("the run stopped repeating the same tool call"),
+            Self::WallClockExceeded => Some("the run reached its time limit"),
+            Self::MaxTokens => Some("the answer was cut off at the model's output limit"),
+            Self::Incomplete => Some("the model stream ended early; the answer may be incomplete"),
+            Self::Cancelled => Some("the run was cancelled"),
+            Self::Error => Some("the run failed"),
+        }
+    }
 }
 
 /// One thing that happened during a run.
@@ -65,6 +94,10 @@ pub enum AgentEvent {
     ToolCallRequested { call: ToolCall },
     /// A requested tool began executing.
     ToolCallStarted { id: String, name: String },
+    /// A running tool reported how far it has got (a retrieval stage, say).
+    /// Progress only: the result still arrives as
+    /// [`ToolCallCompleted`](AgentEvent::ToolCallCompleted).
+    ToolProgress { id: String, progress: ToolProgress },
     /// A tool finished, with its result.
     ToolCallCompleted { id: String, outcome: ToolOutcome },
     /// A tool call is waiting on a human approval decision. `approval_id` is

@@ -44,7 +44,9 @@ pub use config::{
 };
 pub use event::{AgentEvent, ClassificationDiagnostics, StopReason};
 pub use ids::RunId;
-pub use invoker::{NullInvoker, ToolCall, ToolInvoker, ToolOutcome, ToolSchema};
+pub use invoker::{
+    NullInvoker, ToolCall, ToolInvoker, ToolOutcome, ToolProgress, ToolProgressSink, ToolSchema,
+};
 pub use limits::RunLimits;
 pub use loop_::{
     AgentError, AgentEventSink, AgentLoop, Continuation, RunConfig, RunOutcome, Suspended,

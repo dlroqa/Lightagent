@@ -5,12 +5,21 @@
 //! separately configured OpenAI-compatible endpoint (Ollama, llama.cpp, OpenAI,
 //! …). It shares the crate's transport discipline — the rustls provider is
 //! installed before the client is built — and depends only on `lightagent-core`.
+//!
+//! Every request is bounded ([`DEFAULT_EMBEDDING_TIMEOUT`] unless the caller
+//! sets a configured one), so a stalled embeddings server fails a ranking step
+//! instead of holding the tool that asked for it.
+
+use std::time::Duration;
 
 use lightagent_core::provider::ProviderError;
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::tls;
+
+/// How long one embeddings request may take when the caller sets no bound.
+pub const DEFAULT_EMBEDDING_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A client for an OpenAI-compatible embeddings endpoint.
 #[derive(Clone, Debug)]
@@ -19,6 +28,7 @@ pub struct EmbeddingClient {
     base_url: String,
     api_key: Option<String>,
     embeddings_path: &'static str,
+    timeout: Duration,
 }
 
 #[derive(Deserialize)]
@@ -46,7 +56,14 @@ impl EmbeddingClient {
             base_url: base_url.into(),
             api_key,
             embeddings_path: "/v1/embeddings",
+            timeout: DEFAULT_EMBEDDING_TIMEOUT,
         })
+    }
+
+    /// Bound each request by `timeout` (at least one second).
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout.max(Duration::from_secs(1));
+        self
     }
 
     /// Build a client for Infinity's OpenAI-shaped embeddings endpoint. Infinity
@@ -77,6 +94,7 @@ impl EmbeddingClient {
         let mut request = self
             .client
             .post(format!("{}{}", self.base(), self.embeddings_path))
+            .timeout(self.timeout)
             .json(&body);
         if let Some(key) = &self.api_key {
             request = request.bearer_auth(key);

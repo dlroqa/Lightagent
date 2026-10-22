@@ -20,7 +20,7 @@ import { AnimatedLogo } from "../components/Logo";
 import { Menu, MenuItem } from "../components/Menu";
 import { TopBar } from "../components/Shell";
 import { usePoll } from "../hooks/usePoll";
-import { useRunEvents, type RunEvent } from "../hooks/useRunEvents";
+import { useRunEvents, type Delivery, type RunEvent } from "../hooks/useRunEvents";
 import { usePreferences } from "../state/preferences";
 
 const SESSION_KEY = "lightagent.agent.session";
@@ -96,6 +96,8 @@ interface ToolCall {
   status: ToolStatus;
   result: string;
   durationMs?: number;
+  /** The tool's latest progress report, in words. */
+  progress?: string;
 }
 
 function modelLabel(id: string, name?: string | null) {
@@ -174,6 +176,7 @@ function foldTools(events: RunEvent[]): ToolCall[] {
         result: "",
       });
     } else if (event.type === "tool.started" && call) call.status = "running";
+    else if (event.type === "tool.progress" && call) call.progress = describeProgress(event.data) ?? call.progress;
     else if (event.type === "tool.output" && call) {
       call.status = "ok";
       call.result = text(event.data.content);
@@ -188,12 +191,116 @@ function foldTools(events: RunEvent[]): ToolCall[] {
 }
 
 /**
+ * A tool's progress report in words. Stages and outcomes are a fixed
+ * vocabulary; anything unknown is left unsaid.
+ */
+function describeProgress(data: Record<string, unknown>): string | undefined {
+  const done = typeof data.completed === "number" ? data.completed : undefined;
+  const total = typeof data.total === "number" ? data.total : undefined;
+  const counted = done !== undefined && total !== undefined ? `${done} of ${total}` : "";
+  switch (text(data.stage)) {
+    case "searching": return "Searching…";
+    case "fetching": return counted ? `Reading sources (${counted})…` : "Reading sources…";
+    case "ranking": return "Ranking passages…";
+    case "completed":
+      switch (text(data.outcome)) {
+        case "evidence": return counted ? `${counted} sources read` : "Evidence gathered";
+        case "partial": return counted ? `Partial evidence: ${counted} sources read` : "Partial evidence";
+        case "no_relevant_evidence": return "No relevant evidence found";
+        case "failed": return "Retrieval failed";
+        default: return undefined;
+      }
+    default: return undefined;
+  }
+}
+
+const TERMINAL_EVENTS = ["run.completed", "run.cancelled", "run.failed"];
+
+/**
+ * Why a run stopped, in words, when it did not simply finish its answer.
+ * `answered` says whether any answer text arrived. Reasons a newer server may
+ * add are left unsaid rather than guessed at.
+ */
+function describeStop(reason: string, answered: boolean): { label: string; text: string } | null {
+  const limit = (what: string) => answered
+    ? `Research reached its ${what}, so this answer was written from the evidence gathered so far.`
+    : `Research reached its ${what} before an answer was written. The tool results above are what it found.`;
+  let notice: { label: string; text: string } | null = null;
+  switch (reason) {
+    case "MaxTokens":
+      notice = { label: "cut off", text: "The answer was cut off at the model's output limit. What arrived is shown." };
+      break;
+    case "Incomplete":
+      notice = { label: "incomplete", text: "The model's response ended unexpectedly, so this answer may be incomplete." };
+      break;
+    case "MaxTurns":
+      notice = { label: "limit reached", text: limit("step limit") };
+      break;
+    case "MaxToolCalls":
+      notice = { label: "limit reached", text: limit("tool-call limit") };
+      break;
+    case "WallClockExceeded":
+      notice = { label: "limit reached", text: limit("time limit") };
+      break;
+    case "RepeatedToolCalls":
+      notice = { label: "limit reached", text: "The run stopped because it kept repeating the same tool call." };
+      break;
+  }
+  return notice;
+}
+
+/**
+ * Whether this browser may have missed part of the run, in words. Kept apart
+ * from how the run ended: a delivery gap is never reported as a run failure,
+ * and a run failure never hides a delivery gap.
+ */
+function describeDelivery(delivery: Delivery): { label: string; text: string } | null {
+  switch (delivery) {
+    case "incomplete":
+      return { label: "incomplete", text: "Some live output could not be recovered; the saved conversation shows what the server recorded." };
+    case "unavailable":
+      return {
+        label: "unavailable",
+        text: "This run can no longer be followed from this browser (the service may have restarted, or access was withdrawn), so how it ended is unknown. What arrived is shown; reopen the conversation for what the server saved.",
+      };
+    default:
+      return null;
+  }
+}
+
+/**
+ * The run's Jev task classification, as a short, explicitly advisory status
+ * line. It describes a prediction, never retrieval that happened.
+ */
+function describeClassification(data: Record<string, unknown>): string | null {
+  const latency = typeof data.classification_latency_ms === "number" ? ` · ${data.classification_latency_ms} ms` : "";
+  const fallback = text(data.fallback_reason);
+  switch (text(data.outcome)) {
+    case "classified": {
+      const category = text(data.category) || "unknown";
+      const applied = data.workflow_applied === true ? "advisory; guidance added" : "advisory only";
+      return `Jev classified this as ${category} (${applied})${latency}`;
+    }
+    case "low_confidence":
+      return `Jev was not confident enough to classify this; the run continued normally${latency}`;
+    case "skipped":
+      return `Jev classification skipped${fallback ? ` (${fallback})` : ""}; the run continued normally`;
+    case "failed":
+      return `Jev classification failed${fallback ? ` (${fallback})` : ""}; the run continued normally${latency}`;
+    default:
+      return null;
+  }
+}
+
+/**
  * A few local runtimes put their tool-planning text in ordinary content
  * deltas. Hold each unfinished model turn in the reasoning panel until its
- * outcome is known: a tool request makes it reasoning, while a completed run
- * promotes it to the final answer.
+ * outcome is known: a tool request makes it reasoning, while a finished run
+ * (however it finished) promotes it to the answer, so text from a turn that
+ * was cut short is shown rather than stranded in the reasoning panel. `done`
+ * does the same when delivery ended without a terminal event to say so.
  */
-function foldModelOutput(events: RunEvent[]): { answer: string; reasoning: string } {
+function foldModelOutput(events: RunEvent[], done: boolean): { answer: string; reasoning: string } {
   let answer = "";
   let reasoning = "";
   let turnContent = "";
@@ -210,12 +317,18 @@ function foldModelOutput(events: RunEvent[]): { answer: string; reasoning: strin
     } else if (event.type === "tool.requested") {
       reasoning += pendingTurnContent;
       pendingTurnContent = "";
-    } else if (["run.completed", "run.cancelled", "run.failed"].includes(event.type)) {
-      answer += pendingTurnContent;
+    } else if (TERMINAL_EVENTS.includes(event.type)) {
+      answer += pendingTurnContent + turnContent;
       pendingTurnContent = "";
+      turnContent = "";
     }
   }
 
+  if (done) {
+    answer += pendingTurnContent + turnContent;
+    pendingTurnContent = "";
+    turnContent = "";
+  }
   return { answer, reasoning: reasoning + pendingTurnContent + turnContent };
 }
 
@@ -268,7 +381,7 @@ export function Agent() {
   const selected = useRef(activeId);
   const loadGeneration = useRef(0);
   selected.current = activeId;
-  const { events, done } = useRunEvents(runId);
+  const { events, done, delivery } = useRunEvents(runId);
 
   const resizeComposer = useCallback((textarea: HTMLTextAreaElement | null) => {
     if (!textarea) return;
@@ -276,7 +389,7 @@ export function Agent() {
     textarea.style.height = `${textarea.scrollHeight}px`;
   }, []);
 
-  const { answer, reasoning } = useMemo(() => foldModelOutput(events), [events]);
+  const { answer, reasoning } = useMemo(() => foldModelOutput(events, done), [done, events]);
   const tools = useMemo(() => foldTools(events), [events]);
   const routingStatus = useMemo(() => {
     const event = [...events].reverse().find((row) => row.type === "routing.selected");
@@ -302,6 +415,10 @@ export function Agent() {
         : null;
   }, [events]);
   const cancelled = events.some((event) => event.type === "run.cancelled");
+  const classificationStatus = useMemo(() => {
+    const event = [...events].reverse().find((row) => row.type === "classification.completed");
+    return event ? describeClassification(event.data) : null;
+  }, [events]);
   // `busy` can belong to a run the user has navigated away from. Keep that
   // background work from disabling the currently viewed conversation.
   const running = runId !== null && !done;
@@ -318,6 +435,19 @@ export function Agent() {
     .some((message) => message.content.trim() === answer.trim());
   // Covers a fast terminal save whose run metadata has not reached the session payload yet.
   const showLiveAnswer = runId !== null && !persisted && !savedAnswerMatchesLive;
+  // Why the shown run stopped, when it did not simply finish: from the live
+  // terminal event, or from the saved session for a run viewed later.
+  const stopNotice = useMemo(() => {
+    if (runId !== null) {
+      if (!done) return null;
+      const terminal = [...events].reverse().find((row) => TERMINAL_EVENTS.includes(row.type));
+      return describeStop(text(terminal?.data.reason), answer.trim().length > 0);
+    }
+    const last = session?.runs[session.runs.length - 1];
+    const lastMessage = session?.messages[session.messages.length - 1];
+    return last?.stop_reason ? describeStop(last.stop_reason, lastMessage?.role === "assistant") : null;
+  }, [answer, done, events, runId, session]);
+  const deliveryNotice = runId !== null && done ? describeDelivery(delivery) : null;
   const pending = useMemo(() => {
     if (done) return null;
     let open: { toolCallId: string; tool: string } | null = null;
@@ -735,6 +865,10 @@ export function Agent() {
           ? { tone: "danger" as const, label: "error", detail: failure }
           : cancelled
             ? { tone: "warn" as const, label: "cancelled", detail: "The active run was cancelled." }
+            : deliveryNotice
+              ? { tone: "warn" as const, label: deliveryNotice.label, detail: deliveryNotice.text }
+            : done && stopNotice
+              ? { tone: "warn" as const, label: stopNotice.label, detail: stopNotice.text }
             : activeTool
               ? { tone: "accent" as const, label: "tool active", detail: `${activeTool.name} is ${STATUS_LABEL[activeTool.status]}.` }
               : running
@@ -964,6 +1098,18 @@ export function Agent() {
                       {routingStatus.compatibility && !routingStatus.notPermitted
                         ? " (compatibility routing policy)" : ""}</span>
                   </div>}
+                  {classificationStatus && <div className="routing-status" role="status">
+                    <Sparkles size={14} aria-hidden="true" />
+                    <span>{classificationStatus}</span>
+                  </div>}
+                  {runId !== null && tools.filter((tool) => tool.progress).map((tool) => (
+                    // Retrieval stages stay visible in the transcript, not only
+                    // in the collapsed tool list, while and after they run.
+                    <div key={tool.id} className="routing-status" role="status" aria-live="polite">
+                      <Globe size={14} aria-hidden="true" />
+                      <span>{`${tool.name === "rag.realtime" ? "Web research" : tool.name} for “${describeTool(tool).subject}”: ${tool.progress}`}</span>
+                    </div>
+                  ))}
                   {showLiveAnswer && answer && (
                     <AgentMessage message={{ role: "assistant", content: answer }} streaming={!done} />
                   )}
@@ -983,7 +1129,13 @@ export function Agent() {
                       </div>
                     )
                   )}
+                  {stopNotice && !failure && !cancelled && (
+                    <div className="notice notice--warn" role="status" style={{ marginTop: 10 }}>{stopNotice.text}</div>
+                  )}
                   {failure && <div className="notice notice--danger" style={{ marginTop: 10 }}>{failure}</div>}
+                  {deliveryNotice && (
+                    <div className="notice notice--warn" role="status" style={{ marginTop: 10 }}>{deliveryNotice.text}</div>
+                  )}
                   <div ref={end} />
                 </div>
               </div>
@@ -1320,6 +1472,7 @@ function ToolRow({ tool }: { tool: ToolCall }) {
           {activity.verb} <span className="tool-call__subject">{activity.subject}</span>
         </span>
         {tool.status === "error" && <span className="tool-call__status">failed</span>}
+        {tool.progress && <span className="tool-call__progress muted" aria-live="polite">{tool.progress}</span>}
         <span style={{ flex: 1 }} />
         {tool.durationMs !== undefined && (
           <span className="tnum muted" style={{ fontSize: 11.5 }}>{formatDuration(tool.durationMs)}</span>
@@ -1351,6 +1504,8 @@ function describeTool(tool: ToolCall): { verb: string; subject: string; kind: To
     case "fs.write": return { verb: "Edited", subject: stringArg("path") || "a file", kind: "edit" };
     case "web.search": return { verb: "Searched for", subject: stringArg("query") || "the web", kind: "search" };
     case "web.fetch": return { verb: "Visited", subject: stringArg("url") || "a web page", kind: "web" };
+    case "rag.realtime": return { verb: "Researched", subject: stringArg("query") || "the web", kind: "web" };
+    case "rag.search": return { verb: "Searched documents for", subject: stringArg("query") || "passages", kind: "search" };
     case "terminal.run":
     case "open_terminal.run": return { verb: "Ran", subject: stringArg("command") || "a command", kind: "terminal" };
     case "agent.delegate": return { verb: "Asked an agent to", subject: stringArg("task") || "help", kind: "tool" };
