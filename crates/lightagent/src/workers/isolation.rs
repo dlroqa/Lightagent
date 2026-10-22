@@ -7,6 +7,10 @@
 //! configured, profile-scoped tools, with a scripted model. The checks are
 //! about what a worker can reach, so the model only asks; the tools, the
 //! resolver, the identity store and the approval engine are real.
+//!
+//! The vault and RAG checks use real profile vaults, real local indexes and a
+//! loopback search backend and Qdrant/Infinity stand-in that record exactly
+//! what each worker's calls sent.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -167,6 +171,58 @@ impl World {
             ctx = ctx.with_authorization(authorization);
         }
         ctx
+    }
+
+    /// An untrusted (multi-user) run of `lead` on an installation with a
+    /// credential vault: its tools and web context are built from the
+    /// profile's own grants, and it may ask the researcher through
+    /// `agent.research`, as `serve` offers it.
+    async fn untrusted_run(
+        &self,
+        lead: &AgentProfile,
+        worker: &MockProvider,
+        credentials: &crate::chat::ProfileCredentials,
+        edit: impl FnOnce(&mut ToolRegistry),
+    ) -> ToolCtx {
+        let profile_dir = self.dir(lead);
+        let extensions = crate::chat::load_extensions(&self.root, &profile_dir);
+        let access = crate::chat::RemoteAccess::Granted(&lead.id, credentials);
+        let mut registry = crate::chat::configured_registry_for(
+            &self.config,
+            &profile_dir,
+            &extensions,
+            false,
+            access,
+        )
+        .await;
+        registry.insert(Arc::new(lightagent_tools::builtins::AgentResearch::new()));
+        edit(&mut registry);
+        let delegation = super::delegation(super::DelegationInputs {
+            root: &self.root,
+            config: &self.config,
+            lead,
+            trust: RunTrust::RemoteUser,
+            extensions: &extensions,
+            registry: &registry,
+            guard: None,
+            enforced: false,
+            factory: Arc::new(Scripted(worker.clone())),
+        });
+        let web = crate::chat::web_context_for(&self.config, access).unwrap();
+        ToolCtx::new(CancellationToken::new())
+            .with_delegation(delegation)
+            .with_web(web)
+    }
+
+    /// Index `text` as `source` in `profile`'s own RAG store.
+    async fn index(&self, profile: &AgentProfile, source: &str, text: &str) {
+        let path = lightagent_rag::index_path(&self.dir(profile));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut store = lightagent_rag::RagStore::open(&path).unwrap();
+        store
+            .add(source, text, &lightagent_rag::HashingEmbedder, None, 512, 0)
+            .await
+            .unwrap();
     }
 }
 
@@ -553,4 +609,328 @@ async fn a_revoked_run_stops_its_worker_mid_run_and_withholds_it() {
     // And no new worker starts for the revoked run.
     let (again, _) = delegate(&ctx, json!({ "role": "researcher", "task": "Again." })).await;
     assert!(again.is_error);
+}
+
+/// A loopback server answering each request with `reply(path, body)` and
+/// recording `(path, authorization, body)`.
+async fn recorder(
+    reply: fn(&str, &str) -> String,
+) -> (String, Arc<std::sync::Mutex<Vec<(String, String, String)>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&log);
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let seen = Arc::clone(&seen);
+            tokio::spawn(async move {
+                let mut bytes = Vec::new();
+                let mut buffer = [0u8; 8192];
+                let end = loop {
+                    if let Some(at) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break at + 4;
+                    }
+                    match stream.read(&mut buffer).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(read) => bytes.extend_from_slice(&buffer[..read]),
+                    }
+                };
+                let head = String::from_utf8_lossy(&bytes[..end]).into_owned();
+                let length = head
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                while bytes.len() < end + length {
+                    match stream.read(&mut buffer).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => bytes.extend_from_slice(&buffer[..read]),
+                    }
+                }
+                let path = head
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_owned();
+                let authorization = head
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                    .map(|(_, value)| value.trim().to_owned())
+                    .unwrap_or_default();
+                let body = String::from_utf8_lossy(&bytes[end..]).into_owned();
+                let text = reply(&path, &body);
+                seen.lock().unwrap().push((path, authorization, body));
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{text}",
+                    text.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+    (format!("http://127.0.0.1:{port}"), log)
+}
+
+fn search_reply(_path: &str, _body: &str) -> String {
+    r#"{"results":[{"title":"t","url":"https://example.com/a","content":"c"}]}"#.to_owned()
+}
+
+const ALICE_SEARCH_KEY: &str = "synthetic-alice-search-key";
+const BOB_SEARCH_KEY: &str = "synthetic-bob-search-key";
+
+fn operator() -> Caller {
+    Caller::local_operator(PrincipalSource::LocalProcess)
+}
+
+/// Grant `profile` a web-search credential for `origin` in the vault.
+fn grant(
+    world: &World,
+    key: &lightagent_core::credentials::MasterKey,
+    profile: &str,
+    origin: &str,
+    secret: &str,
+) -> String {
+    use lightagent_core::credentials::{
+        CredentialVault, ExternalSecret, GrantSpec, RemoteService, system_now,
+    };
+    CredentialVault::new(&world.root)
+        .add(
+            &operator(),
+            system_now(),
+            key,
+            GrantSpec {
+                profile: ProfileId::new(profile).unwrap(),
+                service: RemoteService::WebSearch,
+                operations: None,
+                destinations: [origin.to_owned()].into(),
+                expires_unix: None,
+                max_requests_per_run: None,
+            },
+            &ExternalSecret::new(secret).unwrap(),
+        )
+        .unwrap()
+}
+
+fn revoke_grant(root: &std::path::Path, id: &str) {
+    lightagent_core::credentials::CredentialVault::new(root)
+        .revoke(&operator(), lightagent_core::credentials::system_now(), id)
+        .unwrap();
+}
+
+/// The authorization headers the recorder saw since `from`, lowercased.
+fn sent_since(log: &std::sync::Mutex<Vec<(String, String, String)>>, from: usize) -> Vec<String> {
+    log.lock().unwrap()[from..]
+        .iter()
+        .map(|(_, authorization, _)| authorization.to_ascii_lowercase())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_workers_search_presents_only_its_own_profiles_vault_grant() {
+    lightagent_provider_lightweight::ensure_provider();
+    let mut world = World::new();
+    let alice = world.profile("iso-vault-alice", "alice");
+    let bob = world.profile("iso-vault-bob", "bob");
+    let carol = world.profile("iso-vault-carol", "carol");
+    let (url, log) = recorder(search_reply).await;
+    world.config.web.enabled = true;
+    world.config.web.search.endpoint = Some(format!("{url}/search"));
+    for profile in [&alice, &bob, &carol] {
+        world
+            .config
+            .web
+            .untrusted_destinations
+            .insert(profile.id.as_str().to_owned(), vec!["127.0.0.1".to_owned()]);
+    }
+    let key = lightagent_core::credentials::MasterKey::generate().unwrap();
+    let origin = lightagent_core::credentials::origin_of(&url).unwrap();
+    let alices = grant(&world, &key, "iso-vault-alice", &origin, ALICE_SEARCH_KEY);
+    grant(&world, &key, "iso-vault-bob", &origin, BOB_SEARCH_KEY);
+    let credentials = |profile: &AgentProfile| {
+        crate::chat::ProfileCredentials::with_key(
+            &world.root,
+            &profile.id,
+            lightagent_core::credentials::MasterKey::from_hex(&key.to_hex()).ok(),
+        )
+    };
+
+    // Alice's researcher searches, her grant is revoked while it works,
+    // and it searches again.
+    let worker = MockProvider::new(vec![
+        call("w1", "web.search", json!({ "query": "first" })),
+        call("w2", "datetime.now", json!({})),
+        call("w3", "web.search", json!({ "query": "second" })),
+        answer("done"),
+    ]);
+    let (root, revoked) = (world.root.clone(), alices.clone());
+    let alice_credentials = credentials(&alice);
+    let ctx = world
+        .untrusted_run(&alice, &worker, &alice_credentials, |registry| {
+            registry.insert(Midway::new(move || revoke_grant(&root, &revoked)));
+        })
+        .await;
+    let outcome = lightagent_tools::builtins::AgentResearch::new()
+        .call(&json!({ "task": "Search twice." }), &ctx)
+        .await;
+    let report: Value = serde_json::from_str(&outcome.content).unwrap();
+    let ok: Vec<bool> = report["tool_calls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|call| call["ok"] == true)
+        .collect();
+    assert_eq!(ok, [true, true, false], "{report}");
+    assert_eq!(
+        sent_since(&log, 0),
+        [format!("bearer {ALICE_SEARCH_KEY}")],
+        "Alice's own grant once, nothing after its revocation"
+    );
+
+    // Bob's researcher presents Bob's grant; Carol's, with no grant, none.
+    for (profile, expected) in [
+        (&bob, format!("bearer {BOB_SEARCH_KEY}")),
+        (&carol, String::new()),
+    ] {
+        let before = log.lock().unwrap().len();
+        let worker = MockProvider::new(vec![
+            call("w1", "web.search", json!({ "query": "mine" })),
+            answer("done"),
+        ]);
+        let profile_credentials = credentials(profile);
+        let ctx = world
+            .untrusted_run(profile, &worker, &profile_credentials, |_| {})
+            .await;
+        let outcome = lightagent_tools::builtins::AgentResearch::new()
+            .call(&json!({ "task": "Search." }), &ctx)
+            .await;
+        assert!(!outcome.is_error, "{}", outcome.content);
+        assert_eq!(sent_since(&log, before), [expected]);
+    }
+    let everything = sent_since(&log, 0).join(" ");
+    assert_eq!(
+        everything.matches(ALICE_SEARCH_KEY).count(),
+        1,
+        "no other run ever presented Alice's grant"
+    );
+}
+
+#[tokio::test]
+async fn a_workers_rag_search_reads_only_its_leads_index() {
+    let world = World::new();
+    let alice = world.profile("iso-rag-alice", "alice");
+    let bob = world.profile("iso-rag-bob", "bob");
+    world
+        .index(
+            &alice,
+            "alice-handbook.md",
+            "The handbook secret word is ALICE-DOC.",
+        )
+        .await;
+    world
+        .index(
+            &bob,
+            "bob-handbook.md",
+            "The handbook secret word is BOB-DOC.",
+        )
+        .await;
+    // The worker asks broadly, names Bob's document as if it knew its id,
+    // and passes a profile argument the tool does not have.
+    let worker = MockProvider::new(vec![
+        call(
+            "w1",
+            "rag.search",
+            json!({ "query": "handbook secret word" }),
+        ),
+        call(
+            "w2",
+            "rag.search",
+            json!({ "query": "bob-handbook.md BOB-DOC" }),
+        ),
+        call(
+            "w3",
+            "rag.search",
+            json!({ "query": "secret word", "profile": "iso-rag-bob" }),
+        ),
+        answer("done"),
+    ]);
+    let ctx = world.run(&alice, &worker, None, |_| {}).await;
+    let (outcome, _) = delegate(
+        &ctx,
+        json!({ "role": "researcher", "task": "Find the handbook's secret word." }),
+    )
+    .await;
+    assert!(!outcome.is_error, "{}", outcome.content);
+    let seen = seen_by(&worker);
+    assert!(seen.contains("ALICE-DOC"), "{seen}");
+    // Nothing of Bob's index reached Alice's worker, by query, by guessed
+    // document name or by an argument the tool does not take.
+    assert!(
+        !seen.contains("BOB-DOC") && !seen.contains("bob-handbook"),
+        "{seen}"
+    );
+}
+
+fn remote_rag_reply(path: &str, _body: &str) -> String {
+    if path.ends_with("/embeddings") {
+        r#"{"data":[{"embedding":[0.1,0.2,0.3]}]}"#.to_owned()
+    } else if path.ends_with("/points/query") {
+        r#"{"result":{"points":[{"score":0.9,"payload":{"source":"remote","text":"REMOTE-PASSAGE"}}]}}"#
+            .to_owned()
+    } else if path.ends_with("/rerank") {
+        r#"{"results":[{"index":0,"relevance_score":0.9}]}"#.to_owned()
+    } else {
+        "{}".to_owned()
+    }
+}
+
+#[tokio::test]
+async fn a_workers_remote_rag_queries_carry_only_its_leads_namespace() {
+    lightagent_provider_lightweight::ensure_provider();
+    let mut world = World::new();
+    let alice = world.profile("iso-remote-alice", "alice");
+    let bob = world.profile("iso-remote-bob", "bob");
+    let (url, log) = recorder(remote_rag_reply).await;
+    for endpoint in [
+        &mut world.config.platform.qdrant.endpoint,
+        &mut world.config.platform.infinity.endpoint,
+    ] {
+        endpoint.enabled = true;
+        endpoint.base_url = Some(url.clone());
+    }
+    // The remote path needs a local index too (its fallback).
+    world.index(&alice, "local", "alice local passage").await;
+    world.index(&bob, "local", "bob local passage").await;
+    for profile in [&alice, &bob] {
+        let before = log.lock().unwrap().len();
+        let worker = MockProvider::new(vec![
+            call("w1", "rag.search", json!({ "query": "passage" })),
+            answer("done"),
+        ]);
+        let ctx = world.run(profile, &worker, None, |_| {}).await;
+        let (outcome, _) = delegate(
+            &ctx,
+            json!({ "role": "researcher", "task": "Find the passage." }),
+        )
+        .await;
+        assert!(!outcome.is_error, "{}", outcome.content);
+        let queries: Vec<String> = log.lock().unwrap()[before..]
+            .iter()
+            .filter(|(path, _, _)| path.ends_with("/points/query"))
+            .map(|(_, _, body)| body.clone())
+            .collect();
+        assert_eq!(queries.len(), 1, "{queries:?}");
+        let other = if profile.id == alice.id { &bob } else { &alice };
+        let query: Value = serde_json::from_str(&queries[0]).unwrap();
+        assert_eq!(
+            query["filter"]["must"][0]["match"]["value"],
+            profile.id.as_str(),
+            "every remote query is filtered to the worker's lead's namespace"
+        );
+        assert!(!queries[0].contains(other.id.as_str()));
+    }
 }

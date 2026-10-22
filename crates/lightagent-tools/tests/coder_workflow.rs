@@ -554,3 +554,124 @@ async fn a_patch_id_names_one_unchanging_change() {
     assert_ne!(store.describe(&second).unwrap(), described);
     assert_eq!(store.get(&first).unwrap().files[0].content, AFTER);
 }
+
+/// A lead's delegation with a coder → tester → reviewer plan, every worker
+/// answering from `worker`.
+fn planned_lead(checkout: &Checkout, worker: MockProvider) -> Delegation {
+    let mut delegation = Delegation::new(
+        Arc::new(ProfileStore::new(checkout.path.join("home"))),
+        Arc::new(MockFactory { provider: worker }),
+        ToolRegistry::builtin().with(Arc::new(PatchPropose::new())),
+        Duration::from_secs(5),
+        262_144,
+    );
+    delegation.subagents = SubagentPolicy {
+        enabled: true,
+        ..SubagentPolicy::default()
+    };
+    let routing = ModelRouting {
+        model: "m".to_owned(),
+        ..ModelRouting::default()
+    };
+    delegation.resolver = Some(Arc::new(BuiltinResolver::new(
+        routing,
+        ApprovalPolicy::Balanced,
+    )));
+    delegation
+        .plan
+        .set(Some(lightagent_tools::plan::RolePlan::new([
+            ("coder".to_owned(), Vec::new()),
+            ("tester".to_owned(), vec!["coder".to_owned()]),
+            (
+                "reviewer".to_owned(),
+                vec!["coder".to_owned(), "tester".to_owned()],
+            ),
+        ])));
+    delegation
+}
+
+/// The user message the worker model saw last.
+fn last_task(worker: &MockProvider) -> String {
+    worker
+        .requests()
+        .last()
+        .and_then(|request| {
+            request
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == lightagent_core::Role::User)
+                .map(|message| message.content.clone())
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn dependent_checks_are_bound_to_the_change_and_go_stale_with_it() {
+    let checkout = Checkout::new();
+    let second = "pub fn one() -> u32 {\n    1 // checked\n}\n";
+    let propose = |content: &str| {
+        call(
+            "c",
+            "patch.propose",
+            json!({ "summary": "s", "changes": [{ "path": "src/lib.rs", "content": content }] }),
+        )
+    };
+    let worker = MockProvider::new(vec![
+        propose(AFTER),
+        answer("coded"),
+        answer("tests pass"),
+        answer("looks right"),
+        propose(second),
+        answer("coded again"),
+        answer("tests pass again"),
+        answer("still right"),
+    ]);
+    let ctx = checkout
+        .context()
+        .with_delegation(planned_lead(&checkout, worker.clone()));
+    let delegate = |role: &str| {
+        let ctx = ctx.clone();
+        let args = json!({ "role": role, "task": format!("Do the {role}'s part."), "write_scope": ["src/lib.rs"] });
+        async move { AgentDelegate::new().call(&args, &ctx).await }
+    };
+    let store = ctx.patches.as_ref().unwrap().store.clone();
+
+    // No change yet: nothing for a tester to check.
+    assert!(delegate("tester").await.is_error);
+    assert!(!delegate("coder").await.is_error);
+    let first = store.latest().unwrap().id;
+    let tested = delegate("tester").await;
+    assert!(!tested.is_error, "{}", tested.content);
+    assert!(
+        last_task(&worker).contains(&format!("patch {first}")),
+        "bound to the change"
+    );
+    assert!(!delegate("reviewer").await.is_error);
+
+    // A new change makes both checks stale: the reviewer is refused until
+    // the tester has checked the new change.
+    assert!(!delegate("coder").await.is_error);
+    let latest = store.latest().unwrap().id;
+    assert_ne!(first, latest);
+    let refused = delegate("reviewer").await;
+    assert!(refused.is_error);
+    assert!(
+        refused.content.contains("earlier change"),
+        "{}",
+        refused.content
+    );
+    assert!(!delegate("tester").await.is_error);
+    assert!(last_task(&worker).contains(&format!("patch {latest}")));
+    assert!(!delegate("reviewer").await.is_error);
+
+    // Files changed outside the patch leave nothing that can be checked.
+    std::fs::write(checkout.path.join("src/lib.rs"), "changed by hand\n").unwrap();
+    let drifted = delegate("tester").await;
+    assert!(drifted.is_error);
+    assert!(
+        drifted.content.contains("changed outside"),
+        "{}",
+        drifted.content
+    );
+}
