@@ -86,7 +86,9 @@ jobs:
               --exact the_whole_process_tree_ends_with_the_execution > "$out" 2>&1
             if [ $? -ne 0 ]; then
               failed=$((failed + 1))
-              grep -E 'survived|panicked|assertion' "$out" | head -5 >> "$RUNNER_TEMP/failures.log"
+              echo "::group::run $round failed"
+              grep -E 'survived|panicked|assertion|left:|right:' "$out" | head -8 | tee -a "$RUNNER_TEMP/failures.log"
+              echo "::endgroup::"
             fi
           done
           jobs -p | xargs -r kill
