@@ -1264,41 +1264,50 @@ async fn create_run(
         None => state.manager.start(request).await,
     };
     if let Some(id) = &session_id {
-        let state = Arc::clone(&state);
-        let run = Arc::clone(&run);
-        let id = id.clone();
-        let sessions = session_store.clone();
-        tokio::spawn(async move {
-            let mut seen = 0;
-            loop {
-                let (events, status) = run.wait_from(seen).await;
-                seen += events.len();
-                if status.is_terminal() {
-                    match sessions.load(&id) {
-                        Ok(mut session) => {
-                            let events = run.events().await;
-                            // The stop reason, as the terminal saves it, so a
-                            // reloaded session still says why a run ended.
-                            let stop =
-                                stop_reason_of(&events).unwrap_or_else(|| format!("{status:?}"));
-                            session.record_run_events(&events, &stop);
-                            if let Err(error) = sessions.save(&session) {
-                                eprintln!("could not save agent session {id:?}: {error}");
-                            }
-                        }
-                        Err(error) => eprintln!("could not read agent session {id:?}: {error}"),
-                    }
-                    state.busy_sessions.lock().await.remove(&id);
-                    break;
-                }
-            }
-        });
+        tokio::spawn(record_run_in_session(
+            Arc::clone(&run),
+            session_store.clone(),
+            Arc::clone(&state.busy_sessions),
+            id.clone(),
+        ));
     }
     (
         StatusCode::ACCEPTED,
         Json(json!({ "id": run.id(), "status": run.status().await, "session_id": session_id })),
     )
         .into_response()
+}
+
+/// Once `run` is terminal, record its events into session `id` and release
+/// the session for its next run.
+async fn record_run_in_session(
+    run: Arc<RunState>,
+    sessions: SessionStore,
+    busy: Arc<Mutex<HashSet<SessionId>>>,
+    id: SessionId,
+) {
+    let mut seen = 0;
+    loop {
+        let (events, status) = run.wait_from(seen).await;
+        seen += events.len();
+        if status.is_terminal() {
+            match sessions.load(&id) {
+                Ok(mut session) => {
+                    let events = run.events().await;
+                    // The stop reason, as the terminal saves it, so a
+                    // reloaded session still says why a run ended.
+                    let stop = stop_reason_of(&events).unwrap_or_else(|| format!("{status:?}"));
+                    session.record_run_events(&events, &stop);
+                    if let Err(error) = sessions.save(&session) {
+                        eprintln!("could not save agent session {id:?}: {error}");
+                    }
+                }
+                Err(error) => eprintln!("could not read agent session {id:?}: {error}"),
+            }
+            busy.lock().await.remove(&id);
+            break;
+        }
+    }
 }
 
 fn session_title(message: &str) -> String {
@@ -2062,7 +2071,90 @@ fn event_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lightagent_core::SecretRef;
+    use lightagent_core::{RunId, SecretRef, StopReason};
+
+    /// A bound on each wait: a recorder or stream that is never woken fails
+    /// the test instead of hanging it.
+    const WAKE_GUARD: std::time::Duration = std::time::Duration::from_secs(10);
+
+    // The session recorder is waiting when the run ends between its read and
+    // its wait: the session is still recorded and released.
+    #[tokio::test]
+    async fn a_run_ending_in_the_recorders_gap_is_still_recorded() {
+        let root =
+            std::env::temp_dir().join(format!("lightagent-session-wait-{}", RunId::new().as_str()));
+        let sessions = SessionStore::new(root.clone());
+        let session = Session::new("default", "agent session");
+        let id = session.id.clone();
+        sessions.save(&session).unwrap();
+        let busy = Arc::new(Mutex::new(HashSet::from([id.clone()])));
+        let run = RunState::detached();
+        run.push_for_test(AgentEvent::Content {
+            text: "the answer".to_owned(),
+        })
+        .await;
+        let (paused, resume) = run.pause_next_wait();
+        let recorder = tokio::spawn(record_run_in_session(
+            Arc::clone(&run),
+            sessions.clone(),
+            Arc::clone(&busy),
+            id.clone(),
+        ));
+        paused.await.unwrap();
+        run.push_for_test(AgentEvent::RunCompleted {
+            reason: StopReason::Cancelled,
+        })
+        .await;
+        run.finish_for_test(RunStatus::Cancelled).await;
+        resume.send(()).unwrap();
+        tokio::time::timeout(WAKE_GUARD, recorder)
+            .await
+            .expect("the session recorder was never woken")
+            .unwrap();
+        let saved = sessions.load(&id).unwrap();
+        assert_eq!(
+            saved
+                .messages
+                .last()
+                .map(|message| message.content.as_str()),
+            Some("the answer")
+        );
+        assert_eq!(
+            saved.runs.last().and_then(|run| run.stop_reason.as_deref()),
+            Some("Cancelled")
+        );
+        assert!(!busy.lock().await.contains(&id));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // An event stream resumed mid-run delivers what follows its position and
+    // ends when the run ends between the stream's read and its wait.
+    #[tokio::test]
+    async fn a_resumed_event_stream_ends_when_the_run_ends_in_its_gap() {
+        use futures_util::StreamExt as _;
+        let run = RunState::detached();
+        for text in ["one", "two", "three"] {
+            run.push_for_test(AgentEvent::Content {
+                text: text.to_owned(),
+            })
+            .await;
+        }
+        let (paused, resume) = run.pause_next_wait();
+        let frames = tokio::spawn(event_stream(Arc::clone(&run), None, 1).collect::<Vec<_>>());
+        paused.await.unwrap();
+        run.push_for_test(AgentEvent::RunCompleted {
+            reason: StopReason::Cancelled,
+        })
+        .await;
+        run.finish_for_test(RunStatus::Cancelled).await;
+        resume.send(()).unwrap();
+        let frames = tokio::time::timeout(WAKE_GUARD, frames)
+            .await
+            .expect("the event stream never ended")
+            .unwrap();
+        // "two" and "three" from position 1, then the terminal event.
+        assert_eq!(frames.len(), 3);
+    }
 
     #[test]
     fn session_titles_extract_a_short_prompt_subject() {
