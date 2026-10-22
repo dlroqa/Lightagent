@@ -510,6 +510,34 @@ impl LightweightRunFactory {
             {
                 profile.persona.push_str(&format!("\n\n{guidance}"));
             }
+            // Specialist selection: decided from the same classification and
+            // the requesting profile's own role readiness for these tools.
+            // Only an applied plan reaches the lead, as fixed text, and it
+            // only orders the lead's delegations.
+            let specialists = crate::coordinator::selection::requested(&config).then(|| {
+                crate::workers::readiness(&self.root, &config, &profile, trust, &registry)
+            });
+            let specialists = specialists.and_then(|readiness| {
+                crate::coordinator::selection::decide(
+                    &crate::coordinator::selection::SelectionInputs {
+                        config: &config,
+                        profile: profile.id.as_str(),
+                        report,
+                        readiness: &readiness,
+                        registry: &registry,
+                        policy: &inspection,
+                        limits: &profile.limits,
+                        trust,
+                        cancelled: cancel.is_cancelled(),
+                    },
+                )
+            });
+            if let Some(chosen) = &specialists
+                && let (Some(instruction), Some(order)) = (&chosen.instruction, &chosen.order)
+            {
+                profile.persona.push_str(&format!("\n\n{instruction}"));
+                delegation.plan.set(Some(order.clone()));
+            }
             if let Some(mut diagnostics) =
                 crate::coordinator::diagnostics(&preflight, decision.applied)
             {
@@ -519,6 +547,9 @@ impl LightweightRunFactory {
                     selection,
                     preflight.routing_input,
                 );
+                if let Some(chosen) = &specialists {
+                    crate::coordinator::annotate_selection(&mut diagnostics, chosen);
+                }
                 self.jev.record(profile.id.as_str(), diagnostics.clone());
                 let _ = sink.send(AgentEvent::TaskClassified {
                     diagnostics: Box::new(diagnostics),

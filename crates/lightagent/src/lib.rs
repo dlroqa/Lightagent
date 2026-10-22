@@ -1455,6 +1455,8 @@ fn get_key(config: &Config, key: &str) -> Option<String> {
         "platform.jev.classification.mode" => {
             Some(config.platform.jev.classification.mode.as_str().to_owned())
         }
+        "subagents.selection" => Some(config.subagents.selection.as_str().to_owned()),
+        "subagents.selection_profiles" => Some(config.subagents.selection_profiles.join(",")),
         "platform.jev.classification.allowed_profiles" => Some(
             config
                 .platform
@@ -1680,6 +1682,17 @@ fn set_key(config: &mut Config, key: &str, value: &str) -> Result<(), String> {
         }
         "platform.jev.classification.mode" => {
             config.platform.jev.classification.mode = value.parse()?;
+        }
+        "subagents.selection" => {
+            config.subagents.selection = value.parse()?;
+        }
+        "subagents.selection_profiles" => {
+            config.subagents.selection_profiles = value
+                .split(',')
+                .map(str::trim)
+                .filter(|profile| !profile.is_empty())
+                .map(str::to_owned)
+                .collect();
         }
         "platform.jev.classification.allowed_profiles" => {
             config.platform.jev.classification.allowed_profiles = value
@@ -2173,6 +2186,34 @@ mod tests {
     fn first_line_takes_only_the_first() {
         assert_eq!(first_line("a\nb\nc"), "a");
         assert_eq!(first_line(""), "");
+    }
+
+    #[test]
+    fn specialist_selection_is_off_until_set_explicitly() {
+        let mut config = Config::default();
+        assert_eq!(
+            get_key(&config, "subagents.selection").as_deref(),
+            Some("off")
+        );
+        set_key(&mut config, "subagents.selection", "active").unwrap();
+        set_key(&mut config, "subagents.selection_profiles", "lead, other").unwrap();
+        assert_eq!(
+            get_key(&config, "subagents.selection_profiles").as_deref(),
+            Some("lead,other")
+        );
+        assert!(config.subagents.selection_active_for("lead"));
+        assert!(!config.subagents.selection_active_for("third"));
+        // Selection never turns classification on by itself.
+        assert_eq!(
+            config.platform.jev.classification.mode,
+            lightagent_core::JevClassificationMode::Off
+        );
+        assert!(set_key(&mut config, "subagents.selection", "always").is_err());
+        config.subagents.selection_max_workers = 4;
+        assert!(config.validate().is_err(), "never all four");
+        config.subagents.selection_max_workers = 3;
+        config.subagents.selection_threshold_percent = 30;
+        assert!(config.validate().is_err());
     }
 
     #[test]

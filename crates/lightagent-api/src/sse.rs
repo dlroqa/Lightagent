@@ -73,39 +73,13 @@ pub fn data(event: &AgentEvent) -> serde_json::Value {
             }
             payload
         }
-        AgentEvent::TaskClassified { diagnostics: d } => json!({
-            "schema": d.schema,
-            "trigger": d.trigger,
-            "mode": d.mode,
-            "outcome": d.outcome,
-            "source": d.source,
-            "category": d.category,
-            "category_confidence": d.category_confidence,
-            "confidence_available": d.confidence_available,
-            "threshold": d.threshold,
-            "planning_probability": d.planning_probability,
-            "retrieval_probability": d.retrieval_probability,
-            "tools_probability": d.tools_probability,
-            "complexity": d.complexity,
-            "complexity_confidence": d.complexity_confidence,
-            "model_version": d.model_version,
-            "input_tokens": d.input_tokens,
-            "output_tokens": d.output_tokens,
-            "jev_calls": d.jev_calls,
-            "classification_latency_ms": d.classification_latency_ms,
-            "preflight_latency_ms": d.preflight_latency_ms,
-            "fallback_reason": d.fallback_reason,
-            "influenced": d.influenced,
-            "accepted": d.accepted,
-            "workflow": d.workflow,
-            "workflow_eligibility": d.workflow_eligibility,
-            "workflow_capability": d.workflow_capability,
-            "workflow_applied": d.workflow_applied,
-            "available_tools": d.available_tools,
-            "approval_required": d.approval_required,
-            "workflow_selection_us": d.workflow_selection_us,
-            "routing_input": d.routing_input,
-        }),
+        AgentEvent::TaskClassified { diagnostics: d } => {
+            let mut payload = classification_payload(d);
+            if let Some(selection) = &d.specialists {
+                payload["specialists"] = specialists_payload(selection);
+            }
+            payload
+        }
         AgentEvent::ToolCallRequested { call } => json!({
             "id": call.id,
             "name": call.name,
@@ -148,6 +122,68 @@ pub fn data(event: &AgentEvent) -> serde_json::Value {
         AgentEvent::Error { message } => json!({ "message": message }),
         _ => json!({}),
     }
+}
+
+/// The classification record's fields, unchanged since schema 2.
+fn classification_payload(d: &lightagent_core::ClassificationDiagnostics) -> serde_json::Value {
+    json!({
+        "schema": d.schema,
+        "trigger": d.trigger,
+        "mode": d.mode,
+        "outcome": d.outcome,
+        "source": d.source,
+        "category": d.category,
+        "category_confidence": d.category_confidence,
+        "confidence_available": d.confidence_available,
+        "threshold": d.threshold,
+        "planning_probability": d.planning_probability,
+        "retrieval_probability": d.retrieval_probability,
+        "tools_probability": d.tools_probability,
+        "complexity": d.complexity,
+        "complexity_confidence": d.complexity_confidence,
+        "model_version": d.model_version,
+        "input_tokens": d.input_tokens,
+        "output_tokens": d.output_tokens,
+        "jev_calls": d.jev_calls,
+        "classification_latency_ms": d.classification_latency_ms,
+        "preflight_latency_ms": d.preflight_latency_ms,
+        "fallback_reason": d.fallback_reason,
+        "influenced": d.influenced,
+        "accepted": d.accepted,
+        "workflow": d.workflow,
+        "workflow_eligibility": d.workflow_eligibility,
+        "workflow_capability": d.workflow_capability,
+        "workflow_applied": d.workflow_applied,
+        "available_tools": d.available_tools,
+        "approval_required": d.approval_required,
+        "workflow_selection_us": d.workflow_selection_us,
+        "routing_input": d.routing_input,
+    })
+}
+
+/// A specialist selection: fixed codes and role names only.
+fn specialists_payload(selection: &lightagent_core::SpecialistSelection) -> serde_json::Value {
+    json!({
+        "mode": selection.mode,
+        "outcome": selection.outcome,
+        "fallback_reason": selection.fallback_reason,
+        "delegation_probability": selection.delegation_probability,
+        "structure": selection.structure,
+        "steps": selection.steps.iter().map(|step| json!({
+            "role": step.role,
+            "reason": step.reason,
+            "after": step.after,
+            "worker": step.worker,
+        })).collect::<Vec<_>>(),
+        "restricted": selection.restricted.iter().map(|restriction| json!({
+            "role": restriction.role,
+            "reason": restriction.reason,
+        })).collect::<Vec<_>>(),
+        "concurrent": selection.concurrent,
+        "concurrency": selection.concurrency,
+        "tool": selection.tool,
+        "applied": selection.applied,
+    })
 }
 
 /// Build the axum SSE [`Event`] for an [`AgentEvent`].
@@ -316,5 +352,49 @@ mod tests {
             text: "hello".into(),
         });
         assert_eq!(value["content"], "hello");
+    }
+
+    #[test]
+    fn a_specialist_selection_is_an_additive_key_of_fixed_codes() {
+        let selection = lightagent_core::SpecialistSelection {
+            mode: "active".into(),
+            outcome: "plan".into(),
+            delegation_probability: Some(0.91),
+            structure: Some("sequential".into()),
+            steps: vec![lightagent_core::SpecialistStep {
+                role: "coder".into(),
+                reason: "recommended".into(),
+                after: Vec::new(),
+                worker: "builtin:coder@1".into(),
+            }],
+            restricted: vec![lightagent_core::SpecialistRestriction {
+                role: "reviewer".into(),
+                reason: "worker_cap".into(),
+            }],
+            concurrency: Some("workers_run_one_at_a_time".into()),
+            tool: Some("agent.delegate".into()),
+            applied: true,
+            ..Default::default()
+        };
+        let event = AgentEvent::TaskClassified {
+            diagnostics: Box::new(lightagent_core::ClassificationDiagnostics {
+                schema: 2,
+                outcome: "classified".into(),
+                specialists: Some(selection),
+                ..Default::default()
+            }),
+        };
+        let payload = data(&event);
+        assert_eq!(payload.as_object().unwrap().len(), 32);
+        let specialists = &payload["specialists"];
+        assert_eq!(specialists["outcome"], "plan");
+        assert_eq!(specialists["steps"][0]["role"], "coder");
+        assert_eq!(specialists["restricted"][0]["reason"], "worker_cap");
+        assert_eq!(specialists["concurrent"], false);
+        assert_eq!(specialists["applied"], true);
+        let without = data(&AgentEvent::TaskClassified {
+            diagnostics: Box::default(),
+        });
+        assert!(without.get("specialists").is_none());
     }
 }

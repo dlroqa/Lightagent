@@ -13,6 +13,13 @@
 //!   then, in `active` mode with `workflow_guidance` on, may one fixed
 //!   advisory instruction be added.
 //!
+//! * **Specialist selection** (`subagents.selection`, off by default) adds
+//!   typed questions to the classification request: whether splitting the
+//!   task helps, which roles, and whether the parts depend on each other.
+//!   [`selection`] turns the answers into a plan with fixed rules over the
+//!   run's own readiness, policy and limits, and only in `active` mode, for
+//!   an enabled profile, gives it to the lead.
+//!
 //! They are separate Jev requests because TypeSafe evaluates every question
 //! against one shared `state`: routing's state is the original bounded message,
 //! classification's is a sanitized description, and merging them would either
@@ -26,6 +33,7 @@ mod classify;
 #[cfg(test)]
 pub(crate) mod evaluation;
 pub(crate) mod sanitize;
+pub(crate) mod selection;
 mod state;
 mod tool;
 pub(crate) mod workflow;
@@ -271,6 +279,16 @@ pub(crate) fn annotate(
     diagnostics.workflow_selection_us =
         Some(u64::try_from(selection.as_micros()).unwrap_or(u64::MAX));
     diagnostics.routing_input = routing_input.map(str::to_owned);
+}
+
+/// Add a specialist selection to a classification record. An applied plan
+/// changes the run, so the record says the classification influenced it.
+pub(crate) fn annotate_selection(
+    diagnostics: &mut ClassificationDiagnostics,
+    selection: &selection::Selection,
+) {
+    diagnostics.influenced |= selection.record.applied;
+    diagnostics.specialists = Some(selection.record.clone());
 }
 
 /// One terminal line describing the classification, or `None` when off.
@@ -537,6 +555,7 @@ mod tests {
                 model_version: Some("jev-1.13.0".to_owned()),
                 usage: None,
                 threshold: 0.9,
+                selection: None,
             }),
             invoked: true,
             latency: Some(Duration::from_millis(5)),

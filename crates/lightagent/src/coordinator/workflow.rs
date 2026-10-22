@@ -318,6 +318,7 @@ mod tests {
                 model_version: Some("jev-1.13.0".to_owned()),
                 usage: None,
                 threshold: 0.9,
+                selection: None,
             }),
             invoked: true,
             latency: Some(Duration::from_millis(5)),

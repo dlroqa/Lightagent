@@ -33,6 +33,7 @@ pub mod definition;
 pub mod egress;
 pub mod executor;
 pub mod output;
+pub mod plan;
 pub mod policy;
 pub mod registry;
 pub mod sandbox;
