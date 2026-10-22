@@ -712,9 +712,10 @@ async fn repairs_are_bounded_and_a_check_that_cannot_run_leaves_the_change_unver
         max_repair_rounds: 1,
         ..SubagentPolicy::default()
     };
-    let ctx = checkout
-        .context()
-        .with_delegation(planned_lead_with(&checkout, worker.clone(), policy));
+    let ctx =
+        checkout
+            .context()
+            .with_delegation(planned_lead_with(&checkout, worker.clone(), policy));
     let delegate = |role: &str| {
         let ctx = ctx.clone();
         let args = json!({ "role": role, "task": format!("Do the {role}'s part."), "write_scope": ["src/lib.rs"] });
@@ -780,7 +781,8 @@ async fn without_a_plan_the_allowance_is_the_limit() {
     let refused = AgentDelegate::new().call(&reviewer, &ctx).await;
     assert!(refused.is_error);
     assert!(
-        refused.content.contains("child limit (3)") && refused.content.contains("no specialist plan"),
+        refused.content.contains("child limit (3)")
+            && refused.content.contains("no specialist plan"),
         "{}",
         refused.content
     );

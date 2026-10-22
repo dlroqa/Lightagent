@@ -143,9 +143,7 @@ impl RolePlan {
                 );
             }
             if self.repairs >= max_rounds.min(MAX_REPAIR_ROUNDS) {
-                return Err(format!(
-                    "this run's repair rounds ({max_rounds}) are used"
-                ));
+                return Err(format!("this run's repair rounds ({max_rounds}) are used"));
             }
             self.repairs += 1;
             return Ok(());
@@ -284,9 +282,9 @@ impl PlanSlot {
         };
         match inner.as_mut() {
             Some(plan) => plan.admit_repair(role, change, max_rounds),
-            None => Err(
-                "this run has no specialist plan, so it has no repair allowance".to_owned(),
-            ),
+            None => {
+                Err("this run has no specialist plan, so it has no repair allowance".to_owned())
+            }
         }
     }
 

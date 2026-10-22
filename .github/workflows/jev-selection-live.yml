@@ -9,7 +9,8 @@ name: jev specialist selection (live)
 # * Manual dispatch only, from master only, in the protected `jev-live`
 #   environment (the same credential and reviewers as the Jev live
 #   contract). Pull requests never run it and never read the key.
-# * At most max_requests requests (hard ceiling 48), one at a time, with the
+# * At most max_requests requests (hard ceiling 24: one pass; a second pass is a
+#   separate dispatch and approval), one at a time, with the
 #   production adapter's timeout and no retries. A credential error or three
 #   failures in a row stop the run.
 # * Without the key the run reports BLOCKED, never a pass. Reports hold case
@@ -19,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       max_requests:
-        description: Maximum Jev requests (1-48; the set has 24 prompts)
+        description: Maximum Jev requests (1-24; one pass over the 24 prompts)
         required: true
         default: '24'
       model:
@@ -76,8 +77,8 @@ jobs:
           case "$MAX_REQUESTS" in
             ''|*[!0-9]*) echo "max_requests must be a whole number"; exit 1 ;;
           esac
-          if [ "$MAX_REQUESTS" -lt 1 ] || [ "$MAX_REQUESTS" -gt 48 ]; then
-            echo "max_requests must be between 1 and 48"; exit 1
+          if [ "$MAX_REQUESTS" -lt 1 ] || [ "$MAX_REQUESTS" -gt 24 ]; then
+            echo "max_requests must be between 1 and 24"; exit 1
           fi
           echo "status=ready" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
