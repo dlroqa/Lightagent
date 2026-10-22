@@ -74,6 +74,21 @@ Release notes: `docs/releases/v0.5.0.md`.
 
 ### Changed
 
+- Repairs after checks are bounded separately from the child allowance.
+  Previously, one coder → tester → reviewer cycle used all of
+  `subagents.max_children_per_agent`, so a re-check after a fix was refused
+  without saying so.
+  - With an active specialist plan, `subagents.max_repair_rounds` (0–2,
+    default 1) lets the coder revise a checked change, and each planned
+    check re-run once on the new change, never twice on the same change.
+  - A check that cannot run is refused as "Verification BLOCKED", the
+    change is reported as unverified, and `verification.blocked` is
+    emitted.
+  - Concurrency and the run's shared budgets are unchanged.
+- The live Jev selection workflows accept at most 24 requests per dispatch
+  (one pass); a second pass is a separate dispatch and approval. The pinned
+  workflow checks the exported requests' digest before sending, sends over
+  HTTPS without redirects, and discards responses that echo the key.
 - A tester or reviewer in a specialist plan checks one exact change: the
   run's latest patch, by id, content and base. Its result is recorded
   against that change. A new patch, or files or a checkout moved outside

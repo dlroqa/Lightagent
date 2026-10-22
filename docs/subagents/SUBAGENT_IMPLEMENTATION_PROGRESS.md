@@ -4,6 +4,63 @@ The working record for making `researcher`, `coder`, `reviewer` and `tester` ope
 
 Every build, format check, lint, test, render and evaluation runs on GitHub-hosted Actions runners. Since round 3, source changes are applied through the GitHub Git Data API: blobs, a tree, a commit and a ref update, prepared from staged files outside any checkout. The local machine holds a repository copy for read-only inspection, synchronization and these notes.
 
+**Authoritative build description and merge plan: [`BUILD_AND_MERGE_PLAN.md`](BUILD_AND_MERGE_PLAN.md).** It covers all 21 PRs (#30–#50), their heads, dependencies and Actions evidence, the merge method and the per-PR procedure. `merge-plan.md` points there.
+
+## Round 5: repair rounds, pinned-evaluation hardening, consolidated plan (2026-10-22)
+
+**Verified state at the start of the round:**
+- `master` was `506340b`; nothing was merged.
+- #30–#49 were at the SHAs in the plan, each 0 behind its base, and every check green at its head. The `check` run on `dd4d47f`, 39711436031, was still running at the last report; it finished green, 11 of 11 jobs.
+- Every PR's GitHub test-merge tree equals its head tree.
+- The earlier "21 PRs" was a miscount of #30–#49, which is 20. #50 makes the stack 21.
+
+| Stage | Branch / PR | Items | Code-tested SHA |
+| --- | --- | --- | --- |
+| U | `subagents/u-repair-rounds`, #50 (on #49) | child allowance vs. repair rounds; blocked verification; pinned workflow hardening; consolidated plan | `6870d3f222c48b8b149a213b8661b69e5d737830` |
+| — | `jev/selection-pinned-workflow`, #51 (on `master`) | the standalone pinned workflow (Route A), byte-identical to U's | `e4a306c` |
+
+**Child cap, resolved (owner decision 2 of round 4).**
+- What stays separate and unchanged:
+  - concurrency (`max_active_workers`);
+  - the initial allowance (`max_children_per_agent`, 1–3);
+  - the run total (`max_workers_per_run`) and the shared budgets.
+- New `subagents.max_repair_rounds` (0–2, default 1) applies to planned runs only:
+  - the coder revises only a change a check completed on;
+  - each check re-runs once per round, never on a change it already verified.
+- A check that cannot run reports **Verification BLOCKED … unverified** and emits `verification.blocked`.
+- The production defaults now fit one full cycle plus one re-check cycle (6 workers = `max_workers_per_run`). The freshness test no longer raises the cap.
+
+**Pinned Jev workflow.**
+- At most 24 requests per dispatch; a second pass is a separate dispatch and approval.
+- The request-set digest from `prepare` is checked in `send`.
+- Only `sel-NNN` files, and HTTPS with no redirects.
+- Responses are capped at 64 KiB, and one that echoes the key is discarded.
+- `jev-selection-live.yml` has the same 24 ceiling.
+
+**Evidence at `6870d3f222c48b8b149a213b8661b69e5d737830`:**
+- check 39715297275 ✓: 11 of 11 jobs. The Linux log shows `repairs_are_bounded_and_never_repeat_a_check`, `repairs_are_bounded_and_a_check_that_cannot_run_leaves_the_change_unverified`, `without_a_plan_the_allowance_is_the_limit` and the updated `dependent_checks_are_bound_to_the_change_and_go_stale_with_it` as `ok`;
+- subagents 39715297283 ✓;
+- jev evaluation 39715297263 ✓;
+- pinned `prepare` 39715297237 ✓: 24 requests exported, digest recorded.
+
+**Superseded:**
+- U `8aecce0`: fmt only (check 39713223407).
+- U `8fe4da0`: green (check 39713543849), superseded by `6870d3f`.
+
+**macOS flake, found on #51:** check 39714022711 failed `serve::routing_tests` on master's own code. The cause is that two tests can share a pid+nanosecond temporary home on macOS. Fixed in U `6870d3f` with a random id. Below #50, the plan allows exactly one re-run for that signature.
+
+**Still BLOCKED — NOT EVALUATED:** live Jev selection accuracy, and live general-model competence.
+
+### Remaining decisions (round 5; supersedes round 4's list)
+
+1. Merge authorization, per PR, following `BUILD_AND_MERGE_PLAN.md` §12.
+2. Live Jev selection:
+   - Route A: merge #51 only, then dispatch with `sha=<#50 head>` and `max_requests=24`;
+   - Route B: after the stack merges, run `jev-selection-live.yml`.
+3. An endpoint, model and budget for the general-model pilot, or decline it.
+4. Whether to extend change binding and repair rounds to runs without a plan.
+5. The 0.5.0 tag and publication, after the final merge.
+
 ## Round 4: final acceptance pass (2026-10-22)
 
 The stack stays unmerged. Three PRs were added on top of #46:
@@ -56,7 +113,7 @@ It requires only that workflow file on `master`. Its pull-request run exercises 
 
 Nothing was tagged.
 
-**7. Merge plan**: `merge-plan.md`. The 21 PRs form one linear chain (`behind_by = 0` everywhere), `delete_branch_on_merge` is off, and the plan is merge commits only, with each PR retargeted to `master` just in time. Before each merge, confirm `behind_by = 0` against current `master`; the merge tree then equals the tested head tree. Then wait for the post-merge `check`.
+**7. Merge plan**: `merge-plan.md`, now superseded by `BUILD_AND_MERGE_PLAN.md`. The PRs (20 at the time, #30–#49, miscounted as 21) form one linear chain (`behind_by = 0` everywhere), `delete_branch_on_merge` is off, and the plan is merge commits only, with each PR retargeted to `master` just in time. Before each merge, confirm `behind_by = 0` against current `master`; the merge tree then equals the tested head tree. Then wait for the post-merge `check`.
 
 Round 4 evidence:
 
@@ -236,7 +293,7 @@ Test merges: none. Each PR is tested at its own head, which contains the whole s
 - 2026-10-21 (round 1): local `python3 -c json.load` on `roles.v1.json` to check syntax.
 - 2026-10-22 (round 3): local `python3 -c json.load` on `roles.v1.json` again, to **read** the task ids for the pilot proposal. No validation was intended, but it is a local parse of a project file, which the policy excludes. The ids were checked against the file by text afterwards. Local scripts now only stage text and call the GitHub API.
 
-## Remaining decisions (round 4)
+## Remaining decisions (round 4; superseded by round 5)
 
 1. **Authorize stage 1 (Jev selection accuracy)**, and choose the route:
    - merge only `jev-selection-pinned.yml` to `master` and evaluate the reviewed head of #49 before merging the stack; or
