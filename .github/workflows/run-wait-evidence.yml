@@ -1,0 +1,141 @@
+name: run wait before/after evidence
+
+# Evidence branch only; never merged. Compares PR #52 (the wait_from fix,
+# AFTER) with the same tree in master's wait order (BEFORE, branch
+# diag/run-wait-before). The two trees differ only in RunState::wait_from.
+#
+#   regression  the crate's unit tests and tests/run_wait.rs on each tree.
+#               BEFORE must fail exactly the five gap tests and nothing
+#               else; AFTER must pass everything.
+#   stress      the 20 000-iteration cancelled-run wait stress from
+#               diag/revocation-latency-hang, five runs per tree. AFTER
+#               must have no hang; BEFORE is reported.
+
+on:
+  push:
+    branches: [diag/run-wait-evidence]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  regression:
+    name: regression (${{ matrix.variant.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - { name: before, sha: 9cb4824431458c656264c724c7cd8ed9114d8851 }
+          - { name: after, sha: b50de7da88d2708e63613d610dd6b202f8ae9de4 }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.variant.sha }}
+          persist-credentials: false
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: run-wait
+      - name: Unit tests of lightagent-api
+        id: unit
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo test -p lightagent-api --lib 2>&1 | tee "$RUNNER_TEMP/unit.log"
+      - name: Bounded stress (tests/run_wait.rs)
+        id: stress
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo test -p lightagent-api --test run_wait 2>&1 | tee "$RUNNER_TEMP/stress.log"
+      - name: Check the expected outcome
+        env:
+          VARIANT: ${{ matrix.variant.name }}
+          UNIT: ${{ steps.unit.outcome }}
+          STRESS: ${{ steps.stress.outcome }}
+        run: |
+          set -euo pipefail
+          gap="manager::tests::a_run_finishing_between_the_read_and_the_wait_wakes_the_waiter
+          manager::tests::an_event_arriving_between_the_read_and_the_wait_wakes_the_waiter
+          manager::tests::every_waiter_sees_every_event_once_in_order_and_the_end
+          tests::a_run_ending_in_the_recorders_gap_is_still_recorded
+          tests::a_resumed_event_stream_ends_when_the_run_ends_in_its_gap"
+          gap=$(echo "$gap" | sed 's/^ *//' | sort)
+          failed=$(grep -oE '^test [^ ]+ \.\.\. FAILED' "$RUNNER_TEMP/unit.log" | awk '{print $2}' | sort || true)
+          passed=$(grep -cE '^test [^ ]+ \.\.\. ok' "$RUNNER_TEMP/unit.log" || true)
+          {
+            echo "### regression: $VARIANT (${{ matrix.variant.sha }})"
+            echo
+            echo "Unit tests: $UNIT ($passed passed). Stress tests/run_wait.rs: $STRESS."
+            echo
+            echo "| new test | result |"
+            echo "|---|---|"
+            for name in $(grep -oE '^test (manager::tests::[a-z_]+|tests::a_(run_ending|resumed)[a-z_]+) \.\.\. (ok|FAILED)' "$RUNNER_TEMP/unit.log" | awk '{print $2"|"$4}'); do
+              echo "| \`${name%%|*}\` | ${name##*|} |"
+            done
+            echo
+            echo "Failed unit tests:"
+            echo '```'
+            echo "${failed:-none}"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$VARIANT" = before ]; then
+            [ "$UNIT" = failure ] || { echo "BEFORE: the unit tests should fail"; exit 1; }
+            [ "$failed" = "$gap" ] || { echo "BEFORE: expected exactly the five gap tests to fail"; exit 1; }
+            echo "BEFORE: exactly the five gap tests failed, as expected." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            [ "$UNIT" = success ] && [ -z "$failed" ] || { echo "AFTER: unit tests must all pass"; exit 1; }
+            [ "$STRESS" = success ] || { echo "AFTER: the bounded stress must pass"; exit 1; }
+            echo "AFTER: every unit test and the bounded stress passed." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+  stress:
+    name: stress (${{ matrix.variant.name }} ${{ matrix.run }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - { name: before, sha: 9cb4824431458c656264c724c7cd8ed9114d8851 }
+          - { name: after, sha: b50de7da88d2708e63613d610dd6b202f8ae9de4 }
+        run: [1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.variant.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ff8979c773cdc95b28509c4b5355be76a4f747ec
+          path: .diag
+          persist-credentials: false
+          sparse-checkout: crates/lightagent-api/tests/revocation_diag.rs
+          sparse-checkout-cone-mode: false
+      - name: Add the diagnostic stress test (test file only)
+        run: |
+          cp .diag/crates/lightagent-api/tests/revocation_diag.rs crates/lightagent-api/tests/
+          rm -rf .diag
+          git diff --exit-code
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: run-wait
+      - name: Cancelled-run wait stress (20 000 iterations, 300 s budget)
+        id: stress
+        continue-on-error: ${{ matrix.variant.name == 'before' }}
+        timeout-minutes: 15
+        env:
+          DIAG_ITERATIONS: '20000'
+          DIAG_BUDGET_SECS: '300'
+        run: cargo test -p lightagent-api --test revocation_diag -- --ignored --nocapture --exact cancelled_runs_are_seen_to_finish
+      - name: Record
+        if: always()
+        run: |
+          echo "stress ${{ matrix.variant.name }} ${{ matrix.run }}: ${{ steps.stress.outcome }}" | tee -a "$GITHUB_STEP_SUMMARY"
