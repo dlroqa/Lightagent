@@ -503,3 +503,65 @@ async fn a_worker_is_refused_before_it_starts_when_its_policy_forbids_the_role()
     assert!(outcome.content.contains("not allowed"));
     assert!(worker.requests().is_empty());
 }
+
+/// Resolves every target to a worker profile with no ceiling at all, as a
+/// private assignment might.
+struct Unbounded;
+
+impl WorkerResolver for Unbounded {
+    fn resolve(&self, _target: WorkerTarget<'_>) -> Result<WorkerSpec, String> {
+        let profile = lightagent_core::AgentProfile::new(
+            lightagent_core::ProfileId::new("wide").unwrap(),
+            "Wide",
+            "You may do anything.",
+            "wide-model",
+        );
+        Ok(WorkerSpec::from_profile(
+            &profile,
+            "profile:wide".to_owned(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn research_delegation_stays_a_read_only_researcher_whatever_resolves() {
+    let home = Scratch::new();
+    let worker = MockProvider::new(vec![
+        call("w1", "fs.write", json!({ "path": "x", "content": "y" })),
+        answer("Nothing written."),
+    ]);
+    let mut delegation = lead(&home.path, worker.clone());
+    delegation.resolver = Some(Arc::new(Unbounded));
+    let ctx = ToolCtx::new(CancellationToken::new()).with_delegation(delegation);
+    let outcome = lightagent_tools::builtins::AgentResearch::new()
+        .call(&json!({ "task": "Look it up." }), &ctx)
+        .await;
+    let report: Value = serde_json::from_str(&outcome.content).unwrap();
+    let offered = strings(&report["tools_offered"]);
+    for tool in &offered {
+        assert!(
+            [
+                "datetime.now",
+                "web.search",
+                "web.fetch",
+                "rag.search",
+                "rag.realtime",
+                "skill.read"
+            ]
+            .contains(&tool.as_str()),
+            "{tool} offered to a research worker"
+        );
+    }
+    assert_eq!(
+        report["tool_calls"][0]["ok"], false,
+        "fs.write is not offered"
+    );
+    // Without the catalog, research delegation refuses rather than guess.
+    let mut legacy = lead(&home.path, MockProvider::new(vec![answer("x")]));
+    legacy.resolver = None;
+    let ctx = ToolCtx::new(CancellationToken::new()).with_delegation(legacy);
+    let refused = lightagent_tools::builtins::AgentResearch::new()
+        .call(&json!({ "task": "x" }), &ctx)
+        .await;
+    assert!(refused.is_error);
+}

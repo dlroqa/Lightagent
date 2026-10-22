@@ -736,6 +736,10 @@ pub struct SubagentsConfig {
     /// Worker runs one lead run may start in all (1–32). Every worker in a
     /// tree also shares the lead's turns, tool calls and time.
     pub max_workers_per_run: u32,
+    /// Offer untrusted (multi-user) runs `agent.research`, the read-only
+    /// researcher, when their profile lists it. Off by default; generic
+    /// delegation stays withheld from them regardless.
+    pub remote_research: bool,
 }
 
 /// How a role without an explicit assignment is resolved.
@@ -773,6 +777,7 @@ impl Default for SubagentsConfig {
             max_active_workers_per_profile: 1,
             queue_timeout_secs: 30,
             max_workers_per_run: 6,
+            remote_research: false,
         }
     }
 }
