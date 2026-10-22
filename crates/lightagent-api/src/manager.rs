@@ -172,6 +172,10 @@ pub struct RunState {
     /// Bumped by the supervisor so open event streams re-check their
     /// subscriber at once instead of at their next periodic check.
     recheck: watch::Sender<u64>,
+    /// Test-only: a pause the next waiter takes between reading the state
+    /// and waiting, so a test can land a change exactly there.
+    #[cfg(test)]
+    gap: StdMutex<Option<Gap>>,
 }
 
 /// A pending approval, as the approvals endpoint reports it.
@@ -276,6 +280,8 @@ impl RunState {
                     return (events[seen.min(events.len())..].to_vec(), status);
                 }
             }
+            #[cfg(test)]
+            self.in_the_gap().await;
             self.notify.notified().await;
         }
     }
@@ -843,6 +849,8 @@ impl RunManager {
             decisions: decisions_tx,
             authorization,
             recheck: watch::Sender::new(0),
+            #[cfg(test)]
+            gap: StdMutex::new(None),
         });
         self.runs.lock().await.insert(id, state.clone());
         if supervised {
@@ -988,4 +996,239 @@ impl RunManager {
 
 fn new_run_id() -> String {
     RunId::new().as_str().to_owned()
+}
+
+/// Test-only: where a paused waiter reports that it stopped, and what lets
+/// it go on.
+#[cfg(test)]
+struct Gap {
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+impl RunState {
+    /// A run with no task behind it, whose state a test changes directly.
+    pub(crate) fn detached() -> Arc<Self> {
+        let cancel = CancellationToken::new();
+        let (decisions, _) = mpsc::unbounded_channel();
+        Arc::new(Self {
+            id: new_run_id(),
+            owner: RunOwner::operator_only(),
+            events: Mutex::new(Vec::new()),
+            status: Mutex::new(RunStatus::Running),
+            pending: Mutex::new(None),
+            notify: Notify::new(),
+            cancel: cancel.clone(),
+            decisions,
+            authorization: RunAuthorization::unconditional(cancel),
+            recheck: watch::Sender::new(0),
+            gap: StdMutex::new(None),
+        })
+    }
+
+    /// Make the next `wait_from` that finds nothing new pause after its read
+    /// and before its wait. Returns a receiver that fires once it has paused,
+    /// and the sender that lets it go on.
+    pub(crate) fn pause_next_wait(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, paused) = tokio::sync::oneshot::channel();
+        let (resume, release) = tokio::sync::oneshot::channel();
+        *self.gap.lock().unwrap() = Some(Gap { entered, release });
+        (paused, resume)
+    }
+
+    async fn in_the_gap(&self) {
+        let gap = self.gap.lock().unwrap().take();
+        if let Some(Gap { entered, release }) = gap {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
+    }
+
+    pub(crate) async fn push_for_test(&self, event: AgentEvent) {
+        self.push_event(event).await;
+    }
+
+    pub(crate) async fn finish_for_test(&self, status: RunStatus) {
+        self.set_status(status).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A bound on each wait: a waiter that is never woken fails the test
+    /// instead of hanging it. Nothing here waits for time to pass.
+    const GUARD: Duration = Duration::from_secs(10);
+
+    fn content(text: &str) -> AgentEvent {
+        AgentEvent::Content {
+            text: text.to_owned(),
+        }
+    }
+
+    fn cancelled() -> AgentEvent {
+        AgentEvent::RunCompleted {
+            reason: StopReason::Cancelled,
+        }
+    }
+
+    async fn within<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(GUARD, future)
+            .await
+            .expect("a waiter was never woken")
+    }
+
+    /// Wait from `seen` until the run is terminal, as every observer does.
+    async fn until_terminal(run: Arc<RunState>, mut seen: usize) -> (Vec<AgentEvent>, RunStatus) {
+        let mut collected = Vec::new();
+        loop {
+            let (events, status) = run.wait_from(seen).await;
+            seen += events.len();
+            collected.extend(events);
+            if status.is_terminal() {
+                return (collected, status);
+            }
+        }
+    }
+
+    // The run finishes after the waiter read "running" and before it waits:
+    // the interleaving of the hang in check run 39728608914.
+    #[tokio::test]
+    async fn a_run_finishing_between_the_read_and_the_wait_wakes_the_waiter() {
+        let run = RunState::detached();
+        let (paused, resume) = run.pause_next_wait();
+        let waiter = tokio::spawn({
+            let run = Arc::clone(&run);
+            async move { run.wait_from(0).await }
+        });
+        paused.await.unwrap();
+        run.set_status(RunStatus::Cancelled).await;
+        resume.send(()).unwrap();
+        let (events, status) = within(waiter).await.unwrap();
+        assert!(events.is_empty());
+        assert_eq!(status, RunStatus::Cancelled);
+    }
+
+    // The same gap, with an event instead of the end.
+    #[tokio::test]
+    async fn an_event_arriving_between_the_read_and_the_wait_wakes_the_waiter() {
+        let run = RunState::detached();
+        run.push_event(content("before")).await;
+        let (paused, resume) = run.pause_next_wait();
+        let waiter = tokio::spawn({
+            let run = Arc::clone(&run);
+            async move { run.wait_from(1).await }
+        });
+        paused.await.unwrap();
+        run.push_event(content("after")).await;
+        resume.send(()).unwrap();
+        let (events, status) = within(waiter).await.unwrap();
+        assert_eq!(events, vec![content("after")]);
+        assert_eq!(status, RunStatus::Running);
+    }
+
+    // A run that already ended answers at once, from any position, and a
+    // position past the end (a stale resume cursor) is clamped.
+    #[tokio::test]
+    async fn a_finished_run_answers_at_once_from_any_position() {
+        let run = RunState::detached();
+        run.push_event(content("a")).await;
+        run.push_event(content("b")).await;
+        run.set_status(RunStatus::Completed).await;
+        assert_eq!(
+            within(run.wait_from(0)).await,
+            (vec![content("a"), content("b")], RunStatus::Completed)
+        );
+        assert_eq!(
+            within(run.wait_from(1)).await,
+            (vec![content("b")], RunStatus::Completed)
+        );
+        assert_eq!(
+            within(run.wait_from(2)).await,
+            (Vec::new(), RunStatus::Completed)
+        );
+        assert_eq!(
+            within(run.wait_from(9)).await,
+            (Vec::new(), RunStatus::Completed)
+        );
+    }
+
+    // The waiter is already waiting when the run produces its last events and
+    // ends.
+    #[tokio::test]
+    async fn a_run_finishing_while_the_waiter_waits_wakes_it() {
+        let run = RunState::detached();
+        let waiter = tokio::spawn(until_terminal(Arc::clone(&run), 0));
+        // Single-threaded runtime: the waiter runs until it waits.
+        tokio::task::yield_now().await;
+        run.push_event(content("a")).await;
+        run.push_event(cancelled()).await;
+        run.set_status(RunStatus::Cancelled).await;
+        assert_eq!(
+            within(waiter).await.unwrap(),
+            (vec![content("a"), cancelled()], RunStatus::Cancelled)
+        );
+    }
+
+    // Many waiters from different positions, one of them caught in the gap,
+    // while events arrive and the run ends: each sees every event after its
+    // position once, in order, and the end.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_waiter_sees_every_event_once_in_order_and_the_end() {
+        let run = RunState::detached();
+        run.push_event(content("0")).await;
+        let (paused, resume) = run.pause_next_wait();
+        let caught = tokio::spawn(until_terminal(Arc::clone(&run), 1));
+        paused.await.unwrap();
+        let others: Vec<_> = (0..8)
+            .map(|index| tokio::spawn(until_terminal(Arc::clone(&run), index % 2)))
+            .collect();
+        let mut expected = vec![content("0")];
+        for index in 1..=5 {
+            let event = content(&index.to_string());
+            run.push_event(event.clone()).await;
+            expected.push(event);
+        }
+        run.push_event(cancelled()).await;
+        expected.push(cancelled());
+        run.set_status(RunStatus::Cancelled).await;
+        resume.send(()).unwrap();
+        assert_eq!(
+            within(caught).await.unwrap(),
+            (expected[1..].to_vec(), RunStatus::Cancelled)
+        );
+        for (index, other) in others.into_iter().enumerate() {
+            assert_eq!(
+                within(other).await.unwrap(),
+                (expected[index % 2..].to_vec(), RunStatus::Cancelled)
+            );
+        }
+    }
+
+    // A waiter that gives up (a stream dropped mid-wait, a `select!` that took
+    // another branch) takes nothing from the others.
+    #[tokio::test]
+    async fn a_waiter_that_gives_up_takes_nothing_from_the_others() {
+        let run = RunState::detached();
+        let abandoned = tokio::spawn({
+            let run = Arc::clone(&run);
+            async move { run.wait_from(0).await }
+        });
+        let kept = tokio::spawn(until_terminal(Arc::clone(&run), 0));
+        tokio::task::yield_now().await;
+        abandoned.abort();
+        assert!(abandoned.await.unwrap_err().is_cancelled());
+        run.set_status(RunStatus::Cancelled).await;
+        assert_eq!(
+            within(kept).await.unwrap(),
+            (Vec::new(), RunStatus::Cancelled)
+        );
+    }
 }
