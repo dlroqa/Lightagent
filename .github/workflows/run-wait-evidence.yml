@@ -31,8 +31,8 @@ jobs:
       fail-fast: false
       matrix:
         variant:
-          - { name: before, sha: 9cb4824431458c656264c724c7cd8ed9114d8851 }
-          - { name: after, sha: b50de7da88d2708e63613d610dd6b202f8ae9de4 }
+          - { name: before, sha: 2ee283c34229cefe9e9059ba6db17f1016b18d8a }
+          - { name: after, sha: f4954d47a77e49410375e8b6890161e11410c5c2 }
     steps:
       - uses: actions/checkout@v7
         with:
@@ -103,8 +103,8 @@ jobs:
       fail-fast: false
       matrix:
         variant:
-          - { name: before, sha: 9cb4824431458c656264c724c7cd8ed9114d8851 }
-          - { name: after, sha: b50de7da88d2708e63613d610dd6b202f8ae9de4 }
+          - { name: before, sha: 2ee283c34229cefe9e9059ba6db17f1016b18d8a }
+          - { name: after, sha: f4954d47a77e49410375e8b6890161e11410c5c2 }
         run: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v7
