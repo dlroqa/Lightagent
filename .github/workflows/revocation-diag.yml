@@ -54,7 +54,8 @@ jobs:
         run: cargo test -p lightagent-api --test revocation_monitor -- --ignored --nocapture --exact measure_detection_latency_and_sweep_overhead
       - name: Runner load after
         if: always()
-        run: echo "after: $(uptime)" | tee -a "$GITHUB_STEP_SUMMARY"
+        run: |
+          echo "after: $(uptime)" | tee -a "$GITHUB_STEP_SUMMARY"
 
   traced:
     name: traced (${{ matrix.target.name }} ${{ matrix.run }})
