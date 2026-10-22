@@ -6,6 +6,37 @@ Every build, format check, lint, test, render and evaluation runs on GitHub-host
 
 **Authoritative build description and merge plan: [`BUILD_AND_MERGE_PLAN.md`](BUILD_AND_MERGE_PLAN.md).** It covers all 21 PRs (#30–#50), their heads, dependencies and Actions evidence, the merge method and the per-PR procedure. `merge-plan.md` points there.
 
+## Round 6: verification and candidate freeze (2026-10-22)
+
+Checked read-only through the GitHub API before this note:
+- `master` is still `506340b033fcb7a05fcb39db785dd3a019894be7` (tree `bf5fdee4…`). Nothing is merged.
+- The stack is 21 PRs, #30 to #50. Each one:
+  - is open, at the head the plan records;
+  - is 0 behind its base, with `ahead_by` equal to its own-commit count;
+  - reports `mergeable`, and its test-merge tree equals its head tree.
+- Standalone #51 (`e4a306c6d52603976aebadafc9c0c9d1748d77e4`) passes the same checks against `master`. Its one file is byte-identical to #50's `jev-selection-pinned.yml`.
+- `jev-live` deploys from `master` only. Its required reviewer is `dlroqa`, and admins cannot bypass. Its one secret is `TYPESAFE_API_KEY`. The repository's default workflow token is read-only, and workflows cannot approve pull requests.
+
+**Evidence at #50 `10fe1ac894b432451e73121a8ff76afa88b9668c`** (docs only, on `6870d3f`):
+- check 39716160243 ✓, 11 of 11 jobs;
+- subagents 39716160247 ✓;
+- jev evaluation 39716160240 ✓;
+- pinned `prepare` 39716160265 ✓.
+
+The live fixture dispatches behaved as designed:
+- pass 39716210786 ✓;
+- coder verify on its own commit 39716251278 ✓;
+- fail 39716226759 and base verify 39716288707 failed, as they must: they are the negative halves of the live checks.
+
+**#30 record.** Check run 39650299128 on `6ed0a98` failed on formatting of hand-formatted lines and on two render expectations. It is superseded by #30's head `1c12cf4` (check 39653621567 ✓, jev evaluation 39653621493 ✓) and is not re-run.
+
+**Scope for this release (owner, 2026-10-22).**
+- Extra repair rounds apply only to runs with a specialist plan.
+- General-model evaluation stays **BLOCKED** until an endpoint, model and budget are authorized.
+- Live Jev selection accuracy stays **NOT EVALUATED**. The prepared run is one pass, `max_requests=24`, no retries, and needs the owner's authorization and `jev-live` approval.
+
+**Candidate freeze.** The commit that adds this note is the candidate head of #50. Its SHA and its runs are recorded in a PR #50 comment. Later routine evidence also goes in PR comments; the documents change only to correct an actual error.
+
 ## Round 5: repair rounds, pinned-evaluation hardening, consolidated plan (2026-10-22)
 
 **Verified state at the start of the round:**

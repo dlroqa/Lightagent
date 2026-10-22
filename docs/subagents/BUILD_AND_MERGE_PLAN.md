@@ -250,6 +250,12 @@ Preparing this changes nothing that needs authorization. Each of these does:
   - pinned prepare 39715297237 ✓.
 - Earlier U commits: `8aecce0` (fmt only) and `8fe4da0` (green: check 39713543849, subagents 39713543570, jev 39713543847, pinned 39713543527). Both were superseded by the macOS temp-dir test fix in `6870d3f`.
 - The documentation commit that adds this file is docs-only. Its runs are recorded in the progress file and on the PR.
+- Docs head `10fe1ac894b432451e73121a8ff76afa88b9668c`:
+  - check 39716160243 ✓, 11 of 11 jobs;
+  - subagents 39716160247 ✓;
+  - jev evaluation 39716160240 ✓;
+  - pinned prepare 39716160265 ✓.
+- **Frozen candidate.** The round-6 verification commit on top of `10fe1ac` is the candidate head of #50. Its SHA and runs are recorded in a PR #50 comment, not here.
 - What those runs prove, by kind:
 
   | Kind | Status |
@@ -269,7 +275,7 @@ Preparing this changes nothing that needs authorization. Each of these does:
    - Route A: merge only #51 (the standalone `jev-selection-pinned.yml`), then dispatch with `sha=<#50 head>` and `max_requests=24`, and approve `send`.
    - Route B: merge the stack, then run `jev-selection-live.yml` (24 per dispatch).
 3. **General-model evaluation.** Provide or decline an endpoint, model and budget. Until then it stays BLOCKED.
-4. **Repair rounds outside a plan.** Today a lead without an active plan has no change binding, so it gets no repair allowance. Extending binding and repair to plan-less runs is a separate change, to be proposed if wanted.
+4. **Repair rounds outside a plan.** Decided for this release (owner, 2026-10-22): extra repair rounds stay limited to runs with a specialist plan. A lead without an active plan has no change binding, so it gets no repair allowance. Extending this to plan-less runs would be a separate, later change.
 5. **Tenant execution sandbox.** None is verified, so coder, reviewer and tester stay unavailable to untrusted users.
 6. **Website preset selection.** Not implemented. It needs Web repository work, and r5 only when there is more than one grantable preset.
 7. **0.5.0 tag and publication**, after the final merge.
