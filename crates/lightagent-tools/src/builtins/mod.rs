@@ -26,7 +26,7 @@ pub use datetime::DateTimeNow;
 pub use delegate::AgentDelegate;
 pub use fs::{FsList, FsRead, FsWrite};
 pub use open_terminal::OpenTerminalRun;
-pub use patch::{PatchApply, PatchContext, PatchPropose, PatchStore, RepoCommit};
+pub use patch::{PatchApply, PatchContext, PatchPropose, PatchStore, Proposer, RepoCommit};
 pub use research::AgentResearch;
 pub use skill::SkillRead;
 pub use terminal::TerminalRun;
