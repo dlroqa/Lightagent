@@ -25,6 +25,7 @@ use lightagent_core::provider::{
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
+use crate::names::ToolNameMap;
 use crate::sse::{SseDecodeError, SseDecoder, SseEvent};
 use crate::tls;
 use crate::wire::{ChatChunk, ModelsResponse};
@@ -39,6 +40,8 @@ pub struct ProviderConfig {
     pub model: String,
     /// The bearer key, when the gateway requires one. Loopback needs none.
     pub api_key: Option<String>,
+    /// How tool names are spelled on the wire (see [`crate::names`]).
+    pub tool_names: lightagent_core::ToolNameMode,
 }
 
 impl ProviderConfig {
@@ -47,7 +50,14 @@ impl ProviderConfig {
             base_url: base_url.into(),
             model: model.into(),
             api_key: None,
+            tool_names: lightagent_core::ToolNameMode::Native,
         }
+    }
+
+    /// Set how tool names are spelled on the wire.
+    pub fn with_tool_names(mut self, tool_names: lightagent_core::ToolNameMode) -> Self {
+        self.tool_names = tool_names;
+        self
     }
 
     /// Set the bearer key.
@@ -144,14 +154,44 @@ impl LightweightProvider {
 /// Free-standing so it is testable without a client: the request-body-shape
 /// test calls this directly.
 pub(crate) fn build_body(config: &ProviderConfig, request: &ProviderRequest) -> Value {
+    body_with(config, request, None)
+}
+
+/// The tool-name map for `request` under `config`: `None` sends names as
+/// they are. Built from every name the request carries, declared or in its
+/// history, so a follow-up or resumed request spells each one the same way.
+pub(crate) fn name_map(
+    config: &ProviderConfig,
+    request: &ProviderRequest,
+) -> Result<Option<ToolNameMap>, ProviderError> {
+    if config.tool_names == lightagent_core::ToolNameMode::Native {
+        return Ok(None);
+    }
+    let declared = request.tools.iter().map(|tool| tool.name.as_str());
+    let called = request
+        .messages
+        .iter()
+        .flat_map(|message| message.tool_calls.iter().map(|call| call.name.as_str()));
+    ToolNameMap::portable(declared.chain(called)).map(Some)
+}
+
+/// The request body, with tool names spelled through `names` when given.
+pub(crate) fn body_with(
+    config: &ProviderConfig,
+    request: &ProviderRequest,
+    names: Option<&ToolNameMap>,
+) -> Value {
     let mut body = Map::new();
     body.insert("model".into(), json!(config.model));
-    body.insert("messages".into(), messages_to_json(&request.messages));
+    body.insert(
+        "messages".into(),
+        messages_to_json(&request.messages, names),
+    );
     // The usage chunk is not optional: the loop reads token counts from it.
     body.insert("stream".into(), Value::Bool(true));
     body.insert("stream_options".into(), json!({ "include_usage": true }));
     if !request.tools.is_empty() {
-        body.insert("tools".into(), tools_to_json(&request.tools));
+        body.insert("tools".into(), tools_to_json(&request.tools, names));
     }
     if let Some(temperature) = request.temperature {
         body.insert("temperature".into(), json!(temperature));
@@ -162,8 +202,16 @@ pub(crate) fn build_body(config: &ProviderConfig, request: &ProviderRequest) -> 
     Value::Object(body)
 }
 
+/// The wire spelling of an internal tool name.
+fn wire_name(internal: &str, names: Option<&ToolNameMap>) -> String {
+    match names {
+        Some(names) => names.outbound(internal),
+        None => internal.to_owned(),
+    }
+}
+
 /// Render messages as the OpenAI chat format.
-fn messages_to_json(messages: &[ProviderMessage]) -> Value {
+fn messages_to_json(messages: &[ProviderMessage], names: Option<&ToolNameMap>) -> Value {
     Value::Array(
         messages
             .iter()
@@ -172,6 +220,12 @@ fn messages_to_json(messages: &[ProviderMessage]) -> Value {
                 object.insert("role".into(), json!(message.role.as_str()));
                 object.insert("content".into(), json!(message.content));
                 if let Some(name) = &message.name {
+                    // A tool result's author is the tool: spelled like it.
+                    let name = if message.role == Role::Tool {
+                        wire_name(name, names)
+                    } else {
+                        name.clone()
+                    };
                     object.insert("name".into(), json!(name));
                 }
                 if let Some(tool_call_id) = &message.tool_call_id {
@@ -189,7 +243,7 @@ fn messages_to_json(messages: &[ProviderMessage]) -> Value {
                                         "id": call.id,
                                         "type": "function",
                                         "function": {
-                                            "name": call.name,
+                                            "name": wire_name(&call.name, names),
                                             "arguments": call.arguments,
                                         },
                                     })
@@ -205,7 +259,7 @@ fn messages_to_json(messages: &[ProviderMessage]) -> Value {
 }
 
 /// Render tool schemas as the OpenAI `tools` array.
-fn tools_to_json(tools: &[lightagent_core::ToolSchema]) -> Value {
+fn tools_to_json(tools: &[lightagent_core::ToolSchema], names: Option<&ToolNameMap>) -> Value {
     Value::Array(
         tools
             .iter()
@@ -218,7 +272,7 @@ fn tools_to_json(tools: &[lightagent_core::ToolSchema]) -> Value {
                 json!({
                     "type": "function",
                     "function": {
-                        "name": tool.name,
+                        "name": wire_name(&tool.name, names),
                         "description": tool.description,
                         "parameters": parameters,
                     },
@@ -237,7 +291,9 @@ impl AgentProvider for LightweightProvider {
     ) -> Result<ProviderStream, ProviderError> {
         let mut config = self.config.clone();
         config.model = self.resolve_model().await?;
-        let body = build_body(&config, &request);
+        // An ambiguous mapping is refused here, before anything is sent.
+        let names = name_map(&config, &request)?;
+        let body = body_with(&config, &request, names.as_ref());
         let mut builder = self
             .client
             .post(format!("{}/v1/chat/completions", self.base()))
@@ -262,7 +318,7 @@ impl AgentProvider for LightweightProvider {
             )));
         }
 
-        Ok(translate(response.bytes_stream().boxed(), cancel))
+        Ok(translate(response.bytes_stream().boxed(), cancel, names))
     }
 }
 
@@ -279,12 +335,16 @@ struct Translation {
     usage: Option<Usage>,
     finished: bool,
     emitted_finish: bool,
+    /// The request's tool-name map, to turn returned names back into
+    /// internal ones; `None` when names were sent unchanged.
+    names: Option<ToolNameMap>,
 }
 
 /// Translate an SSE byte stream into a stream of [`ProviderEvent`]s.
 fn translate(
     body: BoxStream<'static, reqwest::Result<Bytes>>,
     cancel: CancellationToken,
+    names: Option<ToolNameMap>,
 ) -> ProviderStream {
     let state = Translation {
         body,
@@ -297,6 +357,7 @@ fn translate(
         usage: None,
         finished: false,
         emitted_finish: false,
+        names,
     };
 
     stream::unfold(state, |mut state| async move {
@@ -416,12 +477,19 @@ fn absorb(state: &mut Translation, event: &SseEvent) {
         }
         for call in delta.tool_calls.iter().flatten() {
             let function = call.function.as_ref();
+            // A returned name is turned back into the internal name it was
+            // declared as, or into one no tool has.
+            let name = function
+                .and_then(|function| function.name.clone())
+                .filter(|name| !name.is_empty())
+                .map(|name| match &state.names {
+                    Some(names) => names.inbound(&name),
+                    None => name,
+                });
             state.pending.push_back(Ok(ProviderEvent::ToolCallDelta {
                 index: call.index,
                 id: call.id.clone().filter(|id| !id.is_empty()),
-                name: function
-                    .and_then(|function| function.name.clone())
-                    .filter(|name| !name.is_empty()),
+                name,
                 arguments: function.and_then(|function| function.arguments.clone()),
             }));
         }
@@ -514,7 +582,7 @@ mod tests {
     }
 
     async fn decode(frames_in: &[&str]) -> Vec<Result<ProviderEvent, ProviderError>> {
-        translate(frames(frames_in), CancellationToken::new())
+        translate(frames(frames_in), CancellationToken::new(), None)
             .collect()
             .await
     }
@@ -596,12 +664,132 @@ mod tests {
         );
         let body =
             stream::iter(vec![Ok(Bytes::from(format!("data: {HALF}\n\n"))), failing]).boxed();
-        let events: Vec<_> = translate(body, CancellationToken::new()).collect().await;
+        let events: Vec<_> = translate(body, CancellationToken::new(), None)
+            .collect()
+            .await;
         assert!(matches!(
             events.first(),
             Some(Ok(ProviderEvent::Content(_)))
         ));
         assert!(matches!(events.last(), Some(Err(ProviderError::Stream(_)))));
         assert!(finish_of(&events).is_empty());
+    }
+
+    fn portable_request() -> (ProviderConfig, ProviderRequest) {
+        let config = ProviderConfig::new("http://127.0.0.1:11434", "m")
+            .with_tool_names(lightagent_core::ToolNameMode::Portable);
+        let assistant = ProviderMessage::assistant_tool_calls(
+            "",
+            vec![lightagent_core::provider::ProviderToolCall {
+                id: "call_1".into(),
+                name: "web.search".into(),
+                arguments: "{}".into(),
+            }],
+        );
+        let mut result = ProviderMessage::tool_result("call_1", "results");
+        result.name = Some("web.search".into());
+        let mut request = ProviderRequest::new(
+            "m",
+            vec![ProviderMessage::user("find it"), assistant, result],
+        );
+        request.tools = vec![
+            ToolSchema::new("web.search", "search", json!({"type": "object"})),
+            ToolSchema::new("agent.resume_worker", "resume", json!({"type": "object"})),
+        ];
+        (config, request)
+    }
+
+    #[test]
+    fn native_names_are_sent_unchanged() {
+        let (mut config, request) = portable_request();
+        config.tool_names = lightagent_core::ToolNameMode::Native;
+        assert_eq!(name_map(&config, &request).unwrap(), None);
+        let body = body_with(&config, &request, None);
+        assert_eq!(body["tools"][0]["function"]["name"], "web.search");
+    }
+
+    #[test]
+    fn portable_names_cover_declarations_and_history_alike() {
+        let (config, request) = portable_request();
+        let names = name_map(&config, &request).unwrap().unwrap();
+        let body = body_with(&config, &request, Some(&names));
+        let declared: Vec<&str> = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(declared, ["web__search", "agent__resume_worker"]);
+        // The earlier call and its result replay under the same spelling,
+        // so a follow-up or resumed request stays consistent.
+        assert_eq!(
+            body["messages"][1]["tool_calls"][0]["function"]["name"],
+            "web__search"
+        );
+        assert_eq!(body["messages"][2]["name"], "web__search");
+        for name in declared {
+            assert!(crate::names::is_portable(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn an_ambiguous_mapping_is_refused_before_sending() {
+        // Two names that differ only in characters outside the alphabet,
+        // with a hash collision forced by a third, already-portable name
+        // equal to one's hashed spelling, cannot be told apart.
+        let (config, mut request) = portable_request();
+        let hashed = {
+            let map = crate::names::ToolNameMap::portable(["x y", "x?y"]).unwrap();
+            map.outbound("x y")
+        };
+        request.tools = vec![
+            ToolSchema::new("x y", "a", json!({"type": "object"})),
+            ToolSchema::new("x?y", "b", json!({"type": "object"})),
+            ToolSchema::new(hashed.as_str(), "c", json!({"type": "object"})),
+        ];
+        request.messages.truncate(1);
+        assert!(matches!(
+            name_map(&config, &request),
+            Err(ProviderError::Upstream(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn streamed_calls_come_back_under_their_internal_names() {
+        let (config, request) = portable_request();
+        let names = name_map(&config, &request).unwrap();
+        // The name arrives once, on the first delta; arguments stream on.
+        let first = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_2","type":"function","function":{"name":"agent__resume_worker","arguments":"{\"han"}}]}}]}"#;
+        let rest = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"dle\":\"wk-1\"}"}}]}}]}"#;
+        let invented = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_3","type":"function","function":{"name":"web.search","arguments":"{}"}}]}}]}"#;
+        let done = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
+        let events: Vec<_> = translate(
+            frames(&[ROLE, first, rest, invented, done]),
+            CancellationToken::new(),
+            names,
+        )
+        .collect()
+        .await;
+        let named: Vec<(u32, String)> = events
+            .iter()
+            .filter_map(|event| match event {
+                Ok(ProviderEvent::ToolCallDelta {
+                    index,
+                    name: Some(name),
+                    ..
+                }) => Some((*index, name.clone())),
+                _ => None,
+            })
+            .collect();
+        // The approval resume is executed and audited as itself; the
+        // internal spelling the model was never given is not accepted.
+        assert_eq!(
+            named,
+            [
+                (0, "agent.resume_worker".to_owned()),
+                (1, "undeclared:web.search".to_owned())
+            ]
+        );
+        assert_eq!(finish_of(&events), [FinishReason::ToolCalls]);
     }
 }
