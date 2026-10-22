@@ -1,0 +1,105 @@
+name: revocation latency diagnostics
+
+# Diagnostic branch only; never merged. Reproduces and classifies the hang
+# seen once in check run 39728608914 ("Revocation detection latency",
+# job 119658211315: "the run never finished").
+#
+#   baseline  the unchanged measurement, five runs each on master and on
+#             #35's tested tree.
+#   traced    the same targets with one test file added (revocation_diag.rs):
+#             the measurement with phase reporting and the same thresholds,
+#             then a bounded stress of the cancelled-run wait. No source
+#             file of the target is changed.
+
+on:
+  push:
+    branches: [diag/revocation-latency-hang]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  baseline:
+    name: baseline (${{ matrix.target.name }} ${{ matrix.run }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { name: master, sha: 6b88cf28a1aa6dac2b415def6e297f9676b38dfc }
+          - { name: pr35, sha: 67ab0f4fb93c4517e1d52cf0a4d7dbf51ac6078f }
+        run: [1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.target.sha }}
+          persist-credentials: false
+      - name: Record the target and the runner
+        run: |
+          {
+            echo "### baseline ${{ matrix.target.name }} ${{ matrix.run }}"
+            echo "commit $(git rev-parse HEAD), tree $(git rev-parse 'HEAD^{tree}')"
+            echo "nproc $(nproc); $(uptime)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: revocation-latency
+      - name: Measure detection latency and sweep overhead (unchanged)
+        run: cargo test -p lightagent-api --test revocation_monitor -- --ignored --nocapture --exact measure_detection_latency_and_sweep_overhead
+      - name: Runner load after
+        if: always()
+        run: echo "after: $(uptime)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  traced:
+    name: traced (${{ matrix.target.name }} ${{ matrix.run }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { name: master, sha: 6b88cf28a1aa6dac2b415def6e297f9676b38dfc }
+          - { name: pr35, sha: 67ab0f4fb93c4517e1d52cf0a4d7dbf51ac6078f }
+        run: [1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.target.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: .diag
+          persist-credentials: false
+          sparse-checkout: crates/lightagent-api/tests/revocation_diag.rs
+          sparse-checkout-cone-mode: false
+      - name: Add the diagnostic test file (no target file changes)
+        run: |
+          cp .diag/crates/lightagent-api/tests/revocation_diag.rs crates/lightagent-api/tests/
+          rm -rf .diag
+          {
+            echo "### traced ${{ matrix.target.name }} ${{ matrix.run }}"
+            echo "commit $(git rev-parse HEAD), tree $(git rev-parse 'HEAD^{tree}')"
+            echo "nproc $(nproc); $(uptime)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          git status --short
+          git diff --exit-code
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: revocation-latency
+      - name: Traced measurement (same trials, thresholds and guard)
+        run: cargo test -p lightagent-api --test revocation_diag -- --ignored --nocapture --exact traced_measurement
+      - name: Cancelled-run wait stress (bounded)
+        if: always()
+        timeout-minutes: 10
+        env:
+          DIAG_ITERATIONS: '20000'
+          DIAG_BUDGET_SECS: '300'
+        run: cargo test -p lightagent-api --test revocation_diag -- --ignored --nocapture --exact cancelled_runs_are_seen_to_finish
