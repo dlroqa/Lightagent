@@ -228,13 +228,8 @@ pub(crate) async fn evaluate(
         Ok(client) => client.with_size_limits(MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES),
         Err(error) => return skip(error.kind()),
     };
-    let mut request = request(&config.platform.jev.model, summary.text);
-    // Specialist selection rides on the same request and state: no second
-    // Jev call, no second disclosure.
     let specialists = selection::requested(config);
-    if specialists {
-        request.questions.extend(selection::questions());
-    }
+    let request = build_request(config, summary.text);
     let started = Instant::now();
     let response = client.evaluate(&request, cancel).await;
     let latency = Some(started.elapsed());
@@ -250,6 +245,29 @@ pub(crate) async fn evaluate(
         }
     };
     (outcome, true, latency)
+}
+
+/// The request for an already sanitized task description. Specialist
+/// selection rides on the same request and state: no second Jev call, no
+/// second disclosure.
+fn build_request(config: &Config, task: String) -> EvaluationRequest {
+    let mut request = request(&config.platform.jev.model, task);
+    if selection::requested(config) {
+        request.questions.extend(selection::questions());
+    }
+    request
+}
+
+/// The exact request a classification of `message` sends under `config`,
+/// or `None` when the sanitizer refuses to send it. Used to export requests
+/// for review before a protected job sends them.
+pub(crate) fn request_for(config: &Config, message: &str) -> Option<EvaluationRequest> {
+    let summary = sanitize::summarize(
+        message,
+        config.platform.jev.classification.max_input_chars,
+    )
+    .ok()?;
+    Some(build_request(config, summary.text))
 }
 
 /// The one batched request: a category choice, three independent yes/no

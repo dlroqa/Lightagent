@@ -123,9 +123,16 @@ jobs:
     # optional secret SUBAGENT_EVAL_API_KEY, variable SUBAGENT_EVAL_MODELS
     # (comma-separated). It reads them only on a manual dispatch; pull
     # requests and a missing endpoint record BLOCKED, never a pass.
+    #
+    # The job succeeding means only that it ran. Its status is in the job
+    # output `status`, in role-eval/status.json (artifact `role-eval`) and in
+    # the summary: BLOCKED (nothing evaluated, not competence evidence),
+    # or the harness's own status for an evaluated run.
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    outputs:
+      status: ${{ steps.blocked.outputs.status || steps.evaluate.outputs.status }}
     defaults:
       run:
         shell: bash
@@ -133,22 +140,40 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - run: rustup show
+      - name: Decide whether anything can be evaluated
+        id: blocked
+        env:
+          EVENT: ${{ github.event_name }}
+          HAS_ENDPOINT: ${{ github.event_name == 'workflow_dispatch' && secrets.SUBAGENT_EVAL_BASE_URL != '' && vars.SUBAGENT_EVAL_MODELS != '' }}
+        run: |
+          reason=""
+          if [ "$EVENT" != workflow_dispatch ]; then
+            reason="pull requests never run live models or read their secrets"
+          elif [ "$HAS_ENDPOINT" != true ]; then
+            reason="no operator-approved model endpoint is configured"
+          fi
+          [ -n "$reason" ] || exit 0
+          mkdir -p "$RUNNER_TEMP/role-eval"
+          printf '{"evaluation":"role_competence","status":"BLOCKED","evaluated":false,"counts_as_competence_evidence":false,"reason":"%s","commit":"%s"}\n' \
+            "$reason" "$GITHUB_SHA" > "$RUNNER_TEMP/role-eval/status.json"
+          echo "status=BLOCKED" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Role evaluation BLOCKED::NOT EVALUATED: $reason. This job's success is not competence evidence."
+          {
+            echo "### Role evaluation (live): BLOCKED — NOT EVALUATED"
+            echo
+            echo "Reason: $reason (docs/subagents/live-evaluation-proposal.md)."
+            echo "Nothing was evaluated. The job succeeding means only that this check ran;"
+            echo "it is **not** a pass and **not** competence evidence."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - if: steps.blocked.outputs.status != 'BLOCKED'
+        run: rustup show
       - uses: Swatinem/rust-cache@v2
+        if: steps.blocked.outputs.status != 'BLOCKED'
         with:
           key: subagents
-      - name: Report that live evaluation does not run here
-        if: github.event_name != 'workflow_dispatch'
-        run: |
-          {
-            echo "### Role evaluation (live): BLOCKED"
-            echo
-            echo "Live models run only on a manual dispatch with an operator-approved"
-            echo "endpoint (docs/subagents/live-evaluation-proposal.md); pull requests never"
-            echo "read its secrets. Nothing was evaluated; this is not a pass."
-          } >> "$GITHUB_STEP_SUMMARY"
       - name: Run the recorded role evaluation
-        if: github.event_name == 'workflow_dispatch'
+        id: evaluate
+        if: steps.blocked.outputs.status != 'BLOCKED'
         env:
           LIGHTAGENT_EVAL_BASE_URL: ${{ secrets.SUBAGENT_EVAL_BASE_URL }}
           LIGHTAGENT_EVAL_API_KEY: ${{ secrets.SUBAGENT_EVAL_API_KEY }}
@@ -160,18 +185,14 @@ jobs:
           LIGHTAGENT_EVAL_MAX_REQUESTS: ${{ inputs.eval_max_requests }}
           LIGHTAGENT_EVAL_OUT: ${{ runner.temp }}/role-eval
         run: |
-          if [ -z "$LIGHTAGENT_EVAL_BASE_URL" ] || [ -z "$LIGHTAGENT_EVAL_MODEL" ]; then
-            {
-              echo "### Role evaluation (live): BLOCKED"
-              echo
-              echo "No operator-approved model endpoint is configured. Nothing was evaluated;"
-              echo "this is not a pass."
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
           set -o pipefail
+          status=0
           cargo test -p lightagent --test role_eval -- --ignored --nocapture live_ \
-            2>&1 | tee "$RUNNER_TEMP/role-eval.log"
+            2>&1 | tee "$RUNNER_TEMP/role-eval.log" || status=$?
+          reported=$(jq -r '.status // "FAILED"' "$LIGHTAGENT_EVAL_OUT/role-eval.json" 2>/dev/null || echo FAILED)
+          echo "status=$reported" >> "$GITHUB_OUTPUT"
+          echo "### Role evaluation (live): $reported" >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
       - name: Summarize
         if: always()
         run: |
