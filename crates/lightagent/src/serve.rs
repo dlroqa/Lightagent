@@ -7,7 +7,6 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use lightagent_api::manager::{
@@ -22,7 +21,7 @@ use lightagent_core::{
 use lightagent_provider_lightweight::{LightweightProvider, ProviderConfig};
 use lightagent_runtime::{RuntimeClient, RuntimeEndpoint};
 use lightagent_store::SessionStore;
-use lightagent_tools::{BoundedExecutor, Delegation, SkillContext, ToolDefinition, ToolRegistry};
+use lightagent_tools::{BoundedExecutor, SkillContext, ToolDefinition};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_util::sync::CancellationToken;
@@ -389,15 +388,6 @@ impl LightweightRunFactory {
         let profile_dir = store.handle(&profile.id).dir().to_path_buf();
         let extensions = load_extensions(&self.root, &profile_dir);
         let skills = load_skills(&self.root, &profile_dir, &extensions, &config);
-        let mut delegation = Delegation::new(
-            Arc::new(store),
-            Arc::new(LightweightFactory { base_url, api_key }),
-            ToolRegistry::worker_default(),
-            Duration::from_secs(60),
-            262_144,
-        );
-        delegation.delegate_timeout = Duration::from_secs(config.subagents.delegate_timeout_secs);
-        delegation.subagents = crate::chat::subagent_policy(&config);
         // An untrusted run's remote credentials: the profile's own vault
         // grants once the installation has a vault.
         let credentials = vault_credentials(&self.root, &profile.id, trust);
@@ -431,12 +421,27 @@ impl LightweightRunFactory {
         }
         let registry = tool_policy.apply(&registry);
         let registry_snapshot = registry.clone();
-        if tool_policy.enforced {
-            delegation.worker_registry =
-                tool_policy.worker_registry(&ToolRegistry::worker_default());
-            delegation.limit_ceiling = Some(profile.limits);
-            delegation.approval_floor = Some(profile.approval_policy);
-        }
+        let guard = tool_policy.enforced.then(|| {
+            crate::chat::tool_policy_guard(
+                self.root.clone(),
+                profile.id.clone(),
+                trust,
+                registry_snapshot,
+            )
+        });
+        // Delegated workers draw from these same effective tools, under the
+        // same guard, through the one worker-runtime factory.
+        let delegation = crate::workers::delegation(crate::workers::DelegationInputs {
+            root: &self.root,
+            config: &config,
+            lead: &profile,
+            trust,
+            extensions: &extensions,
+            registry: &registry,
+            guard: guard.clone(),
+            enforced: tool_policy.enforced,
+            factory: Arc::new(LightweightFactory { base_url, api_key }),
+        });
         // Classification only advises. The workflow policy inspects the
         // registry, the approval policy and the limits without changing them;
         // the executor below is built exactly as without Jev.
@@ -485,13 +490,8 @@ impl LightweightRunFactory {
         if let Some(authorization) = &authorization {
             executor = executor.with_authorization(authorization.clone());
         }
-        if tool_policy.enforced {
-            executor = executor.with_call_guard(crate::chat::tool_policy_guard(
-                self.root.clone(),
-                profile.id.clone(),
-                trust,
-                registry_snapshot,
-            ));
+        if let Some(guard) = guard {
+            executor = executor.with_call_guard(guard);
         }
         if let Some(web) = crate::chat::web_context_for(
             &config,
@@ -666,6 +666,7 @@ pub async fn run(
 #[cfg(test)]
 pub(crate) mod routing_tests {
     use super::*;
+    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]

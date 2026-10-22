@@ -27,6 +27,25 @@ pub struct Skill {
     pub description: String,
     /// The full instructions (everything after the frontmatter).
     pub body: String,
+    /// The frontmatter `version`, when the skill declares one. Recorded with
+    /// the work a skill guided, so a result names the instructions it used.
+    pub version: Option<String>,
+}
+
+impl Skill {
+    /// Parse a `SKILL.md` held in memory; `fallback_name` names it when the
+    /// frontmatter does not. `None` when no name results.
+    pub fn from_markdown(text: &str, fallback_name: &str) -> Option<Self> {
+        parse_skill(text, fallback_name)
+    }
+
+    /// `name@version`, or the bare name for an unversioned skill.
+    pub fn label(&self) -> String {
+        match &self.version {
+            Some(version) => format!("{}@{version}", self.name),
+            None => self.name.clone(),
+        }
+    }
 }
 
 /// The skills discovered under a set of directories.
@@ -60,6 +79,14 @@ impl SkillStore {
             }
         }
         Self { skills }
+    }
+
+    /// This store with `skill` added. A skill of the same name already here
+    /// is kept: what is loaded from the installation or the profile
+    /// overrides a skill supplied in memory.
+    pub fn with_default(mut self, skill: Skill) -> Self {
+        self.skills.entry(skill.name.clone()).or_insert(skill);
+        self
     }
 
     /// Look up a skill by name.
@@ -108,11 +135,13 @@ fn parse_skill(text: &str, fallback_name: &str) -> Option<Skill> {
     let (front, body) = split_frontmatter(text);
     let mut name = None;
     let mut description = None;
+    let mut version = None;
     for line in front.lines() {
         if let Some((key, value)) = line.split_once(':') {
             match key.trim() {
                 "name" => name = Some(unquote(value.trim())),
                 "description" => description = Some(unquote(value.trim())),
+                "version" => version = Some(unquote(value.trim())),
                 _ => {}
             }
         }
@@ -127,6 +156,7 @@ fn parse_skill(text: &str, fallback_name: &str) -> Option<Skill> {
         name,
         description: description.unwrap_or_default(),
         body: body.trim().to_owned(),
+        version: version.filter(|value| !value.is_empty()),
     })
 }
 

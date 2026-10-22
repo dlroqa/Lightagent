@@ -25,6 +25,7 @@ mod remote_credentials;
 mod serve;
 mod setup;
 mod slash;
+mod workers;
 
 use std::io::IsTerminal as _;
 use std::process::ExitCode;
@@ -116,6 +117,11 @@ enum Command {
         #[command(subcommand)]
         action: Option<SessionsAction>,
     },
+    /// Show each specialist role's readiness, or assign a role to a worker.
+    Workers {
+        #[command(subcommand)]
+        action: Option<WorkersAction>,
+    },
     /// Serve the Lightagent HTTP API (runs, sessions, tools, approvals + SSE).
     Serve {
         /// Address to bind.
@@ -202,6 +208,37 @@ enum ConfigAction {
 enum ToolsAction {
     /// List tools available to the active profile, including connected extensions.
     List,
+}
+
+#[derive(Subcommand)]
+enum WorkersAction {
+    /// Each role's readiness: its worker, model, skill, tools and reasons.
+    Status {
+        /// The lead profile (default: the active one).
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// Assign a role to the built-in worker or to a private worker profile.
+    Assign {
+        /// researcher, coder, reviewer or tester.
+        role: String,
+        /// A worker profile with the same owner as the lead profile.
+        #[arg(long, conflicts_with = "builtin", required_unless_present = "builtin")]
+        worker: Option<String>,
+        /// Pin the built-in worker, superseding a profile named after the role.
+        #[arg(long)]
+        builtin: bool,
+        /// The lead profile (default: the active one).
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// Remove a role's assignment, so the role resolves as if it had none.
+    Revoke {
+        role: String,
+        /// The lead profile (default: the active one).
+        #[arg(long)]
+        profile: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -398,6 +435,10 @@ async fn dispatch(cli: Cli) -> Result<(), String> {
         Some(Command::Profiles { action }) => {
             profiles_cmd(action.unwrap_or(ProfilesAction::List), cli.json)
         }
+        Some(Command::Workers { action }) => {
+            let action = action.unwrap_or(WorkersAction::Status { profile: None });
+            workers_cmd(action, cli.json).await
+        }
         Some(Command::Extensions { action }) => match action.unwrap_or(ExtensionsAction::List) {
             ExtensionsAction::List => extensions::list(cli.json),
             ExtensionsAction::Show { name } => extensions::show(&name, cli.json),
@@ -546,15 +587,19 @@ pub(crate) fn default_profile(config: &Config) -> Result<AgentProfile, String> {
     Ok(profile)
 }
 
-/// Create the built-in worker profiles the first time autonomous delegation is
-/// enabled. Existing profiles are never changed: people can tune a specialist
-/// persona, model, or policy and it will be preserved for later runs.
+/// Under `subagents.resolution = "legacy_profiles"` only (the rollback),
+/// create the role profiles the earlier behavior cloned from the lead.
+/// Existing profiles are never changed: people can tune a specialist persona,
+/// model, or policy and it will be preserved for later runs. With the
+/// built-in catalog, roles need no profiles, so none are created.
 pub(crate) fn ensure_subagent_profiles(
     store: &ProfileStore,
     config: &Config,
     lead: &AgentProfile,
 ) -> Result<(), String> {
-    if !config.subagents.enabled {
+    if !config.subagents.enabled
+        || config.subagents.resolution != lightagent_core::WorkerResolution::LegacyProfiles
+    {
         return Ok(());
     }
 
@@ -577,6 +622,15 @@ pub(crate) fn ensure_subagent_profiles(
         }
     }
     Ok(())
+}
+
+/// Whether `profile` is exactly what [`ensure_subagent_profiles`] generated
+/// for `role`, rather than a profile a person customized. A generated one is
+/// superseded by the built-in worker; a customized one keeps being used.
+pub(crate) fn is_generated_subagent_profile(profile: &AgentProfile, role: &str) -> bool {
+    profile.name == format!("{role} subagent")
+        && profile.description == format!("Focused {role} worker for bounded delegated tasks.")
+        && profile.persona.ends_with(subagent_role_instruction(role))
 }
 
 fn subagent_role_instruction(role: &str) -> &'static str {
@@ -806,6 +860,112 @@ async fn tools_list(json: bool) -> Result<(), String> {
     }
     print!("{out}");
     Ok(())
+}
+
+// --- workers ----------------------------------------------------------------
+
+/// The tools a run of `lead` would have under its tool policy, as an
+/// operator: what its workers are drawn from.
+async fn lead_tools(root: &std::path::Path, config: &Config, lead: &AgentProfile) -> ToolRegistry {
+    let profiles = ProfileStore::new(root);
+    let profile_dir = profiles.handle(&lead.id).dir().to_path_buf();
+    let extensions = chat::load_extensions(root, &profile_dir);
+    let skills = chat::load_skills(root, &profile_dir, &extensions, config);
+    let registry =
+        chat::configured_registry(config, &profile_dir, &extensions, !skills.is_empty()).await;
+    let trust = lightagent_core::identity::RunTrust::LocalOperator;
+    chat::tool_policy(config, &extensions, &registry, lead, trust).apply(&registry)
+}
+
+fn worker_role(raw: &str) -> Result<lightagent_core::WorkerRole, String> {
+    lightagent_core::WorkerRole::parse(raw)
+        .ok_or_else(|| format!("unknown role {raw:?}: use researcher, coder, reviewer or tester"))
+}
+
+async fn workers_cmd(action: WorkersAction, json: bool) -> Result<(), String> {
+    let paths = paths()?;
+    let config = load_config(&paths)?;
+    let profiles = ProfileStore::new(paths.root());
+    match action {
+        WorkersAction::Status { profile } => {
+            let lead = chat::resolve_profile(&profiles, &config, profile)?;
+            let tools = lead_tools(paths.root(), &config, &lead).await;
+            let trust = lightagent_core::identity::RunTrust::LocalOperator;
+            let report = workers::readiness(paths.root(), &config, &lead, trust, &tools);
+            if json {
+                let value = serde_json::to_value(&report).map_err(|error| error.to_string())?;
+                println!("{value}");
+                return Ok(());
+            }
+            let mut out = format!("Workers for {}:\n", lead.id.as_str());
+            for entry in report {
+                let reasons = if entry.reasons.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", entry.reasons.join(", "))
+                };
+                out.push_str(&format!(
+                    "  {:<10} {:<17} {}{reasons}\n",
+                    entry.role.as_str(),
+                    entry.state.as_str(),
+                    entry.worker
+                ));
+            }
+            print!("{out}");
+            Ok(())
+        }
+        WorkersAction::Assign {
+            role,
+            worker,
+            builtin: _,
+            profile,
+        } => {
+            let lead = chat::resolve_profile(&profiles, &config, profile)?;
+            let role = worker_role(&role)?;
+            let target = match worker {
+                Some(id) => lightagent_core::AssignmentTarget::Profile {
+                    profile: ProfileId::new(&id).map_err(|error| error.to_string())?,
+                },
+                None => lightagent_core::AssignmentTarget::Builtin,
+            };
+            let assignment = workers::assign(paths.root(), &lead.id, role, target)?;
+            if json {
+                let value = serde_json::to_value(&assignment).map_err(|error| error.to_string())?;
+                println!("{value}");
+            } else {
+                println!(
+                    "Assigned {} for {} ({}).",
+                    role.as_str(),
+                    lead.id.as_str(),
+                    assignment.id
+                );
+            }
+            Ok(())
+        }
+        WorkersAction::Revoke { role, profile } => {
+            let lead = chat::resolve_profile(&profiles, &config, profile)?;
+            let role = worker_role(&role)?;
+            let dir = profiles.handle(&lead.id).dir().to_path_buf();
+            let removed = lightagent_core::WorkerAssignments::new(lead.id.clone(), &dir)
+                .revoke(role)
+                .map_err(|error| error.to_string())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "role": role, "revoked": removed })
+                );
+            } else if removed {
+                println!(
+                    "Revoked the {} assignment of {}.",
+                    role.as_str(),
+                    lead.id.as_str()
+                );
+            } else {
+                println!("{} had no {} assignment.", lead.id.as_str(), role.as_str());
+            }
+            Ok(())
+        }
+    }
 }
 
 // --- profiles ---------------------------------------------------------------
@@ -1795,13 +1955,14 @@ mod tests {
     }
 
     #[test]
-    fn autonomous_subagents_provision_missing_role_profiles_without_overwriting_them() {
+    fn legacy_resolution_provisions_missing_role_profiles_without_overwriting_them() {
         let home = std::env::temp_dir().join(format!(
             "lightagent-subagent-profiles-{}",
             lightagent_core::RunId::new().as_str()
         ));
         let store = ProfileStore::new(&home);
-        let config = Config::default();
+        let mut config = Config::default();
+        config.subagents.resolution = lightagent_core::WorkerResolution::LegacyProfiles;
         let lead = default_profile(&config).unwrap();
 
         ensure_subagent_profiles(&store, &config, &lead).unwrap();
@@ -1813,20 +1974,24 @@ mod tests {
                 .persona
                 .contains("research specialist")
         );
+        assert!(is_generated_subagent_profile(
+            &store.load(&researcher).unwrap(),
+            "researcher"
+        ));
 
         let mut customized = store.load(&researcher).unwrap();
         customized.persona = "Keep my custom researcher persona.".to_owned();
         store.save(&customized).unwrap();
         ensure_subagent_profiles(&store, &config, &lead).unwrap();
         assert_eq!(store.load(&researcher).unwrap().persona, customized.persona);
+        assert!(!is_generated_subagent_profile(&customized, "researcher"));
 
         std::fs::remove_dir_all(home).unwrap();
     }
 
-    /// Gap 1: built-in workers are cloned into ordinary profiles named after
-    /// their roles, copying whichever lead ran first.
+    /// Gap 1 (closed): built-in workers are not cloned into ordinary
+    /// profiles named after their roles.
     #[test]
-    #[ignore = "seeded: gap 1 (built-in workers as profiles), closed in stage B"]
     fn seeded_built_in_workers_create_no_profiles() {
         let home = std::env::temp_dir().join(format!(
             "lightagent-subagent-builtins-{}",

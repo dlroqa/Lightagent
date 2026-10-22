@@ -190,10 +190,9 @@ fn skills_with(name: &str, body: &str) -> SkillStore {
     store
 }
 
-/// Gap 3: a worker is offered `skill.read` but is not given the run's skill
-/// context, so the call it is offered can only fail.
+/// Gap 3 (closed): a worker offered `skill.read` is given the run's skill
+/// context, so the call it is offered works.
 #[tokio::test]
-#[ignore = "seeded: gap 3 (child contexts), closed in stage C"]
 async fn seeded_a_worker_reads_the_skills_its_run_has() {
     let home = ScratchHome::new();
     let store = worker_store(&home.path, |_| {});
@@ -224,30 +223,26 @@ async fn seeded_a_worker_reads_the_skills_its_run_has() {
     );
 }
 
-/// Gap 5: the worker profile's own `toolsets` do not bound the tools it is
-/// offered.
+/// Gap 5 (closed): under an enforced profile policy, the worker profile's
+/// own `toolsets` bound the tools it is offered, as the lead's bound its own.
 #[tokio::test]
-#[ignore = "seeded: gap 5 (worker toolsets), closed in stage B"]
 async fn seeded_a_worker_profiles_toolsets_bound_its_tools() {
     let home = ScratchHome::new();
     let store = worker_store(&home.path, |profile| {
         profile.toolsets = vec!["datetime.now".to_owned()];
     });
     let worker = MockProvider::new(vec![final_turn("done")]);
-    let ctx = ToolCtx::new(CancellationToken::new()).with_delegation(delegation(
-        store,
-        worker.clone(),
-        ToolRegistry::worker_default(),
-    ));
+    let mut delegation = delegation(store, worker.clone(), ToolRegistry::worker_default());
+    delegation.profile_policy = lightagent_core::ToolPolicyMode::Enforce;
+    let ctx = ToolCtx::new(CancellationToken::new()).with_delegation(delegation);
     let outcome = delegate(&ctx, json!({ "profile": "worker", "task": "t" })).await;
     assert!(!outcome.is_error, "{outcome:?}");
     assert_eq!(offered(&worker), ["datetime.now"]);
 }
 
-/// A model-supplied `tool_scope` may only narrow; nested delegation adds
-/// `agent.delegate` back after the scope was applied.
+/// A model-supplied `tool_scope` may only narrow (closed): nested delegation
+/// no longer adds `agent.delegate` back after the scope was applied.
 #[tokio::test]
-#[ignore = "seeded: tool_scope widening, closed in stage B"]
 async fn seeded_a_tool_scope_is_never_widened() {
     let home = ScratchHome::new();
     let store = worker_store(&home.path, |_| {});
@@ -265,10 +260,9 @@ async fn seeded_a_tool_scope_is_never_widened() {
     assert_eq!(offered(&worker), ["datetime.now"]);
 }
 
-/// The depth bound: with `max_depth = 1` only the lead (depth 0) may start a
-/// worker. A depth-1 execution starting one would create depth 2.
+/// The depth bound (closed): with `max_depth = 1` only the lead (depth 0)
+/// may start a worker. A depth-1 execution starting one would create depth 2.
 #[tokio::test]
-#[ignore = "seeded: depth off-by-one, closed in stage B"]
 async fn seeded_no_worker_starts_below_the_maximum_depth() {
     let home = ScratchHome::new();
     let store = worker_store(&home.path, |_| {});
@@ -318,9 +312,9 @@ async fn seeded_workers_share_one_tool_call_budget() {
     );
 }
 
-/// Gap 7: a worker's progress never reaches the parent while it works.
+/// Gap 7 (closed for lifecycle stages): a worker's progress reaches the
+/// parent while it works.
 #[tokio::test]
-#[ignore = "seeded: gap 7 (worker progress), closed in stage E"]
 async fn seeded_a_worker_reports_its_lifecycle_to_the_parent() {
     let home = ScratchHome::new();
     let store = worker_store(&home.path, |_| {});

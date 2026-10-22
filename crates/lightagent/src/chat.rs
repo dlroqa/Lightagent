@@ -29,9 +29,9 @@ use lightagent_store::{
     Session, SessionId, SessionStore, StoredMessage, model_history as build_model_history,
 };
 use lightagent_tools::{
-    BoundedExecutor, Delegation, OpenTerminalContext, OpenTerminalPolicy, SkillContext,
-    SubagentPolicy, SubagentRole, Tool, ToolRegistry, WebContext, WebPolicy, Workspace,
-    WorkspaceContext, WorkspacePolicy,
+    BoundedExecutor, OpenTerminalContext, OpenTerminalPolicy, SkillContext, SubagentPolicy,
+    SubagentRole, Tool, ToolRegistry, WebContext, WebPolicy, Workspace, WorkspaceContext,
+    WorkspacePolicy,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -807,32 +807,6 @@ async fn build_chat_runtime(
         .api_key
         .as_ref()
         .and_then(|secret| secret.resolve());
-    let mut delegation = Delegation::new(
-        Arc::new(profile_store),
-        Arc::new(LightweightFactory { base_url, api_key }),
-        ToolRegistry::worker_default(),
-        Duration::from_secs(60),
-        262_144,
-    );
-    delegation.delegate_timeout = Duration::from_secs(config.subagents.delegate_timeout_secs);
-    delegation.subagents = SubagentPolicy {
-        enabled: config.subagents.enabled,
-        max_depth: config.subagents.max_depth,
-        max_children_per_agent: config.subagents.max_children_per_agent,
-        roles: config
-            .subagents
-            .allowed_roles
-            .iter()
-            .map(|role| {
-                (
-                    role.clone(),
-                    SubagentRole {
-                        profile: role.clone(),
-                    },
-                )
-            })
-            .collect::<BTreeMap<_, _>>(),
-    };
     let mut registry =
         configured_registry(config, profile_dir, &extensions, !skills.is_empty()).await;
     let jev_budget =
@@ -857,11 +831,27 @@ async fn build_chat_runtime(
         eprintln!("· {line}");
     }
     let registry = tool_policy.apply(&registry);
-    if tool_policy.enforced {
-        delegation.worker_registry = tool_policy.worker_registry(&ToolRegistry::worker_default());
-        delegation.limit_ceiling = Some(profile.limits);
-        delegation.approval_floor = Some(profile.approval_policy);
-    }
+    let guard = tool_policy.enforced.then(|| {
+        tool_policy_guard(
+            home.to_path_buf(),
+            profile.id.clone(),
+            lightagent_core::identity::RunTrust::LocalOperator,
+            registry.clone(),
+        )
+    });
+    // Delegated workers draw from these same effective tools, under the same
+    // guard, through the one worker-runtime factory the API and ACP use.
+    let delegation = crate::workers::delegation(crate::workers::DelegationInputs {
+        root: home,
+        config,
+        lead: profile,
+        trust: lightagent_core::identity::RunTrust::LocalOperator,
+        extensions: &extensions,
+        registry: &registry,
+        guard: guard.clone(),
+        enforced: tool_policy.enforced,
+        factory: Arc::new(LightweightFactory { base_url, api_key }),
+    });
     let tools = registry.names();
     let workflow_registry = registry.clone();
     let permission_policy = PolicyEngine::new(profile.approval_policy.into());
@@ -885,7 +875,6 @@ async fn build_chat_runtime(
             format!("{} [{permission}]", definition.name)
         })
         .collect();
-    let guarded_registry = registry.clone();
     let mut executor = BoundedExecutor::new(
         registry,
         PolicyEngine::new(profile.approval_policy.into()),
@@ -894,13 +883,8 @@ async fn build_chat_runtime(
     )
     .with_run(RunId::new())
     .with_delegation(delegation);
-    if tool_policy.enforced {
-        executor = executor.with_call_guard(tool_policy_guard(
-            home.to_path_buf(),
-            profile.id.clone(),
-            lightagent_core::identity::RunTrust::LocalOperator,
-            guarded_registry,
-        ));
+    if let Some(guard) = guard {
+        executor = executor.with_call_guard(guard);
     }
     if let Some(web) = web_context(config) {
         executor = executor.with_web(web);
