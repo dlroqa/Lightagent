@@ -505,6 +505,9 @@ impl LightweightRunFactory {
         if let Some(open_terminal) = open_terminal_context(&config) {
             executor = executor.with_open_terminal(open_terminal);
         }
+        if let Some(actions) = crate::chat::actions_context(&config) {
+            executor = executor.with_actions(actions);
+        }
         if !skills.is_empty() {
             profile
                 .persona

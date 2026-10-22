@@ -1155,7 +1155,63 @@ pub struct PlatformConfig {
     pub infinity: InfinityConfig,
     /// Open Terminal executes code in an isolated execution environment.
     pub open_terminal: OpenTerminalConfig,
+    /// GitHub Actions, through an operator-allowlisted workflow broker: the
+    /// only place delegated workers build, test or verify code.
+    pub github_actions: GithubActionsConfig,
 }
+
+/// The workflow broker's settings. `endpoint.base_url` is the REST API root
+/// (`https://api.github.com` when unset) and `endpoint.api_key` the token,
+/// which stays in the harness: no model, tool result or job ever sees it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GithubActionsConfig {
+    #[serde(flatten)]
+    pub endpoint: PlatformEndpointConfig,
+    /// `owner/name`: the one repository workflows may run in.
+    pub repository: Option<String>,
+    /// The workflows a worker may dispatch, with their refs and inputs.
+    pub workflows: Vec<AllowedWorkflow>,
+    pub request_timeout_secs: u64,
+    /// Between status checks while a tool waits for a run.
+    pub poll_interval_secs: u64,
+    /// The longest one tool call waits for a run.
+    pub max_wait_secs: u64,
+    /// The most bytes of a job log a tool returns (its tail).
+    pub max_log_bytes: usize,
+}
+
+impl Default for GithubActionsConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: PlatformEndpointConfig::default(),
+            repository: None,
+            workflows: Vec::new(),
+            request_timeout_secs: 20,
+            poll_interval_secs: 10,
+            max_wait_secs: 120,
+            max_log_bytes: 16_384,
+        }
+    }
+}
+
+/// One workflow the broker may dispatch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllowedWorkflow {
+    /// The file name under `.github/workflows`, e.g. `ci.yml`.
+    pub file: String,
+    /// Branches it may run on: exact names, or a prefix ending in `*`.
+    pub refs: Vec<String>,
+    /// Inputs a worker may set, each with the values it may take.
+    #[serde(default)]
+    pub inputs: BTreeMap<String, Vec<String>>,
+    /// An input the workflow puts in its `run-name`, which the broker fills
+    /// with a fresh id to find the run it dispatched. Without one, the run
+    /// is found by SHA and time, and an ambiguous match is reported as such.
+    #[serde(default)]
+    pub correlation_input: Option<String>,
+}
+
 /// The whole typed configuration.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
@@ -1203,7 +1259,53 @@ pub enum ConfigError {
     Unwritable { path: PathBuf, reason: String },
 }
 
+/// A non-empty name of letters, digits, `-`, `_` and `.` only.
+fn simple_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
 impl Config {
+    /// The workflow broker's allowlist must name exactly what it allows.
+    fn validate_github_actions(&self) -> Result<(), ConfigError> {
+        let actions = &self.platform.github_actions;
+        let invalid = |message: String| Err(ConfigError::Invalid(message));
+        if let Some(repository) = &actions.repository {
+            let valid = match repository.split_once('/') {
+                Some((owner, name)) => simple_name(owner) && simple_name(name),
+                None => false,
+            };
+            if !valid {
+                return invalid(format!(
+                    "platform.github_actions.repository must be owner/name, got {repository:?}"
+                ));
+            }
+        }
+        if actions.poll_interval_secs == 0 || actions.max_wait_secs > 900 {
+            return invalid(
+                "platform.github_actions polls at least every second and waits at most 900 s"
+                    .to_owned(),
+            );
+        }
+        for workflow in &actions.workflows {
+            let file = workflow.file.as_str();
+            let named = (file.ends_with(".yml") || file.ends_with(".yaml")) && simple_name(file);
+            if !named {
+                return invalid(format!(
+                    "platform.github_actions.workflows: {file:?} is not a workflow file name"
+                ));
+            }
+            if workflow.refs.is_empty() || workflow.refs.iter().any(|r| r.trim().is_empty()) {
+                return invalid(format!(
+                    "platform.github_actions.workflows: {file} must list the refs it may run on"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Reject a config that could not be acted on.
     ///
     /// Checks the invariants the loop and provider depend on, so a bad value is
@@ -1615,6 +1717,7 @@ impl Config {
                 ));
             }
         }
+        self.validate_github_actions()?;
         for (role, model) in &self.subagents.role_models {
             if crate::workers::WorkerRole::parse(role).is_none() {
                 return Err(ConfigError::Invalid(format!(

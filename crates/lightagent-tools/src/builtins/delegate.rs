@@ -320,6 +320,11 @@ pub async fn run_worker(
     {
         executor = executor.with_open_terminal(open_terminal.clone());
     }
+    if needs(&["actions."])
+        && let Some(actions) = &ctx.actions
+    {
+        executor = executor.with_actions(actions.clone());
+    }
     let mut persona = spec.persona.clone();
     if needs(&["skill."]) {
         let mut skills = ctx

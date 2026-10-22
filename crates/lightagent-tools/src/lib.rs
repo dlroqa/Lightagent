@@ -40,8 +40,9 @@ pub mod worker;
 pub mod workspace;
 
 pub use context::{
-    Clock, Delegation, OpenTerminalContext, OpenTerminalPolicy, SkillContext, SubagentPolicy,
-    SubagentRole, ToolCtx, WebContext, WebPolicy, WorkspaceContext, WorkspacePolicy,
+    ActionsContext, ActionsPolicy, Clock, Delegation, OpenTerminalContext, OpenTerminalPolicy,
+    SkillContext, SubagentPolicy, SubagentRole, ToolCtx, WebContext, WebPolicy, WorkspaceContext,
+    WorkspacePolicy,
 };
 pub use definition::{Tool, ToolDefinition};
 pub use executor::{BoundedExecutor, CallGuard, DEFAULT_PER_CALL_TIMEOUT};

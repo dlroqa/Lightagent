@@ -37,7 +37,8 @@ pub enum ToolReach {
     /// The profile's own data directory, confined by path construction only
     /// (`memory.*`, `session.lookup`, `rag.search`, `skill.read`).
     ProfileData,
-    /// Commands in the installation's shared Open Terminal service.
+    /// Commands in the installation's shared Open Terminal service, or
+    /// workflows on its GitHub repository (`actions.*`).
     RemoteExecution,
     /// Files in the workspace, read and written as the server's OS account.
     LocalFilesystem,
@@ -72,6 +73,10 @@ pub fn reach_of(name: &str, network_mcp_servers: &BTreeSet<String>) -> ToolReach
         "memory.write" | "memory.search" | "memory.reflect" | "session.lookup" | "rag.search"
         | "skill.read" => ToolReach::ProfileData,
         "open_terminal.run" => ToolReach::RemoteExecution,
+        // Runs workflows on the operator's GitHub repository.
+        "actions.dispatch" | "actions.status" | "actions.logs" | "actions.cancel" => {
+            ToolReach::RemoteExecution
+        }
         "fs.read" | "fs.list" | "fs.write" => ToolReach::LocalFilesystem,
         "terminal.run" => ToolReach::LocalCommand,
         "agent.delegate" => ToolReach::Delegation,

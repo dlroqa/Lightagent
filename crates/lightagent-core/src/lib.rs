@@ -36,12 +36,12 @@ pub mod tool_stream;
 pub mod workers;
 
 pub use config::{
-    AgentConfig, ApprovalPolicy, Config, ConfigError, ConfigStore, DUCKDUCKGO_SEARCH_ENDPOINT,
-    ExtensionsConfig, InferenceConfig, InfinityConfig, JevClassificationConfig,
-    JevClassificationMode, JevConfig, JevRoutingGrant, JevRoutingInput, JevRoutingPermission,
-    McpConfig, McpServerEntry, OpenTerminalConfig, PlatformConfig, PlatformEndpointConfig,
-    QdrantConfig, SavedProvider, SecretRef, SecurityConfig, SubagentsConfig, ToolPolicyMode,
-    ToolsConfig, WebConfig, WebSearchConfig, WorkerResolution,
+    AgentConfig, AllowedWorkflow, ApprovalPolicy, Config, ConfigError, ConfigStore,
+    DUCKDUCKGO_SEARCH_ENDPOINT, ExtensionsConfig, GithubActionsConfig, InferenceConfig,
+    InfinityConfig, JevClassificationConfig, JevClassificationMode, JevConfig, JevRoutingGrant,
+    JevRoutingInput, JevRoutingPermission, McpConfig, McpServerEntry, OpenTerminalConfig,
+    PlatformConfig, PlatformEndpointConfig, QdrantConfig, SavedProvider, SecretRef, SecurityConfig,
+    SubagentsConfig, ToolPolicyMode, ToolsConfig, WebConfig, WebSearchConfig, WorkerResolution,
 };
 pub use event::{AgentEvent, ClassificationDiagnostics, StopReason};
 pub use ids::RunId;

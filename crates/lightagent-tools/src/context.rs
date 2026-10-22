@@ -18,6 +18,7 @@ use lightagent_core::identity::{RunAuthorization, RunTrust, revoked_message};
 use lightagent_core::{
     ApprovalPolicy, ProfileStore, ProviderFactory, RunId, RunLimits, SkillStore, ToolPolicyMode,
 };
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::executor::CallGuard;
@@ -448,6 +449,56 @@ impl std::fmt::Debug for OpenTerminalPolicy {
     }
 }
 
+/// The GitHub Actions workflow broker's resolved settings, built by the
+/// caller from its configuration. The token is held only in this run-local
+/// object and is redacted from `Debug`; tools never return it.
+#[derive(Clone)]
+pub struct ActionsPolicy {
+    /// The REST API root, without a trailing slash.
+    pub api_base: String,
+    /// `owner/name`.
+    pub repository: String,
+    pub token: Option<String>,
+    pub workflows: Vec<lightagent_core::AllowedWorkflow>,
+    pub poll_interval: Duration,
+    pub max_wait: Duration,
+    pub max_log_bytes: usize,
+}
+
+impl std::fmt::Debug for ActionsPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActionsPolicy")
+            .field("api_base", &self.api_base)
+            .field("repository", &self.repository)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("workflows", &self.workflows)
+            .field("poll_interval", &self.poll_interval)
+            .field("max_wait", &self.max_wait)
+            .field("max_log_bytes", &self.max_log_bytes)
+            .finish()
+    }
+}
+
+/// What the `actions.*` tools need: a client with redirects disabled, the
+/// policy, and this run's dispatches, so an identical dispatch is never sent
+/// twice in one run.
+#[derive(Clone)]
+pub struct ActionsContext {
+    pub client: reqwest::Client,
+    pub policy: Arc<ActionsPolicy>,
+    pub dispatched: Arc<std::sync::Mutex<BTreeMap<String, Value>>>,
+}
+
+impl ActionsContext {
+    pub fn new(client: reqwest::Client, policy: ActionsPolicy) -> Self {
+        Self {
+            client,
+            policy: Arc::new(policy),
+            dispatched: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+        }
+    }
+}
+
 /// The skills a run's `skill.read` tool can serve, injected by the caller so this
 /// crate does not read the skills directories itself.
 #[derive(Clone)]
@@ -474,6 +525,8 @@ pub struct ToolCtx {
     pub workspace: Option<WorkspaceContext>,
     /// Present only when a configured Open Terminal service is available.
     pub open_terminal: Option<OpenTerminalContext>,
+    /// Present only when the workflow broker is configured for this run.
+    pub actions: Option<ActionsContext>,
     /// Present only when skills are available for this run.
     pub skills: Option<SkillContext>,
     /// The run's authorization, re-checked before a tool reaches outside the
@@ -496,6 +549,7 @@ impl ToolCtx {
             web: None,
             workspace: None,
             open_terminal: None,
+            actions: None,
             skills: None,
             authorization: None,
             progress: None,
@@ -569,6 +623,12 @@ impl ToolCtx {
     /// Make skills available to the run's `skill.read` tool.
     pub fn with_skills(mut self, skills: SkillContext) -> Self {
         self.skills = Some(skills);
+        self
+    }
+
+    /// Enable the `actions.*` workflow-broker tools.
+    pub fn with_actions(mut self, actions: ActionsContext) -> Self {
+        self.actions = Some(actions);
         self
     }
 }
