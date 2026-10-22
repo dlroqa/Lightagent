@@ -4,6 +4,10 @@ All notable Lightagent changes are documented here.
 
 ## [Unreleased]
 
+## [0.5.0] - Unreleased (prepared 2026-10-22; set the date when tagging)
+
+Release notes: `docs/releases/v0.5.0.md`.
+
 ### Added
 
 - Specialist workers. The roles researcher, coder, reviewer and tester are
@@ -62,9 +66,22 @@ All notable Lightagent changes are documented here.
   and a protected, manually dispatched live run (`jev-selection-live.yml`).
   The role evaluation takes pilot bounds: a task subset, runs per task and a
   hard request ceiling.
+- `jev-selection-pinned.yml`: evaluates Jev specialist selection for a
+  pinned, reviewed pull-request head before merging. The Jev key is used
+  only by a job that runs no repository code: the commit's requests are
+  exported without the secret, sent by `curl` after review, and the
+  responses are scored without the secret.
 
 ### Changed
 
+- A tester or reviewer in a specialist plan checks one exact change: the
+  run's latest patch, by id, content and base. Its result is recorded
+  against that change. A new patch, or files or a checkout moved outside
+  it, make earlier checks stale, and a role depending on a stale check is
+  refused until that check runs again.
+- An evaluation that cannot run (no endpoint, no key, a pull request) still
+  finishes, but its summary, annotation, job output and `status.json` say
+  BLOCKED with `evaluated: false`. It never counts as competence evidence.
 - `patch.apply` and `repo.commit` check the run's authorization and the
   proposing worker's assignment and ownership again immediately before
   writing, and `repo.commit` again before moving the branch. Patch ids are
