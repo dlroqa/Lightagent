@@ -112,6 +112,36 @@ Live broker evidence, real GitHub Actions. Each run dispatched `subagent-fixture
 
 Live model evaluation: **BLOCKED**. The repository has no general model endpoint; its only secret is `TYPESAFE_API_KEY` in the `jev-live` environment. The job took its BLOCKED branch and ran no model. To unblock it, an operator adds the secrets `SUBAGENT_EVAL_BASE_URL` (and optionally `SUBAGENT_EVAL_API_KEY`) and the variable `SUBAGENT_EVAL_MODELS`.
 
+## Final stack evidence (restacked onto PR #30 `1c12cf4`)
+
+Every stage was rebased onto PR #30's final head, and all required checks were re-run at these exact SHAs. Each `check` run passed all 11 jobs: fmt, clippy and tests on Linux, macOS and Windows, the Web UI render, LA-WEB-PROVISIONING/1 r4 fixtures, package smoke, the paired E2E, the sandbox, revocation, Open Terminal, Qdrant and Infinity.
+
+| Stage | PR | Tested SHA | check | subagents | jev evaluation |
+| --- | --- | --- | --- | --- | --- |
+| A | #31 | `b2c9a46` | 39694595355 ✓ | 39694595437 ✓ | 39694595439 ✓ |
+| B+C | #32 | `4fdfc62` | 39694598100 ✓ | 39694598227 ✓ | 39694598086 ✓ |
+| D | #33 | `521d914` | 39694600128 ✓ | 39694600072 ✓ | 39694600142 ✓ |
+| E | #34 | `7c78393` | 39694603535 ✓ | 39694603536 ✓ | 39694603553 ✓ |
+| F | #35 | `67ab0f4` | 39694608310 ✓ | 39694608374 ✓ | 39694608318 ✓ |
+| G | #36 | `e4ba72a` | 39694609839 ✓ | 39694609845 ✓ (attempt 2; see note) | 39694609827 ✓ |
+| H | #37 | `e1dc459` | 39694612967 ✓ | 39694613011 ✓ | 39694612827 ✓ |
+| I | #38 | `7ea119a` | 39694616834 ✓ | 39694617020 ✓ | 39694616818 ✓ |
+| J | #39 | `e63be23` | 39694619276 ✓ | 39694619307 ✓ | 39694619298 ✓ |
+| K | #40 | `ba37303` | 39694620479 ✓ | 39694620369 ✓ | 39694620298 ✓ |
+
+Run URLs: `https://github.com/dlroqa/Lightagent/actions/runs/<id>`.
+
+Notes:
+- **G, attempt 1**: the live broker job failed. With ten stacks queued, the dispatched fixture run was still `queued` after the 600-second bound. The broker reported `still_running`, not a pass, and the test refused it, which is the intended behavior. The re-run of only that job passed.
+- **J at `39efccd`**, an earlier head: the experimental bubblewrap job failed once on a pre-existing timing race ("cancel-startup 2ms: process survived") in `sandbox_bubblewrap.rs`, which this stack does not touch. It passed at every final head.
+- **Live coder evidence, real GitHub**:
+  - at J `e63be23`: commit `fa76ee7` on `subagents/live-coder-39694619307-1` passed `rustc --test`, and the base `e63be23` failed;
+  - at K `ba37303`: commit `8180231` passed, and the base failed;
+  - at `8ac904d`: `371c6d5` passed, and the base failed.
+
+  Every scratch branch was deleted (HTTP 204), and none remain.
+- **Live broker evidence**: a passed run and a failed run at the exact head SHA on every final head.
+
 ## Release recommendation (not tagged or published)
 
 Following the release policy, a release is a patch bump even when it adds features, and the latest release is `v0.4.1`. Recommendation: **0.4.2**, cut only after PR #30 and this stack are merged on `master`. It would be one `Release 0.4.2` commit:
