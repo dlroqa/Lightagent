@@ -571,7 +571,10 @@ async fn live_role_evaluation() {
         .iter()
         .filter(|task| only.as_ref().is_none_or(|only| only.contains(&task.id)))
         .collect();
-    assert!(!tasks.is_empty(), "LIGHTAGENT_EVAL_TASKS names no recorded task");
+    assert!(
+        !tasks.is_empty(),
+        "LIGHTAGENT_EVAL_TASKS names no recorded task"
+    );
     let model_count = models.split(',').filter(|m| !m.trim().is_empty()).count();
     let natural = u32::try_from(tasks.len() * model_count).unwrap_or(u32::MAX) * runs * 8;
     let max_requests = env("LIGHTAGENT_EVAL_MAX_REQUESTS")

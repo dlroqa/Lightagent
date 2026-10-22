@@ -15,7 +15,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use lightagent_core::identity::RunTrust;
 use lightagent_core::permissions::ApprovalPolicy;
 use lightagent_core::workers::{Readiness, RoleReadiness, WorkerRole};
-use lightagent_core::{Config, JevClassificationMode, PolicyEngine, RunLimits, SpecialistSelection};
+use lightagent_core::{
+    Config, JevClassificationMode, PolicyEngine, RunLimits, SpecialistSelection,
+};
 use lightagent_tools::ToolRegistry;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -177,7 +179,10 @@ fn the_selection_set_is_well_formed_and_balanced() {
         }
     }
     let lead = set.cases.iter().filter(|case| !case.delegate).count();
-    assert!(lead >= 10 && set.cases.len() - lead >= 10, "both classes covered");
+    assert!(
+        lead >= 10 && set.cases.len() - lead >= 10,
+        "both classes covered"
+    );
     assert!(set.pass.decision_accuracy_min > 0.5);
 }
 
@@ -210,7 +215,10 @@ fn the_scorer_counts_unnecessary_and_missed_delegation_and_role_sets() {
         score_case(coding, &plan_of(&["tester", "coder"])).roles_ok,
         Some(true)
     );
-    assert_eq!(score_case(coding, &plan_of(&["coder"])).roles_ok, Some(true));
+    assert_eq!(
+        score_case(coding, &plan_of(&["coder"])).roles_ok,
+        Some(true)
+    );
     assert_eq!(
         score_case(coding, &plan_of(&["coder", "reviewer"])).roles_ok,
         Some(false)
@@ -236,10 +244,8 @@ async fn the_live_run_scores_what_the_plan_rules_build() {
     // A scripted Jev answering every prompt alike: the scores are those of
     // the stub, which says nothing about Jev. This only proves the path the
     // live run takes: one request per prompt, plan, score.
-    let mut body: Value = serde_json::from_str(&crate::coordinator::test_support::answer(
-        "coding", 0.95,
-    ))
-    .unwrap();
+    let mut body: Value =
+        serde_json::from_str(&crate::coordinator::test_support::answer("coding", 0.95)).unwrap();
     let answers = body["answers"].as_object_mut().unwrap();
     answers.insert("specialists".into(), json!({"type": "noul", "noul": 0.9}));
     for (role, probability) in [
@@ -401,6 +407,9 @@ async fn live_specialist_selection_evaluation() {
     );
     super::write_report("specialist-selection", &report, &summary);
     println!("{summary}");
-    assert!(stopped != Some("endpoint_failures"), "the endpoint failed: {failures:?}");
+    assert!(
+        stopped != Some("endpoint_failures"),
+        "the endpoint failed: {failures:?}"
+    );
     assert!(passed, "below the recorded pass rule: {totals}");
 }
