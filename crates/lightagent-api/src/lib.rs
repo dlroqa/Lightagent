@@ -2081,10 +2081,8 @@ mod tests {
     // its wait: the session is still recorded and released.
     #[tokio::test]
     async fn a_run_ending_in_the_recorders_gap_is_still_recorded() {
-        let root = std::env::temp_dir().join(format!(
-            "lightagent-session-wait-{}",
-            RunId::new().as_str()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("lightagent-session-wait-{}", RunId::new().as_str()));
         let sessions = SessionStore::new(root.clone());
         let session = Session::new("default", "agent session");
         let id = session.id.clone();
@@ -2115,7 +2113,10 @@ mod tests {
             .unwrap();
         let saved = sessions.load(&id).unwrap();
         assert_eq!(
-            saved.messages.last().map(|message| message.content.as_str()),
+            saved
+                .messages
+                .last()
+                .map(|message| message.content.as_str()),
             Some("the answer")
         );
         assert_eq!(
