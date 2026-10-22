@@ -1,0 +1,105 @@
+name: sandbox stress
+
+# A measurement, not a required check: how often the experimental bubblewrap
+# backend leaves a process alive when a run is cancelled during startup. It
+# runs the live process-tree test many times, with the cancellation loop
+# lengthened and every CPU busy, against `source` (any commit), so the base
+# and a fix are measured by the same harness. Results go to the job summary.
+
+on:
+  pull_request:
+    paths:
+      - crates/lightagent-tools/src/sandbox/**
+      - crates/lightagent-tools/tests/sandbox_bubblewrap.rs
+      - .github/workflows/sandbox-stress.yml
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Commit or branch whose backend and test are measured
+        required: true
+      rounds:
+        description: Test runs
+        default: '10'
+      attempts:
+        description: Cancellations per test run
+        default: '300'
+      load:
+        description: Keep every CPU busy while measuring
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  stress:
+    name: Sandbox cancellation stress (measurement)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source || github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sandbox-linux
+      - name: Install bubblewrap and grant it user namespaces
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap
+          printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' \
+            'profile bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '}' \
+            | sudo tee /etc/apparmor.d/lightagent-bwrap
+          sudo apparmor_parser -r /etc/apparmor.d/lightagent-bwrap
+      - name: Lengthen the cancellation loop
+        env:
+          ATTEMPTS: ${{ inputs.attempts || '300' }}
+        run: |
+          file=crates/lightagent-tools/tests/sandbox_bubblewrap.rs
+          grep -q '.cycle().take(30)' "$file"
+          sed -i "s/\.cycle()\.take(30)/.cycle().take(${ATTEMPTS})/" "$file"
+          cargo test -p lightagent-tools --test sandbox_bubblewrap --no-run
+      - name: Measure
+        env:
+          LIGHTAGENT_SANDBOX_LIVE: '1'
+          ROUNDS: ${{ inputs.rounds || '10' }}
+          ATTEMPTS: ${{ inputs.attempts || '300' }}
+          LOAD: ${{ inputs.load == false && 'false' || 'true' }}
+          SOURCE: ${{ inputs.source || github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set +e
+          if [ "$LOAD" = true ]; then
+            for _ in $(seq "$(nproc)"); do (while :; do :; done) & done
+          fi
+          failed=0
+          : > "$RUNNER_TEMP/failures.log"
+          for round in $(seq "$ROUNDS"); do
+            out="$RUNNER_TEMP/round-$round.log"
+            cargo test -p lightagent-tools --test sandbox_bubblewrap -- --ignored --nocapture \
+              --exact the_whole_process_tree_ends_with_the_execution > "$out" 2>&1
+            if [ $? -ne 0 ]; then
+              failed=$((failed + 1))
+              grep -E 'survived|panicked|assertion' "$out" | head -5 >> "$RUNNER_TEMP/failures.log"
+            fi
+          done
+          jobs -p | xargs -r kill
+          {
+            echo "### Sandbox cancellation stress"
+            echo
+            echo "| Source | CPU load | Test runs | Cancellations per run | Failed runs |"
+            echo "| --- | --- | --- | --- | --- |"
+            echo "| \`$SOURCE\` | $LOAD | $ROUNDS | $ATTEMPTS | $failed |"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/failures.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "failed runs: $failed of $ROUNDS"
+          [ "$failed" -eq 0 ]
