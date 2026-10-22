@@ -11,9 +11,10 @@
 //! `inference.tool_names`. Its results measure the named model on these
 //! tasks only.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -219,6 +220,33 @@ struct Factory {
     base_url: String,
     api_key: Option<String>,
     tool_names: lightagent_core::ToolNameMode,
+    /// Model requests made so far, and the most the run may make.
+    used: Arc<AtomicU32>,
+    max_requests: u32,
+}
+
+/// A provider that refuses every request past the run's ceiling, so a
+/// pilot can never spend more than it was authorized to.
+struct Counted {
+    inner: Arc<dyn AgentProvider>,
+    used: Arc<AtomicU32>,
+    max_requests: u32,
+}
+
+#[async_trait]
+impl AgentProvider for Counted {
+    async fn stream(
+        &self,
+        request: lightagent_core::provider::ProviderRequest,
+        cancel: CancellationToken,
+    ) -> Result<lightagent_core::provider::ProviderStream, ProviderError> {
+        if self.used.fetch_add(1, Ordering::SeqCst) >= self.max_requests {
+            return Err(ProviderError::Upstream(
+                "the evaluation's request ceiling is reached".to_owned(),
+            ));
+        }
+        self.inner.stream(request, cancel).await
+    }
 }
 
 impl lightagent_core::ProviderFactory for Factory {
@@ -228,7 +256,11 @@ impl lightagent_core::ProviderFactory for Factory {
         if let Some(key) = &self.api_key {
             config = config.with_api_key(key.clone());
         }
-        Ok(Arc::new(LightweightProvider::new(config)?))
+        Ok(Arc::new(Counted {
+            inner: Arc::new(LightweightProvider::new(config)?),
+            used: Arc::clone(&self.used),
+            max_requests: self.max_requests,
+        }))
     }
 }
 
@@ -520,11 +552,40 @@ async fn live_role_evaluation() {
             .expect("LIGHTAGENT_EVAL_TOOL_NAMES: native or portable"),
         None => lightagent_core::ToolNameMode::Native,
     };
+    // A staged pilot runs fewer tasks, fewer runs and a hard request
+    // ceiling; by default the recorded set in full, at most 8 requests a run.
+    let only: Option<BTreeSet<String>> = env("LIGHTAGENT_EVAL_TASKS").map(|tasks| {
+        tasks
+            .split(',')
+            .map(|task| task.trim().to_owned())
+            .filter(|task| !task.is_empty())
+            .collect()
+    });
+    let runs = env("LIGHTAGENT_EVAL_RUNS")
+        .and_then(|runs| runs.parse::<u32>().ok())
+        .map_or(set.thresholds.runs_per_task, |runs| {
+            runs.clamp(1, set.thresholds.runs_per_task)
+        });
+    let tasks: Vec<&Task> = set
+        .tasks
+        .iter()
+        .filter(|task| only.as_ref().is_none_or(|only| only.contains(&task.id)))
+        .collect();
+    assert!(!tasks.is_empty(), "LIGHTAGENT_EVAL_TASKS names no recorded task");
+    let model_count = models.split(',').filter(|m| !m.trim().is_empty()).count();
+    let natural = u32::try_from(tasks.len() * model_count).unwrap_or(u32::MAX) * runs * 8;
+    let max_requests = env("LIGHTAGENT_EVAL_MAX_REQUESTS")
+        .and_then(|max| max.parse::<u32>().ok())
+        .map_or(natural, |max| max.min(natural));
+    let used = Arc::new(AtomicU32::new(0));
     let factory = Arc::new(Factory {
         base_url,
         api_key: env("LIGHTAGENT_EVAL_API_KEY"),
         tool_names,
+        used: Arc::clone(&used),
+        max_requests,
     });
+    let mut stopped = false;
     let root: PathBuf =
         std::env::temp_dir().join(format!("lightagent-role-eval-{}", RunId::new().as_str()));
     std::fs::create_dir_all(&root).unwrap();
@@ -536,8 +597,12 @@ async fn live_role_evaluation() {
         .filter(|model| !model.is_empty())
     {
         let mut by_role: BTreeMap<String, (u32, u32)> = BTreeMap::new();
-        for task in &set.tasks {
-            for attempt in 0..set.thresholds.runs_per_task {
+        for task in &tasks {
+            for attempt in 0..runs {
+                if used.load(Ordering::SeqCst) >= max_requests {
+                    stopped = true;
+                    break;
+                }
                 let report = run_task(task, model, Arc::clone(&factory), &root).await;
                 let failures = score(&task.expect, &report);
                 let entry = by_role.entry(task.role.clone()).or_default();
@@ -567,9 +632,21 @@ async fn live_role_evaluation() {
     }
     if let Some(out) = env("LIGHTAGENT_EVAL_OUT") {
         std::fs::create_dir_all(&out).unwrap();
-        let report = json!({ "set": set.schema, "recorded": set.recorded, "results": results });
+        let report = json!({
+            "set": set.schema, "recorded": set.recorded, "results": results,
+            "requests": used.load(Ordering::SeqCst), "request_ceiling": max_requests,
+            "runs_per_task": runs, "stopped_at_ceiling": stopped,
+        });
         std::fs::write(Path::new(&out).join("role-eval.json"), report.to_string()).unwrap();
     }
     let _ = std::fs::remove_dir_all(&root);
+    println!(
+        "EVIDENCE requests {} of {max_requests}",
+        used.load(Ordering::SeqCst)
+    );
+    assert!(
+        !stopped,
+        "stopped at the request ceiling: the evaluation is incomplete, not a pass"
+    );
     assert!(below.is_empty(), "below the recorded threshold: {below:?}");
 }

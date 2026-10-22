@@ -22,6 +22,7 @@
 mod live;
 pub(crate) mod metrics;
 mod routing;
+mod specialists;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
