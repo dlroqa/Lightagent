@@ -568,7 +568,7 @@ async fn legacy_resolution_is_refused_to_an_untrusted_run() {
 #[tokio::test]
 async fn a_planned_tester_waits_for_the_coder_whose_change_it_verifies() {
     let home = Scratch::new();
-    let worker = MockProvider::new(vec![answer("Patch proposed."), answer("Verified.")]);
+    let worker = MockProvider::new(vec![answer("Patch proposed.")]);
     let delegation = lead(&home.path, worker);
     delegation
         .plan
@@ -589,7 +589,14 @@ async fn a_planned_tester_waits_for_the_coder_whose_change_it_verifies() {
     assert!(!coded.is_error, "{}", coded.content);
     assert_eq!(report["status"], "completed");
     assert_eq!(report["answer"], "Patch proposed.");
-    let (tested, report) = delegate(&ctx, "tester", "Run the tests on the patch.").await;
-    assert!(!tested.is_error, "{}", tested.content);
-    assert_eq!(report["answer"], "Verified.");
+    // The coder only said it made a change: there is no proposed patch to
+    // bind a test to, so the tester is refused rather than told to verify
+    // nothing. (Binding to a real patch is `coder_workflow.rs`.)
+    let (tested, _) = delegate(&ctx, "tester", "Run the tests on the patch.").await;
+    assert!(tested.is_error);
+    assert!(
+        tested.content.contains("proposed no change"),
+        "{}",
+        tested.content
+    );
 }
