@@ -1,0 +1,164 @@
+name: windows MCP timeout diagnostics
+
+# Diagnostic branch only; never merged. Investigates the Windows failure of
+# chat::model_tests::installed_mcp_tool_is_listed_callable_and_removed
+# ("MCP server 'fixture' unavailable: request timed out") on #44's
+# integration candidate (check run 39887011384, attempt 1).
+#
+#   original      the unmodified test, in the same configuration as the
+#                 failed job (windows-latest, bash, cache key windows-x64,
+#                 npm ci, `cargo test --workspace --lib`), ten runs each on
+#                 master and on the candidate.
+#   instrumented  a probe of the same stdio MCP path with phase records
+#                 (diag_stdio_probe.rs, test file only), idle and while the
+#                 lightagent lib suite runs alongside it.
+
+on:
+  push:
+    branches: [diag/windows-mcp-timeout]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  original:
+    name: original (${{ matrix.target.name }} ${{ matrix.run }})
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { name: master, sha: 7d747d9ebe01e1a7adc32c5d7f6ff2940f4c94ac }
+          - { name: candidate, sha: 9c2f8a49dc935af9b60a6e5e3e3788cfca3eb634 }
+        run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.target.sha }}
+          persist-credentials: false
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-x64
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --prefix frontend
+      - name: Record the target, image and Python
+        run: |
+          {
+            echo "### original ${{ matrix.target.name }} ${{ matrix.run }}"
+            echo "commit $(git rev-parse HEAD), tree $(git rev-parse 'HEAD^{tree}')"
+            echo "image ${ImageOS:-?} ${ImageVersion:-?}; nproc $(nproc)"
+            echo "python3: $(command -v python3); $(python3 --version 2>&1)"
+            start=$(date +%s%N); python3 -c pass; end=$(date +%s%N)
+            echo "python3 -c pass: $(( (end - start) / 1000000 )) ms"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Lib unit tests, as check.sh runs them
+        id: tests
+        run: |
+          set -o pipefail
+          cargo test --workspace --lib 2>&1 | tee "$RUNNER_TEMP/tests.log"
+      - name: Result of the test under investigation
+        if: always()
+        run: |
+          line=$(grep -E 'installed_mcp_tool_is_listed_callable_and_removed \.\.\. (ok|FAILED)' "$RUNNER_TEMP/tests.log" || echo "not run")
+          {
+            echo "suite: ${{ steps.tests.outcome }}"
+            echo "test: $line"
+            grep -E "MCP server 'fixture' unavailable" "$RUNNER_TEMP/tests.log" || true
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  instrumented:
+    name: instrumented (${{ matrix.target.name }} ${{ matrix.run }})
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { name: master, sha: 7d747d9ebe01e1a7adc32c5d7f6ff2940f4c94ac }
+          - { name: candidate, sha: 9c2f8a49dc935af9b60a6e5e3e3788cfca3eb634 }
+        run: [1, 2, 3]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.target.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: .diag
+          persist-credentials: false
+          sparse-checkout: crates/lightagent-mcp/tests/diag_stdio_probe.rs
+          sparse-checkout-cone-mode: false
+      - name: Add the probe (test file only; no target file changes)
+        run: |
+          cp .diag/crates/lightagent-mcp/tests/diag_stdio_probe.rs crates/lightagent-mcp/tests/
+          rm -rf .diag
+          git diff --exit-code
+          {
+            echo "### instrumented ${{ matrix.target.name }} ${{ matrix.run }}"
+            echo "commit $(git rev-parse HEAD), tree $(git rev-parse 'HEAD^{tree}')"
+            echo "image ${ImageOS:-?} ${ImageVersion:-?}; nproc $(nproc)"
+            echo "python3: $(command -v python3); $(python3 --version 2>&1)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-x64
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --prefix frontend
+      - name: Build the probe and the lightagent lib tests
+        run: |
+          set -o pipefail
+          cargo test -p lightagent-mcp --test diag_stdio_probe --no-run
+          cargo test --workspace --lib --no-run 2>&1 | tee "$RUNNER_TEMP/build.log"
+          exe=$(grep -oE 'target[\\/]debug[\\/]deps[\\/]lightagent-[0-9a-f]+\.exe' "$RUNNER_TEMP/build.log" | head -1)
+          [ -n "$exe" ] || { echo "lightagent lib test binary not found"; exit 1; }
+          echo "LIB_TESTS=$PWD/${exe//\\//}" >> "$GITHUB_ENV"
+      - name: Probe, idle (10 rounds x 4 at once)
+        id: idle
+        continue-on-error: true
+        timeout-minutes: 15
+        env:
+          DIAG_MODE: idle
+        run: cargo test -p lightagent-mcp --test diag_stdio_probe -- --ignored --nocapture
+      - name: Probe, while the lightagent lib suite runs
+        id: loaded
+        continue-on-error: true
+        timeout-minutes: 15
+        env:
+          DIAG_MODE: loaded
+        run: |
+          ( cd crates/lightagent && "$LIB_TESTS" > "$RUNNER_TEMP/load.log" 2>&1; echo "load suite exit $?" >> "$RUNNER_TEMP/load.log" ) &
+          load=$!
+          sleep 2
+          cargo test -p lightagent-mcp --test diag_stdio_probe -- --ignored --nocapture
+          status=$?
+          wait "$load"
+          tail -3 "$RUNNER_TEMP/load.log"
+          grep -E 'installed_mcp_tool_is_listed_callable_and_removed \.\.\. (ok|FAILED)' "$RUNNER_TEMP/load.log" || true
+          exit $status
+      - name: Outcome
+        if: always()
+        run: |
+          echo "idle ${{ steps.idle.outcome }}; loaded ${{ steps.loaded.outcome }}" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "${{ steps.idle.outcome }}" = success ] && [ "${{ steps.loaded.outcome }}" = success ]
