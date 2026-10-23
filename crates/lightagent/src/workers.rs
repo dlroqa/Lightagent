@@ -560,4 +560,6 @@ fn role_readiness(
 }
 
 #[cfg(test)]
+mod isolation;
+#[cfg(test)]
 mod tests;
