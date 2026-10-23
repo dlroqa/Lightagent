@@ -1,0 +1,68 @@
+name: MCP stdio diagnostics before/after evidence
+
+# Evidence branch only; never merged. BEFORE: #53's head plus only
+# tests/stdio_diagnostics.rs. AFTER: the diagnostics PR. BEFORE must fail
+# exactly the exit test (the silent-server test passes on both); AFTER must
+# pass both.
+
+on:
+  push:
+    branches: [diag/mcp-diagnostics-evidence]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+  BEFORE: 6009c01ca008183b3900ecb53796c551fb68bd11
+  AFTER: 3a012417cee99c0382f8d5ce5a89b6af08273180
+
+jobs:
+  diagnostics:
+    name: diagnostics (${{ matrix.variant }} ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04, macos-15]
+        variant: [before, after]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.variant == 'before' && env.BEFORE || env.AFTER }}
+          persist-credentials: false
+      - run: rustup show
+      - name: tests/stdio_diagnostics.rs
+        id: tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 --version
+          cargo test -p lightagent-mcp --test stdio_diagnostics -- --nocapture 2>&1 | tee "$RUNNER_TEMP/tests.log"
+      - name: Check the expected outcome
+        env:
+          VARIANT: ${{ matrix.variant }}
+          OUTCOME: ${{ steps.tests.outcome }}
+        run: |
+          set -euo pipefail
+          failed=$( (grep -oE '^test [a-z_]+ \.\.\. FAILED' "$RUNNER_TEMP/tests.log" || true) | awk '{print $2}' | sort | tr '\n' ' ')
+          passed=$( (grep -oE '^test [a-z_]+ \.\.\. ok' "$RUNNER_TEMP/tests.log" || true) | awk '{print $2}' | sort | tr '\n' ' ')
+          {
+            echo "### diagnostics $VARIANT on $RUNNER_OS ($(git rev-parse HEAD))"
+            echo "failed: ${failed:-none}"
+            echo "passed: ${passed:-none}"
+            grep -E '^reported after' "$RUNNER_TEMP/tests.log" || true
+            grep -E "panicked|^thread" "$RUNNER_TEMP/tests.log" | head -4 || true
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          sed -n '/^failures:/,/^test result/p' "$RUNNER_TEMP/tests.log" | head -40
+          if [ "$VARIANT" = before ]; then
+            [ "$failed" = "a_server_that_exits_is_reported_at_once_with_its_stderr " ] || { echo "BEFORE: expected only the exit test to fail"; exit 1; }
+            echo "BEFORE failed exactly the exit test." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            [ "$OUTCOME" = success ] && [ -z "$failed" ] || { echo "AFTER must pass"; exit 1; }
+            echo "AFTER passed both tests." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
