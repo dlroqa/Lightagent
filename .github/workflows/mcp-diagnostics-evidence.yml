@@ -15,7 +15,7 @@ permissions:
 env:
   CARGO_INCREMENTAL: '0'
   BEFORE: 6009c01ca008183b3900ecb53796c551fb68bd11
-  AFTER: 3a012417cee99c0382f8d5ce5a89b6af08273180
+  AFTER: 48b05495bb31b278100d33d11fca9e72b844a2df
 
 jobs:
   diagnostics:
