@@ -28,7 +28,7 @@ pub mod jsonrpc;
 pub mod tool;
 
 pub use client::{CallResult, McpClient, McpToolDef};
-pub use connection::{Connection, HttpConnection, StdioConnection};
+pub use connection::{Connection, HttpConnection, StdioConnection, wait_for_exit_under};
 pub use hub::{McpHub, McpServerSpec, McpTransportSpec};
 pub use jsonrpc::McpError;
 pub use tool::McpTool;

@@ -1241,6 +1241,21 @@ pub async fn run(
                 // deleted files elsewhere. Every path below rebuilds the
                 // runtime, so a failed operation still leaves a usable chat.
                 drop(agent);
+                // A stopped MCP server exits on its own schedule and keeps its
+                // extension's directory in use until it has; wait for it,
+                // bounded by the MCP timeout, before anything there moves.
+                let exit_timeout = Duration::from_secs(config.mcp.timeout_secs);
+                for dir in lightagent_extensions::extension_dirs(paths.root(), &profile_dir) {
+                    if let Err(running) =
+                        lightagent_mcp::wait_for_exit_under(&dir, exit_timeout).await
+                    {
+                        eprintln!(
+                            "· {running} MCP server(s) from {} had not exited after {}s",
+                            dir.display(),
+                            config.mcp.timeout_secs
+                        );
+                    }
+                }
                 let operation = match &command {
                     Slash::ExtensionInstall(source) => {
                         crate::extensions::install(Path::new(source), false, false)
@@ -3502,21 +3517,14 @@ for line in sys.stdin:
 
         // The registry owns the server connection, so release it before the
         // bundle is removed, exactly as the chat does for `/extensions
-        // uninstall`. The server is killed when its connection drops, but the
-        // process exits on its own schedule and runs from the very directory
-        // being removed, so give it a moment to let go.
+        // uninstall`: the server is stopped when its connection drops, and
+        // the bundle is removed once it has exited (bounded by the default MCP
+        // timeout).
         drop(registry);
-        let mut attempts = 0;
-        loop {
-            match lightagent_extensions::uninstall("fixture", &root) {
-                Ok(()) => break,
-                Err(error) => {
-                    attempts += 1;
-                    assert!(attempts < 50, "could not uninstall: {error}");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
-        }
+        lightagent_mcp::wait_for_exit_under(&root, Duration::from_secs(config.mcp.timeout_secs))
+            .await
+            .expect("the fixture server exited");
+        lightagent_extensions::uninstall("fixture", &root).expect("uninstalled once it exited");
         assert!(!root.join("fixture").exists());
         let removed = ExtensionStore::load(std::slice::from_ref(&root));
         assert!(
