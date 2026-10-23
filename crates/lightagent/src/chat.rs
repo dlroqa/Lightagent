@@ -388,6 +388,16 @@ pub(crate) fn configured_builtin_registry(config: &Config, has_skills: bool) -> 
     if !has_skills {
         registry = registry.without("skill.read");
     }
+    if config.tools.enabled {
+        // A coder proposes patches; the lead applies them under approval.
+        use lightagent_tools::builtins::{PatchApply, PatchPropose};
+        registry = registry
+            .with(Arc::new(PatchPropose::new()))
+            .with(Arc::new(PatchApply::new()));
+    }
+    if actions_configured(config) && !config.platform.github_actions.commit_refs.is_empty() {
+        registry = registry.with(Arc::new(lightagent_tools::builtins::RepoCommit::new()));
+    }
     if config.subagents.enabled {
         // A person's decision on an action a worker paused for.
         use lightagent_tools::builtins::{AgentDeclineWorker, AgentResumeWorker};
@@ -445,6 +455,7 @@ pub(crate) fn actions_context(config: &Config) -> Option<ActionsContext> {
             .as_ref()
             .and_then(|key| key.resolve()),
         workflows: actions.workflows.clone(),
+        commit_refs: actions.commit_refs.clone(),
         poll_interval: Duration::from_secs(actions.poll_interval_secs.max(1)),
         max_wait: Duration::from_secs(actions.max_wait_secs),
         max_log_bytes: actions.max_log_bytes,
@@ -964,6 +975,7 @@ async fn build_chat_runtime(
     if let Some(actions) = actions_context(config) {
         executor = executor.with_actions(actions);
     }
+    executor = executor.with_patches(lightagent_tools::builtins::PatchContext::default());
     let mut run_profile = profile.clone();
     if !skills.is_empty() {
         run_profile

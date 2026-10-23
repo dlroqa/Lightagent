@@ -54,14 +54,14 @@ fn broker(ctx: &ToolCtx) -> Result<&ActionsContext, ToolOutcome> {
 }
 
 /// One response: its status and parsed JSON body (`Null` when not JSON).
-struct Reply {
-    status: StatusCode,
-    body: Value,
-    location: Option<String>,
+pub(crate) struct Reply {
+    pub(crate) status: StatusCode,
+    pub(crate) body: Value,
+    pub(crate) location: Option<String>,
 }
 
 /// Call the REST API at `path` (beginning with `/`), with the token.
-async fn api(
+pub(crate) async fn api(
     actions: &ActionsContext,
     method: Method,
     path: &str,
@@ -103,7 +103,7 @@ async fn api(
 }
 
 /// A refusal from the API: its status and message, nothing else.
-fn api_error(what: &str, reply: &Reply) -> String {
+pub(crate) fn api_error(what: &str, reply: &Reply) -> String {
     let message = reply
         .body
         .get("message")
@@ -126,7 +126,7 @@ fn allowed_workflow<'a>(
 }
 
 /// Whether `branch` matches one of `patterns` (exact, or `prefix*`).
-fn ref_allowed(patterns: &[String], branch: &str) -> bool {
+pub(crate) fn ref_allowed(patterns: &[String], branch: &str) -> bool {
     patterns
         .iter()
         .any(|pattern| match pattern.strip_suffix('*') {
@@ -136,7 +136,7 @@ fn ref_allowed(patterns: &[String], branch: &str) -> bool {
 }
 
 /// A branch name safe to put in an API path.
-fn valid_branch(branch: &str) -> bool {
+pub(crate) fn valid_branch(branch: &str) -> bool {
     !branch.is_empty()
         && !branch.starts_with(['-', '/'])
         && !branch.ends_with('/')
@@ -146,7 +146,7 @@ fn valid_branch(branch: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/'))
 }
 
-fn valid_sha(sha: &str) -> bool {
+pub(crate) fn valid_sha(sha: &str) -> bool {
     sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())
 }
 

@@ -59,6 +59,7 @@ pub struct BoundedExecutor {
     workspace: Option<WorkspaceContext>,
     open_terminal: Option<OpenTerminalContext>,
     actions: Option<ActionsContext>,
+    patches: Option<crate::builtins::PatchContext>,
     skills: Option<SkillContext>,
 }
 
@@ -86,6 +87,7 @@ impl BoundedExecutor {
             workspace: None,
             open_terminal: None,
             actions: None,
+            patches: None,
             skills: None,
         }
     }
@@ -187,6 +189,12 @@ impl BoundedExecutor {
         self
     }
 
+    /// Enable the patch tools over `patches`.
+    pub fn with_patches(mut self, patches: crate::builtins::PatchContext) -> Self {
+        self.patches = Some(patches);
+        self
+    }
+
     /// The risk and scopes a call would carry, from its tool's definition.
     fn classify(&self, call: &ToolCall) -> Option<(RiskClass, Vec<Scope>)> {
         self.registry
@@ -221,6 +229,21 @@ impl BoundedExecutor {
                 .ok()
                 .map(|args| redact(args).to_string())
                 .unwrap_or_else(|| preview(&call.arguments)),
+            // What approving writes: the patch's files and base.
+            crate::builtins::PatchApply::NAME | crate::builtins::RepoCommit::NAME => {
+                serde_json::from_str::<Value>(&call.arguments)
+                    .ok()
+                    .and_then(|args| {
+                        let id = args.get("patch_id")?.as_str()?;
+                        let patch = self.patches.as_ref()?.store.describe(id)?;
+                        let branch = args.get("branch").and_then(Value::as_str);
+                        Some(match branch {
+                            Some(branch) => format!("{patch} branch={branch}"),
+                            None => patch,
+                        })
+                    })
+                    .unwrap_or_else(|| preview(&call.arguments))
+            }
             // What approving lets run: the parked worker's exact action.
             crate::builtins::AgentResumeWorker::NAME => self
                 .resumed_action(&call.arguments)
@@ -271,6 +294,9 @@ impl BoundedExecutor {
         }
         if let Some(actions) = &self.actions {
             ctx = ctx.with_actions(actions.clone());
+        }
+        if let Some(patches) = &self.patches {
+            ctx = ctx.with_patches(patches.clone());
         }
         if let Some(authorization) = &self.authorization {
             ctx = ctx.with_authorization(authorization.clone());

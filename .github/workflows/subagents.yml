@@ -65,9 +65,11 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    # contents: write only so the live coder check can create, commit to and
+    # delete its own scratch branch (subagents/live-coder-*).
     permissions:
       actions: write
-      contents: read
+      contents: write
     defaults:
       run:
         shell: bash
@@ -87,7 +89,7 @@ jobs:
           LIGHTAGENT_BROKER_LIVE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -o pipefail
-          cargo test -p lightagent-tools --test actions_broker -- --ignored --nocapture live_ \
+          cargo test -p lightagent-tools --test actions_broker -- --ignored --nocapture --test-threads=1 live_ \
             2>&1 | tee "$RUNNER_TEMP/broker.log"
       - name: Summarize
         if: always()
