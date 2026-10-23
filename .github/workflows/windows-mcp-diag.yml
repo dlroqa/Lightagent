@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       jobs:
-        description: 'all, or instrumented'
+        description: 'all, instrumented or uninstall'
         default: instrumented
       runs:
         description: Instrumented runs per target (JSON list)
@@ -87,6 +87,7 @@ jobs:
 
   instrumented:
     name: instrumented (${{ matrix.target.name }} ${{ matrix.run }})
+    if: inputs.jobs == 'all' || inputs.jobs == 'instrumented'
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
@@ -182,3 +183,41 @@ jobs:
         run: |
           echo "idle ${{ steps.idle.outcome }}; loaded ${{ steps.loaded.outcome }}" | tee -a "$GITHUB_STEP_SUMMARY"
           [ "${{ steps.idle.outcome }}" = success ] && [ "${{ steps.loaded.outcome }}" = success ]
+
+  uninstall:
+    name: uninstall while in use (${{ matrix.os }} ${{ matrix.run }})
+    if: inputs.jobs == 'all' || inputs.jobs == 'uninstall'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, run: 1 }
+          - { os: windows-latest, run: 2 }
+          - { os: windows-latest, run: 3 }
+          - { os: ubuntu-24.04, run: 1 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 7d747d9ebe01e1a7adc32c5d7f6ff2940f4c94ac
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: .diag
+          persist-credentials: false
+          sparse-checkout: crates/lightagent-extensions/tests/diag_uninstall_in_use.rs
+          sparse-checkout-cone-mode: false
+      - name: Add the diagnostic test (test file only; master 7d747d9)
+        run: |
+          cp .diag/crates/lightagent-extensions/tests/diag_uninstall_in_use.rs crates/lightagent-extensions/tests/
+          rm -rf .diag
+          git diff --exit-code
+          echo "commit $(git rev-parse HEAD), tree $(git rev-parse 'HEAD^{tree}'); $(python3 --version 2>&1)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - run: rustup show
+      - name: Uninstall while a process runs from the directory
+        run: cargo test -p lightagent-extensions --test diag_uninstall_in_use -- --ignored --nocapture
