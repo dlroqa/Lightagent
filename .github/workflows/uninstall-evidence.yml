@@ -1,0 +1,200 @@
+name: uninstall before/after evidence
+
+# Evidence branch only; never merged. Compares PR #53 (AFTER) with master
+# 7d747d9 plus only the new regression tests (BEFORE).
+#
+#   regression  tests/uninstall.rs on Windows, Linux and macOS. BEFORE must
+#               fail exactly the expected tests; AFTER must pass them all.
+#   cli         the user-facing `lightagent extensions` commands: in use,
+#               an empty directory left by the old code, unverified leftovers,
+#               repeated uninstall.
+#   chat        the lightagent lib suite on Windows (AFTER), five times: the
+#               MCP extension test now waits for its server to exit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      before:
+        description: BEFORE commit
+        required: true
+      after:
+        description: AFTER commit
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  regression:
+    name: regression (${{ matrix.variant }} ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04, macos-15]
+        variant: [before, after]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.variant == 'before' && inputs.before || inputs.after }}
+          persist-credentials: false
+      - run: rustup show
+      - name: tests/uninstall.rs
+        id: tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo test -p lightagent-extensions --test uninstall 2>&1 | tee "$RUNNER_TEMP/tests.log"
+      - name: Check the expected outcome
+        env:
+          VARIANT: ${{ matrix.variant }}
+          OUTCOME: ${{ steps.tests.outcome }}
+        run: |
+          set -euo pipefail
+          failed=$(grep -oE '^test [a-z_]+ \.\.\. FAILED' "$RUNNER_TEMP/tests.log" | awk '{print $2}' | sort | tr '\n' ' ')
+          passed=$(grep -oE '^test [a-z_]+ \.\.\. ok' "$RUNNER_TEMP/tests.log" | awk '{print $2}' | sort | tr '\n' ' ')
+          expected="a_removal_interrupted_after_the_rename_is_finished_and_never_loaded an_empty_directory_left_without_its_manifest_is_finished entries_left_without_a_manifest_are_reported_and_kept "
+          if [ "$RUNNER_OS" = Windows ]; then
+            expected="a_removal_interrupted_after_the_rename_is_finished_and_never_loaded an_empty_directory_left_without_its_manifest_is_finished an_extension_in_use_is_left_intact_and_uninstalls_once_released entries_left_without_a_manifest_are_reported_and_kept "
+          fi
+          {
+            echo "### regression $VARIANT on $RUNNER_OS ($(git rev-parse HEAD))"
+            echo "outcome: $OUTCOME"
+            echo "failed: ${failed:-none}"
+            echo "passed: ${passed:-none}"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          sed -n '/^failures:/,/^test result/p' "$RUNNER_TEMP/tests.log" | head -80
+          if [ "$VARIANT" = before ]; then
+            [ "$failed" = "$expected" ] || { echo "BEFORE: expected exactly: $expected"; exit 1; }
+            echo "BEFORE failed exactly the expected tests." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            [ "$OUTCOME" = success ] && [ -z "$failed" ] || { echo "AFTER must pass"; exit 1; }
+            echo "AFTER passed every test." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+  cli:
+    name: cli (${{ matrix.variant }} ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04, macos-15]
+        variant: [before, after]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.variant == 'before' && inputs.before || inputs.after }}
+          persist-credentials: false
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: uninstall-cli
+      - run: cargo build -p lightagent --bin lightagent
+      - name: The user-facing uninstall path
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -u
+          export LIGHTAGENT_HOME="$RUNNER_TEMP/home"
+          mkdir -p "$LIGHTAGENT_HOME"
+          bin="$PWD/target/debug/lightagent"
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          src="$RUNNER_TEMP/src/fixture"
+          mkdir -p "$src"
+          printf '%s' '{"name":"fixture"}' > "$src/extension.json"
+          echo "installed directory" > "$src/marker.txt"
+          ext="$LIGHTAGENT_HOME/extensions"
+          unexpected=0
+          check() { # label expected(ok|fail) exit-code output
+            local seen=ok; [ "$3" = 0 ] || seen=fail
+            local mark=as-expected; [ "$seen" = "$2" ] || { mark=UNEXPECTED; unexpected=1; }
+            echo "| $1 | expected $2 | $seen ($3) | $mark | $(echo "$4" | tr '\n' ' ' | cut -c1-220) |" | tee -a "$GITHUB_STEP_SUMMARY"
+          }
+          listed() { "$bin" extensions list 2>&1 | grep -c fixture || true; }
+          echo "### cli $VARIANT on $RUNNER_OS ($(git rev-parse HEAD))" >> "$GITHUB_STEP_SUMMARY"
+          echo "| step | expected | result | | output |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          out=$("$bin" extensions install "$src" 2>&1); check install ok $? "$out"
+          # 1. In use: a process runs from the installed directory.
+          if [ "$RUNNER_OS" = Windows ]; then
+            ( cd "$ext/fixture" && exec ping -n 60 127.0.0.1 > /dev/null ) &
+          else
+            ( cd "$ext/fixture" && exec sleep 60 ) &
+          fi
+          holder=$!
+          sleep 2
+          out=$("$bin" extensions uninstall fixture 2>&1); code=$?
+          if [ "$RUNNER_OS" = Windows ]; then
+            check "uninstall while in use" fail $code "$out"
+            files=$(ls "$ext/fixture" 2>/dev/null | tr '\n' ' ')
+            check "files kept while in use: [$files]" ok "$([ -f "$ext/fixture/extension.json" ] && [ -f "$ext/fixture/marker.txt" ] && echo 0 || echo 1)" "$files"
+            check "still listed while in use" ok "$([ "$(listed)" -ge 1 ] && echo 0 || echo 1)" "$("$bin" extensions list 2>&1)"
+          else
+            check "uninstall while in use (allowed here)" ok $code "$out"
+          fi
+          kill "$holder" 2> /dev/null
+          [ "$RUNNER_OS" = Windows ] && taskkill //F //IM ping.exe > /dev/null 2>&1
+          wait "$holder" 2> /dev/null
+          sleep 1
+          if [ "$RUNNER_OS" = Windows ]; then
+            out=$("$bin" extensions uninstall fixture 2>&1); check "uninstall once released" ok $? "$out"
+          fi
+          check "no longer listed" ok "$([ "$(listed)" = 0 ] && echo 0 || echo 1)" "$("$bin" extensions list 2>&1)"
+          out=$("$bin" extensions uninstall fixture 2>&1); check "uninstall again (not installed)" fail $? "$out"
+          # 2. An empty directory left without its manifest (the old failure's state).
+          mkdir -p "$ext/legacy"
+          out=$("$bin" extensions uninstall legacy 2>&1); check "finish an empty leftover" ok $? "$out"
+          check "empty leftover gone" ok "$([ -d "$ext/legacy" ] && echo 1 || echo 0)" ""
+          # 3. Unverified entries without a manifest are reported and kept.
+          mkdir -p "$ext/kept" && echo keep > "$ext/kept/keep.txt"
+          out=$("$bin" extensions uninstall kept 2>&1); check "unverified leftover refused" fail $? "$out"
+          check "unverified entries kept" ok "$([ -f "$ext/kept/keep.txt" ] && echo 0 || echo 1)" ""
+          echo "unexpected=$unexpected" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$VARIANT" = after ] && [ "$unexpected" != 0 ]; then exit 1; fi
+          exit 0
+
+  chat:
+    name: chat MCP extension test (after, windows ${{ matrix.run }})
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3, 4, 5]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.after }}
+          persist-credentials: false
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-x64
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --prefix frontend
+      - name: Lib unit tests, as check.sh runs them
+        run: |
+          set -o pipefail
+          cargo test --workspace --lib 2>&1 | tee "$RUNNER_TEMP/tests.log"
+      - name: Result of the MCP extension test
+        if: always()
+        run: |
+          grep -E 'installed_mcp_tool_is_listed_callable_and_removed \.\.\. (ok|FAILED)' "$RUNNER_TEMP/tests.log" | tee -a "$GITHUB_STEP_SUMMARY" || echo "not run" | tee -a "$GITHUB_STEP_SUMMARY"
