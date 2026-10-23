@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lightagent_extensions::{ExtensionStore, install, uninstall};
 
@@ -44,25 +44,39 @@ fn loaded(root: &Path) -> usize {
 }
 
 /// A process whose working directory is `dir`, as an extension's MCP server
-/// runs from its bundle. It is a real process holding the directory until it
-/// is killed.
+/// runs from its bundle: one process, started directly, holding the
+/// directory until it is killed. It writes `ready` there once it runs; this
+/// returns when that file exists (within 30 s).
 fn holding(dir: &Path) -> Child {
-    // Started directly, so killing it ends the only process holding `dir`.
     let mut command = if cfg!(windows) {
-        let mut command = Command::new("ping");
-        command.args(["-n", "60", "127.0.0.1"]);
+        let mut command = Command::new("powershell");
+        command.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Set-Content -Path ready -Value x; Start-Sleep -Seconds 60",
+        ]);
         command
     } else {
-        let mut command = Command::new("sleep");
-        command.arg("60");
+        let mut command = Command::new("sh");
+        command.args(["-c", "echo x > ready; exec sleep 60"]);
         command
     };
-    command
+    let child = command
         .current_dir(dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .unwrap()
+        .unwrap();
+    let started = Instant::now();
+    while !dir.join("ready").exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the holding process never started"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    child
 }
 
 // The defect seen on Windows: uninstalling while the extension's MCP server
@@ -93,7 +107,11 @@ fn an_extension_in_use_is_left_intact_and_uninstalls_once_released() {
     }
     assert!(!dir.exists());
     assert_eq!(loaded(&root), 0);
-    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0, "nothing is left");
+    assert_eq!(
+        std::fs::read_dir(&root).unwrap().count(),
+        0,
+        "nothing is left"
+    );
     std::fs::remove_dir_all(&scratch).ok();
 }
 
@@ -163,12 +181,15 @@ fn nothing_outside_the_root_is_removed() {
     let root = installed(&scratch);
     let outside = scratch.join("outside");
     std::fs::create_dir_all(&outside).unwrap();
-    std::fs::write(
-        outside.join("extension.json"),
-        r#"{"name":"elsewhere"}"#,
-    )
-    .unwrap();
-    for name in ["../outside", "..", "", "a/b", "a\\b", ".fixture.uninstalling"] {
+    std::fs::write(outside.join("extension.json"), r#"{"name":"elsewhere"}"#).unwrap();
+    for name in [
+        "../outside",
+        "..",
+        "",
+        "a/b",
+        "a\\b",
+        ".fixture.uninstalling",
+    ] {
         assert!(uninstall(name, &root).is_err(), "{name:?} was accepted");
     }
     let linked = |link: &Path| -> bool {
@@ -194,6 +215,9 @@ fn nothing_outside_the_root_is_removed() {
     if linked(&root.join(".gone.uninstalling")) {
         assert!(uninstall("gone", &root).is_err());
     }
-    assert!(outside.join("extension.json").is_file(), "the outside directory was touched");
+    assert!(
+        outside.join("extension.json").is_file(),
+        "the outside directory was touched"
+    );
     std::fs::remove_dir_all(&scratch).ok();
 }

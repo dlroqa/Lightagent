@@ -77,7 +77,12 @@ pub async fn wait_for_exit_under(dir: &Path, timeout: Duration) -> Result<(), us
         exited.as_mut().enable();
         let pending = STOPPING
             .lock()
-            .map(|stopping| stopping.values().filter(|cwd| cwd.starts_with(&dir)).count())
+            .map(|stopping| {
+                stopping
+                    .values()
+                    .filter(|cwd| cwd.starts_with(&dir))
+                    .count()
+            })
             .unwrap_or(0);
         if pending == 0 {
             return Ok(());
