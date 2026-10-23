@@ -564,3 +564,32 @@ async fn legacy_resolution_is_refused_to_an_untrusted_run() {
     }
     assert!(worker.requests().is_empty());
 }
+
+#[tokio::test]
+async fn a_planned_tester_waits_for_the_coder_whose_change_it_verifies() {
+    let home = Scratch::new();
+    let worker = MockProvider::new(vec![answer("Patch proposed."), answer("Verified.")]);
+    let delegation = lead(&home.path, worker);
+    delegation
+        .plan
+        .set(Some(lightagent_tools::plan::RolePlan::new([
+            ("coder".to_owned(), Vec::new()),
+            ("tester".to_owned(), vec!["coder".to_owned()]),
+        ])));
+    let ctx = ToolCtx::new(CancellationToken::new()).with_delegation(delegation);
+    // Refused before any worker starts: the scripted turns are untouched.
+    let (early, _) = delegate(&ctx, "tester", "Run the tests on the patch.").await;
+    assert!(early.is_error);
+    assert!(
+        early.content.contains("after the coder"),
+        "{}",
+        early.content
+    );
+    let (coded, report) = delegate(&ctx, "coder", "Fix the parser bug.").await;
+    assert!(!coded.is_error, "{}", coded.content);
+    assert_eq!(report["status"], "completed");
+    assert_eq!(report["answer"], "Patch proposed.");
+    let (tested, report) = delegate(&ctx, "tester", "Run the tests on the patch.").await;
+    assert!(!tested.is_error, "{}", tested.content);
+    assert_eq!(report["answer"], "Verified.");
+}

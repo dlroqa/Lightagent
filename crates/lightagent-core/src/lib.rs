@@ -43,7 +43,10 @@ pub use config::{
     PlatformConfig, PlatformEndpointConfig, QdrantConfig, SavedProvider, SecretRef, SecurityConfig,
     SubagentsConfig, ToolPolicyMode, ToolsConfig, WebConfig, WebSearchConfig, WorkerResolution,
 };
-pub use event::{AgentEvent, ClassificationDiagnostics, StopReason};
+pub use event::{
+    AgentEvent, ClassificationDiagnostics, SpecialistRestriction, SpecialistSelection,
+    SpecialistStep, StopReason,
+};
 pub use ids::RunId;
 pub use invoker::{
     NullInvoker, ToolCall, ToolInvoker, ToolOutcome, ToolProgress, ToolProgressSink, ToolSchema,

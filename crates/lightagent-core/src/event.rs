@@ -193,4 +193,57 @@ pub struct ClassificationDiagnostics {
     pub workflow_selection_us: Option<u64>,
     /// The routing-input policy used when routing consulted Jev.
     pub routing_input: Option<String>,
+    /// The specialist selection decided from this classification, when
+    /// `subagents.selection` is on. Additive: absent otherwise.
+    pub specialists: Option<SpecialistSelection>,
+}
+
+/// Which specialist workers Lightagent planned for a task, and why, from
+/// Jev's typed recommendation and its own fixed rules. Every string is a
+/// fixed code or a role name; nothing derived from the user's text.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SpecialistSelection {
+    /// `shadow` (recorded only) or `active`.
+    pub mode: String,
+    /// `plan` when workers were planned, `lead` when the lead keeps the task.
+    pub outcome: String,
+    /// Why the lead keeps the task, as a stable code.
+    pub fallback_reason: Option<String>,
+    /// Jev's yes-probability that splitting the task helps.
+    pub delegation_probability: Option<f64>,
+    /// `single`, `independent` or `sequential`, as Jev answered.
+    pub structure: Option<String>,
+    /// The planned workers, in the order they run.
+    pub steps: Vec<SpecialistStep>,
+    /// Roles Jev recommended that were not planned, with the reason.
+    pub restricted: Vec<SpecialistRestriction>,
+    /// Whether the planned workers may run at the same time.
+    pub concurrent: bool,
+    /// Why they may or may not, as a stable code.
+    pub concurrency: Option<String>,
+    /// The tool the lead delegates through: `agent.delegate` or
+    /// `agent.research`.
+    pub tool: Option<String>,
+    /// Whether the plan was given to the lead (active mode, profile enabled).
+    pub applied: bool,
+}
+
+/// One planned worker.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SpecialistStep {
+    pub role: String,
+    /// Why it was selected, as a stable code.
+    pub reason: String,
+    /// Roles that must complete first.
+    pub after: Vec<String>,
+    /// The resolved worker label (`builtin:…`, `assigned:…`).
+    pub worker: String,
+}
+
+/// A recommended role that was not planned.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SpecialistRestriction {
+    pub role: String,
+    /// A stable code, e.g. `permission_denied`, `worker_cap`.
+    pub reason: String,
 }

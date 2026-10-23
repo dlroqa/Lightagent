@@ -8,11 +8,13 @@ use lightagent_jev::{Answer, EvaluationRequest, JevClient, Question, Response, U
 use tokio_util::sync::CancellationToken;
 
 use super::sanitize;
+use super::selection::{self, SelectionAnswers};
 
 /// The classification request never needs more than this, whatever the
 /// adapter's general bound.
 const MAX_REQUEST_BYTES: usize = 16_384;
-/// A valid answer to these five questions is a few hundred bytes.
+/// A valid answer to these questions (five, or eleven with specialist
+/// selection) is well under a kilobyte.
 const MAX_RESPONSE_BYTES: usize = 16_384;
 
 const TASK: &str = "task";
@@ -132,6 +134,8 @@ pub(crate) struct TaskClassification {
     pub usage: Option<Usage>,
     /// The threshold `category_confidence` was held to.
     pub threshold: f32,
+    /// Jev's specialist recommendation, when selection asked for one.
+    pub selection: Option<SelectionAnswers>,
 }
 
 impl TaskClassification {
@@ -224,7 +228,13 @@ pub(crate) async fn evaluate(
         Ok(client) => client.with_size_limits(MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES),
         Err(error) => return skip(error.kind()),
     };
-    let request = request(&config.platform.jev.model, summary.text);
+    let mut request = request(&config.platform.jev.model, summary.text);
+    // Specialist selection rides on the same request and state: no second
+    // Jev call, no second disclosure.
+    let specialists = selection::requested(config);
+    if specialists {
+        request.questions.extend(selection::questions());
+    }
     let started = Instant::now();
     let response = client.evaluate(&request, cancel).await;
     let latency = Some(started.elapsed());
@@ -233,7 +243,7 @@ pub(crate) async fn evaluate(
         Ok(Response::LegacyOutput(_)) => Outcome::Failed("unsupported_format"),
         Ok(Response::TypeSafe(evaluation)) => {
             let threshold = settings.threshold_for(evaluation.model.as_deref());
-            match classification(evaluation, threshold) {
+            match classification(evaluation, threshold, specialists) {
                 Some(classification) => Outcome::Classified(classification),
                 None => Outcome::Failed("malformed"),
             }
@@ -297,6 +307,7 @@ fn request(model: &str, task: String) -> EvaluationRequest {
 fn classification(
     mut evaluation: lightagent_jev::Evaluation,
     threshold: f32,
+    specialists: bool,
 ) -> Option<TaskClassification> {
     let Some(Answer::Choice {
         choice, confidence, ..
@@ -320,6 +331,13 @@ fn classification(
     else {
         return None;
     };
+    // A malformed specialist answer invalidates the whole classification:
+    // the answers were asked together and are trusted only together.
+    let selection = if specialists {
+        Some(selection::answers(&mut evaluation.answers)?)
+    } else {
+        None
+    };
     Some(TaskClassification {
         category,
         category_confidence: confidence,
@@ -331,6 +349,7 @@ fn classification(
         model_version: evaluation.model,
         usage: evaluation.usage,
         threshold,
+        selection,
     })
 }
 

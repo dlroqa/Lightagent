@@ -740,6 +740,35 @@ pub struct SubagentsConfig {
     /// researcher, when their profile lists it. Off by default; generic
     /// delegation stays withheld from them regardless.
     pub remote_research: bool,
+    /// Jev-assisted specialist selection: `off` (the default) asks nothing;
+    /// `shadow` adds typed questions to the existing classification request
+    /// and records the plan Lightagent would build; `active` also gives that
+    /// plan to the lead, for the profiles in `selection_profiles` only. It
+    /// needs task classification on for the profile, and never grants a
+    /// tool, role, approval or budget.
+    pub selection: JevClassificationMode,
+    /// Profiles whose runs act on an active plan. Every other profile keeps
+    /// the existing behavior, even in `active` mode.
+    pub selection_profiles: Vec<String>,
+    /// The yes-probability (percent, 50–99) Jev's delegation and role
+    /// answers need before Lightagent considers a worker.
+    pub selection_threshold_percent: u8,
+    /// The most workers one plan may name (1–3): never all four roles.
+    pub selection_max_workers: u32,
+}
+
+pub const DEFAULT_SELECTION_THRESHOLD_PERCENT: u8 = 70;
+pub const DEFAULT_SELECTION_MAX_WORKERS: u32 = 2;
+
+impl SubagentsConfig {
+    /// Whether specialist selection acts on its plans for `profile`.
+    pub fn selection_active_for(&self, profile: &str) -> bool {
+        self.selection == JevClassificationMode::Active
+            && self
+                .selection_profiles
+                .iter()
+                .any(|enabled| enabled == profile)
+    }
 }
 
 /// How a role without an explicit assignment is resolved.
@@ -778,6 +807,10 @@ impl Default for SubagentsConfig {
             queue_timeout_secs: 30,
             max_workers_per_run: 6,
             remote_research: false,
+            selection: JevClassificationMode::Off,
+            selection_profiles: Vec::new(),
+            selection_threshold_percent: DEFAULT_SELECTION_THRESHOLD_PERCENT,
+            selection_max_workers: DEFAULT_SELECTION_MAX_WORKERS,
         }
     }
 }
@@ -1757,6 +1790,16 @@ impl Config {
                     "subagents.{name} must be between 1 and {maximum}"
                 )));
             }
+        }
+        if !(50..=99).contains(&subagents.selection_threshold_percent) {
+            return Err(ConfigError::Invalid(
+                "subagents.selection_threshold_percent must be between 50 and 99".to_owned(),
+            ));
+        }
+        if !(1..=3).contains(&subagents.selection_max_workers) {
+            return Err(ConfigError::Invalid(
+                "subagents.selection_max_workers must be between 1 and 3".to_owned(),
+            ));
         }
         if !(1..=300).contains(&subagents.queue_timeout_secs) {
             return Err(ConfigError::Invalid(

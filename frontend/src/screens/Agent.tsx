@@ -283,6 +283,21 @@ function describeDelivery(delivery: Delivery): { label: string; text: string } |
  * The run's Jev task classification, as a short, explicitly advisory status
  * line. It describes a prediction, never retrieval that happened.
  */
+/** One sentence about a specialist selection: role names and fixed codes only. */
+function describeSpecialists(value: unknown): string {
+  if (!value || typeof value !== "object") return "";
+  const selection = value as Record<string, unknown>;
+  const effect = selection.applied === true ? "planned" : "recorded only";
+  if (text(selection.outcome) === "plan" && Array.isArray(selection.steps)) {
+    const roles = selection.steps
+      .map((step) => text((step as Record<string, unknown>)?.role))
+      .filter(Boolean);
+    return ` · Specialists: ${roles.join(" → ")} (${effect}, one at a time)`;
+  }
+  const reason = text(selection.fallback_reason).replace(/_/g, " ");
+  return ` · Specialists: the lead keeps this task${reason ? ` (${reason})` : ""}`;
+}
+
 function describeClassification(data: Record<string, unknown>): string | null {
   const latency = typeof data.classification_latency_ms === "number" ? ` · ${data.classification_latency_ms} ms` : "";
   const fallback = text(data.fallback_reason);
@@ -290,7 +305,7 @@ function describeClassification(data: Record<string, unknown>): string | null {
     case "classified": {
       const category = text(data.category) || "unknown";
       const applied = data.workflow_applied === true ? "advisory; guidance added" : "advisory only";
-      return `Jev classified this as ${category} (${applied})${latency}`;
+      return `Jev classified this as ${category} (${applied})${latency}${describeSpecialists(data.specialists)}`;
     }
     case "low_confidence":
       return `Jev was not confident enough to classify this; the run continued normally${latency}`;
