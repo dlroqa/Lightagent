@@ -74,6 +74,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/lightagent/v1/tools", get(list_tools))
+        .route("/api/lightagent/v1/workers", get(list_workers))
         .route(
             "/api/lightagent/v1/provider",
             get(get_provider_capabilities),
@@ -445,6 +446,44 @@ async fn list_tools(
             Json(json!({ "tools": tools, "profile": user.profile.as_str() })).into_response()
         }
         None => Json(json!({ "tools": tools })).into_response(),
+    }
+}
+
+/// Each specialist role's readiness: state, worker, model, skill, tools and
+/// reason codes. An ordinary user sees only their own profile's, as an
+/// untrusted run of it would have it; nothing names another profile.
+async fn list_workers(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ProfileQuery>,
+) -> Response {
+    let (profile, trust) =
+        match access(&state, &headers, Scope::ToolsRead, query.profile.as_deref()) {
+            Ok(Access::Unscoped) => {
+                let profile = match query.profile.as_deref().map(ProfileId::new) {
+                    Some(Ok(profile)) => Some(profile),
+                    Some(Err(_)) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({ "error": "invalid profile id" })),
+                        )
+                            .into_response();
+                    }
+                    None => None,
+                };
+                (profile, RunTrust::LocalOperator)
+            }
+            Ok(Access::User(user)) => (Some(user.profile.clone()), RunTrust::RemoteUser),
+            Err(response) => return *response,
+        };
+    match state.manager.workers_for(profile.as_ref(), trust).await {
+        Ok(workers) => Json(json!({ "workers": workers })).into_response(),
+        Err(_) if trust == RunTrust::RemoteUser => operator_only(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": error })),
+        )
+            .into_response(),
     }
 }
 

@@ -4,6 +4,53 @@ All notable Lightagent changes are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Specialist workers. The roles researcher, coder, reviewer and tester are
+  now typed built-in definitions, each with a versioned role skill, a tool
+  ceiling, readiness requirements, an output contract and a resource
+  ceiling. They run under the requesting profile's authority, with only the
+  run contexts their tools need.
+  - A profile can assign a role to one of its own private worker profiles
+    (`lightagent workers assign`). The assignment is ownership-checked and
+    re-checked on every worker turn and tool call, and must use the lead's
+    endpoint, a model the installation knows, an approval policy no looser
+    than the lead's, and limits within the lead's. A refusal never falls
+    back to another worker.
+  - A role worker returns a typed result (`lightagent.worker_result.v1`):
+    status, answer, sources, citations no tool returned, tool use, skill and
+    model provenance, usage and limitations. It reports its lifecycle as
+    `tool.progress` stages.
+  - A worker that reaches an action needing approval waits under a one-time
+    handle. The lead asks the person through `agent.resume_worker`, which
+    always asks, or declines through `agent.decline_worker`.
+  - The coder proposes scoped patches tied to their base (`patch.propose`).
+    The lead applies them (`patch.apply`) or commits them to an allowlisted
+    branch as a fast-forward (`repo.commit`), each under its own approval.
+    A stale base or a concurrent edit is refused.
+  - The tester verifies through a GitHub Actions workflow broker
+    (`actions.dispatch`, `status`, `logs`, `cancel`). It accepts only
+    allowlisted workflows, branches and inputs, at the exact SHA, and the
+    token never leaves the harness.
+  - Readiness per role: `lightagent workers status`,
+    `GET /api/lightagent/v1/workers`, and the Tools screen.
+  - Untrusted runs can be offered only the read-only researcher
+    (`agent.research`, behind `subagents.remote_research`, off by default).
+  - Operator capability presets: `lightagent profile preset <id> research@1`.
+- The Web UI shows each worker's progress and its typed result.
+
+### Changed
+
+- Workers below one lead run now share the lead's turns, tool calls and
+  time, with at most `subagents.max_workers_per_run` workers. They are
+  admitted through installation-wide and per-profile pools.
+- Role profiles are no longer cloned from the lead. A previously generated
+  clone is superseded by the built-in, and a customized one keeps working.
+  `subagents.resolution = "legacy_profiles"` restores the earlier behavior
+  for operator runs.
+- The subagent depth limit is enforced at the worker it would create, and a
+  model-supplied `tool_scope` can no longer be widened by nested delegation.
+
 ### Fixed
 
 - Research runs now report how they really ended, and the Web UI no longer

@@ -7,7 +7,7 @@ Lightagent has four specialist roles a lead agent can delegate to: researcher, c
 | Role | Tool ceiling | What it returns | Needs, for `ready` |
 | --- | --- | --- | --- |
 | researcher | `web.search`, `web.fetch`, `rag.search`, `rag.realtime`, `skill.read`, `datetime.now` (read-only) | Findings with citations, evidence vs. inference, contradictions, limitations, retrieval status | One retrieval tool. Search and page reading are degraded without them. |
-| coder | `fs.read`, `fs.list`, `fs.write`, `skill.read`, `datetime.now` | Patch, rationale, checks to run, risks, base | `fs.read`. Without `fs.write` it returns a diff and is `degraded`. |
+| coder | `fs.read`, `fs.list`, `patch.propose`, `fs.write` (approval-gated), `skill.read`, `datetime.now` | Patch id, base commit, diff, rationale, checks to run, risks | `fs.read`. Without `patch.propose` it is `degraded`. |
 | reviewer | `fs.read`, `fs.list`, `skill.read`, `datetime.now` (read-only) | Prioritized findings with location, evidence, impact and remediation, or an honest "no findings" | `fs.read` |
 | tester | `actions.*`, `fs.read`, `fs.list`, `skill.read`, `datetime.now` | Run IDs and URLs, exact SHA, job conclusions, failures, coverage gaps, blocked checks | The workflow broker (`actions.dispatch`, `actions.status`) |
 
@@ -23,7 +23,7 @@ Resolution is deterministic. A refusal is never followed by a different worker.
    - the built-in worker;
    - a private worker profile with **the same effective owner**. Both profiles may also be unowned, which is how operator-managed profiles look.
 
-   Ownership and the assignment are checked when the worker starts and again before every worker model turn and tool call. Withdrawing the assignment, deleting the target or changing its owner stops the worker, and its results are withheld. An assigned private profile keeps its persona and routing, but runs inside the role's ceiling and gets the role skill.
+   Ownership and the assignment are checked when the worker starts and again before every worker model turn and tool call. The worker must also run on the lead's endpoint (so the lead's key goes nowhere else) and use a model the installation knows: the lead's model, `subagents.approved_models`, or the inference catalog and aliases. Its approval policy is the stricter of its own and the lead's, and its limits are within the lead's. A failing check refuses the role; it is never replaced by the built-in. Withdrawing the assignment, deleting the target or changing its owner stops the worker, and its results are withheld. An assigned private profile keeps its persona and routing, but runs inside the role's ceiling and gets the role skill.
 2. **A legacy profile named after the role.** Earlier versions cloned the lead into profiles named `researcher`, `coder` and so on.
    - A clone that is still exactly as generated is superseded by the built-in.
    - A clone someone customized keeps being used. Readiness reports it as `legacy_profile` until it is assigned or superseded explicitly.
@@ -43,16 +43,30 @@ A worker's tools are the intersection of:
 A worker also:
 - gets **only the run contexts its tools need**: the requesting run's own web, workspace, broker and skill contexts. They are never copied wholesale and never selected from a shared tenant directory;
 - re-checks the lead's **per-call policy guard** and the run's **authorization** at every call. Its cancellation token is a child of the run's;
-- runs under the stricter of its own approval policy and the lead's when the profile policy is enforced. Mutating and executable calls always need an approval that a worker cannot obtain. The worker then stops with status `blocked`, names the tool in `blocked_on`, and nothing runs. No worker is left suspended;
+- runs under the stricter of its own approval policy and the lead's when the profile policy is enforced. A worker can never approve anything itself. When it reaches an action that needs approval, it is **parked** under a one-time handle bound to that exact action, and the lead gets status `awaiting_approval`:
+  - the lead calls `agent.resume_worker` with the handle. That tool is Executable and always asks the person, even in a session allowed to run without restrictions, and no remembered grant covers it. The approval prompt shows `worker=… tool=… risk=… args=…`. On approval the worker runs exactly that action once and continues;
+  - or the lead calls `agent.decline_worker`, and the worker continues without the action;
+  - expiry (10 minutes), cancellation, revocation and a withdrawn assignment are re-checked before anything resumes, and a handle cannot be replayed. Parked workers release their admission slot and are dropped with the run;
 - draws turns, tool calls and time from the **tree budget**. That budget is the lead's limits, with at most `subagents.max_workers_per_run` worker runs. Grants are taken up front and the unused part is returned;
 - is **admitted** through an installation-wide pool and a per-profile pool. Waiting is FIFO, bounded by `queue_timeout_secs`, and cancelled with the run.
 
 Depth: a worker may start one only while one more generation fits under `subagents.max_depth`. Built-in roles never nest.
 
+## The coder's change workflow
+
+1. The lead delegates with a `write_scope`: exact paths or `dir/**`. Without one, the coder proposes nothing.
+2. The coder calls `patch.propose` with complete new file contents. Nothing is written. Every path is checked against the confined workspace and the scope. Each file's exact base content is kept, and the checkout's commit is read from `.git` (nothing is executed). The result is a patch id, the base commit and a unified diff per file.
+3. The lead reviews the patch, then acts on it under its own approval. Both tools are Mutating, and the approval prompt shows the patch's files and base:
+   - `patch.apply` writes into the workspace only while every file still has its base content and the checkout is still at the base commit;
+   - `repo.commit` commits through the GitHub API to an allowlisted branch (`platform.github_actions.commit_refs`) as a fast-forward of exactly the base commit, with `force: false`.
+
+   A stale base or a concurrent edit is refused, never overwritten.
+4. The commit is built and verified only by dispatching an allowlisted workflow at its exact SHA (the tester, or the lead).
+
 ## What the lead and the UI see
 
 A role worker returns `lightagent.worker_result.v1`. Its fields:
-- `status`: `completed`, `partial`, `timed_out`, `blocked`, `failed` or `cancelled`;
+- `status`: `completed`, `partial`, `timed_out`, `awaiting_approval` (with `approval: {handle, tool, risk, arguments_preview, expires_in_secs}`), `blocked`, `failed` or `cancelled`;
 - `worker`, `role`, `model`, `model_source`, `skills` (with versions), `tools_offered`;
 - `stop_reason` and the bounded `answer`;
 - `sources`: fetched pages, and URLs a retrieval tool returned;
@@ -69,7 +83,7 @@ These stages travel over the existing SSE contract, with event ids and resume. T
 
 ## Readiness
 
-`lightagent workers status [--profile ID] [--json]` reports each role's state:
+`lightagent workers status [--profile ID] [--json]`, `GET /api/lightagent/v1/workers` (scope `tools_read`; an ordinary user sees only their own profile, as an untrusted run of it would be) and the web UI's Tools → Specialists card report each role's state:
 - `ready`, `degraded`, `disabled`, `permission_denied` or `unavailable`;
 - the worker (`builtin:<role>@<v>`, `assigned:<id>` or `legacy_profile:<role>`), with its model, model source, skill, offered tools and reason codes.
 
@@ -145,7 +159,7 @@ Operators can give an existing profile a versioned capability preset with `light
 - creates no profile and does not touch the provisioning ledger;
 - needs no new provisioned identities for shared built-in workers.
 
-**Web handoff (not implemented here).** Letting the website choose a preset needs a versioned protocol revision, owned by the Web repository. It would add a `capabilityPreset` field whose value must be one of the harness's registered preset ids, validated against `provisioning::PRESETS` at admission. A preset would be applied inside the same create transaction and recorded in the ledger, and status would report the applied preset id. The website must never send tools, paths, endpoints, model ids or secrets. Until Web delivers such a revision and its fixtures, presets are operator-applied only, and there is no end-to-end web integration to claim.
+**Web handoff (pending, not implemented here).** Letting the website choose a preset needs a new protocol revision owned by the Web repository. The exact proposal (wire member, admission check, error codes, ledger record, fixtures, Lightagent steps) is `docs/integrations/web/subagent-presets-handoff.md`. Until Web freezes that revision, presets are operator-applied only, and there is no end-to-end web integration to claim.
 
 ## Migration and rollback
 
@@ -153,5 +167,5 @@ Operators can give an existing profile a versioned capability preset with `light
   - Generated role profiles are left on disk untouched and superseded.
   - Customized ones keep working and are reported as `legacy_profile`.
   - To move a customized one explicitly, run `lightagent workers assign <role> --worker <profile>` to keep it, or `--builtin` to switch to the built-in.
-- **Rollback**: set `subagents.resolution = "legacy_profiles"`. Role profiles are created and used exactly as before, and assignments are ignored.
+- **Rollback**: set `subagents.resolution = "legacy_profiles"`. Role profiles are created and used exactly as before for operator runs, and assignments are ignored. The rollback never reaches untrusted runs: the legacy path refuses them in the tools crate, `agent.delegate` stays withheld by policy, and `agent.research` is not offered without the built-in catalog.
 - **Behavior change**: workers in one lead run now share the lead's turns, tool calls and time, instead of each receiving its own full limits.
