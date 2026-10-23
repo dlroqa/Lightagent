@@ -509,36 +509,67 @@ impl BubblewrapBackend {
     }
 }
 
-/// The parent pid of `pid`, from `/proc/<pid>/stat` (after the command
-/// name, which may itself hold spaces and parentheses).
-fn parent_of(pid: u32) -> Option<u32> {
+/// How long teardown waits for the kernel to report `outer` stopped.
+const STOP_WAIT: Duration = Duration::from_millis(500);
+/// How many times teardown looks again for live descendants.
+const KILL_ROUNDS: usize = 20;
+
+/// The state letter and parent pid of `pid`, from `/proc/<pid>/stat` (after
+/// the command name, which may itself hold spaces and parentheses).
+fn stat_of(pid: u32) -> Option<(char, u32)> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let (_, after) = stat.rsplit_once(')')?;
-    after.split_whitespace().nth(1)?.parse().ok()
+    let mut fields = after.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let parent = fields.next()?.parse().ok()?;
+    Some((state, parent))
 }
 
-/// Every live descendant of `root`, as the host sees them.
+/// Whether a process in `state` can still run: not a zombie, not dead.
+fn live(state: char) -> bool {
+    !matches!(state, 'Z' | 'X' | 'x')
+}
+
+/// Every live descendant of `root`, as the host sees them. A zombie is
+/// skipped (it is already dead and waits only for its stopped parent), but
+/// its children, if any, are still looked for.
 fn descendants(root: u32) -> Vec<u32> {
-    let parents: HashMap<u32, u32> = std::fs::read_dir("/proc")
+    let table: HashMap<u32, (char, u32)> = std::fs::read_dir("/proc")
         .into_iter()
         .flatten()
         .flatten()
         .filter_map(|entry| {
             let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
-            Some((pid, parent_of(pid)?))
+            Some((pid, stat_of(pid)?))
         })
         .collect();
+    let mut seen = Vec::new();
     let mut found = Vec::new();
     let mut frontier = vec![root];
     while let Some(parent) = frontier.pop() {
-        for (&pid, &of) in &parents {
-            if of == parent && !found.contains(&pid) {
-                found.push(pid);
+        for (&pid, &(state, of)) in &table {
+            if of == parent && !seen.contains(&pid) {
+                seen.push(pid);
                 frontier.push(pid);
+                if live(state) {
+                    found.push(pid);
+                }
             }
         }
     }
     found
+}
+
+/// Wait until the kernel reports `pid` stopped or gone, for at most
+/// [`STOP_WAIT`].
+async fn stopped(pid: u32) {
+    let deadline = std::time::Instant::now() + STOP_WAIT;
+    while let Some((state, _)) = stat_of(pid) {
+        if matches!(state, 'T' | 't') || !live(state) || std::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
 }
 
 async fn signal(signal: &str, pids: &[u32]) {
@@ -568,9 +599,24 @@ async fn signal(signal: &str, pids: &[u32]) {
 /// then every descendant is killed (the namespace's init among them, which
 /// ends every process in the PID namespace); then `outer` itself is killed
 /// by the caller.
+///
+/// `kill` returns once the stop signal is queued, not delivered: `outer` may
+/// still be running on another CPU and finish cloning the namespace's init
+/// after its children were listed, which then survived it (observed on the
+/// CI runner at a 2 ms cancellation). So teardown waits until the kernel
+/// reports `outer` stopped before listing, and lists and kills again until
+/// nothing live is left below it.
 async fn kill_tree(outer: u32) {
     signal("STOP", &[outer]).await;
-    signal("KILL", &descendants(outer)).await;
+    stopped(outer).await;
+    for _ in 0..KILL_ROUNDS {
+        let found = descendants(outer);
+        if found.is_empty() {
+            return;
+        }
+        signal("KILL", &found).await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
 }
 
 /// Read a pipe to the end, keeping at most `cap` bytes.
