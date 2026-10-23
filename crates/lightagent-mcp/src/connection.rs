@@ -9,9 +9,9 @@
 //! [`McpError`]; neither knows any MCP method.
 
 use std::collections::HashMap;
-use std::path::Path;
-use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -19,7 +19,7 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderName, HeaderValue};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
-use tokio::sync::{Mutex as AsyncMutex, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, Notify, oneshot};
 
 use crate::jsonrpc::{self, McpError};
 
@@ -47,8 +47,73 @@ struct StdioInner {
 /// A server run as a subprocess, spoken to over stdin/stdout.
 pub struct StdioConnection {
     inner: std::sync::Arc<StdioInner>,
-    // Held so the child lives as long as the connection; killed on drop.
-    _child: AsyncMutex<Child>,
+    // Held so the child lives as long as the connection; stopped on drop.
+    child: AsyncMutex<Option<Child>>,
+    /// The directory the server runs from, when one was given.
+    cwd: Option<PathBuf>,
+}
+
+/// Stdio servers that were stopped (their connection dropped) and have not
+/// exited yet, by the directory each runs from. A process keeps its working
+/// directory in use until it is gone, and on Windows a directory in use
+/// cannot be moved or removed, so a bundle a server ran from must wait for
+/// it: see [`wait_for_exit_under`].
+static STOPPING: LazyLock<StdMutex<HashMap<u64, PathBuf>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+/// Notified each time a stopped server has exited.
+static EXITED: LazyLock<Notify> = LazyLock::new(Notify::new);
+static NEXT_STOPPING: AtomicU64 = AtomicU64::new(0);
+
+/// Wait until every stopped stdio server that ran from `dir`, or from a
+/// directory below it, has exited, for at most `timeout`. On a timeout,
+/// returns how many had not.
+pub async fn wait_for_exit_under(dir: &Path, timeout: Duration) -> Result<(), usize> {
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        // Registered before the count is read, so an exit in between is not
+        // missed.
+        let mut exited = std::pin::pin!(EXITED.notified());
+        exited.as_mut().enable();
+        let pending = STOPPING
+            .lock()
+            .map(|stopping| stopping.values().filter(|cwd| cwd.starts_with(&dir)).count())
+            .unwrap_or(0);
+        if pending == 0 {
+            return Ok(());
+        }
+        if tokio::time::timeout_at(deadline, exited).await.is_err() {
+            return Err(pending);
+        }
+    }
+}
+
+impl Drop for StdioConnection {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.get_mut().take() else {
+            return;
+        };
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        // Stop it now; it would be killed on drop in any case.
+        let _ = child.start_kill();
+        let (Some(cwd), Ok(runtime)) = (self.cwd.clone(), tokio::runtime::Handle::try_current())
+        else {
+            return;
+        };
+        let id = NEXT_STOPPING.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut stopping) = STOPPING.lock() {
+            stopping.insert(id, cwd);
+        }
+        runtime.spawn(async move {
+            let _ = child.wait().await;
+            if let Ok(mut stopping) = STOPPING.lock() {
+                stopping.remove(&id);
+            }
+            EXITED.notify_waiters();
+        });
+    }
 }
 
 impl StdioConnection {
@@ -126,7 +191,8 @@ impl StdioConnection {
 
         Ok(Self {
             inner,
-            _child: AsyncMutex::new(child),
+            child: AsyncMutex::new(Some(child)),
+            cwd: cwd.map(|dir| dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())),
         })
     }
 }

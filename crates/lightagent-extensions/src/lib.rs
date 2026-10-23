@@ -107,7 +107,7 @@ impl ExtensionStore {
             };
             for entry in entries.flatten() {
                 let path = entry.path();
-                if !path.is_dir() {
+                if !path.is_dir() || is_staging(&entry.file_name().to_string_lossy()) {
                     continue;
                 }
                 let Ok(text) = std::fs::read_to_string(path.join("extension.json")) else {
@@ -325,28 +325,207 @@ pub fn install(source: &Path, root: &Path) -> Result<Extension, String> {
     })
 }
 
-/// Remove exactly one installed extension from a selected root.
+/// The suffix of the hidden directory an uninstall renames an extension to
+/// before deleting it (`.<name>.uninstalling`).
+const UNINSTALLING: &str = ".uninstalling";
+
+/// Install and uninstall work in hidden siblings of an extension
+/// (`.<name>.install-<pid>`, `.<name>.uninstalling`). They are never loaded:
+/// one may still hold a manifest while its files are being copied or removed.
+fn is_staging(file_name: &str) -> bool {
+    file_name.starts_with('.')
+        && (file_name.contains(".install-") || file_name.ends_with(UNINSTALLING))
+}
+
+/// What [`try_uninstall`] removed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Uninstalled {
+    /// The installed extension, completely.
+    Removed,
+    /// What an earlier, interrupted uninstall had left behind.
+    Finished,
+}
+
+/// Why an extension could not be uninstalled.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UninstallError {
+    /// The name is not a valid extension name, so it names no path.
+    InvalidName,
+    /// Nothing is installed under the name, and nothing is left to finish.
+    NotInstalled { name: String },
+    /// What is there is not an installed extension this may remove: a link,
+    /// a file, an invalid manifest or one naming another extension.
+    Refused { name: String, reason: String },
+    /// A running process still uses the extension's directory or a file in
+    /// it (on Windows, an MCP server that is still exiting from it), or the
+    /// system denied access. Nothing was removed.
+    InUse { name: String, reason: String },
+    /// An earlier, interrupted removal left the directory without its
+    /// manifest and with entries that nothing shows belong to the extension.
+    /// Nothing was removed.
+    PartiallyRemoved { name: String, remaining: usize },
+    /// The extension no longer loads, but some of its files could not be
+    /// deleted yet. Uninstalling the name again finishes the removal.
+    Unfinished { name: String, reason: String },
+    /// Any other failure, as the system reported it.
+    Io { name: String, reason: String },
+}
+
+impl std::fmt::Display for UninstallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidName => f.write_str("invalid extension name"),
+            Self::NotInstalled { name } => write!(f, "extension '{name}' is not installed"),
+            Self::Refused { name, reason } => {
+                write!(f, "extension '{name}' cannot be uninstalled: {reason}")
+            }
+            Self::InUse { name, reason } => write!(
+                f,
+                "extension '{name}' is in use by a running process or not accessible \
+                 ({reason}); it was left installed"
+            ),
+            Self::PartiallyRemoved { name, remaining } => write!(
+                f,
+                "extension '{name}' was partially removed earlier: its extension.json is missing \
+                 and {remaining} entries remain, left in place because nothing shows they belong \
+                 to it"
+            ),
+            Self::Unfinished { name, reason } => write!(
+                f,
+                "extension '{name}' was uninstalled, but some of its files could not be deleted \
+                 yet ({reason}); uninstall it again to finish"
+            ),
+            Self::Io { name, reason } => write!(f, "could not uninstall '{name}': {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for UninstallError {}
+
+/// Remove exactly one installed extension from a selected root. See
+/// [`try_uninstall`]; this reports its outcome as text.
 pub fn uninstall(name: &str, root: &Path) -> Result<(), String> {
+    try_uninstall(name, root)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// Remove exactly one installed extension from a selected root, or finish an
+/// earlier removal of it that was interrupted.
+///
+/// It only ever removes what it has verified, and only under `root`:
+/// - An installed extension (a real directory, not a link, whose manifest
+///   names it) is first renamed to `.<name>.uninstalling` beside it, so it
+///   stops loading at once, and only then deleted. While a process still uses
+///   the directory, Windows refuses the rename, so that case fails before
+///   anything is removed and the extension stays installed and intact.
+/// - If deleting the renamed directory is interrupted, the extension is
+///   already gone; uninstalling the name again finishes the removal.
+/// - A directory that an earlier, interrupted removal left without its
+///   manifest is removed only if it is empty. Anything still in it is
+///   reported, never deleted.
+pub fn try_uninstall(name: &str, root: &Path) -> Result<Uninstalled, UninstallError> {
     if !valid_name(name) {
-        return Err("invalid extension name".to_owned());
+        return Err(UninstallError::InvalidName);
     }
     let destination = root.join(name);
-    let metadata = std::fs::symlink_metadata(&destination)
-        .map_err(|e| format!("extension '{name}' is not installed: {e}"))?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(format!("extension '{name}' is not a regular directory"));
+    let trash = root.join(format!(".{name}{UNINSTALLING}"));
+    match std::fs::symlink_metadata(&destination) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Nothing installed: finish a removal interrupted after its rename.
+            if !real_dir(&trash, name)? {
+                return Err(UninstallError::NotInstalled {
+                    name: name.to_owned(),
+                });
+            }
+            std::fs::remove_dir_all(&trash).map_err(|error| failure(name, &error))?;
+            return Ok(Uninstalled::Finished);
+        }
+        Err(error) => return Err(failure(name, &error)),
+        Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+            return Err(refused(name, "it is not a regular directory"));
+        }
+        Ok(_) => {}
     }
-    let manifest = std::fs::read_to_string(destination.join("extension.json"))
-        .map_err(|e| format!("extension.json: {e}"))?;
-    let ext = parse_extension(&manifest, name, &destination)
-        .ok_or_else(|| "invalid extension.json".to_owned())?;
-    if ext.name != name {
-        return Err(format!(
-            "extension directory '{name}' declares name '{}'",
-            ext.name
-        ));
+    match std::fs::read_to_string(destination.join("extension.json")) {
+        Ok(manifest) => {
+            let ext = parse_extension(&manifest, name, &destination)
+                .ok_or_else(|| refused(name, "its extension.json is invalid"))?;
+            if ext.name != name {
+                return Err(refused(
+                    name,
+                    &format!("its extension.json declares the name '{}'", ext.name),
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Left by an earlier, interrupted removal. Only an empty directory
+            // is removed: nothing shows that anything else belongs to it.
+            let remaining = std::fs::read_dir(&destination)
+                .map_err(|error| failure(name, &error))?
+                .count();
+            if remaining > 0 {
+                return Err(UninstallError::PartiallyRemoved {
+                    name: name.to_owned(),
+                    remaining,
+                });
+            }
+            std::fs::remove_dir(&destination).map_err(|error| failure(name, &error))?;
+            return Ok(Uninstalled::Finished);
+        }
+        Err(error) => return Err(failure(name, &error)),
     }
-    std::fs::remove_dir_all(&destination).map_err(|e| format!("could not uninstall '{name}': {e}"))
+    // What an earlier, interrupted removal left must go first: the rename
+    // needs its name.
+    if real_dir(&trash, name)? {
+        std::fs::remove_dir_all(&trash).map_err(|error| failure(name, &error))?;
+    }
+    // Renaming removes nothing, and fails while the directory is in use.
+    std::fs::rename(&destination, &trash).map_err(|error| failure(name, &error))?;
+    std::fs::remove_dir_all(&trash).map_err(|error| UninstallError::Unfinished {
+        name: name.to_owned(),
+        reason: error.to_string(),
+    })?;
+    Ok(Uninstalled::Removed)
+}
+
+/// Whether `path` is a real directory. A link or a file there is refused,
+/// never followed or removed.
+fn real_dir(path: &Path, name: &str) -> Result<bool, UninstallError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(true),
+        Ok(_) => Err(refused(
+            name,
+            &format!("{} is not a regular directory", path.display()),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(failure(name, &error)),
+    }
+}
+
+fn refused(name: &str, reason: &str) -> UninstallError {
+    UninstallError::Refused {
+        name: name.to_owned(),
+        reason: reason.to_owned(),
+    }
+}
+
+/// A failure as the system reported it. On Windows a sharing or lock
+/// violation, or a denied access, is how a directory or file still in use by
+/// a running process fails to move or delete.
+fn failure(name: &str, error: &std::io::Error) -> UninstallError {
+    let in_use = cfg!(windows) && matches!(error.raw_os_error(), Some(5 | 32 | 33));
+    if in_use {
+        UninstallError::InUse {
+            name: name.to_owned(),
+            reason: error.to_string(),
+        }
+    } else {
+        UninstallError::Io {
+            name: name.to_owned(),
+            reason: error.to_string(),
+        }
+    }
 }
 
 fn valid_name(name: &str) -> bool {
