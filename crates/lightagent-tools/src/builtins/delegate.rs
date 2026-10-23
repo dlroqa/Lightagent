@@ -159,6 +159,8 @@ struct DelegateArgs {
     max_seconds: Option<u64>,
     #[serde(default)]
     tool_scope: Option<Vec<String>>,
+    #[serde(default)]
+    write_scope: Option<Vec<String>>,
 }
 
 impl AgentDelegate {
@@ -183,6 +185,11 @@ impl AgentDelegate {
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "Restrict the worker to these tool names.",
+                },
+                "write_scope": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Paths a coder may propose changes to: exact paths or dir/**.",
                 }
             },
             "required": ["task"],
@@ -259,6 +266,7 @@ impl Tool for AgentDelegate {
             max_turns: args.max_turns,
             max_seconds: args.max_seconds,
             tool_scope: args.tool_scope,
+            write_scope: args.write_scope,
         };
         run_worker(&delegation, spec, request, ctx).await
     }
@@ -272,6 +280,8 @@ pub struct WorkerRequest {
     pub max_seconds: Option<u64>,
     /// Tool names the caller restricts the worker to. Only ever narrows.
     pub tool_scope: Option<Vec<String>>,
+    /// Paths the worker may propose changes to; none when absent.
+    pub write_scope: Option<Vec<String>>,
 }
 
 /// Resolve `target` through the run's resolver, or the legacy way: a
@@ -452,6 +462,15 @@ pub async fn run_worker(
         && let Some(actions) = &ctx.actions
     {
         executor = executor.with_actions(actions.clone());
+    }
+    // The run's patch store, with only the paths the lead allowed.
+    if needs(&["patch."])
+        && let Some(patches) = &ctx.patches
+    {
+        executor = executor.with_patches(crate::builtins::PatchContext {
+            store: patches.store.clone(),
+            scope: Some(request.write_scope.clone().unwrap_or_default()),
+        });
     }
     let mut persona = spec.persona.clone();
     if needs(&["skill."]) {

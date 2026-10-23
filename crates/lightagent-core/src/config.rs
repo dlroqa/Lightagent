@@ -1191,6 +1191,9 @@ pub struct GithubActionsConfig {
     pub repository: Option<String>,
     /// The workflows a worker may dispatch, with their refs and inputs.
     pub workflows: Vec<AllowedWorkflow>,
+    /// Branches `repo.commit` may advance with a coder's patch: exact names
+    /// or a prefix ending in `*`. Empty: no commits.
+    pub commit_refs: Vec<String>,
     pub request_timeout_secs: u64,
     /// Between status checks while a tool waits for a run.
     pub poll_interval_secs: u64,
@@ -1206,6 +1209,7 @@ impl Default for GithubActionsConfig {
             endpoint: PlatformEndpointConfig::default(),
             repository: None,
             workflows: Vec::new(),
+            commit_refs: Vec::new(),
             request_timeout_secs: 20,
             poll_interval_secs: 10,
             max_wait_secs: 120,

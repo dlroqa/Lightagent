@@ -134,7 +134,7 @@ limitations, retrieval status",
 
 const CODER: BuiltinWorker = BuiltinWorker {
     role: WorkerRole::Coder,
-    version: 1,
+    version: 2,
     instruction: "You are the coder specialist working for a lead agent. Make only the scoped \
 change you are assigned, inside the confined workspace, and report it as a reviewable patch.",
     skill: include_str!("workers/coder.md"),
@@ -143,6 +143,7 @@ change you are assigned, inside the confined workspace, and report it as a revie
         "fs.read",
         "fs.list",
         "fs.write",
+        "patch.propose",
         "skill.read",
     ],
     requirements: &[
@@ -152,8 +153,8 @@ change you are assigned, inside the confined workspace, and report it as a revie
             essential: true,
         },
         Requirement {
-            capability: "workspace_write",
-            any_of: &["fs.write"],
+            capability: "patch_proposal",
+            any_of: &["patch.propose"],
             essential: false,
         },
     ],

@@ -3,16 +3,18 @@ run-name: subagent fixture ${{ inputs.mode || 'pass' }} ${{ inputs.correlation |
 
 # A deliberately tiny workflow for the tester specialist's live broker check
 # (the `subagents` workflow): `mode: pass` succeeds and `mode: fail` fails its
-# one step, so the broker must report each as it is. It checks out nothing,
-# runs no repository code and has no permissions. The pull_request trigger
-# only registers the workflow so the broker can dispatch it on a branch.
+# one step, so the broker must report each as it is. Those modes check out nothing,
+# `mode: verify` checks out the exact commit and compiles and tests the
+# coder's fixture (fixtures/subagents/coder/lib.rs) with rustc. The
+# pull_request trigger only registers the workflow so the broker can
+# dispatch it on a branch.
 
 on:
   workflow_dispatch:
     inputs:
       mode:
         type: choice
-        options: [pass, fail]
+        options: [pass, fail, verify]
         default: pass
       correlation:
         type: string
@@ -20,13 +22,14 @@ on:
   pull_request:
     paths: ['.github/workflows/subagent-fixture.yml']
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   verify:
     name: verify
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - name: Check
         env:
@@ -37,3 +40,14 @@ jobs:
             echo "FAIL: deliberate fixture failure"
             exit 1
           fi
+      - uses: actions/checkout@v7
+        if: inputs.mode == 'verify'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Build and test the coder fixture at this commit
+        if: inputs.mode == 'verify'
+        run: |
+          echo "verifying $GITHUB_SHA"
+          rustc --edition 2021 --test fixtures/subagents/coder/lib.rs -o "$RUNNER_TEMP/fixture-tests"
+          "$RUNNER_TEMP/fixture-tests"

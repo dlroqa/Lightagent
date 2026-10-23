@@ -479,6 +479,8 @@ pub struct ActionsPolicy {
     pub repository: String,
     pub token: Option<String>,
     pub workflows: Vec<lightagent_core::AllowedWorkflow>,
+    /// Branches `repo.commit` may advance: exact names or `prefix*`.
+    pub commit_refs: Vec<String>,
     pub poll_interval: Duration,
     pub max_wait: Duration,
     pub max_log_bytes: usize,
@@ -491,6 +493,7 @@ impl std::fmt::Debug for ActionsPolicy {
             .field("repository", &self.repository)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
             .field("workflows", &self.workflows)
+            .field("commit_refs", &self.commit_refs)
             .field("poll_interval", &self.poll_interval)
             .field("max_wait", &self.max_wait)
             .field("max_log_bytes", &self.max_log_bytes)
@@ -546,6 +549,8 @@ pub struct ToolCtx {
     pub open_terminal: Option<OpenTerminalContext>,
     /// Present only when the workflow broker is configured for this run.
     pub actions: Option<ActionsContext>,
+    /// The run's proposed patches, and a worker's write scope.
+    pub patches: Option<crate::builtins::PatchContext>,
     /// Present only when skills are available for this run.
     pub skills: Option<SkillContext>,
     /// The run's authorization, re-checked before a tool reaches outside the
@@ -569,6 +574,7 @@ impl ToolCtx {
             workspace: None,
             open_terminal: None,
             actions: None,
+            patches: None,
             skills: None,
             authorization: None,
             progress: None,
@@ -648,6 +654,12 @@ impl ToolCtx {
     /// Enable the `actions.*` workflow-broker tools.
     pub fn with_actions(mut self, actions: ActionsContext) -> Self {
         self.actions = Some(actions);
+        self
+    }
+
+    /// Enable the patch tools over `patches`.
+    pub fn with_patches(mut self, patches: crate::builtins::PatchContext) -> Self {
+        self.patches = Some(patches);
         self
     }
 }

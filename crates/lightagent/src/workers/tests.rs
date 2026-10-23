@@ -267,7 +267,7 @@ fn readiness_reports_each_role_with_its_reasons() {
     assert!(!researcher.tools.contains(&"fs.read".to_owned()));
     let coder = entry(WorkerRole::Coder);
     assert_eq!(coder.state, Readiness::Degraded);
-    assert_eq!(coder.reasons, ["workspace_write"]);
+    assert_eq!(coder.reasons, ["patch_proposal"]);
     assert_eq!(entry(WorkerRole::Reviewer).state, Readiness::Ready);
     assert_eq!(entry(WorkerRole::Tester).state, Readiness::Unavailable);
 

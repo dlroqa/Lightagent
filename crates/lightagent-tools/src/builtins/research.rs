@@ -107,6 +107,7 @@ impl Tool for AgentResearch {
                 .and_then(|turns| u32::try_from(turns).ok()),
             max_seconds: None,
             tool_scope: None,
+            write_scope: None,
         };
         run_worker(&delegation, spec, request, ctx).await
     }

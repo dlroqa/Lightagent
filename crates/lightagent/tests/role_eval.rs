@@ -454,6 +454,7 @@ async fn run_task(task: &Task, model: &str, factory: Arc<Factory>, root: &Path) 
                 )]),
                 correlation_input: Some("correlation".to_owned()),
             }],
+            commit_refs: Vec::new(),
             poll_interval: Duration::from_millis(200),
             max_wait: Duration::from_secs(10),
             max_log_bytes: 4096,

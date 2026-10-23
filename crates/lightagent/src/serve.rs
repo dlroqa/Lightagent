@@ -518,6 +518,7 @@ impl LightweightRunFactory {
         if let Some(actions) = crate::chat::actions_context(&config) {
             executor = executor.with_actions(actions);
         }
+        executor = executor.with_patches(lightagent_tools::builtins::PatchContext::default());
         if !skills.is_empty() {
             profile
                 .persona
