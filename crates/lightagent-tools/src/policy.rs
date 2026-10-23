@@ -82,7 +82,7 @@ pub fn reach_of(name: &str, network_mcp_servers: &BTreeSet<String>) -> ToolReach
         }
         "fs.read" | "fs.list" | "fs.write" => ToolReach::LocalFilesystem,
         "terminal.run" => ToolReach::LocalCommand,
-        "agent.delegate" => ToolReach::Delegation,
+        "agent.delegate" | "agent.resume_worker" | "agent.decline_worker" => ToolReach::Delegation,
         _ => match name
             .strip_prefix("mcp.")
             .and_then(|rest| rest.split_once('.'))

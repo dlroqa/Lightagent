@@ -18,6 +18,7 @@ pub mod research;
 pub mod skill;
 pub mod terminal;
 pub mod web;
+pub mod worker_approval;
 
 pub use actions::{ActionsCancel, ActionsDispatch, ActionsLogs, ActionsStatus};
 pub use datetime::DateTimeNow;
@@ -30,3 +31,4 @@ pub use terminal::TerminalRun;
 pub use web::{
     WebFetch, WebSearch, WebSearchHit, fetch_text, fetch_text_authorized, search_results,
 };
+pub use worker_approval::{AgentDeclineWorker, AgentResumeWorker};

@@ -75,7 +75,9 @@ pub(crate) fn autonomous_subagent_instructions(config: &Config) -> Option<String
              an easy task. Existing approval requirements and delegation limits always apply. \
              Each role returns a typed result with a status: treat partial, timed_out, blocked or failed \
              results as incomplete and say so, cite only the sources it returned, and never present \
-             unverified citations or unrun checks as verified."
+             unverified citations or unrun checks as verified. A result with status awaiting_approval \
+             names one exact action and a handle: call agent.resume_worker with that handle so the \
+             user can approve it, or agent.decline_worker to let the worker continue without it."
         )
     })
 }
@@ -385,6 +387,13 @@ pub(crate) fn configured_builtin_registry(config: &Config, has_skills: bool) -> 
     }
     if !has_skills {
         registry = registry.without("skill.read");
+    }
+    if config.subagents.enabled {
+        // A person's decision on an action a worker paused for.
+        use lightagent_tools::builtins::{AgentDeclineWorker, AgentResumeWorker};
+        registry = registry
+            .with(Arc::new(AgentResumeWorker::new()))
+            .with(Arc::new(AgentDeclineWorker::new()));
     }
     if actions_configured(config) {
         use lightagent_tools::builtins::{

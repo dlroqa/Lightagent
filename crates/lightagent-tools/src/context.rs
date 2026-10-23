@@ -104,6 +104,10 @@ pub struct Delegation {
     /// How many workers may run at once. Applied to the lead's workers; a
     /// nested worker runs inside its parent's slot.
     pub admission: Option<Admission>,
+    /// Workers paused on an action that needs a person's approval.
+    pub parked: crate::builtins::delegate::ParkedWorkers,
+    /// How long a parked worker's pending action may wait for a decision.
+    pub approval_ttl: Duration,
 }
 
 /// A server-provided role preset. The model supplies only a role id; the
@@ -177,6 +181,8 @@ impl Delegation {
             call_guard: None,
             budget: None,
             admission: None,
+            parked: Default::default(),
+            approval_ttl: crate::builtins::delegate::APPROVAL_TTL,
         }
     }
 
@@ -253,6 +259,8 @@ impl Delegation {
             call_guard: self.call_guard.clone(),
             budget: self.budget.clone(),
             admission: self.admission.clone(),
+            parked: self.parked.clone(),
+            approval_ttl: self.approval_ttl,
         }
     }
 }

@@ -38,9 +38,11 @@ use tokio::sync::Semaphore;
 /// Tools a worker is never offered, even when the lead has them: delegation
 /// is added back only where depth allows, Jev's budget belongs to the lead,
 /// and the lead's durable memory is written only by the lead.
-const LEAD_ONLY_TOOLS: [&str; 5] = [
+const LEAD_ONLY_TOOLS: [&str; 7] = [
     "agent.delegate",
     "agent.research",
+    "agent.resume_worker",
+    "agent.decline_worker",
     "jev.classify_task",
     "memory.write",
     "memory.reflect",
