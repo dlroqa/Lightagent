@@ -417,6 +417,7 @@ impl LightweightRunFactory {
         if trust == RunTrust::RemoteUser
             && config.subagents.enabled
             && config.subagents.remote_research
+            && config.subagents.resolution == lightagent_core::WorkerResolution::Builtin
         {
             registry.insert(Arc::new(lightagent_tools::builtins::AgentResearch::new()));
         }
@@ -1657,6 +1658,22 @@ pub(crate) mod routing_tests {
         config.subagents.remote_research = true;
         let (_, _, bodies) = run_through_factory(config, "hi").await;
         assert!(!tool_names(&bodies[0]).contains(&"agent.research".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn the_legacy_rollback_opens_no_delegation_to_an_untrusted_run() {
+        // Rollback on, research on, and the profile lists both delegation
+        // tools: the untrusted run still gets no generic delegation, and its
+        // research tool has no legacy resolution to fall back on.
+        let mut config = tool_config(lightagent_core::ToolPolicyMode::Off);
+        config.subagents.resolution = lightagent_core::WorkerResolution::LegacyProfiles;
+        config.subagents.remote_research = true;
+        let listed = strings(&["web.*", "agent.research", "agent.delegate"]);
+        let (_, _, bodies) =
+            run_through_factory_with(config, "hi", listed, RunTrust::RemoteUser).await;
+        let names = tool_names(&bodies[0]);
+        assert!(!names.contains(&"agent.delegate".to_owned()), "{names:?}");
+        assert!(!names.contains(&"agent.research".to_owned()), "{names:?}");
     }
 
     #[tokio::test]

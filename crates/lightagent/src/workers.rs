@@ -138,6 +138,7 @@ pub(crate) struct HarnessResolver {
     config: Config,
     requester: ProfileId,
     lead_limits: RunLimits,
+    lead_approval: lightagent_core::ApprovalPolicy,
     trust: RunTrust,
     builtin: BuiltinResolver,
 }
@@ -162,6 +163,7 @@ impl HarnessResolver {
             config: config.clone(),
             requester: lead.id.clone(),
             lead_limits: lead.limits,
+            lead_approval: lead.approval_policy,
             trust,
             builtin,
         }
@@ -219,7 +221,14 @@ impl HarnessResolver {
         if same_owner(&self.root, &self.requester, profile).is_err() {
             return Err(refused());
         }
+        // The worker runs on the lead's endpoint and credentials, with a
+        // model the installation knows, and never under a looser approval
+        // policy or larger limits than the lead's.
+        let routing = self.permitted_routing(&worker.routing)?;
         let mut spec = WorkerSpec::from_profile(&worker, label);
+        spec.routing = routing;
+        spec.approval = worker.approval_policy.stricter(self.lead_approval);
+        spec.limits = spec.limits.intersect(&self.lead_limits);
         if let Some(role) = role {
             let definition = workers::builtin(role);
             spec.role = Some(role);
@@ -230,6 +239,37 @@ impl HarnessResolver {
             spec.typed_result = true;
         }
         Ok(spec)
+    }
+
+    /// `routing` as a worker of this lead may use it: on the lead's endpoint
+    /// (the lead's key is never sent anywhere else) and with a model the
+    /// installation knows. Refused, never substituted.
+    fn permitted_routing(&self, routing: &ModelRouting) -> Result<ModelRouting, String> {
+        let lead = &self.builtin.routing;
+        let endpoint = |url: &Option<String>| {
+            url.as_deref()
+                .unwrap_or(&self.config.inference.base_url)
+                .trim_end_matches('/')
+                .to_owned()
+        };
+        if endpoint(&routing.base_url) != endpoint(&lead.base_url) {
+            return Err("the worker's endpoint is not the lead's; it was not used".to_owned());
+        }
+        let model = crate::chat::configured_model(&routing.model, &self.config);
+        let inference = &self.config.inference;
+        let known = model == lead.model
+            || self.config.subagents.approved_models.contains(&model)
+            || inference.model_catalog.contains_key(&model)
+            || inference.model_aliases.contains_key(&model);
+        if !known {
+            return Err(format!(
+                "the worker's model {model:?} is not approved for this installation"
+            ));
+        }
+        Ok(ModelRouting {
+            model,
+            ..routing.clone()
+        })
     }
 
     /// A profile named after `role` that a person customized, if any. One

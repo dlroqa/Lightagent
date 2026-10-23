@@ -191,6 +191,11 @@ fn resolve(delegation: &Delegation, target: WorkerTarget<'_>) -> Result<WorkerSp
     if let Some(resolver) = &delegation.resolver {
         return resolver.resolve(target);
     }
+    // The legacy resolution (and so the `legacy_profiles` rollback) names
+    // profiles directly; an untrusted run may never use it.
+    if delegation.trust == lightagent_core::identity::RunTrust::RemoteUser {
+        return Err("legacy worker resolution is not available to this run".to_owned());
+    }
     let name = match target {
         WorkerTarget::Profile(profile) => profile,
         WorkerTarget::Role(role) => delegation
