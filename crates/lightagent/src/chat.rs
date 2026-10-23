@@ -851,6 +851,8 @@ struct ChatRuntime {
     /// A read-only view of the session's tools, for the per-turn workflow
     /// decision. The executor owns the tools that actually run.
     workflow_registry: ToolRegistry,
+    /// The session's specialist plan slot, replaced at every turn.
+    plan: lightagent_tools::plan::PlanSlot,
 }
 
 /// Build a fresh runtime from the installed extension set. The same path is
@@ -931,6 +933,7 @@ async fn build_chat_runtime(
     });
     let tools = registry.names();
     let workflow_registry = registry.clone();
+    let plan = delegation.plan.clone();
     let permission_policy = PolicyEngine::new(profile.approval_policy.into());
     let tool_permissions = tools
         .iter()
@@ -1007,6 +1010,7 @@ async fn build_chat_runtime(
         extensions: active_extensions,
         jev_budget,
         workflow_registry,
+        plan,
     }
 }
 
@@ -1100,6 +1104,7 @@ pub async fn run(
     let mut jev_budget = runtime.jev_budget;
     let mut routing_notice_shown = false;
     let mut workflow_registry = runtime.workflow_registry;
+    let mut plan_slot = runtime.plan;
     if session.approvals_unrestricted {
         agent.invoker().allow_without_restrictions();
     }
@@ -1292,6 +1297,7 @@ pub async fn run(
                 tool_permissions = runtime.tool_permissions;
                 jev_budget = runtime.jev_budget;
                 workflow_registry = runtime.workflow_registry;
+                plan_slot = runtime.plan;
                 config = new_config;
                 profile = new_profile;
                 if let Err(error) = operation {
@@ -1377,6 +1383,44 @@ pub async fn run(
             }
             turn_guidance = decision.guidance.filter(|_| decision.applied);
         }
+        // Specialist selection decides afresh each turn; a plan from an
+        // earlier turn never carries over.
+        plan_slot.set(None);
+        let mut turn_plan = None;
+        if let Some(report) = &preflight.classification
+            && crate::coordinator::selection::requested(&config)
+        {
+            let trust = lightagent_core::identity::RunTrust::LocalOperator;
+            let readiness = crate::workers::readiness(
+                paths.root(),
+                &config,
+                &profile,
+                trust,
+                &workflow_registry,
+            );
+            let policy = PolicyEngine::new(profile.approval_policy.into());
+            let chosen = crate::coordinator::selection::decide(
+                &crate::coordinator::selection::SelectionInputs {
+                    config: &config,
+                    profile: profile.id.as_str(),
+                    report,
+                    readiness: &readiness,
+                    registry: &workflow_registry,
+                    policy: &policy,
+                    limits: &profile.limits,
+                    trust,
+                    cancelled: false,
+                },
+            );
+            if let Some(chosen) = chosen {
+                println!(
+                    "{}",
+                    crate::coordinator::selection::terminal_summary(&chosen.record)
+                );
+                plan_slot.set(chosen.order);
+                turn_plan = chosen.instruction;
+            }
+        }
         if config.platform.jev.endpoint.enabled {
             let default_model = configured_model(&profile.routing.model, &config);
             let (model, url) = (preflight.model, preflight.base_url);
@@ -1416,6 +1460,7 @@ pub async fn run(
             _ => {}
         }
         with_turn_guidance(&mut history, turn_guidance);
+        with_turn_guidance(&mut history, turn_plan);
         session.push_message(StoredMessage::new("user", &line));
         session_store
             .save(&session)
@@ -2973,7 +3018,7 @@ fn turn_workflow(
 /// never changed. The history is rebuilt from the session at every turn and
 /// the session stores only user and assistant text, so the guidance reaches
 /// this turn's requests and no later turn.
-fn with_turn_guidance(history: &mut Vec<ProviderMessage>, guidance: Option<&'static str>) {
+fn with_turn_guidance(history: &mut Vec<ProviderMessage>, guidance: Option<impl Into<String>>) {
     if let Some(guidance) = guidance {
         let position = history
             .iter()

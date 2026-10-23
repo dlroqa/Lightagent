@@ -247,6 +247,13 @@ impl Tool for AgentDelegate {
             }
             (None, None) => return ToolOutcome::error("a worker profile or role is required"),
         };
+        // A planned role waits for the roles the plan puts before it.
+        if let WorkerTarget::Role(role) = target
+            && delegation.depth == 0
+            && let Err(error) = delegation.plan.check(role)
+        {
+            return ToolOutcome::error(error);
+        }
         if let Err(error) = delegation.may_start_worker() {
             return ToolOutcome::error(error);
         }
@@ -620,6 +627,12 @@ fn conclude(
         };
         (outcome, status)
     };
+    if status == "completed"
+        && delegation.depth == 0
+        && let Some(role) = run.spec.role
+    {
+        delegation.plan.completed(role.as_str());
+    }
     ctx.report(progress(&format!("worker.{status}"), Some(status)));
     outcome
 }

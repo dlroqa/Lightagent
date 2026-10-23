@@ -223,6 +223,7 @@ pub(crate) fn accepted(category: TaskCategory) -> Outcome {
         model_version: None,
         usage: None,
         threshold: 0.9,
+        selection: None,
     })
 }
 

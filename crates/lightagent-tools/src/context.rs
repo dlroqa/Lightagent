@@ -108,6 +108,9 @@ pub struct Delegation {
     pub parked: crate::builtins::delegate::ParkedWorkers,
     /// How long a parked worker's pending action may wait for a decision.
     pub approval_ttl: Duration,
+    /// The run's specialist plan, if one was given to the lead: the order
+    /// its planned roles may start in. Empty by default.
+    pub plan: crate::plan::PlanSlot,
 }
 
 /// A server-provided role preset. The model supplies only a role id; the
@@ -183,6 +186,7 @@ impl Delegation {
             admission: None,
             parked: Default::default(),
             approval_ttl: crate::builtins::delegate::APPROVAL_TTL,
+            plan: Default::default(),
         }
     }
 
@@ -261,6 +265,8 @@ impl Delegation {
             admission: self.admission.clone(),
             parked: self.parked.clone(),
             approval_ttl: self.approval_ttl,
+            // A plan orders the lead's workers only.
+            plan: Default::default(),
         }
     }
 }

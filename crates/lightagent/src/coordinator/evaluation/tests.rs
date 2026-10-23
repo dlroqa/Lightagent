@@ -535,6 +535,7 @@ fn a_live_run_proposes_thresholds_only_from_enough_evidence() {
                         model_version: Some("jev-test".to_owned()),
                         usage: None,
                         threshold: 0.9,
+                        selection: None,
                     }),
                     invoked: true,
                     latency: None,
