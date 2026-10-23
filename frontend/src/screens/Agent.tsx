@@ -202,7 +202,8 @@ function describeProgress(data: Record<string, unknown>): string | undefined {
     case "worker.queued": return "Waiting for a free worker…";
     case "worker.started": return "Worker started…";
     case "worker.tool": return counted ? `Worker working (tool call ${counted})…` : "Worker working…";
-    case "worker.awaiting_approval": return "Worker needs an approval it cannot get";
+    case "worker.awaiting_approval": return "Worker is waiting for your approval";
+    case "worker.resumed": return "Worker resumed…";
     case "worker.completed": return "Worker finished";
     case "worker.partial": return "Worker returned partial results";
     case "worker.timed_out": return "Worker ran out of time";
@@ -1517,7 +1518,7 @@ interface WorkerReport {
 
 /** The typed result of an `agent.delegate` call, when it returned one. */
 function workerReport(tool: ToolCall): WorkerReport | null {
-  if (tool.name !== "agent.delegate") return null;
+  if (!["agent.delegate", "agent.research", "agent.resume_worker", "agent.decline_worker"].includes(tool.name)) return null;
   try {
     const value: unknown = JSON.parse(tool.result);
     if (!value || typeof value !== "object") return null;
@@ -1549,6 +1550,7 @@ const WORKER_STATUS: Record<string, { label: string; tone: string }> = {
   partial: { label: "Partial", tone: "warn" },
   timed_out: { label: "Timed out", tone: "warn" },
   blocked: { label: "Blocked on approval", tone: "danger" },
+  awaiting_approval: { label: "Needs approval", tone: "warn" },
   failed: { label: "Failed", tone: "danger" },
   cancelled: { label: "Cancelled", tone: "neutral" },
 };
@@ -1560,7 +1562,7 @@ function workerStatus(report: WorkerReport): { label: string; tone: string } {
 /** How a tool's progress line in the transcript names the tool. */
 function progressLabel(name: string): string {
   if (name === "rag.realtime") return "Web research";
-  if (name === "agent.delegate") return "Delegated work";
+  if (name.startsWith("agent.")) return "Delegated work";
   return name;
 }
 
@@ -1634,6 +1636,8 @@ function describeTool(tool: ToolCall): { verb: string; subject: string; kind: To
     case "rag.search": return { verb: "Searched documents for", subject: stringArg("query") || "passages", kind: "search" };
     case "terminal.run":
     case "open_terminal.run": return { verb: "Ran", subject: stringArg("command") || "a command", kind: "terminal" };
+    case "agent.resume_worker": return { verb: "Asked you to approve a worker's", subject: "action", kind: "tool" };
+    case "agent.decline_worker": return { verb: "Declined a worker's", subject: "action", kind: "tool" };
     case "agent.delegate": return {
       verb: stringArg("role") ? `Asked the ${stringArg("role")} to` : "Asked an agent to",
       subject: stringArg("task") || "help",

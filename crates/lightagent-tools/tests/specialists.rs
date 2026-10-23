@@ -377,36 +377,6 @@ async fn the_reviewer_reads_the_workspace_and_cannot_write_it() {
 }
 
 #[tokio::test]
-async fn the_coders_write_waits_for_an_approval_a_worker_cannot_grant() {
-    let home = Scratch::new();
-    let root = Scratch::new();
-    let ctx = ToolCtx::new(CancellationToken::new()).with_workspace(workspace(
-        &root.path,
-        &[("src/lib.rs", "pub fn one() -> u32 { 2 }\n")],
-    ));
-    let worker = MockProvider::new(vec![
-        call("w1", "fs.read", json!({ "path": "src/lib.rs" })),
-        call(
-            "w2",
-            "fs.write",
-            json!({ "path": "src/lib.rs", "content": "pub fn one() -> u32 { 1 }\n" }),
-        ),
-        answer("never reached"),
-    ]);
-    let ctx = ctx.with_delegation(lead(&home.path, worker));
-    let (outcome, report) = delegate(&ctx, "coder", "Make one() return 1.").await;
-    assert!(outcome.is_error, "a blocked worker is not a success");
-    assert_eq!(report["status"], "blocked");
-    assert_eq!(report["blocked_on"], "fs.write");
-    assert!(strings(&report["tools_offered"]).contains(&"fs.write".to_owned()));
-    assert_eq!(
-        std::fs::read_to_string(root.path.join("src/lib.rs")).unwrap(),
-        "pub fn one() -> u32 { 2 }\n",
-        "nothing was written"
-    );
-}
-
-#[tokio::test]
 async fn the_tester_is_offered_no_workflow_tools_without_a_broker() {
     let home = Scratch::new();
     let worker = MockProvider::new(vec![answer("No workflow tools; nothing verified.")]);
