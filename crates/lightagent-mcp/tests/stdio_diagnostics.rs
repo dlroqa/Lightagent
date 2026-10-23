@@ -42,6 +42,7 @@ async fn a_server_that_exits_is_reported_at_once_with_its_stderr() {
         .expect_err("the server exited without answering");
     let elapsed = started.elapsed();
     let text = error.to_string();
+    println!("reported after {elapsed:?}: {text}");
     assert!(elapsed < Duration::from_secs(10), "{elapsed:?}: {text}");
     assert!(text.contains("closed its output"), "{text}");
     assert!(text.contains("starting"), "{text}");
