@@ -12,6 +12,18 @@ export interface SkillInfo {
   description: string;
 }
 
+/** One specialist role's readiness, from `GET /workers`. */
+export interface WorkerReadiness {
+  role: string;
+  state: "ready" | "degraded" | "disabled" | "permission_denied" | "unavailable";
+  worker: string;
+  model: string | null;
+  model_source: string;
+  skill: string | null;
+  tools: string[];
+  reasons: string[];
+}
+
 
 export interface PendingApproval {
   approval_id: string;
@@ -326,6 +338,7 @@ async function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
 export const agentApi = {
   tools: () => jsonRequest<{ tools: ToolInfo[] }>("/tools"),
   skills: () => jsonRequest<{ skills: SkillInfo[] }>("/skills"),
+  workers: () => jsonRequest<{ workers: WorkerReadiness[] }>("/workers"),
   settings: () => jsonRequest<LightagentSettings>("/settings"),
   saveSettings: (settings: LightagentSettings) =>
     jsonRequest<LightagentSettings>("/settings", {

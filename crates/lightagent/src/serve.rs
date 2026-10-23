@@ -141,6 +141,42 @@ impl RunFactory for LightweightRunFactory {
             .collect())
     }
 
+    async fn workers_for(
+        &self,
+        profile: Option<&ProfileId>,
+        trust: RunTrust,
+    ) -> Result<serde_json::Value, String> {
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let config = ConfigStore::at(&paths).load().map_err(|e| e.to_string())?;
+        let profiles = ProfileStore::new(&self.root);
+        let requested = profile.map(|profile| profile.as_str().to_owned());
+        let lead = resolve_profile(&profiles, &config, requested)?;
+        let profile_dir = profiles.handle(&lead.id).dir().to_path_buf();
+        let extensions = load_extensions(&self.root, &profile_dir);
+        let skills = load_skills(&self.root, &profile_dir, &extensions, &config);
+        let credentials = vault_credentials(&self.root, &lead.id, trust);
+        let mut registry = crate::chat::configured_registry_for(
+            &config,
+            &profile_dir,
+            &extensions,
+            !skills.is_empty(),
+            crate::chat::RemoteAccess::for_run_with(trust, &lead.id, credentials.as_ref()),
+        )
+        .await;
+        // As a run would: the read-only researcher where it is granted.
+        if trust == RunTrust::RemoteUser
+            && config.subagents.enabled
+            && config.subagents.remote_research
+            && config.subagents.resolution == lightagent_core::WorkerResolution::Builtin
+        {
+            registry.insert(Arc::new(lightagent_tools::builtins::AgentResearch::new()));
+        }
+        let registry = crate::chat::tool_policy(&config, &extensions, &registry, &lead, trust)
+            .apply(&registry);
+        let report = crate::workers::readiness(&self.root, &config, &lead, trust, &registry);
+        serde_json::to_value(report).map_err(|error| error.to_string())
+    }
+
     async fn jev_status_for(&self, profile: &ProfileId) -> Result<serde_json::Value, String> {
         let paths = LightagentPaths::rooted_at(&self.root);
         let config = ConfigStore::at(&paths)
@@ -1659,6 +1695,57 @@ pub(crate) mod routing_tests {
         config.subagents.remote_research = true;
         let (_, _, bodies) = run_through_factory(config, "hi").await;
         assert!(!tool_names(&bodies[0]).contains(&"agent.research".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn readiness_is_reported_per_role_for_operators_and_untrusted_users() {
+        let root = std::env::temp_dir().join(format!(
+            "lightagent-readiness-{}",
+            lightagent_core::RunId::new().as_str()
+        ));
+        let mut config = tool_config(lightagent_core::ToolPolicyMode::Off);
+        config.subagents.remote_research = true;
+        ConfigStore::at(&LightagentPaths::rooted_at(&root))
+            .save(&config)
+            .unwrap();
+        let store = ProfileStore::new(&root);
+        let mut lead = lightagent_core::AgentProfile::new(
+            lightagent_core::ProfileId::new("lead").unwrap(),
+            "Lead",
+            "Persona",
+            "fast",
+        );
+        lead.toolsets = strings(&["web.*", "agent.research"]);
+        store.create(&lead).unwrap();
+        store.set_active(&lead.id).unwrap();
+        let factory = LightweightRunFactory {
+            root: root.clone(),
+            jev: crate::coordinator::JevState::new(),
+        };
+        let state = |report: &serde_json::Value, role: &str| {
+            report
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["role"] == role)
+                .map(|entry| entry["state"].as_str().unwrap().to_owned())
+                .unwrap()
+        };
+        let operator = factory
+            .workers_for(None, RunTrust::LocalOperator)
+            .await
+            .unwrap();
+        assert_eq!(state(&operator, "researcher"), "ready");
+        assert_eq!(state(&operator, "tester"), "unavailable");
+        let remote = factory
+            .workers_for(Some(&lead.id), RunTrust::RemoteUser)
+            .await
+            .unwrap();
+        assert_eq!(state(&remote, "researcher"), "ready");
+        for role in ["coder", "reviewer", "tester"] {
+            assert_eq!(state(&remote, role), "permission_denied");
+        }
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[tokio::test]
