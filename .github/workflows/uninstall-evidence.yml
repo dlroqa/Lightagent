@@ -12,20 +12,16 @@ name: uninstall before/after evidence
 #               MCP extension test now waits for its server to exit.
 
 on:
-  workflow_dispatch:
-    inputs:
-      before:
-        description: BEFORE commit
-        required: true
-      after:
-        description: AFTER commit
-        required: true
+  push:
+    branches: [diag/uninstall-evidence]
 
 permissions:
   contents: read
 
 env:
   CARGO_INCREMENTAL: '0'
+  BEFORE: 72d93b2368cc3689a5563a0033d6615a27dabd68
+  AFTER: ba33ce24e6c6f4318b16200c1f8b4bff26401167
 
 jobs:
   regression:
@@ -43,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ matrix.variant == 'before' && inputs.before || inputs.after }}
+          ref: ${{ matrix.variant == 'before' && env.BEFORE || env.AFTER }}
           persist-credentials: false
       - run: rustup show
       - name: tests/uninstall.rs
@@ -94,7 +90,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ matrix.variant == 'before' && inputs.before || inputs.after }}
+          ref: ${{ matrix.variant == 'before' && env.BEFORE || env.AFTER }}
           persist-credentials: false
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
@@ -178,7 +174,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.after }}
+          ref: ${{ env.AFTER }}
           persist-credentials: false
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
