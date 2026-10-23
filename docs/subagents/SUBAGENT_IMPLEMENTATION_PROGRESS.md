@@ -54,19 +54,70 @@ Approval, cancellation and authorization in the current code:
 
 | Stage | Scope | Branch / PR | State |
 | --- | --- | --- | --- |
-| A | Baseline record, seeded regressions, report workflow | `subagents/a-baseline` | in progress |
-| B | Typed built-in catalog, explicit assignments, legacy resolution, worker-runtime factory, depth/scope fixes | — | pending |
-| C | Scoped child contexts, role skills, dynamic guards, readiness and routing validation | — | pending |
-| D | Actions workflow broker; researcher, coder, reviewer and tester fixtures | — | pending |
-| E | Tree budget, approval states, cancellation and revocation, lifecycle events and UI | — | pending |
-| F | Confined `RemoteUser` research path, provisioning presets and assignment contract | — | pending |
-| G | Final CI, role evaluations, handoff | — | pending |
+| A | Baseline record, seeded regressions, report workflow | `subagents/a-baseline`, #31 | done, green |
+| B+C | Typed catalog, role skills, explicit assignments, legacy resolution, one worker-runtime factory, scoped contexts, guards, readiness, routing validation, `lightagent workers` | `subagents/b-catalog`, #32 | done, green |
+| D | GitHub Actions workflow broker; operational role fixtures | `subagents/d-broker`, #33 | done, green, live broker passed |
+| E | Tree budget, fair admission, lifecycle events, web UI, render scenarios | `subagents/e-budget-events`, #34 | done, green |
+| F | Confined `agent.research` for untrusted runs, capability presets | `subagents/f-remote-research`, #35 | done, green |
+| G | Role evaluation set and live harness, documentation | `subagents/g-evidence`, #36 | done, green; live model evaluation BLOCKED |
+
+Each stage branch is stacked on the previous one, and A is stacked on PR #30.
+
+## Seeded gaps
+
+| Gap | Test | Closed in |
+| --- | --- | --- |
+| 1 Built-in workers created as profiles | `seeded_built_in_workers_create_no_profiles` | B |
+| 3 Child contexts missing | `seeded_a_worker_reads_the_skills_its_run_has` | B |
+| 5 Worker toolsets ignored | `seeded_a_worker_profiles_toolsets_bound_its_tools` | B |
+| N2 `tool_scope` re-widened | `seeded_a_tool_scope_is_never_widened` | B |
+| N1 Depth off by one | `seeded_no_worker_starts_below_the_maximum_depth` | B |
+| 7 No worker progress | `seeded_a_worker_reports_its_lifecycle_to_the_parent` | B |
+| 6 No tree budget | `seeded_workers_share_one_tool_call_budget` | E |
+
+Gaps not covered by a seeded test:
+- Gap 2 (no skills) was closed by the role skills and is tested in `workers/tests.rs` and `specialists.rs`.
+- Gap 4 (no RAG/MCP for workers) was closed because workers now draw from the lead's effective tools (`worker_base`).
+- Gap 8 (untrusted runs) is partly closed by stage F: research only.
+- Gap 9 (mock-only evidence): operational fixture tests were added and the live evaluation is BLOCKED.
+- N3 (serial "parallelism"): rechecked. The lead's instructions never claimed parallel work; only the `SubagentsConfig` doc comment did, and it is corrected. Workers run one at a time per lead run, with one active worker per profile by default.
+- N4 (mutations need approval) is reported as status `blocked`.
+- N5 (routing) is handled by approved routes only.
 
 ## Actions evidence
 
-| SHA | Workflow run | Result |
-| --- | --- | --- |
-| — | — | — |
+| Stage | Tested SHA | Workflow runs | Result |
+| --- | --- | --- | --- |
+| A | `9be758b` | check 39653913064, subagents 39653912976, jev 39653912889 | all green. The seeded report showed 6 of 6 seeded tests failing, as designed. |
+| B+C | `98eef17` | check 39658871077 (11/11 jobs), subagents 39658871113, jev 39658871184 | all green |
+| D | `de255b3` | check 39688062800 (11/11), subagents 39688062725, jev 39688062795 | all green |
+| E | `03a16ad` | check 39688063260 (11/11, Web UI render with the three worker scenarios), subagents 39688063250 | all green |
+| F | `1656af2` | check 39688068681 (11/11), subagents 39688068705 | all green |
+| G | `c123438` | check 39689431569 (11/11), subagents 39689431574, jev 39689431615 | all green; role evaluation BLOCKED |
+
+Live broker evidence, real GitHub Actions. Each run dispatched `subagent-fixture.yml` on the PR head SHA, and each `fail` dispatch's `subagent fixture` run is a deliberate failure:
+
+| Head | Pass run, verdict | Fail run, verdict | Notes |
+| --- | --- | --- | --- |
+| `743afba` (D) | 39659970045 `passed` | 39660000696 `failed` (step `Check`) | The log line was read, and the `mode=deploy` dispatch was refused. |
+| `de255b3` (D) | 39688122168 `passed` | 39688149855 `failed` | |
+| `03a16ad` (E) | 39688214871 `passed` | 39688239195 `failed` | |
+| `1656af2` (F) | 39688242618 `passed` | 39688266649 `failed` | |
+| `c123438` (G) | 39689558867 `passed` | 39689581384 `failed` | |
+
+Live model evaluation: **BLOCKED**. The repository has no general model endpoint; its only secret is `TYPESAFE_API_KEY` in the `jev-live` environment. The job took its BLOCKED branch and ran no model. To unblock it, an operator adds the secrets `SUBAGENT_EVAL_BASE_URL` (and optionally `SUBAGENT_EVAL_API_KEY`) and the variable `SUBAGENT_EVAL_MODELS`.
+
+## Pending and limitations
+
+- **Live model competence**: BLOCKED (see above). The mock and fixture tests show mechanics only.
+- **Approval propagation**: a worker's mutating call returns status `blocked` instead of asking the human through the parent. A parent decision mechanism is not built.
+- **Coder repository flow**: there are no branch-scoped commits or stale-base detection for edits. The coder writes inside the confined workspace under approval, or returns a diff. Verification goes through the tester's broker.
+- **Untrusted runs**: they get research only. Coding, review and testing need a verified per-tenant execution backend, which does not exist.
+- **Web**: the preset wire extension is a handoff only (`docs/subagents/specialists.md`). No Web-side change was made and none is claimed.
+- **Scheduling**: workers are serial within a lead run. Admission pools are sized once per process.
+- **PR #30**: it gained a docs-only commit (`1c12cf4`) after this stack was based, with no overlap. Retarget each PR before its base merges.
+- **Not authorized and not done**: merging, releases, activating provisioning, production settings, deployment.
+
 
 ## Resume instructions
 

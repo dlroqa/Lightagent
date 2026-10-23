@@ -1,0 +1,83 @@
+{
+  "schema": "lightagent.role_eval.v1",
+  "recorded": "2026-10-21",
+  "note": "Recorded before any execution. Each task runs runs_per_task times per model against deterministic fixtures (loopback web pages, a confined workspace, a GitHub stand-in); a run passes only when every check in its expect block holds. A role meets the bar when its pass rate is at least per_role_pass_rate. This measures the named model on these tasks only; it cannot establish general competence.",
+  "thresholds": { "runs_per_task": 3, "per_role_pass_rate": 0.67 },
+  "tasks": [
+    {
+      "id": "res-1",
+      "role": "researcher",
+      "fixture": "zephyr",
+      "task": "When did the Zephyr release ship? Cite the page you read.",
+      "expect": {
+        "status_in": ["completed", "partial"],
+        "answer_contains_all": ["September 10, 2026"],
+        "sources_include": ["/spec"],
+        "no_unverified_citations": true
+      }
+    },
+    {
+      "id": "res-2",
+      "role": "researcher",
+      "fixture": "quill-conflict",
+      "task": "What is the default port of the Quill service? Report any disagreement between sources.",
+      "expect": {
+        "status_in": ["completed", "partial"],
+        "answer_contains_all": ["8080", "9090"],
+        "no_unverified_citations": true
+      }
+    },
+    {
+      "id": "res-3",
+      "role": "researcher",
+      "fixture": "empty",
+      "task": "What is the maximum airspeed of the Quokka 3 drone? Use only evidence you retrieve.",
+      "expect": {
+        "answer_contains_any": ["no evidence", "could not find", "couldn't find", "not find", "no results", "unable", "no information", "not available"],
+        "no_unverified_citations": true
+      }
+    },
+    {
+      "id": "rev-1",
+      "role": "reviewer",
+      "fixture": "ratio",
+      "task": "Review src/lib.rs for defects. Give the location and evidence for each finding.",
+      "expect": {
+        "answer_contains_all": ["src/lib.rs"],
+        "answer_contains_any": ["zero", "panic"]
+      }
+    },
+    {
+      "id": "rev-2",
+      "role": "reviewer",
+      "fixture": "clean",
+      "task": "Review src/clean.rs. Report only defects you can verify in the code.",
+      "expect": {
+        "answer_contains_none": ["critical"],
+        "answer_contains_any": ["no findings", "no defects", "no issues", "no verified", "nothing", "none", "no problems", "correct"]
+      }
+    },
+    {
+      "id": "cod-1",
+      "role": "coder",
+      "fixture": "one",
+      "task": "In src/lib.rs, make one() return 1 instead of 2. Do not write files: return the change as a unified diff.",
+      "expect": {
+        "status_in": ["completed", "partial", "blocked"],
+        "answer_contains_all": ["src/lib.rs", "+"],
+        "answer_contains_any": ["+    1", "+ 1", "+1", "-> u32 { 1"]
+      }
+    },
+    {
+      "id": "tst-1",
+      "role": "tester",
+      "fixture": "github",
+      "task": "Verify commit 0123456789abcdef0123456789abcdef01234567 on branch subagents/fixture: dispatch fixture.yml with input mode=fail, read the run's status, and report its verdict and the exact SHA.",
+      "expect": {
+        "tool_called": ["actions.dispatch", "actions.status"],
+        "answer_contains_any": ["fail"],
+        "answer_contains_all": ["0123456789abcdef0123456789abcdef01234567"]
+      }
+    }
+  ]
+}

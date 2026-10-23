@@ -99,3 +99,62 @@ jobs:
             grep -E '^(EVIDENCE|BLOCKED)' "$RUNNER_TEMP/broker.log" || echo "no evidence lines"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  role-eval-live:
+    name: Role evaluation (live models, BLOCKED without an endpoint)
+    # The recorded set in evaluation/subagents/roles.v1.json, run by real
+    # models through the real worker runtime against local fixtures. It
+    # needs an operator-approved endpoint: secret SUBAGENT_EVAL_BASE_URL,
+    # optional secret SUBAGENT_EVAL_API_KEY, variable SUBAGENT_EVAL_MODELS
+    # (comma-separated). Without them it records BLOCKED, never a pass.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: subagents
+      - name: Run the recorded role evaluation
+        env:
+          LIGHTAGENT_EVAL_BASE_URL: ${{ secrets.SUBAGENT_EVAL_BASE_URL }}
+          LIGHTAGENT_EVAL_API_KEY: ${{ secrets.SUBAGENT_EVAL_API_KEY }}
+          LIGHTAGENT_EVAL_MODEL: ${{ vars.SUBAGENT_EVAL_MODELS }}
+          LIGHTAGENT_EVAL_OUT: ${{ runner.temp }}/role-eval
+        run: |
+          if [ -z "$LIGHTAGENT_EVAL_BASE_URL" ] || [ -z "$LIGHTAGENT_EVAL_MODEL" ]; then
+            {
+              echo "### Role evaluation (live): BLOCKED"
+              echo
+              echo "No operator-approved model endpoint is configured for this repository."
+              echo "Nothing was evaluated; this is not a pass. The deterministic scoring"
+              echo "tests run in the check workflow."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          set -o pipefail
+          cargo test -p lightagent --test role_eval -- --ignored --nocapture live_ \
+            2>&1 | tee "$RUNNER_TEMP/role-eval.log"
+      - name: Summarize
+        if: always()
+        run: |
+          [ -f "$RUNNER_TEMP/role-eval.log" ] || exit 0
+          {
+            echo "### Role evaluation (live)"
+            echo '```'
+            grep -E '^(EVIDENCE|BLOCKED)' "$RUNNER_TEMP/role-eval.log" || echo "no evidence lines"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: role-eval
+          path: ${{ runner.temp }}/role-eval/
+          if-no-files-found: ignore
+          retention-days: 7
