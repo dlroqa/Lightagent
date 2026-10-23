@@ -284,3 +284,62 @@ fn readiness_reports_each_role_with_its_reasons() {
             .all(|entry| entry.state == Readiness::Disabled)
     );
 }
+
+#[test]
+fn a_private_worker_must_use_the_leads_endpoint_and_an_approved_model() {
+    let home = Home::new();
+    let lead = home.profile("lead", |_| {});
+    let mut config = Config::default();
+    home.profile("elsewhere", |profile| {
+        profile.routing.base_url = Some("https://other.example/v1".to_owned());
+    });
+    home.profile("odd-model", |profile| {
+        profile.routing.model = "unlisted-model".to_owned();
+    });
+    for (worker, why) in [("elsewhere", "endpoint"), ("odd-model", "not approved")] {
+        let assigned = assign(&home.root, &lead.id, WorkerRole::Researcher, to(worker));
+        assert!(assigned.is_ok());
+        let error = researcher(&resolver(&home, &config, &lead))
+            .err()
+            .expect("refused, not replaced by the built-in");
+        assert!(error.contains(why), "{error}");
+    }
+    // The installation approving the model makes it usable.
+    config.subagents.approved_models = vec!["unlisted-model".to_owned()];
+    let spec = researcher(&resolver(&home, &config, &lead)).unwrap();
+    assert_eq!(spec.routing.model, "unlisted-model");
+}
+
+#[test]
+fn a_private_worker_never_runs_looser_or_longer_than_its_lead() {
+    let home = Home::new();
+    let config = Config::default();
+    let lead = home.profile("lead", |lead| {
+        lead.approval_policy = lightagent_core::ApprovalPolicy::Strict;
+        lead.limits.max_tool_calls = 4;
+    });
+    home.profile("loose", |profile| {
+        profile.approval_policy = lightagent_core::ApprovalPolicy::Permissive;
+        profile.limits.max_tool_calls = 100;
+    });
+    let assigned = assign(&home.root, &lead.id, WorkerRole::Researcher, to("loose"));
+    assert!(assigned.is_ok());
+    let spec = researcher(&resolver(&home, &config, &lead)).unwrap();
+    assert_eq!(spec.approval, lightagent_core::ApprovalPolicy::Strict);
+    assert_eq!(spec.limits.max_tool_calls, 4);
+}
+
+#[test]
+fn a_customized_legacy_profile_that_fails_a_check_is_refused_not_replaced() {
+    let home = Home::new();
+    let config = Config::default();
+    let lead = home.profile("lead", |_| {});
+    home.profile("researcher", |profile| {
+        profile.persona = "Tuned.".to_owned();
+        profile.routing.base_url = Some("https://other.example/v1".to_owned());
+    });
+    let error = researcher(&resolver(&home, &config, &lead))
+        .err()
+        .expect("refused");
+    assert!(error.contains("endpoint"), "{error}");
+}
