@@ -8,18 +8,18 @@
 //! `Mcp-Session-Id` on later calls. Both hand the client a `result` or an
 //! [`McpError`]; neither knows any MCP method.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderName, HeaderValue};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
-use tokio::sync::{Mutex as AsyncMutex, Notify, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, Notify, oneshot, watch};
 
 use crate::jsonrpc::{self, McpError};
 
@@ -42,6 +42,80 @@ struct StdioInner {
     stdin: AsyncMutex<ChildStdin>,
     next_id: AtomicI64,
     timeout: Duration,
+    /// Set once the server's output has ended: nothing more will be answered.
+    closed: AtomicBool,
+    /// The last lines the server wrote to stderr, bounded and sanitized.
+    stderr: StdMutex<VecDeque<String>>,
+    /// True once the server's stderr has ended.
+    stderr_done: watch::Receiver<bool>,
+}
+
+/// How much of a server's stderr is kept: the last lines, each shortened.
+const STDERR_LINES: usize = 20;
+const STDERR_LINE_CHARS: usize = 300;
+/// A stderr line longer than this is omitted whole, never cut, so no part of
+/// a secret in it can show.
+const STDERR_LINE_BYTES: usize = 4096;
+
+/// One stderr line, made safe to show: the values of the variables the server
+/// was started with are replaced, and so is everything after a credential-like
+/// key (`token=`, `Authorization:`, `Bearer`); control characters are dropped
+/// and the line is shortened.
+fn sanitize(line: &str, secrets: &[String]) -> String {
+    let mut text = line.to_owned();
+    for secret in secrets {
+        text = text.replace(secret.as_str(), "[redacted]");
+    }
+    let mut words = Vec::new();
+    for word in text.split_whitespace() {
+        let lower = word.to_ascii_lowercase();
+        if let Some(split) = word.find(['=', ':'])
+            && credential_key(&lower[..split])
+        {
+            words.push(format!("{}[redacted]", &word[..=split]));
+            break;
+        }
+        if matches!(lower.as_str(), "bearer" | "basic" | "token") {
+            words.push(format!("{word} [redacted]"));
+            break;
+        }
+        words.push(word.to_owned());
+    }
+    let clean: String = words.join(" ").chars().filter(|c| !c.is_control()).collect();
+    if clean.chars().count() > STDERR_LINE_CHARS {
+        let short: String = clean.chars().take(STDERR_LINE_CHARS).collect();
+        format!("{short}…")
+    } else {
+        clean
+    }
+}
+
+fn credential_key(key: &str) -> bool {
+    [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "apikey",
+        "api_key",
+        "api-key",
+        "authorization",
+        "credential",
+        "key",
+    ]
+    .iter()
+    .any(|suffix| key.ends_with(suffix))
+}
+
+impl StdioInner {
+    fn keep_stderr(&self, line: String) {
+        if let Ok(mut lines) = self.stderr.lock() {
+            if lines.len() == STDERR_LINES {
+                lines.pop_front();
+            }
+            lines.push_back(line);
+        }
+    }
 }
 
 /// A server run as a subprocess, spoken to over stdin/stdout.
@@ -148,7 +222,7 @@ impl StdioConnection {
             .envs(env.iter().map(|(k, v)| (k.clone(), v.clone())))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|error| {
             McpError::Transport(format!("could not start {command:?}: {error}"))
@@ -161,12 +235,62 @@ impl StdioConnection {
             .stdout
             .take()
             .ok_or_else(|| McpError::Transport("child has no stdout".to_owned()))?;
+        let stderr = child.stderr.take();
+        let (stderr_finished, stderr_done) = watch::channel(false);
 
         let inner = std::sync::Arc::new(StdioInner {
             pending: StdMutex::new(HashMap::new()),
             stdin: AsyncMutex::new(stdin),
             next_id: AtomicI64::new(1),
             timeout,
+            closed: AtomicBool::new(false),
+            stderr: StdMutex::new(VecDeque::new()),
+            stderr_done,
+        });
+
+        // Keep reading stderr so the server never blocks on it, holding only
+        // its last lines, sanitized, for a failure report.
+        let stderr_inner = std::sync::Arc::clone(&inner);
+        let secrets: Vec<String> = env
+            .iter()
+            .map(|(_, value)| value.clone())
+            .filter(|value| value.len() >= 4)
+            .collect();
+        tokio::spawn(async move {
+            if let Some(mut stderr) = stderr {
+                let mut chunk = [0u8; 1024];
+                let mut line = Vec::new();
+                let mut overlong = false;
+                while let Ok(read) = stderr.read(&mut chunk).await {
+                    if read == 0 {
+                        break;
+                    }
+                    for &byte in &chunk[..read] {
+                        if byte != b'\n' {
+                            if line.len() < STDERR_LINE_BYTES {
+                                line.push(byte);
+                            } else {
+                                overlong = true;
+                            }
+                            continue;
+                        }
+                        let kept = if overlong {
+                            "[a longer line was omitted]".to_owned()
+                        } else {
+                            sanitize(&String::from_utf8_lossy(&line), &secrets)
+                        };
+                        if !kept.is_empty() {
+                            stderr_inner.keep_stderr(kept);
+                        }
+                        line.clear();
+                        overlong = false;
+                    }
+                }
+                if !line.is_empty() && !overlong {
+                    stderr_inner.keep_stderr(sanitize(&String::from_utf8_lossy(&line), &secrets));
+                }
+            }
+            let _ = stderr_finished.send(true);
         });
 
         let reader_inner = std::sync::Arc::clone(&inner);
@@ -192,6 +316,12 @@ impl StdioConnection {
                 // Server-initiated requests and notifications are ignored: this
                 // client exposes tools and needs no server-driven callbacks.
             }
+            // The output ended: nothing waiting will be answered, so fail every
+            // pending request now rather than at its deadline.
+            reader_inner.closed.store(true, Ordering::SeqCst);
+            if let Ok(mut pending) = reader_inner.pending.lock() {
+                pending.clear();
+            }
         });
 
         Ok(Self {
@@ -199,6 +329,49 @@ impl StdioConnection {
             child: AsyncMutex::new(Some(child)),
             cwd: cwd.map(|dir| dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())),
         })
+    }
+}
+
+impl StdioConnection {
+    /// Why the server can no longer answer: it closed its output (it exited,
+    /// or stopped speaking), with its exit status when it has exited and the
+    /// last lines it wrote to stderr. Waits for its stderr to end, at most the
+    /// request timeout, so those lines are complete.
+    async fn closed(&self) -> McpError {
+        let mut stderr_done = self.inner.stderr_done.clone();
+        let _ = tokio::time::timeout(self.inner.timeout, stderr_done.wait_for(|done| *done)).await;
+        let status = match self.child.lock().await.as_mut().map(Child::try_wait) {
+            Some(Ok(Some(status))) => format!(" ({status})"),
+            _ => String::new(),
+        };
+        let stderr = self
+            .inner
+            .stderr
+            .lock()
+            .map(|lines| lines.iter().cloned().collect::<Vec<_>>().join(" | "))
+            .unwrap_or_default();
+        let stderr = if stderr.is_empty() {
+            "; it wrote nothing to stderr".to_owned()
+        } else {
+            format!("; its last stderr: {stderr}")
+        };
+        McpError::Transport(format!(
+            "the server closed its output before answering{status}{stderr}"
+        ))
+    }
+
+    /// A write to the server failed: report why it can no longer answer if
+    /// it has closed or exited, else the write error.
+    async fn write_failed(&self, error: std::io::Error) -> McpError {
+        let exited = matches!(
+            self.child.lock().await.as_mut().map(Child::try_wait),
+            Some(Ok(Some(_)))
+        );
+        if exited || self.inner.closed.load(Ordering::SeqCst) {
+            self.closed().await
+        } else {
+            McpError::Transport(error.to_string())
+        }
     }
 }
 
@@ -210,21 +383,31 @@ impl Connection for StdioConnection {
         if let Ok(mut pending) = self.inner.pending.lock() {
             pending.insert(id, sender);
         }
+        // Checked after registering, so an end of output either is seen here
+        // or drops this request's sender.
+        if self.inner.closed.load(Ordering::SeqCst) {
+            if let Ok(mut pending) = self.inner.pending.lock() {
+                pending.remove(&id);
+            }
+            return Err(self.closed().await);
+        }
         let line = format!("{}\n", jsonrpc::request(id, method, params));
-        {
+        let written = {
             let mut stdin = self.inner.stdin.lock().await;
-            stdin
-                .write_all(line.as_bytes())
-                .await
-                .map_err(|error| McpError::Transport(error.to_string()))?;
-            stdin
-                .flush()
-                .await
-                .map_err(|error| McpError::Transport(error.to_string()))?;
+            match stdin.write_all(line.as_bytes()).await {
+                Ok(()) => stdin.flush().await,
+                Err(error) => Err(error),
+            }
+        };
+        if let Err(error) = written {
+            if let Ok(mut pending) = self.inner.pending.lock() {
+                pending.remove(&id);
+            }
+            return Err(self.write_failed(error).await);
         }
         match tokio::time::timeout(self.inner.timeout, receiver).await {
             Ok(Ok(message)) => jsonrpc::read_result(message),
-            Ok(Err(_)) => Err(McpError::Transport("connection closed".to_owned())),
+            Ok(Err(_)) => Err(self.closed().await),
             Err(_) => {
                 if let Ok(mut pending) = self.inner.pending.lock() {
                     pending.remove(&id);
@@ -466,6 +649,34 @@ mod tests {
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn stderr_lines_are_sanitized_and_bounded() {
+        let secrets = vec!["s3cr3t-value".to_owned()];
+        assert_eq!(
+            sanitize("connecting with s3cr3t-value now", &secrets),
+            "connecting with [redacted] now"
+        );
+        assert_eq!(
+            sanitize("failed: token=abc123 and more", &secrets),
+            "failed: token=[redacted]"
+        );
+        assert_eq!(
+            sanitize("sent Authorization: Bearer abc", &secrets),
+            "sent Authorization:[redacted]"
+        );
+        assert_eq!(
+            sanitize("header bearer abc123", &secrets),
+            "header bearer [redacted]"
+        );
+        assert_eq!(sanitize("api_key:xyz", &secrets), "api_key:[redacted]");
+        assert_eq!(sanitize("plain\u{7}text", &secrets), "plaintext");
+        let long = "x".repeat(STDERR_LINE_CHARS + 10);
+        assert_eq!(
+            sanitize(&long, &secrets).chars().count(),
+            STDERR_LINE_CHARS + 1
+        );
+    }
 
     #[test]
     fn sse_body_yields_the_matching_response() {
