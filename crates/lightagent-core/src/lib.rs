@@ -41,7 +41,8 @@ pub use config::{
     InfinityConfig, JevClassificationConfig, JevClassificationMode, JevConfig, JevRoutingGrant,
     JevRoutingInput, JevRoutingPermission, McpConfig, McpServerEntry, OpenTerminalConfig,
     PlatformConfig, PlatformEndpointConfig, QdrantConfig, SavedProvider, SecretRef, SecurityConfig,
-    SubagentsConfig, ToolPolicyMode, ToolsConfig, WebConfig, WebSearchConfig, WorkerResolution,
+    SubagentsConfig, ToolNameMode, ToolPolicyMode, ToolsConfig, WebConfig, WebSearchConfig,
+    WorkerResolution,
 };
 pub use event::{
     AgentEvent, ClassificationDiagnostics, SpecialistRestriction, SpecialistSelection,
