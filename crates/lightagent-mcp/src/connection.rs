@@ -81,7 +81,11 @@ fn sanitize(line: &str, secrets: &[String]) -> String {
         }
         words.push(word.to_owned());
     }
-    let clean: String = words.join(" ").chars().filter(|c| !c.is_control()).collect();
+    let clean: String = words
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
     if clean.chars().count() > STDERR_LINE_CHARS {
         let short: String = clean.chars().take(STDERR_LINE_CHARS).collect();
         format!("{short}…")
