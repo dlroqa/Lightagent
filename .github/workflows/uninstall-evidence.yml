@@ -20,8 +20,8 @@ permissions:
 
 env:
   CARGO_INCREMENTAL: '0'
-  BEFORE: 72d93b2368cc3689a5563a0033d6615a27dabd68
-  AFTER: ba33ce24e6c6f4318b16200c1f8b4bff26401167
+  BEFORE: a6d7fc7414c801e3c4d22f957e71c7c9d0ae1e71
+  AFTER: 385f60ee20917c112822e481488f66ef4b865e62
 
 jobs:
   regression:
@@ -54,8 +54,8 @@ jobs:
           OUTCOME: ${{ steps.tests.outcome }}
         run: |
           set -euo pipefail
-          failed=$(grep -oE '^test [a-z_]+ \.\.\. FAILED' "$RUNNER_TEMP/tests.log" | awk '{print $2}' | sort | tr '\n' ' ')
-          passed=$(grep -oE '^test [a-z_]+ \.\.\. ok' "$RUNNER_TEMP/tests.log" | awk '{print $2}' | sort | tr '\n' ' ')
+          failed=$( (grep -oE '^test [a-z_]+ \.\.\. FAILED' "$RUNNER_TEMP/tests.log" || true) | awk '{print $2}' | sort | tr '\n' ' ')
+          passed=$( (grep -oE '^test [a-z_]+ \.\.\. ok' "$RUNNER_TEMP/tests.log" || true) | awk '{print $2}' | sort | tr '\n' ' ')
           expected="a_removal_interrupted_after_the_rename_is_finished_and_never_loaded an_empty_directory_left_without_its_manifest_is_finished entries_left_without_a_manifest_are_reported_and_kept "
           if [ "$RUNNER_OS" = Windows ]; then
             expected="a_removal_interrupted_after_the_rename_is_finished_and_never_loaded an_empty_directory_left_without_its_manifest_is_finished an_extension_in_use_is_left_intact_and_uninstalls_once_released entries_left_without_a_manifest_are_reported_and_kept "
@@ -101,6 +101,7 @@ jobs:
         env:
           VARIANT: ${{ matrix.variant }}
         run: |
+          set +e
           set -u
           export LIGHTAGENT_HOME="$RUNNER_TEMP/home"
           mkdir -p "$LIGHTAGENT_HOME"
