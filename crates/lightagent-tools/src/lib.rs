@@ -43,9 +43,9 @@ pub mod workspace;
 
 pub use budget::{Admission, Grant, TreeBudget};
 pub use context::{
-    ActionsContext, ActionsPolicy, Clock, Delegation, OpenTerminalContext, OpenTerminalPolicy,
-    SkillContext, SubagentPolicy, SubagentRole, ToolCtx, WebContext, WebPolicy, WorkspaceContext,
-    WorkspacePolicy,
+    ActionsContext, ActionsPolicy, BranchWrite, Clock, Delegation, OpenTerminalContext,
+    OpenTerminalPolicy, RefReconcile, SkillContext, SubagentPolicy, SubagentRole, ToolCtx,
+    WebContext, WebPolicy, WorkspaceContext, WorkspacePolicy,
 };
 pub use definition::{Tool, ToolDefinition};
 pub use executor::{BoundedExecutor, CallGuard, DEFAULT_PER_CALL_TIMEOUT};

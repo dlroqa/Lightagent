@@ -26,7 +26,9 @@ use lightagent_core::{RiskClass, Scope, ToolOutcome};
 use reqwest::Method;
 use serde_json::{Value, json};
 
-use crate::builtins::actions::{api, api_error, ref_allowed, valid_branch, valid_sha};
+use crate::builtins::actions::{
+    api, api_error, confirm_update, ref_allowed, valid_branch, valid_sha,
+};
 use crate::context::ToolCtx;
 use crate::definition::{Tool, ToolDefinition};
 
@@ -626,7 +628,9 @@ async fn commit(args: &Value, ctx: &ToolCtx) -> Result<Value, String> {
         &format!("/repos/{repository}/git/refs/heads/{branch}"),
         Some(&update),
     )
-    .await?;
+    .await;
+    // The update counts only once confirmed; it is never sent twice.
+    let (moved, write) = confirm_update(actions, ctx, branch, &base, &sha, moved).await?;
     if !moved.status.is_success() {
         return Err(api_error("moving the branch", &moved));
     }
@@ -637,6 +641,7 @@ async fn commit(args: &Value, ctx: &ToolCtx) -> Result<Value, String> {
         "patch_id": patch.id,
         "files": patch.files.iter().map(|file| file.path.clone()).collect::<Vec<_>>(),
         "note": "Not verified yet: dispatch an allowlisted workflow on this exact commit.",
+        "write": write,
     }))
 }
 
