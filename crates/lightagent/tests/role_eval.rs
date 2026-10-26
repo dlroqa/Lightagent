@@ -635,7 +635,19 @@ async fn live_role_evaluation() {
     }
     if let Some(out) = env("LIGHTAGENT_EVAL_OUT") {
         std::fs::create_dir_all(&out).unwrap();
+        // A pilot (fewer tasks or runs) or a run stopped at its ceiling is
+        // evaluated, but it is not the recorded evaluation and cannot pass it.
+        let complete =
+            !stopped && tasks.len() == set.tasks.len() && runs == set.thresholds.runs_per_task;
+        let status = match (stopped, below.is_empty(), complete) {
+            (true, _, _) => "INCOMPLETE",
+            (false, false, _) => "BELOW_THRESHOLD",
+            (false, true, true) => "PASSED",
+            (false, true, false) => "PILOT_ONLY",
+        };
         let report = json!({
+            "evaluation": "role_competence", "status": status, "evaluated": true,
+            "counts_as_competence_evidence": status == "PASSED",
             "set": set.schema, "recorded": set.recorded, "results": results,
             "requests": used.load(Ordering::SeqCst), "request_ceiling": max_requests,
             "runs_per_task": runs, "stopped_at_ceiling": stopped,

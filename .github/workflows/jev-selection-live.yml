@@ -61,11 +61,15 @@ jobs:
           fi
           if [ -z "${TYPESAFE_API_KEY:-}" ]; then
             echo "status=blocked" >> "$GITHUB_OUTPUT"
+            mkdir -p "$RUNNER_TEMP/jev-selection"
+            printf '{"evaluation":"jev_specialist_selection","status":"BLOCKED","evaluated":false,"counts_as_competence_evidence":false,"reason":"TYPESAFE_API_KEY is not configured in the jev-live environment","commit":"%s"}\n' \
+              "$GITHUB_SHA" > "$RUNNER_TEMP/jev-selection/status.json"
+            echo "::notice title=Jev specialist selection BLOCKED::NOT EVALUATED: no credential. This run's success is not a pass."
             {
-              echo "## Jev specialist selection: BLOCKED"
+              echo "## Jev specialist selection: BLOCKED — NOT EVALUATED"
               echo
               echo "TYPESAFE_API_KEY is not configured in the jev-live environment, so no request was made."
-              echo "This is not a pass."
+              echo "The run succeeding means only that this check ran; it is not a pass."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -111,7 +115,7 @@ jobs:
           done
           exit 0
       - uses: actions/upload-artifact@v7
-        if: always() && steps.gate.outputs.status == 'ready'
+        if: always() && steps.gate.outputs.status != ''
         with:
           name: jev-selection-reports
           path: ${{ runner.temp }}/jev-selection/
