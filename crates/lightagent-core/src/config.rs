@@ -102,6 +102,43 @@ pub struct InferenceConfig {
     pub model_aliases: BTreeMap<String, String>,
     /// Additional model IDs to surface in the UI before the backend reports them.
     pub model_catalog: BTreeMap<String, String>,
+    /// How tool names are spelled to the provider. `native` (the default)
+    /// sends Lightagent's dotted names unchanged; `portable` maps them to
+    /// `^[a-zA-Z0-9_-]{1,64}$`, which OpenAI's API and providers that copy
+    /// its validation require, and maps the model's calls back.
+    pub tool_names: ToolNameMode,
+}
+
+/// How tool names cross the provider boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolNameMode {
+    /// The internal names, unchanged. The default.
+    #[default]
+    Native,
+    /// A reversible, collision-checked mapping to the portable alphabet.
+    Portable,
+}
+
+impl ToolNameMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Portable => "portable",
+        }
+    }
+}
+
+impl std::str::FromStr for ToolNameMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "native" => Ok(Self::Native),
+            "portable" => Ok(Self::Portable),
+            _ => Err("tool names must be native or portable".to_owned()),
+        }
+    }
 }
 
 impl Default for InferenceConfig {
@@ -119,6 +156,7 @@ impl Default for InferenceConfig {
                 "Molly".to_owned(),
             )]),
             model_catalog: BTreeMap::new(),
+            tool_names: ToolNameMode::Native,
         }
     }
 }
