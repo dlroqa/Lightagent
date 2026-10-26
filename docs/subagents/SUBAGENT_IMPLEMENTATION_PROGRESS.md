@@ -4,6 +4,76 @@ The working record for making `researcher`, `coder`, `reviewer` and `tester` ope
 
 Every build, format check, lint, test, render and evaluation runs on GitHub-hosted Actions runners. Since round 3, source changes are applied through the GitHub Git Data API: blobs, a tree, a commit and a ref update, prepared from staged files outside any checkout. The local machine holds a repository copy for read-only inspection, synchronization and these notes.
 
+## Round 4: final acceptance pass (2026-10-22)
+
+The stack stays unmerged. Three PRs were added on top of #46:
+
+| Stage | Branch / PR | Items | Final tested SHA |
+| --- | --- | --- | --- |
+| Q | `subagents/q-freshness`, #47 | 2 (vault and RAG through workers), 3 (runtime freshness) | `759ec44` |
+| R | `subagents/r-eval-reporting`, #48 | 4 (BLOCKED reporting), 5 (pinned-commit Jev run) | `9d1901a` |
+| T | `subagents/t-release-prep`, #49 | 6 (0.5.0 metadata and notes), 7 (merge plan) | `e491cad` |
+
+**1. Checks on `068230a`** (the round 3 final head), all green:
+- check [39705190983](https://github.com/dlroqa/Lightagent/actions/runs/39705190983): 11 of 11 jobs;
+- subagents [39705190879](https://github.com/dlroqa/Lightagent/actions/runs/39705190879): broker live, seeded, role evaluation (BLOCKED);
+- jev evaluation [39705190906](https://github.com/dlroqa/Lightagent/actions/runs/39705190906).
+
+`master` has no branch protection or rulesets, so "required" here means this conventional set.
+
+**2. Isolation through delegated workers** (`workers/isolation.rs`):
+- `a_workers_search_presents_only_its_own_profiles_vault_grant`: through the real untrusted `agent.research` path, Alice's researcher presents only her grant. Her grant is revoked mid-run (between two searches), and the second search sends nothing. Bob's run presents only Bob's grant; Carol, with no grant, sends none. Alice's key appears exactly once in everything the backend saw.
+- `a_workers_rag_search_reads_only_its_leads_index`: broad queries, Bob's guessed document name and an extra `profile` argument never surface Bob's index.
+- `a_workers_remote_rag_queries_carry_only_its_leads_namespace`: every Qdrant query a worker causes is filtered to its lead's profile.
+
+**3. Runtime freshness** (`plan.rs`, `patch.rs`, `delegate.rs`):
+- A planned tester or reviewer checks the run's latest patch by id, content and base, plus the commit it became. Its brief names that change, and a completed result is recorded against it.
+- A new patch, or files or a checkout moved outside the patch, make earlier checks stale. A dependent check of a stale result is refused until that check runs again, and the coder's new change reports `plan.stale`.
+- Test: `dependent_checks_are_bound_to_the_change_and_go_stale_with_it`.
+- Limit: the runtime cannot force the lead to request a check it never asks for.
+- Interaction found: the per-agent child cap (`subagents.max_children_per_agent`, 1–3, default 3) is used up by one coder → tester → reviewer cycle. Under that cap, a re-check after a fix is refused by the cap and the lead continues alone. The test raises the cap in its fixture; production validation was **not** widened (owner decision below).
+
+**4. Evaluation reporting.** An unavailable evaluation still finishes "success" but says **BLOCKED — NOT EVALUATED**, with `evaluated: false` and `counts_as_competence_evidence: false`, in four places:
+- the summary;
+- an annotation;
+- the job output `status`;
+- `status.json` in the artifact.
+
+This covers the role evaluation, the Jev live contract and Jev selection. Evaluated role runs report PASSED, BELOW_THRESHOLD, PILOT_ONLY or INCOMPLETE. Only a complete PASSED run counts as competence evidence.
+
+**5. Live Jev selection review**: `jev-selection-review.md`, covering the 24 prompts, why the ceiling is 48 (a second pass), what 24 covers (one full pass), no retries, token estimates, cost not available, and stop conditions. Pre-merge evaluation of a pinned PR head is possible without exposing the key, through `jev-selection-pinned.yml`:
+- `prepare` exports the requests with no secret;
+- `send`, in `jev-live`, runs no repository code: jq validation and curl;
+- `score` replays the responses with no secret.
+
+It requires only that workflow file on `master`. Its pull-request run exercises `prepare`, and the replay path is tested deterministically.
+
+**6. 0.5.0**:
+- versions bumped in the same four files as `647758d`;
+- `[0.5.0] - Unreleased` in the changelog;
+- `docs/releases/v0.5.0.md`;
+- `release-preparation.md` updated.
+
+Nothing was tagged.
+
+**7. Merge plan**: `merge-plan.md`. The 21 PRs form one linear chain (`behind_by = 0` everywhere), `delete_branch_on_merge` is off, and the plan is merge commits only, with each PR retargeted to `master` just in time. Before each merge, confirm `behind_by = 0` against current `master`; the merge tree then equals the tested head tree. Then wait for the post-merge `check`.
+
+Round 4 evidence:
+
+| Stage | Tested SHA | check | subagents | jev evaluation | Other |
+| --- | --- | --- | --- | --- | --- |
+| Q | `759ec44` | 39710127402 ✓ | 39710127405 ✓ | 39710127408 ✓ | |
+| R | `9d1901a` | 39710140105 ✓ | 39710140014 ✓ | 39710140022 ✓ | pinned workflow `prepare` (PR run) 39710140018 ✓ (24 requests exported; send and score skipped on pull requests by design) |
+| T | `e491cad` | 39710154732 ✓ (Cargo.lock is current and versions agree at 0.5.0 on all three OSes) | 39710154833 ✓ (role evaluation annotated BLOCKED, `status.json` uploaded) | 39710154740 ✓ | |
+
+Superseded or failed round 4 runs, kept for the record:
+- Q `8f9cdd5`, R `55be831`: fmt.
+- R `73c7b38`: dead code (`request_for` used only by tests).
+- Q `440664b`, R `46996d8`, T `17cba78`: the freshness test hit the child cap.
+- Q `2f3b708`, R `32946bb`, T `6993f5b`: L's earlier ordering test expected a tester to run after a coder that proposed no patch. Under runtime binding that is now correctly refused, and the test was updated to assert the refusal.
+
+All were fixed and restacked.
+
 ## Round 3 baseline (verified 2026-10-21, before any change)
 
 | Item | Verified value |
@@ -165,6 +235,17 @@ Test merges: none. Each PR is tested at its own head, which contains the whole s
 
 - 2026-10-21 (round 1): local `python3 -c json.load` on `roles.v1.json` to check syntax.
 - 2026-10-22 (round 3): local `python3 -c json.load` on `roles.v1.json` again, to **read** the task ids for the pilot proposal. No validation was intended, but it is a local parse of a project file, which the policy excludes. The ids were checked against the file by text afterwards. Local scripts now only stage text and call the GitHub API.
+
+## Remaining decisions (round 4)
+
+1. **Authorize stage 1 (Jev selection accuracy)**, and choose the route:
+   - merge only `jev-selection-pinned.yml` to `master` and evaluate the reviewed head of #49 before merging the stack; or
+   - merge the stack, then run `jev-selection-live.yml`.
+
+   Either way: `max_requests=24`, approved at the `jev-live` gate.
+2. **The child cap and re-verification.** Keep `max_children_per_agent ≤ 3` (re-checks after a fix may be refused, and the lead continues alone), or approve widening its range so a full fix-and-recheck cycle fits.
+3. **Provide or decline an inference endpoint** for the stage 2 pilot.
+4. **Merge**, following `merge-plan.md`, when ready; then the tag and publication of 0.5.0.
 
 ## Remaining dependencies
 
