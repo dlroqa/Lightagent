@@ -55,6 +55,7 @@ pub(crate) fn subagent_policy(config: &Config) -> SubagentPolicy {
         enabled: config.subagents.enabled,
         max_depth: config.subagents.max_depth,
         max_children_per_agent: config.subagents.max_children_per_agent,
+        max_repair_rounds: config.subagents.max_repair_rounds,
         roles,
     }
 }

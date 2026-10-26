@@ -9,7 +9,10 @@ name: jev specialist selection (pinned PR commit)
 #                          bodies with jq and sends them with curl, one at a
 #                          time, then records the responses (artifact). The
 #                          environment's reviewer approves this job and can
-#                          read the exported requests first.
+#                          read the exported requests first; the digest the
+#                          prepare job published must match what is sent.
+#                          One pass at most: 24 requests, no retries. A
+#                          second pass is a new dispatch and a new approval.
 #   score    no secret     builds the pinned commit again and scores the
 #                          recorded responses with its own rules.
 #
@@ -17,7 +20,8 @@ name: jev specialist selection (pinned PR commit)
 # the default branch's file), so a pull request cannot change these steps.
 # The pinned commit must be the current head of an open pull request from a
 # branch of this repository. On pull requests only `prepare` runs, with no
-# secret, to keep the export path tested.
+# secret, to keep the export path tested; a commit without the export
+# harness (master before the stack merges) has nothing to export.
 
 on:
   pull_request:
@@ -31,7 +35,7 @@ on:
         description: The reviewed pull-request head commit to evaluate (40 hex characters)
         required: true
       max_requests:
-        description: Maximum Jev requests (1-48; the set has 24 prompts)
+        description: Maximum Jev requests (1-24; one pass over the 24 prompts)
         required: true
         default: '24'
 
@@ -55,6 +59,7 @@ jobs:
       pull-requests: read
     outputs:
       sha: ${{ steps.pin.outputs.sha }}
+      digest: ${{ steps.digest.outputs.digest }}
     defaults:
       run:
         shell: bash
@@ -94,14 +99,45 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: jev-pinned
+      - name: Find the export harness
+        id: harness
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if grep -q 'fn export_selection_requests' crates/lightagent/src/coordinator/evaluation/specialists.rs 2>/dev/null; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT" = workflow_dispatch ]; then
+            echo "The pinned commit has no selection export harness."; exit 1
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "This commit has no selection export harness: nothing to export." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Export the requests
+        if: steps.harness.outputs.present == 'true'
         env:
           LIGHTAGENT_SELECTION_EXPORT: ${{ runner.temp }}/selection-requests
           LIGHTAGENT_JEV_LIVE_COMMIT: ${{ steps.pin.outputs.sha }}
         run: >-
           cargo test -p lightagent --lib --
           --ignored --exact --nocapture coordinator::evaluation::specialists::export_selection_requests
+      - name: Record the requests' digest
+        id: digest
+        if: steps.harness.outputs.present == 'true'
+        working-directory: ${{ runner.temp }}/selection-requests
+        run: |
+          set -euo pipefail
+          digest=$(sha256sum sel-*.json | sha256sum | cut -d' ' -f1)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Exported requests"
+            echo "Pinned commit: \`${{ steps.pin.outputs.sha }}\`. Digest of the request set: \`$digest\`."
+            echo '```'
+            sha256sum sel-*.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
+        if: steps.harness.outputs.present == 'true'
         with:
           name: selection-requests
           path: ${{ runner.temp }}/selection-requests/
@@ -131,6 +167,7 @@ jobs:
         env:
           TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
           MAX_REQUESTS: ${{ inputs.max_requests }}
+          EXPECTED_DIGEST: ${{ needs.prepare.outputs.digest }}
           URL: https://api.typesafe.ai/v1/systemone
         run: |
           set -euo pipefail
@@ -143,7 +180,15 @@ jobs:
             exit 0
           fi
           case "$MAX_REQUESTS" in ''|*[!0-9]*) echo "max_requests must be a whole number"; exit 1 ;; esac
-          if [ "$MAX_REQUESTS" -lt 1 ] || [ "$MAX_REQUESTS" -gt 48 ]; then echo "max_requests must be 1-48"; exit 1; fi
+          if [ "$MAX_REQUESTS" -lt 1 ] || [ "$MAX_REQUESTS" -gt 24 ]; then echo "max_requests must be 1-24"; exit 1; fi
+          # Only sel-NNN request bodies (plus prepare's manifest, which is
+          # never sent), at most 24, unchanged since prepare published
+          # their digest.
+          [ -z "$(find requests -mindepth 1 ! -name 'sel-[0-9][0-9][0-9].json' ! -name manifest.json)" ] || { echo "unexpected files in the request set"; exit 1; }
+          [ "$(find requests -name 'sel-*.json' | wc -l)" -le 24 ] || { echo "more than 24 requests"; exit 1; }
+          digest=$(cd requests && sha256sum sel-*.json | sha256sum | cut -d' ' -f1)
+          [ -n "$EXPECTED_DIGEST" ] && [ "$digest" = "$EXPECTED_DIGEST" ] || { echo "the request set does not match the digest prepare published"; exit 1; }
+          echo "Request set digest $digest matches prepare." >> "$GITHUB_STEP_SUMMARY"
           sent=0; failed=0; stopped=no
           for file in requests/sel-*.json; do
             if [ "$sent" -ge "$MAX_REQUESTS" ]; then stopped=request_ceiling; break; fi
@@ -158,10 +203,17 @@ jobs:
                    and (.questions | type == "object" and length <= 11)
                    and ([.questions[].type] | all(. == "choice" or . == "noul" or . == "score"))' \
               "$file" > /dev/null || { echo "$id is not a typed selection request"; exit 1; }
-            code=$(curl -sS --max-time 10 -o "responses/$id.json" -w '%{http_code}' \
+            code=$(curl -sS --proto '=https' --max-redirs 0 --max-time 10 --max-filesize 65536 \
+              -o "responses/$id.json" -w '%{http_code}' \
               -H "Authorization: Bearer $TYPESAFE_API_KEY" -H 'content-type: application/json' \
               --data-binary @"$file" "$URL" || echo 000)
             sent=$((sent + 1))
+            # Keep a response only if it is a JSON object that does not
+            # echo the credential.
+            if [ "$code" = 200 ] && { ! jq -e 'type == "object"' "responses/$id.json" > /dev/null 2>&1 \
+                || grep -qF -- "$TYPESAFE_API_KEY" "responses/$id.json"; }; then
+              code=invalid
+            fi
             case "$code" in
               200) failed=0 ;;
               401|403) rm -f "responses/$id.json"; stopped=credential; break ;;
