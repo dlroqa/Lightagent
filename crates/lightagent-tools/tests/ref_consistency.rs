@@ -150,7 +150,12 @@ impl GitHub {
 
     fn run(&self, id: &Value) -> Value {
         let state = self.state.lock().unwrap();
-        state.runs.iter().find(|run| &run["id"] == id).cloned().unwrap()
+        state
+            .runs
+            .iter()
+            .find(|run| &run["id"] == id)
+            .cloned()
+            .unwrap()
     }
 }
 
@@ -403,8 +408,14 @@ async fn a_branch_that_stays_stale_is_refused_at_the_deadline() {
 
     let refused = refusal(&f.dispatch(NEW).await);
     let elapsed = started.elapsed();
-    assert!(refused.contains("refusing to verify a stale ref"), "{refused}");
-    assert!(refused.contains(&format!("still read at {BASE}")), "{refused}");
+    assert!(
+        refused.contains("refusing to verify a stale ref"),
+        "{refused}"
+    );
+    assert!(
+        refused.contains(&format!("still read at {BASE}")),
+        "{refused}"
+    );
     assert!(elapsed >= Duration::from_millis(300), "{elapsed:?}");
     assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
     let reads = f.github.count_since(mark, "GET", REF);
@@ -419,7 +430,9 @@ async fn without_a_confirmed_update_a_stale_branch_is_refused_at_once() {
     // Nothing was committed: the branch is at BASE.
     let refused = refusal(&f.dispatch(NEW).await);
     assert!(
-        refused.contains(&format!("is at {BASE}, not {NEW}: refusing to verify a stale ref")),
+        refused.contains(&format!(
+            "is at {BASE}, not {NEW}: refusing to verify a stale ref"
+        )),
         "{refused}"
     );
     assert_eq!(f.github.count("GET", REF), 1);
@@ -429,7 +442,10 @@ async fn without_a_confirmed_update_a_stale_branch_is_refused_at_once() {
     report(&f.commit().await);
     let mark = f.github.mark();
     let refused = refusal(&f.dispatch(BASE).await);
-    assert!(refused.contains("refusing to verify a stale ref"), "{refused}");
+    assert!(
+        refused.contains("refusing to verify a stale ref"),
+        "{refused}"
+    );
     assert_eq!(f.github.count_since(mark, "GET", REF), 1);
     assert_eq!(f.github.count("POST", DISPATCHES), 0);
 }
@@ -463,7 +479,10 @@ async fn an_update_answer_naming_another_commit_is_not_taken_for_the_update() {
     f.github.reads([at(BASE)]);
     let mark = f.github.mark();
     let refused = refusal(&f.dispatch(NEW).await);
-    assert!(refused.contains("refusing to verify a stale ref"), "{refused}");
+    assert!(
+        refused.contains("refusing to verify a stale ref"),
+        "{refused}"
+    );
     assert_eq!(f.github.count_since(mark, "GET", REF), 1);
 }
 
@@ -517,13 +536,19 @@ async fn an_update_without_an_answer_is_reconciled_by_reading_never_resent() {
     assert_eq!(f.branch(), BASE);
     assert_eq!(f.github.count("PATCH", UPDATE), 1);
     let refused = refusal(&f.dispatch(NEW).await);
-    assert!(refused.contains("refusing to verify a stale ref"), "{refused}");
+    assert!(
+        refused.contains("refusing to verify a stale ref"),
+        "{refused}"
+    );
 }
 
 #[tokio::test]
 async fn an_update_answered_with_a_server_error_is_reconciled_by_reading() {
     let f = fixture(Duration::from_secs(2)).await;
-    f.update(true, Answer::Reply(502, "", json!({ "message": "Bad Gateway" })));
+    f.update(
+        true,
+        Answer::Reply(502, "", json!({ "message": "Bad Gateway" })),
+    );
     let committed = report(&f.commit().await);
     assert_eq!(committed["write"]["status"], 502);
     assert_eq!(committed["write"]["confirmed_by"], "read");
@@ -560,7 +585,11 @@ async fn a_failed_read_is_named_never_taken_for_a_lagging_one() {
             "authentication failed",
         ),
         (
-            Answer::Reply(403, "retry-after: 60\r\n", json!({ "message": "slow down" })),
+            Answer::Reply(
+                403,
+                "retry-after: 60\r\n",
+                json!({ "message": "slow down" }),
+            ),
             "rate limited",
         ),
         (
