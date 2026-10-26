@@ -9,6 +9,19 @@ name: subagents
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      eval_tasks:
+        description: Role evaluation task ids to run, comma-separated (blank for all)
+        required: false
+        default: ''
+      eval_runs:
+        description: Runs per task (1-3; blank for the recorded 3)
+        required: false
+        default: ''
+      eval_max_requests:
+        description: Hard ceiling on model requests for the whole run (blank for 8 per run)
+        required: false
+        default: ''
 
 concurrency:
   group: subagents-${{ github.ref }}
@@ -142,6 +155,9 @@ jobs:
           LIGHTAGENT_EVAL_MODEL: ${{ vars.SUBAGENT_EVAL_MODELS }}
           # `portable` for endpoints that refuse dotted function names.
           LIGHTAGENT_EVAL_TOOL_NAMES: ${{ vars.SUBAGENT_EVAL_TOOL_NAMES }}
+          LIGHTAGENT_EVAL_TASKS: ${{ inputs.eval_tasks }}
+          LIGHTAGENT_EVAL_RUNS: ${{ inputs.eval_runs }}
+          LIGHTAGENT_EVAL_MAX_REQUESTS: ${{ inputs.eval_max_requests }}
           LIGHTAGENT_EVAL_OUT: ${{ runner.temp }}/role-eval
         run: |
           if [ -z "$LIGHTAGENT_EVAL_BASE_URL" ] || [ -z "$LIGHTAGENT_EVAL_MODEL" ]; then
