@@ -74,3 +74,77 @@ async fn a_silent_server_still_times_out() {
     assert!(matches!(error, McpError::Timeout), "{error}");
     assert!(started.elapsed() >= Duration::from_secs(2));
 }
+
+/// Run `script` as a server that writes to stderr and exits, and return how
+/// its first request failed.
+async fn reported(script: &str, env: &[(String, String)]) -> String {
+    let connection = StdioConnection::spawn(
+        "python3",
+        &["-c".to_owned(), script.to_owned()],
+        env,
+        Duration::from_secs(20),
+    )
+    .await
+    .expect("spawn");
+    let error = connection
+        .request("initialize", json!({}))
+        .await
+        .expect_err("the server exited without answering");
+    let text = error.to_string();
+    println!("reported: {text}");
+    text
+}
+
+// Output that reaches the client in pieces is put back together before it
+// is sanitized: a credential written in two flushed parts, and a variable's
+// value split across writes, are both redacted.
+#[tokio::test]
+async fn output_split_across_writes_is_redacted_whole() {
+    if !python_available() {
+        eprintln!("python3 unavailable; skipping");
+        return;
+    }
+    let script = r#"import os, sys, time; s = os.environ["FIXTURE_SECRET"]; sys.stderr.write("auth tok"); sys.stderr.flush(); time.sleep(0.3); sys.stderr.write("en=abc123 rest\nusing " + s[:4]); sys.stderr.flush(); time.sleep(0.3); sys.stderr.write(s[4:] + " ok\n"); sys.stderr.flush(); sys.exit(5)"#;
+    let text = reported(
+        script,
+        &[("FIXTURE_SECRET".to_owned(), "s3cr3t-value".to_owned())],
+    )
+    .await;
+    assert!(text.contains("auth token=[redacted]"), "{text}");
+    assert!(text.contains("using [redacted] ok"), "{text}");
+    assert!(!text.contains("abc123"), "{text}");
+    assert!(!text.contains("s3cr3t-value"), "{text}");
+    assert!(!text.contains("s3cr"), "{text}");
+}
+
+// Only the last 20 lines are kept, and a line longer than 4 KiB is omitted
+// whole: no part of it is shown.
+#[tokio::test]
+async fn stderr_is_bounded_to_its_last_lines_and_long_lines_are_omitted() {
+    if !python_available() {
+        eprintln!("python3 unavailable; skipping");
+        return;
+    }
+    let script = r#"import sys; [sys.stderr.write("L%02d\n" % i) for i in range(30)]; sys.stderr.write("x" * 5000 + " TAILMARK\n"); sys.stderr.flush(); sys.exit(4)"#;
+    let text = reported(script, &[]).await;
+    for kept in ["L11", "L29", "[a longer line was omitted]"] {
+        assert!(text.contains(kept), "{kept} missing: {text}");
+    }
+    for dropped in ["L00", "L10", "TAILMARK", "xxxxxxxxxx"] {
+        assert!(!text.contains(dropped), "{dropped} shown: {text}");
+    }
+}
+
+// A credential that reaches the client across a read boundary (after a long
+// line) is still redacted.
+#[tokio::test]
+async fn a_credential_across_a_read_boundary_is_redacted() {
+    if !python_available() {
+        eprintln!("python3 unavailable; skipping");
+        return;
+    }
+    let script = r#"import sys; sys.stderr.write("z" * 1015 + "\n" + "login password=hunter22 failed\n"); sys.stderr.flush(); sys.exit(6)"#;
+    let text = reported(script, &[]).await;
+    assert!(text.contains("login password=[redacted]"), "{text}");
+    assert!(!text.contains("hunter22"), "{text}");
+}
