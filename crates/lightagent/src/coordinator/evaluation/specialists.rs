@@ -653,7 +653,11 @@ fn export_selection_requests() {
         env("LIGHTAGENT_SELECTION_EXPORT").expect("LIGHTAGENT_SELECTION_EXPORT names a directory");
     let named = chosen_set();
     let ids = export_requests(std::path::Path::new(&dir), &named);
-    println!("EVIDENCE exported {} requests from {}", ids.len(), named.name);
+    println!(
+        "EVIDENCE exported {} requests from {}",
+        ids.len(),
+        named.name
+    );
 }
 
 #[tokio::test]
@@ -1241,7 +1245,12 @@ fn a_run_takes_its_set_from_the_fixed_list_only() {
     assert_eq!(first.set.cases.len(), 24);
     assert_eq!(held.set.cases.len(), 24);
     assert_eq!(fingerprint(held.text), HELD_OUT_FINGERPRINT);
-    for unknown in ["", "selection.v2", "../selection.v1", "selection-heldout.v1.json"] {
+    for unknown in [
+        "",
+        "selection.v2",
+        "../selection.v1",
+        "selection-heldout.v1.json",
+    ] {
         assert!(named_set(unknown).is_none(), "{unknown}");
     }
 }
