@@ -65,16 +65,36 @@ struct Scored {
     roles_ok: Option<bool>,
     /// The fallback code when the lead kept the task.
     fallback: Option<String>,
+    /// The planned roles, sorted; empty when the lead kept the task.
+    roles: Vec<String>,
+    /// For a case labeled for delegation, the share of the best-matching
+    /// labeled role set the plan covers (0 when nothing was planned).
+    coverage: Option<f64>,
+    /// Jev's raw `specialists` yes-probability, when it was answered.
+    specialists: Option<f64>,
 }
 
 fn score_case(case: &SelectionCase, record: &SpecialistSelection) -> Scored {
     let planned = record.outcome == "plan";
+    let got: BTreeSet<&str> = if planned {
+        record.steps.iter().map(|step| step.role.as_str()).collect()
+    } else {
+        BTreeSet::new()
+    };
     let roles_ok = (planned && case.delegate).then(|| {
-        let got: BTreeSet<&str> = record.steps.iter().map(|step| step.role.as_str()).collect();
         case.roles.iter().any(|set| {
             let want: BTreeSet<&str> = set.iter().map(String::as_str).collect();
             want == got
         })
+    });
+    let coverage = case.delegate.then(|| {
+        case.roles
+            .iter()
+            .map(|set| {
+                let want: BTreeSet<&str> = set.iter().map(String::as_str).collect();
+                want.intersection(&got).count() as f64 / want.len().max(1) as f64
+            })
+            .fold(0.0, f64::max)
     });
     Scored {
         id: case.id.clone(),
@@ -84,6 +104,24 @@ fn score_case(case: &SelectionCase, record: &SpecialistSelection) -> Scored {
         missed: !planned && case.delegate,
         roles_ok,
         fallback: record.fallback_reason.clone(),
+        roles: got.into_iter().map(str::to_owned).collect(),
+        coverage,
+        specialists: record.delegation_probability,
+    }
+}
+
+/// What kind of rule kept a task with the lead: the classification's own
+/// answers (category, complexity), Jev's specialist answers, the run's
+/// permissions, readiness or limits, or a failed classification.
+fn fallback_kind(code: &str) -> &'static str {
+    match code {
+        "simple_task" | "conversation" | "low_confidence" | "single_step_research" => {
+            "classification"
+        }
+        "delegation_not_useful" | "no_role_needed" => "jev_specialist_answers",
+        "delegation_unavailable" | "no_ready_role" | "insufficient_budget" | "cancelled"
+        | "not_asked" | "profile_not_enabled" => "runtime_policy",
+        _ => "classification_failed",
     }
 }
 
@@ -108,6 +146,22 @@ fn totals(set: &SelectionSet, scored: &[Scored]) -> (Value, bool) {
     let passed = scored.len() == set.cases.len()
         && accuracy >= set.pass.decision_accuracy_min
         && unnecessary_rate <= set.pass.unnecessary_delegation_max;
+    // Reported beside the pass rule, never part of it: precision and recall
+    // of the decision to delegate, and role selection over every case
+    // labeled for delegation, so that planning nothing cannot hide behind a
+    // role match of 0/0.
+    let planned = count(&|s| s.planned);
+    let delegated_right = count(&|s| s.planned && !s.unnecessary);
+    let should = scored.iter().filter(|s| s.coverage.is_some()).count();
+    let coverage: f64 = scored.iter().filter_map(|s| s.coverage).sum();
+    let mut fallbacks: BTreeMap<&str, BTreeMap<&str, usize>> = BTreeMap::new();
+    for code in scored.iter().filter_map(|s| s.fallback.as_deref()) {
+        *fallbacks
+            .entry(fallback_kind(code))
+            .or_default()
+            .entry(code)
+            .or_default() += 1;
+    }
     let report = json!({
         "cases": scored.len(),
         "decision_accuracy": ratio(decisions, scored.len()),
@@ -115,6 +169,11 @@ fn totals(set: &SelectionSet, scored: &[Scored]) -> (Value, bool) {
         "missed_delegation": ratio(count(&|s| s.missed), scored.len() - lead_cases.min(scored.len())),
         "role_match": ratio(roles, both),
         "passed": passed,
+        "delegation_precision": ratio(delegated_right, planned),
+        "delegation_recall": ratio(delegated_right, should),
+        "role_match_over_all_delegation_cases": ratio(roles, should),
+        "mean_expected_role_coverage": (should > 0).then(|| coverage / should as f64),
+        "lead_kept_by": fallbacks,
     });
     (report, passed)
 }
@@ -433,6 +492,10 @@ fn finish(set: &SelectionSet, run: &SetRun, measurement: &str, limit: u32) -> bo
             "decision_ok": s.decision_ok,
             "roles_ok": s.roles_ok,
             "fallback": s.fallback,
+            "fallback_kind": s.fallback.as_deref().map(fallback_kind),
+            "roles": s.roles,
+            "expected_role_coverage": s.coverage,
+            "specialists": s.specialists,
         })).collect::<Vec<_>>(),
     });
     let summary = format!(
@@ -707,26 +770,107 @@ fn the_recorded_requests_are_what_this_code_exports() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The recorded run's own result, kept as baseline evidence whatever the
+/// rules become: its verdict, its send record, and the per-case endings of
+/// the rules it ran under, which agree with the labels on 12 of 24.
+#[test]
+fn the_recorded_result_is_kept_as_the_baseline() {
+    let dir = recorded_run();
+    let verdict = read_json(&dir.join("verdict.json"));
+    assert_eq!(verdict["status"], "BELOW_THRESHOLD");
+    assert_eq!(verdict["code_sha"], "b1ffd79c33bc39a13cf26ddf94126b6cb83bfd1c");
+    assert_eq!(verdict["metrics"]["decision_accuracy"]["numerator"], 12);
+    assert_eq!(verdict["metrics"]["missed_delegation"]["numerator"], 12);
+    assert_eq!(verdict["model_identifiers"], json!(["model=jev-1.14.0"]));
+    let send = read_json(&dir.join("responses").join("send.json"));
+    assert_eq!(send, json!({"sent": 24, "ceiling": 24, "retries": 0, "stopped": "no"}));
+    let set = set();
+    let agreed = set
+        .cases
+        .iter()
+        .zip(RECORDED_FALLBACKS)
+        .filter(|(case, (id, ended))| {
+            assert_eq!(case.id, *id);
+            case.delegate == (*ended == "plan")
+        })
+        .count();
+    assert_eq!(agreed, 12);
+}
+
+/// How each prompt ends when this code's rules read the recorded answers.
+/// Development evidence: the same answers to the same questions, through
+/// the corrected rules; not a live result, and the rules were corrected
+/// after seeing these answers.
+const CORRECTED_REPLAY: [(&str, &str, &[&str]); 24] = [
+    ("sel-001", "simple_task", &[]),
+    ("sel-002", "simple_task", &[]),
+    ("sel-003", "simple_task", &[]),
+    ("sel-004", "simple_task", &[]),
+    ("sel-005", "simple_task", &[]),
+    ("sel-006", "simple_task", &[]),
+    ("sel-007", "simple_task", &[]),
+    ("sel-008", "simple_task", &[]),
+    ("sel-009", "simple_task", &[]),
+    ("sel-010", "simple_task", &[]),
+    ("sel-011", "simple_task", &[]),
+    ("sel-012", "simple_task", &[]),
+    ("sel-013", "plan", &["coder", "tester"]),
+    ("sel-014", "plan", &["coder", "researcher"]),
+    ("sel-015", "plan", &["reviewer"]),
+    ("sel-016", "delegation_not_useful", &[]),
+    ("sel-017", "plan", &["researcher"]),
+    ("sel-018", "plan", &["coder", "reviewer"]),
+    ("sel-019", "delegation_not_useful", &[]),
+    ("sel-020", "plan", &["researcher"]),
+    ("sel-021", "plan", &["coder", "tester"]),
+    ("sel-022", "plan", &["coder", "researcher"]),
+    ("sel-023", "plan", &["reviewer"]),
+    ("sel-024", "low_confidence", &[]),
+];
+
 #[tokio::test]
-async fn the_recorded_run_replays_to_its_recorded_result() {
+async fn the_corrected_rules_on_the_recorded_answers() {
     let dir = recorded_run();
     let url = replay_server(&dir.join("requests"), &dir.join("responses")).await;
     let set = set();
     let run = run_set(&set, &selection_config(url, None), DEFAULT_REQUESTS).await;
-    let ended: Vec<(&str, &str)> = run
+    assert_eq!((run.requests, run.failures.len()), (24, 0));
+    let ended: Vec<(&str, &str, Vec<&str>)> = run
         .scored
         .iter()
-        .map(|s| (s.id.as_str(), s.fallback.as_deref().unwrap_or("plan")))
+        .map(|s| {
+            (
+                s.id.as_str(),
+                s.fallback.as_deref().unwrap_or("plan"),
+                s.roles.iter().map(String::as_str).collect(),
+            )
+        })
         .collect();
-    assert_eq!(ended, RECORDED_FALLBACKS);
-    assert_eq!((run.requests, run.failures.len()), (24, 0));
-    let (totals, passed) = totals(&set, &run.scored);
-    assert!(!passed);
-    assert_eq!(totals["decision_accuracy"]["numerator"], 12);
-    assert_eq!(totals["missed_delegation"]["numerator"], 12);
-    let verdict = read_json(&dir.join("verdict.json"));
-    assert_eq!(verdict["status"], "BELOW_THRESHOLD");
-    assert_eq!(verdict["metrics"]["decision_accuracy"]["numerator"], 12);
+    let expected: Vec<(&str, &str, Vec<&str>)> = CORRECTED_REPLAY
+        .iter()
+        .map(|(id, ended, roles)| (*id, *ended, roles.to_vec()))
+        .collect();
+    assert_eq!(ended, expected);
+    let (totals, _) = totals(&set, &run.scored);
+    assert_eq!(totals["decision_accuracy"]["numerator"], 21);
+    assert_eq!(totals["unnecessary_delegation"]["numerator"], 0);
+    assert_eq!(totals["missed_delegation"]["numerator"], 3);
+    assert_eq!(totals["role_match"], json!({"numerator": 9, "denominator": 9, "value": 1.0}));
+    assert_eq!(totals["role_match_over_all_delegation_cases"]["numerator"], 9);
+    assert_eq!(totals["role_match_over_all_delegation_cases"]["denominator"], 12);
+    assert_eq!(totals["delegation_precision"]["value"], 1.0);
+    assert_eq!(totals["delegation_recall"]["numerator"], 9);
+    super::write_report(
+        "selection-replay-corrected",
+        &json!({
+            "evidence": "development: run 40503493185's recorded answers through the corrected rules; not a live result",
+            "totals": totals,
+        }),
+        &format!(
+            "### Corrected rules on run 40503493185's recorded answers (development evidence)\n\n```json\n{}\n```\n",
+            serde_json::to_string_pretty(&totals).unwrap_or_default()
+        ),
+    );
 }
 
 /// Precision and recall of `predicted` against `expected`, per case.
@@ -787,7 +931,7 @@ async fn diagnose_the_recorded_run() {
     let set = set();
     let mut rows = Vec::new();
     let mut table = String::from(
-        "| Case | Expected | Category (conf) | Complexity | specialists | researcher / coder / reviewer / tester | Structure | Rule that ended it | Next rule if confidence passed | Plan from roles alone |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+        "| Case | Expected | Category (conf) | Complexity | specialists | researcher / coder / reviewer / tester | Structure | Recorded run (baseline rules) | This code's rules | Next rule if confidence passed | Plan from roles alone |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
     );
     let (mut actual, mut raw, mut roles_only) = (Vec::new(), Vec::new(), Vec::new());
     let mut coverage = BTreeMap::<&str, (f64, usize)>::new();
@@ -884,13 +1028,14 @@ async fn diagnose_the_recorded_run() {
                 "specialists": {"value": answers.delegation, "threshold": selection_threshold, "passes": delegation_recommended},
                 "roles_at_threshold": recommended,
             },
+            "recorded_baseline": RECORDED_FALLBACKS.iter().find(|(id, _)| *id == case.id).map(|(_, ended)| *ended),
             "ended": ended(&record),
             "next_rule_if_confidence_passed": ended(&next),
             "plan_from_roles_alone": {"ended": ended(&from_roles), "roles": planned_roles(&from_roles), "restricted": from_roles.restricted.iter().map(|x| format!("{}:{}", x.role, x.reason)).collect::<Vec<_>>()},
             "runtime_checks_affected_decision": runtime_affected,
         }));
         table.push_str(&format!(
-            "| {} | {} | {} ({:.2}) | {} ({}) | {:.2} | {:.2} / {:.2} / {:.2} / {:.2} | {:?} ({:.2}) | {} | {} | {} {:?} |\n",
+            "| {} | {} | {} ({:.2}) | {} ({}) | {:.2} | {:.2} / {:.2} / {:.2} / {:.2} | {:?} ({:.2}) | {} | {} {:?} | {} | {} {:?} |\n",
             case.id,
             if case.delegate { format!("delegate {:?}", case.roles) } else { "lead".to_owned() },
             classification.category.as_str(),
@@ -904,7 +1049,12 @@ async fn diagnose_the_recorded_run() {
             role_p(WorkerRole::Tester),
             answers.structure,
             answers.structure_confidence,
+            RECORDED_FALLBACKS
+                .iter()
+                .find(|(id, _)| *id == case.id)
+                .map_or("", |(_, ended)| *ended),
             ended(&record),
+            planned_roles(&record),
             ended(&next),
             ended(&from_roles),
             planned_roles(&from_roles),
@@ -948,4 +1098,48 @@ async fn diagnose_the_recorded_run() {
     super::write_report("selection-diagnosis", &report, &summary);
     println!("{summary}");
     assert_eq!(rows.len(), 24);
+}
+
+/// A second set, labeled before any request with its prompts and kept apart
+/// from the rules' correction: for a future, separately authorized live run.
+const HELD_OUT: &str =
+    include_str!("../../../../../evaluation/subagents/selection-heldout.v1.json");
+
+#[test]
+fn the_held_out_set_is_well_formed_and_disjoint_from_the_first() {
+    let held: SelectionSet = serde_json::from_str(HELD_OUT).expect("the held-out set parses");
+    let first = set();
+    assert_eq!(held.schema, first.schema);
+    // The same recorded pass rule.
+    assert_eq!(
+        (held.pass.decision_accuracy_min, held.pass.unnecessary_delegation_max),
+        (first.pass.decision_accuracy_min, first.pass.unnecessary_delegation_max)
+    );
+    // 24 cases with sel-NNN ids, as the pinned workflow and its guard require.
+    assert_eq!(held.cases.len(), 24);
+    let ids: BTreeSet<&str> = held.cases.iter().map(|case| case.id.as_str()).collect();
+    assert_eq!(ids.len(), 24, "ids are unique");
+    assert!(ids.iter().all(|id| {
+        id.len() == 7 && id.starts_with("sel-") && id[4..].bytes().all(|b| b.is_ascii_digit())
+    }));
+    let roles: BTreeSet<&str> = WorkerRole::ALL.iter().map(|role| role.as_str()).collect();
+    for case in &held.cases {
+        assert!(
+            first.cases.iter().all(|other| other.id != case.id && other.prompt != case.prompt),
+            "{} repeats the first set",
+            case.id
+        );
+        assert!(
+            sanitize::summarize(&case.prompt, 400).is_ok(),
+            "{} would not be sent",
+            case.id
+        );
+        assert_eq!(case.delegate, !case.roles.is_empty(), "{}", case.id);
+        for labeled in &case.roles {
+            assert!(!labeled.is_empty() && labeled.len() < 4, "{}", case.id);
+            assert!(labeled.iter().all(|role| roles.contains(role.as_str())));
+        }
+    }
+    let lead = held.cases.iter().filter(|case| !case.delegate).count();
+    assert_eq!((lead, held.cases.len() - lead), (12, 12));
 }

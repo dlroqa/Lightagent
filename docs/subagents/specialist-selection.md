@@ -26,15 +26,17 @@ The plan is built by fixed rules over the requesting profile's own checks, in th
 | --- | --- |
 | The run was cancelled | `cancelled` |
 | Classification failed or was skipped | its own code, such as `timeout`, `profile_not_permitted` or `malformed` |
-| The category's confidence is below its threshold | `low_confidence` |
 | The run cannot delegate: no `agent.delegate` (or, for an untrusted run, no `agent.research`), or its approval policy refuses it | `delegation_unavailable` |
 | The task is simple | `simple_task` |
 | The task is conversation | `conversation` |
-| Jev's `specialists` probability is below `selection_threshold_percent` | `delegation_not_useful` |
-| No recommended role fits the task. Coder and tester fit coding or multi-step tasks; reviewer fits those and analysis; researcher fits any. | `no_role_needed` |
+| Jev's `specialists` answer is a confident no: at or below 100 − `selection_threshold_percent` (30% by default). An uncertain answer does not end selection; the role answers decide. | `delegation_not_useful` |
+| No role is recommended (each needs at least `selection_threshold_percent`), or none fits the task. Coder and tester fit coding or multi-step tasks; reviewer fits those and analysis; researcher fits any. A role fits when the accepted category is one it serves, or when the categories it serves hold at least the category threshold of the category distribution. | `no_role_needed` |
+| As above, but a recommended role's fit could not be established because the category is uncertain | `low_confidence` |
 | Only a researcher, and the task is not complex: a straightforward search | `single_step_research` |
 | No recommended role is ready for this profile | `no_ready_role` |
 | The lead's limits leave no room to brief and read the workers | `insufficient_budget` |
+
+The category's confidence is not a gate of its own. A task with several parts is often split between categories that admit the same workers (for example 76% coding and 23% multi-step), and selection uses the category only to check that a role fits. The `specialists` question asks whether the task would *clearly* benefit from being split among *different* assistants, a stronger question than the role questions and one a single-worker plan does not need; only a confident no ends selection on it. Both changes follow the diagnosis of the first live run, which kept every task with the lead: see [selection-diagnosis.md](selection-diagnosis.md).
 
 Readiness is the existing per-profile check (`workers::readiness`): the role's assignment and its ownership, the role skill, the model route, the tools the profile's policy leaves, and the run's trust. A role that is not ready is listed under `restricted` with its reason (for example `assignment_refused` or `requires_isolation`) and is **never replaced** by another worker. A tester or reviewer of a change is dropped (`needs_coder`) when the coder it would check is not available.
 
@@ -113,5 +115,5 @@ In `config.json`:
 ## Evidence
 
 - Deterministic (CI, `check`): the rules (`coordinator::selection` tests), the one-request contract with 11 typed questions, malformed answers, order enforcement through the real `agent.delegate` (`specialists.rs`), the SSE payload, the CLI keys and validation.
-- Live Jev selection accuracy: **BLOCKED**, pending explicit authorization. A labeled set and a protected workflow are ready (`evaluation/subagents/selection.v1.json`, `jev-selection-live.yml`). See `live-evaluation-proposal.md`.
+- Live Jev selection accuracy: run 40503493185 (2026-10-27, `jev-1.14.0`, the earlier rules) was **BELOW_THRESHOLD**: 12/24 decisions, every task kept with the lead. Its answers are kept in `evaluation/subagents/runs/2026-10-27-40503493185/`. Replaying them through the corrected rules is development evidence only, since the rules were corrected after seeing them. A held-out set (`selection-heldout.v1.json`) is ready for a separately authorized live run. See [selection-diagnosis.md](selection-diagnosis.md).
 - Whether selection makes runs better or cheaper than the lead choosing alone is **not measured**, and no such claim is made.

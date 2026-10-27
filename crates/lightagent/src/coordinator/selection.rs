@@ -93,6 +93,9 @@ pub(crate) struct SelectionAnswers {
     pub roles: BTreeMap<WorkerRole, f64>,
     pub structure: Structure,
     pub structure_confidence: f64,
+    /// The task category's full distribution, from the classification
+    /// question the selection questions ride on.
+    pub categories: BTreeMap<TaskCategory, f64>,
 }
 
 /// Whether this configuration asks Jev for a specialist recommendation.
@@ -148,9 +151,13 @@ pub(crate) fn questions() -> BTreeMap<String, Question> {
     questions
 }
 
-/// Take selection's answers out of a validated evaluation, or `None` when
-/// any is missing or of the wrong type.
-pub(crate) fn answers(answers: &mut BTreeMap<String, Answer>) -> Option<SelectionAnswers> {
+/// Take selection's answers out of a validated evaluation, with the task
+/// category's distribution, or `None` when any is missing or of the wrong
+/// type.
+pub(crate) fn answers(
+    answers: &mut BTreeMap<String, Answer>,
+    categories: &BTreeMap<String, f64>,
+) -> Option<SelectionAnswers> {
     let noul = |answer: Option<Answer>| match answer {
         Some(Answer::Noul { probability }) => Some(probability),
         _ => None,
@@ -166,11 +173,16 @@ pub(crate) fn answers(answers: &mut BTreeMap<String, Answer>) -> Option<Selectio
     else {
         return None;
     };
+    let categories = categories
+        .iter()
+        .map(|(name, probability)| Some((TaskCategory::parse(name)?, *probability)))
+        .collect::<Option<_>>()?;
     Some(SelectionAnswers {
         delegation,
         roles,
         structure: Structure::parse(&choice)?,
         structure_confidence: confidence,
+        categories,
     })
 }
 
@@ -239,9 +251,10 @@ pub(crate) fn decide(inputs: &SelectionInputs<'_>) -> Option<Selection> {
     };
     record.delegation_probability = Some(answers.delegation);
     record.structure = Some(answers.structure.as_str().to_owned());
-    if !classification.accepted() {
-        return lead(record, "low_confidence");
-    }
+    // The category's own confidence is not a gate here: a task with several
+    // parts is often split between categories that admit the same workers
+    // (coding and multi-step), and selection uses the category only to check
+    // that a role fits, which is held to the same threshold below.
     let threshold = f64::from(config.subagents.selection_threshold_percent) / 100.0;
     // The tool the lead would delegate through, if its policy permits it.
     let tool = match inputs.trust {
@@ -258,17 +271,28 @@ pub(crate) fn decide(inputs: &SelectionInputs<'_>) -> Option<Selection> {
     if classification.category == TaskCategory::Conversation {
         return lead(record, "conversation");
     }
-    if answers.delegation < threshold {
+    // `specialists` is a yes-probability with no confidence of its own, and
+    // asks a stronger question than the role questions (clearly better split
+    // among different assistants). A confident no keeps the task with the
+    // lead; an uncertain answer leaves the decision to the role answers, each
+    // of which must be a confident yes.
+    if answers.delegation <= 1.0 - threshold {
         return lead(record, "delegation_not_useful");
     }
     let recommended =
         |role: WorkerRole| answers.roles.get(&role).copied().unwrap_or(0.0) >= threshold;
-    let coding = matches!(
-        classification.category,
-        TaskCategory::Coding | TaskCategory::MultiStep
-    );
-    // The roles Jev recommends that fit the task at all. A tester or a
-    // reviewer checks code: a change the coder makes, or code that exists.
+    // A role fits when the task is, with the category's own threshold, of a
+    // kind the role serves: the accepted category, or enough of the category
+    // distribution. A tester or a reviewer checks code: a change the coder
+    // makes, or code that exists.
+    let fits_kinds = |kinds: &[TaskCategory]| {
+        (classification.accepted() && kinds.contains(&classification.category))
+            || kinds
+                .iter()
+                .map(|kind| answers.categories.get(kind).copied().unwrap_or(0.0))
+                .sum::<f64>()
+                >= f64::from(classification.threshold)
+    };
     let mut candidates: Vec<WorkerRole> = Vec::new();
     for role in WorkerRole::ALL {
         if !recommended(role) {
@@ -276,19 +300,38 @@ pub(crate) fn decide(inputs: &SelectionInputs<'_>) -> Option<Selection> {
         }
         let fits = match role {
             WorkerRole::Researcher => true,
-            WorkerRole::Coder | WorkerRole::Tester => coding,
-            WorkerRole::Reviewer => coding || classification.category == TaskCategory::Analysis,
+            WorkerRole::Coder | WorkerRole::Tester => {
+                fits_kinds(&[TaskCategory::Coding, TaskCategory::MultiStep])
+            }
+            WorkerRole::Reviewer => fits_kinds(&[
+                TaskCategory::Coding,
+                TaskCategory::MultiStep,
+                TaskCategory::Analysis,
+            ]),
         };
         if fits {
             candidates.push(role);
-        } else {
+        } else if classification.accepted() {
             record
                 .restricted
                 .push(restriction(role, "not_for_this_task"));
+        } else {
+            record.restricted.push(restriction(role, "low_confidence"));
         }
     }
     if candidates.is_empty() {
-        return lead(record, "no_role_needed");
+        let uncertain = record
+            .restricted
+            .iter()
+            .any(|restricted| restricted.reason == "low_confidence");
+        return lead(
+            record,
+            if uncertain {
+                "low_confidence"
+            } else {
+                "no_role_needed"
+            },
+        );
     }
     // A straightforward search stays with the lead: one researcher is worth
     // it only for a complex task.
@@ -574,14 +617,36 @@ mod tests {
             roles: WorkerRole::ALL.into_iter().zip(roles).collect(),
             structure,
             structure_confidence: 0.9,
+            categories: BTreeMap::new(),
         }
     }
 
+    /// A category distribution: `split` as given, the rest spread evenly.
+    fn distribution(split: &[(TaskCategory, f64)]) -> BTreeMap<TaskCategory, f64> {
+        let given: f64 = split.iter().map(|(_, p)| p).sum();
+        let rest = TaskCategory::ALL.len() - split.len();
+        TaskCategory::ALL
+            .into_iter()
+            .map(|category| {
+                let p = split
+                    .iter()
+                    .find(|(c, _)| *c == category)
+                    .map_or((1.0 - given) / rest as f64, |(_, p)| *p);
+                (category, p)
+            })
+            .collect()
+    }
+
+    /// A classification of `category` with 0.95 confidence, and the same
+    /// share of its distribution unless `selection` brings its own.
     fn report(
         category: TaskCategory,
         complexity: Complexity,
-        selection: SelectionAnswers,
+        mut selection: SelectionAnswers,
     ) -> ClassificationReport {
+        if selection.categories.is_empty() {
+            selection.categories = distribution(&[(category, 0.95)]);
+        }
         ClassificationReport {
             mode: JevClassificationMode::Active,
             outcome: Outcome::Classified(TaskClassification {
@@ -770,10 +835,11 @@ mod tests {
         .decide()
         .unwrap();
         assert_eq!(chat.record.fallback_reason.as_deref(), Some("conversation"));
+        // A confident no: at or below 1 - threshold (0.3 by default).
         let unhelpful = Case::new(report(
             TaskCategory::Coding,
             Complexity::Complex,
-            answers(0.4, [0.95; 4], Structure::Sequential),
+            answers(0.3, [0.95; 4], Structure::Sequential),
         ))
         .decide()
         .unwrap();
@@ -899,14 +965,24 @@ mod tests {
 
     #[test]
     fn low_confidence_unavailable_delegation_and_small_budgets_fall_back() {
-        let mut low = coding_task([0.1, 0.95, 0.1, 0.9]);
-        if let Outcome::Classified(classification) = &mut low.outcome {
-            classification.category_confidence = 0.5;
-        }
-        let low = Case::new(low).decide().unwrap();
+        // Coding at 0.5 and conversation at 0.3: the coder and the tester
+        // fit only 55% of the distribution, short of the 0.9 threshold.
+        let low = Case::new(uncertain(
+            coding_task([0.1, 0.95, 0.1, 0.9]),
+            0.5,
+            &[(TaskCategory::Coding, 0.5), (TaskCategory::Conversation, 0.3)],
+        ))
+        .decide()
+        .unwrap();
         assert_eq!(
             low.record.fallback_reason.as_deref(),
             Some("low_confidence")
+        );
+        assert!(
+            low.record
+                .restricted
+                .iter()
+                .all(|restricted| restricted.reason == "low_confidence")
         );
         let mut withheld = Case::new(coding_task([0.1, 0.95, 0.1, 0.9]));
         withheld.registry = ToolRegistry::worker_default();
@@ -929,6 +1005,210 @@ mod tests {
         .decide()
         .unwrap();
         assert_eq!(failed.record.fallback_reason.as_deref(), Some("timeout"));
+    }
+
+    /// `report` with the category's confidence and distribution replaced.
+    fn uncertain(
+        mut report: ClassificationReport,
+        confidence: f64,
+        split: &[(TaskCategory, f64)],
+    ) -> ClassificationReport {
+        if let Outcome::Classified(classification) = &mut report.outcome {
+            classification.category_confidence = confidence;
+            if let Some(selection) = classification.selection.as_mut() {
+                selection.categories = distribution(split);
+            }
+        }
+        report
+    }
+
+    fn with_delegation(mut report: ClassificationReport, delegation: f64) -> ClassificationReport {
+        if let Outcome::Classified(classification) = &mut report.outcome {
+            if let Some(selection) = classification.selection.as_mut() {
+                selection.delegation = delegation;
+            }
+        }
+        report
+    }
+
+    // The live run of 2026-10-27 kept every prompt with the lead: ten tasks
+    // with several parts ended on the category's confidence before any role
+    // was considered, though their distribution was almost all coding and
+    // multi-step, which admit the same workers.
+    #[test]
+    fn a_task_split_between_categories_that_admit_the_roles_is_planned() {
+        let split = Case::new(uncertain(
+            coding_task([0.2, 0.93, 0.5, 0.89]),
+            0.71,
+            &[(TaskCategory::Coding, 0.76), (TaskCategory::MultiStep, 0.23)],
+        ))
+        .decide()
+        .unwrap();
+        assert_eq!(split.record.outcome, "plan", "{:?}", split.record);
+        assert_eq!(roles(&split), ["coder", "tester"]);
+        // A review split between analysis and code fits the reviewer.
+        let review = Case::new(uncertain(
+            report(
+                TaskCategory::Analysis,
+                Complexity::Complex,
+                answers(0.5, [0.2, 0.2, 0.84, 0.3], Structure::Single),
+            ),
+            0.5,
+            &[(TaskCategory::Analysis, 0.58), (TaskCategory::Coding, 0.33)],
+        ))
+        .decide()
+        .unwrap();
+        assert_eq!(roles(&review), ["reviewer"]);
+        // Research split with multi-step: the researcher fits any task, the
+        // coder only 41% of this one, so it is held back as uncertain.
+        let research = Case::new(uncertain(
+            report(
+                TaskCategory::Research,
+                Complexity::Complex,
+                answers(0.5, [0.95, 0.9, 0.1, 0.1], Structure::Sequential),
+            ),
+            0.51,
+            &[(TaskCategory::Research, 0.59), (TaskCategory::MultiStep, 0.4)],
+        ))
+        .decide()
+        .unwrap();
+        assert_eq!(roles(&research), ["researcher"]);
+        let reasons: Vec<(&str, &str)> = research
+            .record
+            .restricted
+            .iter()
+            .map(|restriction| (restriction.role.as_str(), restriction.reason.as_str()))
+            .collect();
+        assert_eq!(reasons, [("coder", "low_confidence")]);
+    }
+
+    // The same run's `specialists` answers ranged from 0.26 to 0.68 on the
+    // tasks labeled for delegation, under a 0.7 threshold: uncertain, not no.
+    #[test]
+    fn an_uncertain_specialists_answer_leaves_the_decision_to_the_roles() {
+        let uncertain_yes = Case::new(with_delegation(coding_task([0.2, 0.93, 0.5, 0.89]), 0.34))
+            .decide()
+            .unwrap();
+        assert_eq!(roles(&uncertain_yes), ["coder", "tester"]);
+        assert_eq!(uncertain_yes.record.delegation_probability, Some(0.34));
+        // A confident no still keeps the task with the lead...
+        let no = Case::new(with_delegation(coding_task([0.2, 0.93, 0.5, 0.89]), 0.26))
+            .decide()
+            .unwrap();
+        assert_eq!(no.record.fallback_reason.as_deref(), Some("delegation_not_useful"));
+        // ...and an uncertain answer with no confident role plans nothing.
+        let no_role = Case::new(with_delegation(coding_task([0.6, 0.66, 0.5, 0.65]), 0.5))
+            .decide()
+            .unwrap();
+        assert_eq!(no_role.record.fallback_reason.as_deref(), Some("no_role_needed"));
+        // The confident-no bound follows the configured threshold.
+        let mut strict = Case::new(with_delegation(coding_task([0.2, 0.93, 0.5, 0.89]), 0.25));
+        strict.config.subagents.selection_threshold_percent = 80;
+        assert_eq!(strict.decide().unwrap().record.outcome, "plan");
+    }
+
+    #[test]
+    fn uncertain_answers_never_turn_a_simple_task_or_a_chat_into_a_plan() {
+        let simple = Case::new(with_delegation(
+            uncertain(
+                report(
+                    TaskCategory::Coding,
+                    Complexity::Simple,
+                    answers(0.5, [0.95; 4], Structure::Sequential),
+                ),
+                0.6,
+                &[(TaskCategory::Coding, 0.6), (TaskCategory::MultiStep, 0.39)],
+            ),
+            0.6,
+        ))
+        .decide()
+        .unwrap();
+        assert_eq!(simple.record.fallback_reason.as_deref(), Some("simple_task"));
+        // A chat is kept even when its category is uncertain.
+        let chat = Case::new(uncertain(
+            report(
+                TaskCategory::Conversation,
+                Complexity::Moderate,
+                answers(0.6, [0.95; 4], Structure::Sequential),
+            ),
+            0.69,
+            &[(TaskCategory::Conversation, 0.74), (TaskCategory::Analysis, 0.25)],
+        ))
+        .decide()
+        .unwrap();
+        assert_eq!(chat.record.fallback_reason.as_deref(), Some("conversation"));
+    }
+
+    #[test]
+    fn uncertain_tasks_keep_permissions_readiness_and_budgets() {
+        let task = || {
+            with_delegation(
+                uncertain(
+                    coding_task([0.1, 0.95, 0.2, 0.9]),
+                    0.7,
+                    &[(TaskCategory::Coding, 0.75), (TaskCategory::MultiStep, 0.24)],
+                ),
+                0.4,
+            )
+        };
+        // No delegation tool: the lead keeps it, whatever the answers.
+        let mut withheld = Case::new(task());
+        withheld.registry = ToolRegistry::worker_default();
+        assert_eq!(
+            withheld.decide().unwrap().record.fallback_reason.as_deref(),
+            Some("delegation_unavailable")
+        );
+        // A refused coder is reported, its tester dropped, nothing replaced.
+        let mut refused = Case::new(task());
+        refused.readiness[1] = RoleReadiness {
+            state: Readiness::PermissionDenied,
+            reasons: vec!["assignment_refused"],
+            ..ready(WorkerRole::Coder)
+        };
+        let refused = refused.decide().unwrap();
+        assert_eq!(refused.record.fallback_reason.as_deref(), Some("no_ready_role"));
+        assert_eq!(refused.order, None);
+        let mut small = Case::new(task());
+        small.limits.max_tool_calls = 2;
+        assert_eq!(
+            small.decide().unwrap().record.fallback_reason.as_deref(),
+            Some("insufficient_budget")
+        );
+        // Shadow mode records the plan and applies nothing.
+        let mut shadow = Case::new(task());
+        shadow.config.subagents.selection = JevClassificationMode::Shadow;
+        let shadow = shadow.decide().unwrap();
+        assert_eq!(shadow.record.outcome, "plan");
+        assert!(!shadow.record.applied && shadow.instruction.is_none() && shadow.order.is_none());
+    }
+
+    #[test]
+    fn a_category_distribution_naming_an_unknown_category_is_malformed() {
+        let mut taken = BTreeMap::from([
+            (DELEGATION.to_owned(), Answer::Noul { probability: 0.9 }),
+            (
+                STRUCTURE.to_owned(),
+                Answer::Choice {
+                    choice: "single".to_owned(),
+                    probabilities: BTreeMap::from([("single".to_owned(), 1.0)]),
+                    confidence: 0.9,
+                },
+            ),
+        ]);
+        for role in WorkerRole::ALL {
+            taken.insert(role_question_id(role), Answer::Noul { probability: 0.5 });
+        }
+        let known = BTreeMap::from([("coding".to_owned(), 1.0)]);
+        assert!(answers_from(&taken, &known).is_some());
+        let unknown = BTreeMap::from([("gardening".to_owned(), 1.0)]);
+        assert!(answers_from(&taken, &unknown).is_none());
+    }
+
+    fn answers_from(
+        taken: &BTreeMap<String, Answer>,
+        categories: &BTreeMap<String, f64>,
+    ) -> Option<SelectionAnswers> {
+        super::answers(&mut taken.clone(), categories)
     }
 
     /// A typed answer to the classification request with selection.
