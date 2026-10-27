@@ -241,7 +241,9 @@ fn large_file() -> String {
     let mut text = String::new();
     let mut line = 0;
     while text.len() < 60_000 {
-        text.push_str(&format!("// line {line}: a long comment that makes the file large\n"));
+        text.push_str(&format!(
+            "// line {line}: a long comment that makes the file large\n"
+        ));
         line += 1;
     }
     text.push_str("// END-OF-FILE\n");
@@ -257,8 +259,12 @@ async fn each_worker_is_budgeted_for_the_window_of_the_model_it_runs_on() {
         let (id, served) = model(name, Some(window), vec![read(), answer("reviewed")]);
         let worker = served.mock.clone();
         let lead = lead_generation(settings(1_024, None, None), 8_192);
-        let ctx = context(&scratch.path, &[("src/big.rs", &big)])
-            .with_delegation(delegation(&scratch.path, vec![(id, served)], &[("reviewer", name)], lead));
+        let ctx = context(&scratch.path, &[("src/big.rs", &big)]).with_delegation(delegation(
+            &scratch.path,
+            vec![(id, served)],
+            &[("reviewer", name)],
+            lead,
+        ));
         let (outcome, report) = delegate(&ctx, "reviewer", json!({})).await;
         assert!(!outcome.is_error, "{}", outcome.content);
         assert_eq!(report["model"], name);
@@ -292,15 +298,24 @@ async fn a_worker_whose_model_reports_no_window_is_neither_guarded_nor_continued
     );
     let worker = served.mock.clone();
     let lead = lead_generation(settings(1_024, None, None), 8_192);
-    let ctx = context(&scratch.path, &[("src/big.rs", &big)])
-        .with_delegation(delegation(&scratch.path, vec![(id, served)], &[("reviewer", "mystery")], lead));
+    let ctx = context(&scratch.path, &[("src/big.rs", &big)]).with_delegation(delegation(
+        &scratch.path,
+        vec![(id, served)],
+        &[("reviewer", "mystery")],
+        lead,
+    ));
     let (_, report) = delegate(&ctx, "reviewer", json!({})).await;
     // Unknown capacity: nothing is cut to fit a guessed window, the cut-off
     // answer is reported as such, and the ceiling still applies.
     assert!(tool_result(&worker, 1).contains("END-OF-FILE"));
     assert_eq!(report["stop_reason"], "max_tokens", "{report}");
     assert_eq!(worker.requests().len(), 2, "no continuation");
-    assert!(worker.requests().iter().all(|r| r.max_tokens == Some(1_024)));
+    assert!(
+        worker
+            .requests()
+            .iter()
+            .all(|r| r.max_tokens == Some(1_024))
+    );
 }
 
 #[tokio::test]
@@ -313,12 +328,21 @@ async fn workers_draw_on_one_run_wide_pool_and_stop_when_it_is_spent() {
     let (id, served) = model(
         LEAD,
         Some(8_192),
-        vec![answer("one"), answer("two"), answer("three"), answer("never")],
+        vec![
+            answer("one"),
+            answer("two"),
+            answer("three"),
+            answer("never"),
+        ],
     );
     let worker = served.mock.clone();
     let models = vec![(id, served)];
-    let ctx = context(&scratch.path, &[])
-        .with_delegation(delegation(&scratch.path, models.clone(), &[], lead.clone()));
+    let ctx = context(&scratch.path, &[]).with_delegation(delegation(
+        &scratch.path,
+        models.clone(),
+        &[],
+        lead.clone(),
+    ));
     for role in ["researcher", "reviewer", "reviewer"] {
         let (outcome, _) = delegate(&ctx, role, json!({})).await;
         assert!(!outcome.is_error, "{}", outcome.content);
@@ -328,8 +352,8 @@ async fn workers_draw_on_one_run_wide_pool_and_stop_when_it_is_spent() {
     assert_eq!(sent, [Some(256), Some(256), Some(88)]);
     assert_eq!(pool.available(), 0);
     // A worker started once the pool is spent takes no turn at all.
-    let ctx = context(&scratch.path, &[])
-        .with_delegation(delegation(&scratch.path, models, &[], lead));
+    let ctx =
+        context(&scratch.path, &[]).with_delegation(delegation(&scratch.path, models, &[], lead));
     let (_, report) = delegate(&ctx, "reviewer", json!({})).await;
     assert_eq!(report["stop_reason"], "output_budget", "{report}");
     assert_eq!(worker.requests().len(), 3);
@@ -349,23 +373,38 @@ async fn a_workers_continuation_spends_its_turns_and_the_pool() {
     let worker = served.mock.clone();
     let lead = lead_generation(settings(256, Some(2_000), Some(64)), 8_192);
     let pool = lead.budget.output_pool.clone().unwrap();
-    let ctx = context(&scratch.path, &[])
-        .with_delegation(delegation(&scratch.path, vec![(id, served)], &[], lead));
+    let ctx = context(&scratch.path, &[]).with_delegation(delegation(
+        &scratch.path,
+        vec![(id, served)],
+        &[],
+        lead,
+    ));
     let (_, report) = delegate(&ctx, "reviewer", json!({})).await;
     assert_eq!(report["stop_reason"], "end_turn", "{report}");
     let answer_text = report["answer"].as_str().unwrap();
     assert!(answer_text.contains("part one") && answer_text.contains("part two"));
     assert_eq!(worker.requests().len(), 2);
-    assert!(worker.requests()[1].tools.is_empty(), "a continuation is answer-only");
-    assert_eq!(pool.spent(), 512, "both turns are charged to the run's pool");
+    assert!(
+        worker.requests()[1].tools.is_empty(),
+        "a continuation is answer-only"
+    );
+    assert_eq!(
+        pool.spent(),
+        512,
+        "both turns are charged to the run's pool"
+    );
 
     // A pool that cannot grant a continuation's minimum: none is taken.
     let scratch = Scratch::new();
     let (id, served) = model(LEAD, Some(8_192), script());
     let worker = served.mock.clone();
     let lead = lead_generation(settings(256, Some(300), Some(64)), 8_192);
-    let ctx = context(&scratch.path, &[])
-        .with_delegation(delegation(&scratch.path, vec![(id, served)], &[], lead));
+    let ctx = context(&scratch.path, &[]).with_delegation(delegation(
+        &scratch.path,
+        vec![(id, served)],
+        &[],
+        lead,
+    ));
     let (_, report) = delegate(&ctx, "reviewer", json!({})).await;
     assert_eq!(report["stop_reason"], "max_tokens", "{report}");
     assert_eq!(worker.requests().len(), 1);
@@ -425,10 +464,12 @@ async fn a_plan_admits_a_repair_round_but_never_lifts_the_run_wide_pool() {
     let mut planned = delegation(&scratch.path, vec![(id, served)], &[], lead);
     planned.subagents.max_children_per_agent = 2;
     planned.subagents.max_repair_rounds = 1;
-    planned.plan.set(Some(lightagent_tools::plan::RolePlan::new([
-        ("coder".to_owned(), Vec::new()),
-        ("tester".to_owned(), vec!["coder".to_owned()]),
-    ])));
+    planned
+        .plan
+        .set(Some(lightagent_tools::plan::RolePlan::new([
+            ("coder".to_owned(), Vec::new()),
+            ("tester".to_owned(), vec!["coder".to_owned()]),
+        ])));
     let ctx = context(&scratch.path, &[("src/lib.rs", BEFORE)]).with_delegation(planned);
     let scope = json!({ "write_scope": ["src/lib.rs"] });
     let store = ctx.patches.as_ref().unwrap().store.clone();
@@ -460,12 +501,19 @@ async fn a_plan_or_none_the_same_bounds_apply() {
         let (id, served) = model("large@128k", Some(131_072), vec![answer("done")]);
         let worker = served.mock.clone();
         let lead = lead_generation(settings(512, Some(10_000), None), 8_192);
-        let routed = delegation(&scratch.path, vec![(id, served)], &[("reviewer", "large@128k")], lead);
+        let routed = delegation(
+            &scratch.path,
+            vec![(id, served)],
+            &[("reviewer", "large@128k")],
+            lead,
+        );
         if plan {
-            routed.plan.set(Some(lightagent_tools::plan::RolePlan::new([(
-                "reviewer".to_owned(),
-                Vec::new(),
-            )])));
+            routed
+                .plan
+                .set(Some(lightagent_tools::plan::RolePlan::new([(
+                    "reviewer".to_owned(),
+                    Vec::new(),
+                )])));
         } else {
             routed.plan.set(None);
         }
@@ -488,7 +536,11 @@ async fn the_leads_synthesis_fits_the_leads_window() {
     let mut config = RunConfig::new(LEAD);
     config.generation = generation.budget.clone();
     let lead = MockProvider::new(vec![
-        call("d", "agent.delegate", json!({ "role": "reviewer", "task": "Review it." })),
+        call(
+            "d",
+            "agent.delegate",
+            json!({ "role": "reviewer", "task": "Review it." }),
+        ),
         answer("Synthesized."),
     ]);
     let executor = BoundedExecutor::new(
@@ -498,9 +550,17 @@ async fn the_leads_synthesis_fits_the_leads_window() {
         262_144,
     )
     .with_run(RunId::new())
-    .with_delegation(delegation(&scratch.path, vec![(id, served)], &[], generation));
+    .with_delegation(delegation(
+        &scratch.path,
+        vec![(id, served)],
+        &[],
+        generation,
+    ));
     let agent = AgentLoop::new(lead.clone(), executor, config);
-    let outcome = agent.run("Review it.", CancellationToken::new()).await.unwrap();
+    let outcome = agent
+        .run("Review it.", CancellationToken::new())
+        .await
+        .unwrap();
     let outcome = match outcome {
         RunOutcome::AwaitingApproval {
             request, suspended, ..
@@ -514,7 +574,10 @@ async fn the_leads_synthesis_fits_the_leads_window() {
             .unwrap(),
         other => other,
     };
-    assert!(matches!(outcome, RunOutcome::Completed { .. }), "{outcome:?}");
+    assert!(
+        matches!(outcome, RunOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
     let seen = tool_result(&lead, 1);
     assert!(!seen.is_empty());
     assert!(
