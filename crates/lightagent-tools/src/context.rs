@@ -507,14 +507,49 @@ impl std::fmt::Debug for ActionsPolicy {
     }
 }
 
+/// How long a read of a branch may lag an update this run made to it.
+///
+/// GitHub can answer a read of a branch with its previous commit for a
+/// moment after a confirmed update. Only then is the read repeated: after
+/// `first_delay`, doubling up to `max_delay`, until `deadline` from the first
+/// read. The update itself is never sent again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RefReconcile {
+    pub first_delay: Duration,
+    pub max_delay: Duration,
+    pub deadline: Duration,
+}
+
+impl Default for RefReconcile {
+    fn default() -> Self {
+        Self {
+            first_delay: Duration::from_millis(250),
+            max_delay: Duration::from_secs(2),
+            deadline: Duration::from_secs(10),
+        }
+    }
+}
+
+/// A branch update this run made and confirmed: the branch moved from
+/// `from` to `to`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchWrite {
+    pub from: String,
+    pub to: String,
+}
+
 /// What the `actions.*` tools need: a client with redirects disabled, the
 /// policy, and this run's dispatches, so an identical dispatch is never sent
-/// twice in one run.
+/// twice in one run. Also the branch updates `repo.commit` confirmed, by
+/// branch, so a read that lags one of them is told apart from a branch that
+/// is really elsewhere.
 #[derive(Clone)]
 pub struct ActionsContext {
     pub client: reqwest::Client,
     pub policy: Arc<ActionsPolicy>,
     pub dispatched: Arc<std::sync::Mutex<BTreeMap<String, Value>>>,
+    pub writes: Arc<std::sync::Mutex<BTreeMap<String, BranchWrite>>>,
+    pub reconcile: RefReconcile,
 }
 
 impl ActionsContext {
@@ -523,7 +558,15 @@ impl ActionsContext {
             client,
             policy: Arc::new(policy),
             dispatched: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            writes: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            reconcile: RefReconcile::default(),
         }
+    }
+
+    /// The same context with other read-after-write bounds.
+    pub fn with_reconcile(mut self, reconcile: RefReconcile) -> Self {
+        self.reconcile = reconcile;
+        self
     }
 }
 

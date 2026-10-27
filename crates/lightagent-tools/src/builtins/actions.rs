@@ -13,7 +13,15 @@
 //! root, never to a log-download redirect, and never appears in a result.
 //! A dispatch is remembered for the run, so repeating it returns the first
 //! run instead of starting another. A dispatch being accepted is reported as
-//! exactly that, never as a pass.
+//! exactly that, never as a pass, and the run it reports is one whose own
+//! head SHA is the SHA being verified.
+//!
+//! GitHub can answer a read of a branch with its previous commit for a
+//! moment after an update. Only when this run confirmed that update (see
+//! [`confirm_update`]) and a read still shows the commit it moved from is
+//! the read repeated, within [`RefReconcile`](crate::RefReconcile) bounds.
+//! Any other commit is a concurrent update, and an API refusal is reported
+//! as what it is; neither is waited out. The verified SHA is never relaxed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -23,7 +31,7 @@ use lightagent_core::{RiskClass, Scope, ToolOutcome, ToolProgress};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 
-use crate::context::{ActionsContext, ToolCtx};
+use crate::context::{ActionsContext, BranchWrite, ToolCtx};
 use crate::definition::{Tool, ToolDefinition};
 
 /// The most runs one lookup reads.
@@ -58,6 +66,8 @@ pub(crate) struct Reply {
     pub(crate) status: StatusCode,
     pub(crate) body: Value,
     pub(crate) location: Option<String>,
+    /// GitHub said the token's rate limit is used up.
+    pub(crate) rate_limited: bool,
 }
 
 /// Call the REST API at `path` (beginning with `/`), with the token.
@@ -93,12 +103,19 @@ pub(crate) async fn api(
         .get("location")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
+    let headers = response.headers();
+    let rate_limited = status == StatusCode::TOO_MANY_REQUESTS
+        || headers
+            .get("x-ratelimit-remaining")
+            .is_some_and(|value| value.as_bytes() == b"0")
+        || (status == StatusCode::FORBIDDEN && headers.contains_key("retry-after"));
     let bytes = response.bytes().await.unwrap_or_default();
     let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     Ok(Reply {
         status,
         body,
         location,
+        rate_limited,
     })
 }
 
@@ -110,6 +127,177 @@ pub(crate) fn api_error(what: &str, reply: &Reply) -> String {
         .and_then(Value::as_str)
         .unwrap_or("no message");
     format!("{what} failed: HTTP {} ({message})", reply.status.as_u16())
+}
+
+/// [`api_error`], naming the kind of refusal, so that none of them is
+/// mistaken for another (or for a lagging read).
+pub(crate) fn api_refusal(what: &str, reply: &Reply) -> String {
+    let kind = match reply.status.as_u16() {
+        403 | 429 if reply.rate_limited => "rate limited",
+        429 => "rate limited",
+        401 => "authentication failed",
+        403 => "permission denied",
+        404 => "not found, or not visible to this token",
+        409 | 422 => "rejected",
+        500..=599 => "GitHub server error",
+        _ => "unexpected answer",
+    };
+    format!("{}: {kind}", api_error(what, reply))
+}
+
+/// The commit `branch` is at, as GitHub answers now. A refusal is reported
+/// as its kind, and an answer without a commit SHA as malformed; neither is
+/// ever taken for a lagging read.
+pub(crate) async fn read_branch(actions: &ActionsContext, branch: &str) -> Result<String, String> {
+    let repository = &actions.policy.repository;
+    let path = format!("/repos/{repository}/git/ref/heads/{branch}");
+    let head = api(actions, Method::GET, &path, None).await?;
+    if !head.status.is_success() {
+        return Err(api_refusal("reading the branch", &head));
+    }
+    match head.body.pointer("/object/sha").and_then(Value::as_str) {
+        Some(sha) if valid_sha(sha) => Ok(sha.to_ascii_lowercase()),
+        _ => Err(format!(
+            "reading the branch '{branch}' answered HTTP {} without a commit SHA: a malformed answer, not used",
+            head.status.as_u16()
+        )),
+    }
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Read `branch` until it shows `to`, while it still shows `from`, the
+/// commit an update this run confirmed moved it from. Each read is added to
+/// `reads` as `{ "sha", "ms" }` (milliseconds since the first). Returns
+/// whether `to` was read before the deadline. Any other commit is a
+/// concurrent update and an error, as is a failed read or cancellation.
+pub(crate) async fn await_branch(
+    actions: &ActionsContext,
+    ctx: &ToolCtx,
+    branch: &str,
+    from: &str,
+    to: &str,
+    reads: &mut Vec<Value>,
+) -> Result<bool, String> {
+    let bounds = actions.reconcile;
+    let started = Instant::now();
+    let mut delay = bounds.first_delay;
+    loop {
+        let sha = read_branch(actions, branch).await?;
+        reads.push(json!({ "sha": sha, "ms": millis(started.elapsed()) }));
+        if sha == to {
+            return Ok(true);
+        }
+        if sha != from {
+            return Err(format!(
+                "the branch '{branch}' is at {sha}, neither {from} nor {to}: it was moved by someone else; refusing"
+            ));
+        }
+        let left = bounds.deadline.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            return Ok(false);
+        }
+        if !pause(ctx, delay.min(left)).await {
+            return Err(format!(
+                "stopped while waiting for the branch '{branch}' to read {to}: the run was cancelled or is no longer authorized"
+            ));
+        }
+        delay = (delay * 2).min(bounds.max_delay);
+    }
+}
+
+/// Settle the fast-forward of `branch` from `from` to `to` whose request
+/// returned `sent`, never assuming that it happened:
+/// - a success naming `to` confirms it;
+/// - a success naming another commit is refused;
+/// - a refusal (4xx) is reported as its kind;
+/// - no answer, a server error, or a success without a commit leaves the
+///   outcome unknown: the branch is read until it shows `to`, within the
+///   bounds, and is never written again.
+///
+/// A confirmed update is remembered, so a later lagging read of the branch
+/// is recognized. Returns a success reply and the evidence, which holds
+/// statuses, SHAs and timings only.
+pub(crate) async fn confirm_update(
+    actions: &ActionsContext,
+    ctx: &ToolCtx,
+    branch: &str,
+    from: &str,
+    to: &str,
+    sent: Result<Reply, String>,
+) -> Result<(Reply, Value), String> {
+    let mut evidence = json!({ "from": from, "to": to });
+    let answered = match sent {
+        Ok(reply) if reply.status.is_success() => {
+            evidence["status"] = json!(reply.status.as_u16());
+            let named = reply
+                .body
+                .pointer("/object/sha")
+                .and_then(Value::as_str)
+                .map(str::to_ascii_lowercase);
+            evidence["response_sha"] = json!(named);
+            match named {
+                Some(sha) if sha == to => Some(reply),
+                Some(sha) if valid_sha(&sha) => {
+                    return Err(format!(
+                        "moving the branch '{branch}' answered {sha}, not the new commit {to}: the update is not treated as done"
+                    ));
+                }
+                _ => None,
+            }
+        }
+        Ok(reply) if reply.status.is_server_error() => {
+            evidence["status"] = json!(reply.status.as_u16());
+            None
+        }
+        Ok(reply) => return Err(api_refusal("moving the branch", &reply)),
+        Err(_) => {
+            evidence["status"] = json!("no answer");
+            None
+        }
+    };
+    let reply = match answered {
+        Some(reply) => {
+            evidence["confirmed_by"] = json!("response");
+            reply
+        }
+        None => {
+            let mut reads = Vec::new();
+            let reached = await_branch(actions, ctx, branch, from, to, &mut reads).await;
+            let count = reads.len();
+            evidence["reads"] = json!(reads);
+            match reached {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(format!(
+                        "the update of '{branch}' to {to} is unconfirmed ({evidence}): after {count} reads the branch is still at {from}. It was not sent again; {to} is not committed"
+                    ));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "the update of '{branch}' to {to} is unconfirmed ({evidence}): {error}"
+                    ));
+                }
+            }
+            evidence["confirmed_by"] = json!("read");
+            Reply {
+                status: StatusCode::OK,
+                body: json!({ "object": { "sha": to } }),
+                location: None,
+                rate_limited: false,
+            }
+        }
+    };
+    if let Ok(mut writes) = actions.writes.lock() {
+        let write = BranchWrite {
+            from: from.to_owned(),
+            to: to.to_owned(),
+        };
+        writes.insert(branch.to_owned(), write);
+    }
+    Ok((reply, evidence))
 }
 
 /// The allowlisted workflow named `file`.
@@ -350,27 +538,35 @@ async fn dispatch(actions: &ActionsContext, args: &Value, ctx: &ToolCtx) -> Resu
         return Ok(repeated);
     }
 
-    // The branch must be at exactly the SHA the caller is verifying.
+    // The branch must be at exactly the SHA the caller is verifying. Only a
+    // read lagging an update this run confirmed to that SHA is repeated.
     let repository = &actions.policy.repository;
-    let head = api(
-        actions,
-        Method::GET,
-        &format!("/repos/{repository}/git/ref/heads/{branch}"),
-        None,
-    )
-    .await?;
-    if !head.status.is_success() {
-        return Err(api_error("reading the branch", &head));
-    }
-    let current = head
-        .body
-        .pointer("/object/sha")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if current != sha {
-        return Err(format!(
-            "the branch '{branch}' is at {current}, not {sha}: refusing to verify a stale ref"
-        ));
+    let pending = actions
+        .writes
+        .lock()
+        .ok()
+        .and_then(|writes| writes.get(branch).cloned())
+        .filter(|write| write.to == sha);
+    let mut reads = Vec::new();
+    match pending {
+        Some(write) => {
+            if !await_branch(actions, ctx, branch, &write.from, &sha, &mut reads).await? {
+                return Err(format!(
+                    "the branch '{branch}' is still read at {}, not {sha}, {} reads and {} ms after this run's confirmed update: refusing to verify a stale ref",
+                    write.from,
+                    reads.len(),
+                    millis(actions.reconcile.deadline)
+                ));
+            }
+        }
+        None => {
+            let current = read_branch(actions, branch).await?;
+            if current != sha {
+                return Err(format!(
+                    "the branch '{branch}' is at {current}, not {sha}: refusing to verify a stale ref"
+                ));
+            }
+        }
     }
 
     let before: BTreeSet<u64> = dispatched_runs(actions, file, &sha)
@@ -392,19 +588,35 @@ async fn dispatch(actions: &ActionsContext, args: &Value, ctx: &ToolCtx) -> Resu
     }
     let body = json!({ "ref": branch, "inputs": inputs });
     let path = format!("/repos/{repository}/actions/workflows/{file}/dispatches");
-    let reply = api(actions, Method::POST, &path, Some(&body)).await?;
-    if !reply.status.is_success() {
-        return Err(api_error("dispatching the workflow", &reply));
-    }
+    // A refusal started nothing. No answer, or a server error, may have
+    // started the run: it is looked for below, and never sent again.
+    let sent = api(actions, Method::POST, &path, Some(&body)).await;
+    let confirmed = match &sent {
+        Ok(reply) if reply.status.is_success() => true,
+        Ok(reply) if !reply.status.is_server_error() => {
+            return Err(api_refusal("dispatching the workflow", reply));
+        }
+        _ => false,
+    };
     ctx.report(ToolProgress::stage("dispatched"));
 
-    // Find the run this dispatch started.
+    // Find the run this dispatch started: one whose own head SHA is `sha`.
+    // From here on the dispatch is remembered whatever happens, so it is
+    // never sent twice.
     let deadline = Instant::now() + LOCATE_WAIT.min(actions.policy.max_wait);
+    let mut lookup_error = None;
     let located = loop {
-        let runs = dispatched_runs(actions, file, &sha).await?;
+        let runs = match dispatched_runs(actions, file, &sha).await {
+            Ok(runs) => runs,
+            Err(error) => {
+                lookup_error = Some(error);
+                break Vec::new();
+            }
+        };
         let found: Vec<Value> = runs
             .into_iter()
             .filter(|run| run_id(run).is_some_and(|id| !before.contains(&id)))
+            .filter(|run| run.get("head_sha").and_then(Value::as_str) == Some(sha.as_str()))
             .filter(|run| match &correlation {
                 Some((_, id)) => run
                     .get("display_title")
@@ -427,12 +639,25 @@ async fn dispatch(actions: &ActionsContext, args: &Value, ctx: &ToolCtx) -> Resu
         "correlation": correlation.as_ref().map(|(_, id)| id.clone()),
         "note": "Dispatch accepted is not a pass. Read the result with actions.status.",
     });
+    if !reads.is_empty() {
+        report["branch_reads"] = json!(reads);
+    }
+    if !confirmed {
+        report["dispatch_confirmed"] = json!(false);
+        report["note"] = json!(
+            "GitHub gave no clear answer to the dispatch; it was not sent again. A run is reported only if one with this correlation and SHA was found. Not a pass."
+        );
+    }
+    if let Some(error) = lookup_error {
+        report["lookup_error"] = json!(error);
+    }
     match located.as_slice() {
         [run] => {
             report["status"] = json!("dispatched");
             report["run_id"] = json!(run_id(run));
             report["run_url"] = json!(run.get("html_url"));
         }
+        [] if !confirmed => report["status"] = json!("dispatch_unconfirmed"),
         [] => report["status"] = json!("dispatched_unlocated"),
         runs => {
             report["status"] = json!("dispatched_ambiguous");
