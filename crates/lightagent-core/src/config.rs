@@ -746,8 +746,14 @@ pub struct SubagentsConfig {
     pub delegate_timeout_secs: u64,
     /// Deepest allowed child generation; the lead is depth zero.
     pub max_depth: u8,
-    /// Maximum direct children an agent may create.
+    /// Maximum direct children an agent may create (1–3), before repairs.
     pub max_children_per_agent: u8,
+    /// Repair rounds (0–2, default 1) a lead run with a specialist plan may
+    /// add past `max_children_per_agent`: each lets the coder revise a
+    /// change a check completed on, and each planned check run once more on
+    /// the new change. Concurrency (`max_active_workers`) and the run's
+    /// shared budgets, including `max_workers_per_run`, still apply.
+    pub max_repair_rounds: u8,
     /// Role profile names a delegated task may request.
     pub allowed_roles: Vec<String>,
     /// How a role without an explicit assignment is resolved. `builtin` (the
@@ -830,6 +836,7 @@ impl Default for SubagentsConfig {
             delegate_timeout_secs: 180,
             max_depth: 2,
             max_children_per_agent: 3,
+            max_repair_rounds: 1,
             allowed_roles: vec![
                 "researcher".to_owned(),
                 "coder".to_owned(),
@@ -1797,6 +1804,11 @@ impl Config {
             {
                 return Err(ConfigError::Invalid(
                     "subagents.max_children_per_agent must be between 1 and 3".to_owned(),
+                ));
+            }
+            if self.subagents.max_repair_rounds > 2 {
+                return Err(ConfigError::Invalid(
+                    "subagents.max_repair_rounds must be between 0 and 2".to_owned(),
                 ));
             }
             if self.subagents.allowed_roles.is_empty()

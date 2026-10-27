@@ -130,7 +130,13 @@ pub struct SubagentPolicy {
     pub enabled: bool,
     /// Maximum depth below the lead. Values above two are clamped when used.
     pub max_depth: u8,
+    /// The workers one execution may start in all, before any repair.
     pub max_children_per_agent: u8,
+    /// Repair rounds a lead with a specialist plan may add past
+    /// `max_children_per_agent` (at most [`crate::plan::MAX_REPAIR_ROUNDS`]):
+    /// each lets the coder revise a checked change once and each planned
+    /// check run once on the new change.
+    pub max_repair_rounds: u8,
     pub roles: BTreeMap<String, SubagentRole>,
 }
 
@@ -151,6 +157,7 @@ impl Default for SubagentPolicy {
             enabled: false,
             max_depth: 2,
             max_children_per_agent: 3,
+            max_repair_rounds: 1,
             roles,
         }
     }
@@ -239,6 +246,18 @@ impl Delegation {
         result
             .map(|_| ())
             .map_err(|_| format!("subagent child limit ({maximum}) reached for this execution"))
+    }
+
+    /// Admit one start past the child allowance as a step of a bounded
+    /// repair under the run's specialist plan (see
+    /// [`crate::plan::RolePlan::admit_repair`]). Only the lead repairs: a
+    /// worker's own children never do.
+    pub fn reserve_repair(&self, role: &str, change: Option<&str>) -> Result<(), String> {
+        if self.depth != 0 {
+            return Err("only the lead's planned workers have a repair allowance".to_owned());
+        }
+        self.plan
+            .admit_repair(role, change, self.subagents.max_repair_rounds)
     }
 
     /// Build an isolated child context. Its direct-child counter is new, so a
