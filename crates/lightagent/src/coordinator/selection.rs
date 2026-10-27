@@ -1243,7 +1243,10 @@ mod tests {
             taken.insert(role_question_id(role), Answer::Noul { probability: 0.5 });
         }
         let named = |pairs: &[(&str, f64)]| -> BTreeMap<String, f64> {
-            pairs.iter().map(|(name, p)| ((*name).to_owned(), *p)).collect()
+            pairs
+                .iter()
+                .map(|(name, p)| ((*name).to_owned(), *p))
+                .collect()
         };
         let valid = [
             ("conversation", 0.05),
@@ -1324,7 +1327,10 @@ mod tests {
             uncertain(
                 coding_task(strong),
                 0.6,
-                &[(TaskCategory::Coding, 0.6), (TaskCategory::MultiStep, multi_step)],
+                &[
+                    (TaskCategory::Coding, 0.6),
+                    (TaskCategory::MultiStep, multi_step),
+                ],
             )
         };
         assert_eq!(outcome(split(0.3)), "coder+tester");
@@ -1369,7 +1375,10 @@ mod tests {
                     answers(0.5, [0.95, 0.1, 0.1, 0.1], Structure::Single),
                 ),
                 0.6,
-                &[(TaskCategory::Research, 0.6), (TaskCategory::Analysis, 0.39)],
+                &[
+                    (TaskCategory::Research, 0.6),
+                    (TaskCategory::Analysis, 0.39),
+                ],
             ),
             0.5,
         ))

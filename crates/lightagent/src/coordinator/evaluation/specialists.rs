@@ -1184,7 +1184,7 @@ fn fingerprint(text: &str) -> u64 {
 
 /// The held-out set as frozen on 2026-10-27. Changing it is a decision to
 /// record, not an edit: see its `frozen` note.
-const HELD_OUT_FINGERPRINT: u64 = 0;
+const HELD_OUT_FINGERPRINT: u64 = 0x39f2_27b7_1a9f_2dc6;
 
 #[test]
 fn the_held_out_set_is_frozen() {
