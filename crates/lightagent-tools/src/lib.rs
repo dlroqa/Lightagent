@@ -38,6 +38,8 @@ pub mod policy;
 pub mod registry;
 pub mod sandbox;
 pub mod schema;
+#[cfg(test)]
+mod test_dir;
 pub mod worker;
 pub mod workspace;
 

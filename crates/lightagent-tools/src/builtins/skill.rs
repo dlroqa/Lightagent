@@ -79,22 +79,21 @@ impl Tool for SkillRead {
 mod tests {
     use super::*;
     use crate::context::SkillContext;
+    use crate::test_dir::TestDir;
     use lightagent_core::SkillStore;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
     fn store_with_one() -> SkillStore {
-        let dir = std::env::temp_dir().join(format!("lightagent-skillread-{}", std::process::id()));
-        let skill = dir.join("greet");
+        let dir = TestDir::new("skillread");
+        let skill = dir.path().join("greet");
         std::fs::create_dir_all(&skill).unwrap();
         std::fs::write(
             skill.join("SKILL.md"),
             "---\nname: greet\ndescription: Say hi\n---\nAlways greet warmly.",
         )
         .unwrap();
-        let store = SkillStore::load(std::slice::from_ref(&dir));
-        std::fs::remove_dir_all(&dir).ok();
-        store
+        SkillStore::load(&[dir.path().to_path_buf()])
     }
 
     #[tokio::test]

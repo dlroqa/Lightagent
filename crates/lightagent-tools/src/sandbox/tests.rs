@@ -13,6 +13,7 @@ use lightagent_core::identity::{
 use lightagent_core::{ProfileId, RunId};
 
 use super::*;
+use crate::test_dir::TestDir;
 
 /// What the mock does when asked to execute.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -449,11 +450,8 @@ async fn a_failed_sandbox_never_falls_back_to_the_host() {
         let gate = test_gate(&mock);
         // The request names a program that would leave a mark on the host if
         // anything ran it there.
-        let marker = std::env::temp_dir().join(format!(
-            "lightagent-sandbox-fallback-{}-{}",
-            std::process::id(),
-            MockBackend::count(&mock.starts)
-        ));
+        let host = TestDir::new("sandbox-fallback");
+        let marker = host.path().join("ran-on-host");
         let probe = ExecRequest {
             program: "touch".to_owned(),
             args: vec![marker.display().to_string()],

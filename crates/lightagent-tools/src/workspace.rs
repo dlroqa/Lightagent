@@ -111,29 +111,18 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn scratch_root() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "lightagent-ws-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
+    use crate::test_dir::TestDir;
 
     #[cfg(unix)]
     #[test]
     fn a_leaf_symlink_cannot_redirect_a_write_outside_the_workspace() {
         use std::os::unix::fs::symlink;
-        let root = scratch_root();
-        let outside = root.with_extension("outside");
+        let root = TestDir::new("ws");
+        let elsewhere = TestDir::new("ws-outside");
+        let outside = elsewhere.path().join("target.txt");
         std::fs::write(&outside, "original").unwrap();
-        symlink(&outside, root.join("linked.txt")).unwrap();
-        let workspace = Workspace::new(&root).unwrap();
+        symlink(&outside, root.path().join("linked.txt")).unwrap();
+        let workspace = Workspace::new(root.path()).unwrap();
         assert!(
             workspace
                 .resolve_new("linked.txt")
@@ -141,51 +130,44 @@ mod tests {
                 .contains("symlink")
         );
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "original");
-        std::fs::remove_dir_all(root).ok();
-        std::fs::remove_file(outside).ok();
     }
 
     #[test]
     fn resolves_a_path_inside_the_workspace() {
-        let root = scratch_root();
-        std::fs::write(root.join("file.txt"), b"hi").unwrap();
-        let ws = Workspace::new(&root).unwrap();
+        let root = TestDir::new("ws");
+        std::fs::write(root.path().join("file.txt"), b"hi").unwrap();
+        let ws = Workspace::new(root.path()).unwrap();
         let resolved = ws.resolve_existing("file.txt").unwrap();
         assert!(resolved.starts_with(ws.root()));
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn refuses_parent_and_absolute_paths() {
-        let root = scratch_root();
-        let ws = Workspace::new(&root).unwrap();
+        let root = TestDir::new("ws");
+        let ws = Workspace::new(root.path()).unwrap();
         assert!(ws.resolve_existing("../outside").is_err());
         assert!(ws.resolve_existing("a/../../b").is_err());
         assert!(ws.resolve_new("/etc/passwd").is_err());
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn resolve_new_allows_a_missing_leaf_but_not_a_missing_escape() {
-        let root = scratch_root();
-        let ws = Workspace::new(&root).unwrap();
+        let root = TestDir::new("ws");
+        let ws = Workspace::new(root.path()).unwrap();
         assert!(ws.resolve_new("subdir/new.txt").is_ok());
         assert!(ws.resolve_new("nope.txt").is_ok());
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[cfg(unix)]
     #[test]
     fn a_symlink_pointing_outside_is_refused() {
-        let root = scratch_root();
-        let outside = scratch_root();
-        std::fs::write(outside.join("secret"), b"s").unwrap();
-        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
-        let ws = Workspace::new(&root).unwrap();
+        let root = TestDir::new("ws");
+        let outside = TestDir::new("ws-outside");
+        std::fs::write(outside.path().join("secret"), b"s").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("link")).unwrap();
+        let ws = Workspace::new(root.path()).unwrap();
         // The symlink target is real but outside the workspace root.
         assert!(ws.resolve_existing("link/secret").is_err());
         assert!(ws.resolve_new("link/written.txt").is_err());
-        std::fs::remove_dir_all(&root).ok();
-        std::fs::remove_dir_all(&outside).ok();
     }
 }
