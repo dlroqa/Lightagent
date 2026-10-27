@@ -4,6 +4,14 @@ All notable Lightagent changes are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- `jev-selection-pinned.yml` can evaluate an explicitly named commit already
+  on `master` (the dispatch commit or an ancestor) as well as an open
+  pull-request head, and reports a run as PASSED only when all 24 prompts
+  were answered and every record agrees; anything less is INCOMPLETE and
+  fails. Both checks live in `scripts/jev-selection-guard.py`, with tests.
+
 ## [0.5.0] - Unreleased (prepared 2026-10-22; set the date when tagging)
 
 Release notes: `docs/releases/v0.5.0.md`.
