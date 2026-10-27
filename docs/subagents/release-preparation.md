@@ -29,11 +29,11 @@ The earlier record recommended 0.4.2. That recommendation is superseded by the o
 - `frontend/package.json` and `frontend/package-lock.json`: the package's own version, two places in the lockfile.
 - `CHANGELOG.md`: `## [0.5.0] - Unreleased (prepared 2026-10-22; set the date when tagging)`, with every entry since v0.4.1. `[Unreleased]` above it is empty.
 - `docs/releases/v0.5.0.md`: the release body. It covers behavior changes, opt-in features, configuration, migration, restrictions and verification.
-- `docs/subagents/merge-plan.md`: the merge order.
+- `docs/subagents/BUILD_AND_MERGE_PLAN.md`: the build description and the merge procedure (`merge-plan.md` points there). #50 adds bounded repair rounds and its notes.
 
 ## After authorization (not now)
 
-1. Merge in the order of `merge-plan.md`, ending with #49.
+1. Merge in the order of `BUILD_AND_MERGE_PLAN.md` §12, ending with #50.
 2. Set the release date in `CHANGELOG.md` on `master`, and wait for `check`.
 3. `git tag -a v0.5.0 -m "Release 0.5.0"` on that commit, then push the tag. `release.yml` builds and drafts.
 4. Paste `docs/releases/v0.5.0.md` above the generated notes, review, then publish with `gh release edit v0.5.0 --draft=false --latest`.

@@ -1303,13 +1303,12 @@ pub(crate) mod routing_tests {
         trust: RunTrust,
     ) -> (RunStatus, Vec<AgentEvent>, Vec<serde_json::Value>) {
         let (gateway, chats) = gateway_stub().await;
+        // A random component: on macOS two tests started in parallel can
+        // read the same clock value, and then share (and delete) one home.
         let root = std::env::temp_dir().join(format!(
             "lightagent-workflow-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            RunId::new().as_str()
         ));
         config.inference.base_url = gateway;
         config.memory.inject_recent = 0;

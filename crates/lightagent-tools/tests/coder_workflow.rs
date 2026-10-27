@@ -555,9 +555,18 @@ async fn a_patch_id_names_one_unchanging_change() {
     assert_eq!(store.get(&first).unwrap().files[0].content, AFTER);
 }
 
-/// A lead's delegation with a coder → tester → reviewer plan, every worker
-/// answering from `worker`.
+/// A lead's delegation with a coder → tester → reviewer plan under the
+/// default limits, every worker answering from `worker`.
 fn planned_lead(checkout: &Checkout, worker: MockProvider) -> Delegation {
+    planned_lead_with(checkout, worker, SubagentPolicy::default())
+}
+
+/// The same, under `policy` (hierarchy turned on).
+fn planned_lead_with(
+    checkout: &Checkout,
+    worker: MockProvider,
+    policy: SubagentPolicy,
+) -> Delegation {
     let mut delegation = Delegation::new(
         Arc::new(ProfileStore::new(checkout.path.join("home"))),
         Arc::new(MockFactory { provider: worker }),
@@ -565,12 +574,9 @@ fn planned_lead(checkout: &Checkout, worker: MockProvider) -> Delegation {
         Duration::from_secs(5),
         262_144,
     );
-    // Six delegations in one lead run: above the configurable maximum of
-    // three children per agent, which would otherwise stop the re-checks.
     delegation.subagents = SubagentPolicy {
         enabled: true,
-        max_children_per_agent: 8,
-        ..SubagentPolicy::default()
+        ..policy
     };
     let routing = ModelRouting {
         model: "m".to_owned(),
@@ -653,7 +659,8 @@ async fn dependent_checks_are_bound_to_the_change_and_go_stale_with_it() {
     assert!(!delegate("reviewer").await.is_error);
 
     // A new change makes both checks stale: the reviewer is refused until
-    // the tester has checked the new change.
+    // the tester has checked the new change. The default allowance of three
+    // children is used; this second cycle is the default repair round.
     assert!(!delegate("coder").await.is_error);
     let latest = store.latest().unwrap().id;
     assert_ne!(first, latest);
@@ -676,5 +683,107 @@ async fn dependent_checks_are_bound_to_the_change_and_go_stale_with_it() {
         drifted.content.contains("changed outside"),
         "{}",
         drifted.content
+    );
+}
+
+#[tokio::test]
+async fn repairs_are_bounded_and_a_check_that_cannot_run_leaves_the_change_unverified() {
+    let checkout = Checkout::new();
+    let second = "pub fn one() -> u32 {\n    1 // repaired\n}\n";
+    let propose = |content: &str| {
+        call(
+            "c",
+            "patch.propose",
+            json!({ "summary": "s", "changes": [{ "path": "src/lib.rs", "content": content }] }),
+        )
+    };
+    let worker = MockProvider::new(vec![
+        propose(AFTER),
+        answer("coded"),
+        answer("one test fails"),
+        propose(second),
+        answer("repaired"),
+        answer("tests pass"),
+        answer("looks right"),
+    ]);
+    // Two children before repairs, one repair round.
+    let policy = SubagentPolicy {
+        max_children_per_agent: 2,
+        max_repair_rounds: 1,
+        ..SubagentPolicy::default()
+    };
+    let ctx =
+        checkout
+            .context()
+            .with_delegation(planned_lead_with(&checkout, worker.clone(), policy));
+    let delegate = |role: &str| {
+        let ctx = ctx.clone();
+        let args = json!({ "role": role, "task": format!("Do the {role}'s part."), "write_scope": ["src/lib.rs"] });
+        async move { AgentDelegate::new().call(&args, &ctx).await }
+    };
+    let store = ctx.patches.as_ref().unwrap().store.clone();
+
+    assert!(!delegate("coder").await.is_error);
+    let first = store.latest().unwrap().id;
+    assert!(!delegate("tester").await.is_error);
+    // The allowance is used and no repair round is open: the review cannot
+    // run, and the refusal says the change is unverified.
+    let blocked = delegate("reviewer").await;
+    assert!(blocked.is_error);
+    assert!(
+        blocked.content.contains("Verification BLOCKED")
+            && blocked.content.contains("unverified")
+            && blocked.content.contains(&format!("patch {first}")),
+        "{}",
+        blocked.content
+    );
+    // The coder repairs the tested change once; each check then runs once
+    // on the new change.
+    let repaired = delegate("coder").await;
+    assert!(!repaired.is_error, "{}", repaired.content);
+    let latest = store.latest().unwrap().id;
+    assert_ne!(first, latest);
+    assert!(!delegate("tester").await.is_error);
+    assert!(last_task(&worker).contains(&format!("patch {latest}")));
+    assert!(!delegate("reviewer").await.is_error);
+    // The round is used: no further repair, and no second check of a change
+    // already verified.
+    let refused = delegate("coder").await;
+    assert!(refused.is_error);
+    assert!(
+        refused.content.contains("repair rounds"),
+        "{}",
+        refused.content
+    );
+    let duplicate = delegate("tester").await;
+    assert!(duplicate.is_error);
+    assert!(
+        duplicate.content.contains("reuse its result"),
+        "{}",
+        duplicate.content
+    );
+    // Every response the worker model had was used, and no more.
+    assert_eq!(worker.requests().len(), 7);
+}
+
+#[tokio::test]
+async fn without_a_plan_the_allowance_is_the_limit() {
+    let checkout = Checkout::new();
+    let worker = MockProvider::new(vec![answer("one"), answer("two"), answer("three")]);
+    let delegation = planned_lead(&checkout, worker);
+    delegation.plan.set(None);
+    let ctx = checkout.context().with_delegation(delegation);
+    let reviewer = json!({ "role": "reviewer", "task": "Read src/lib.rs." });
+    for _ in 0..3 {
+        let outcome = AgentDelegate::new().call(&reviewer, &ctx).await;
+        assert!(!outcome.is_error, "{}", outcome.content);
+    }
+    let refused = AgentDelegate::new().call(&reviewer, &ctx).await;
+    assert!(refused.is_error);
+    assert!(
+        refused.content.contains("child limit (3)")
+            && refused.content.contains("no specialist plan"),
+        "{}",
+        refused.content
     );
 }
