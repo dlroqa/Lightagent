@@ -766,7 +766,11 @@ fn ended(record: &SpecialistSelection) -> String {
 }
 
 /// Codes only the run's own permissions, readiness or limits produce.
-const RUNTIME_CODES: [&str; 3] = ["delegation_unavailable", "no_ready_role", "insufficient_budget"];
+const RUNTIME_CODES: [&str; 3] = [
+    "delegation_unavailable",
+    "no_ready_role",
+    "insufficient_budget",
+];
 
 /// The recorded run traced prompt by prompt: what was sent, what Jev
 /// answered, which rule ended selection and with what threshold, and what
@@ -828,7 +832,10 @@ async fn diagnose_the_recorded_run() {
         let runtime_affected = [&record, &next, &from_roles].iter().any(|r| {
             RUNTIME_CODES.contains(&ended(r).as_str())
                 || r.restricted.iter().any(|x| {
-                    !matches!(x.reason.as_str(), "not_for_this_task" | "worker_cap" | "needs_coder")
+                    !matches!(
+                        x.reason.as_str(),
+                        "not_for_this_task" | "worker_cap" | "needs_coder"
+                    )
                 })
         });
         let state = request["state"].as_str().unwrap_or_default();
