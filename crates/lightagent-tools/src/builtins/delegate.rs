@@ -470,13 +470,19 @@ pub async fn run_worker(
     {
         executor = executor.with_actions(actions.clone());
     }
-    // The run's patch store, with only the paths the lead allowed.
+    // The run's patch store, with only the paths the lead allowed. Each
+    // patch remembers this worker, so it is used only while the worker's
+    // assignment and ownership still hold.
     if needs(&["patch."])
         && let Some(patches) = &ctx.patches
     {
         executor = executor.with_patches(crate::builtins::PatchContext {
             store: patches.store.clone(),
             scope: Some(request.write_scope.clone().unwrap_or_default()),
+            proposer: Some(crate::builtins::Proposer {
+                label: spec.label.clone(),
+                validity: spec.validity.clone(),
+            }),
         });
     }
     let mut persona = spec.persona.clone();

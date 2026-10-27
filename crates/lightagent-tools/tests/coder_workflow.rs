@@ -5,6 +5,7 @@
 
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -401,4 +402,155 @@ async fn a_commit_is_a_fast_forward_of_exactly_the_patch_base() {
         writes, 4,
         "one blob, tree, commit and ref update; nothing for the refusals"
     );
+}
+
+/// A proposing worker whose authority holds for its first `allowed`
+/// checks, and the count of checks made.
+fn proposer(allowed: usize) -> (lightagent_tools::builtins::Proposer, Arc<AtomicUsize>) {
+    let checks = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&checks);
+    let proposer = lightagent_tools::builtins::Proposer {
+        label: "assigned:wa-1 (builtin:coder@2)".to_owned(),
+        validity: Some(Arc::new(move || {
+            if counted.fetch_add(1, Ordering::SeqCst) < allowed {
+                Ok(())
+            } else {
+                Err("the worker assignment was withdrawn".to_owned())
+            }
+        })),
+    };
+    (proposer, checks)
+}
+
+/// Propose `content` for `path` as `proposer`, with `path` in scope.
+async fn propose_as(
+    ctx: &ToolCtx,
+    proposer: lightagent_tools::builtins::Proposer,
+    path: &str,
+    content: &str,
+) -> String {
+    let mut ctx = ctx.clone();
+    if let Some(patches) = ctx.patches.as_mut() {
+        patches.scope = Some(vec![path.to_owned()]);
+        patches.proposer = Some(proposer);
+    }
+    let args = json!({ "summary": "s", "changes": [{ "path": path, "content": content }] });
+    let proposed = json_of(&PatchPropose::new().call(&args, &ctx).await);
+    proposed["patch_id"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn a_withdrawn_proposers_patch_is_never_applied() {
+    let checkout = Checkout::new();
+    let ctx = checkout.context();
+    let (withdrawn, _) = proposer(0);
+    let id = propose_as(&ctx, withdrawn, "src/lib.rs", AFTER).await;
+    let refused = PatchApply::new()
+        .call(&json!({ "patch_id": id }), &ctx)
+        .await;
+    assert!(refused.is_error);
+    assert!(
+        refused.content.contains("no longer authorized"),
+        "{}",
+        refused.content
+    );
+    assert_eq!(checkout.file(), BEFORE, "nothing was written");
+
+    // The same change from a worker that is still assigned applies.
+    let (assigned, checks) = proposer(usize::MAX);
+    let id = propose_as(&ctx, assigned, "src/lib.rs", AFTER).await;
+    let applied = PatchApply::new()
+        .call(&json!({ "patch_id": id }), &ctx)
+        .await;
+    assert!(!applied.is_error, "{}", applied.content);
+    assert_eq!(checkout.file(), AFTER);
+    assert_eq!(
+        checks.load(Ordering::SeqCst),
+        1,
+        "checked once, before writing"
+    );
+}
+
+#[tokio::test]
+async fn the_commit_rechecks_authority_immediately_before_moving_the_branch() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let checkout = Checkout::new();
+    let github = github(BASE).await;
+    let ctx = with_broker(checkout.context(), &github);
+    // Authorized at the start of the commit, withdrawn while its objects
+    // were being written.
+    let (withdrawn_midway, checks) = proposer(1);
+    let id = propose_as(&ctx, withdrawn_midway, "src/lib.rs", AFTER).await;
+    let args = json!({ "patch_id": id, "branch": "subagents/coder", "message": "m" });
+    let refused = RepoCommit::new().call(&args, &ctx).await;
+    assert!(refused.is_error);
+    assert!(
+        refused.content.contains("no longer authorized"),
+        "{}",
+        refused.content
+    );
+    assert_eq!(checks.load(Ordering::SeqCst), 2);
+    // The branch never moved; the unreferenced objects change nothing.
+    assert_eq!(github.head.lock().unwrap().as_str(), BASE);
+    let seen = github.seen.lock().unwrap().clone();
+    assert!(
+        !seen.iter().any(|(method, _, _)| method == "PATCH"),
+        "{seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_revoked_run_neither_applies_nor_commits_a_patch() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let checkout = Checkout::new();
+    let github = github(BASE).await;
+    let revoked = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&revoked);
+    let authorization = lightagent_core::identity::RunAuthorization::revocable(
+        Arc::new(move || {
+            if flag.load(Ordering::SeqCst) {
+                Err(lightagent_core::identity::Denial::Revoked)
+            } else {
+                Ok(())
+            }
+        }),
+        CancellationToken::new(),
+        None,
+    );
+    let ctx = with_broker(checkout.context(), &github).with_authorization(authorization);
+    let (assigned, _) = proposer(usize::MAX);
+    let id = propose_as(&ctx, assigned, "src/lib.rs", AFTER).await;
+    revoked.store(true, Ordering::SeqCst);
+    let applied = PatchApply::new()
+        .call(&json!({ "patch_id": id }), &ctx)
+        .await;
+    assert!(applied.is_error);
+    assert_eq!(checkout.file(), BEFORE);
+    let args = json!({ "patch_id": id, "branch": "subagents/coder", "message": "m" });
+    let committed = RepoCommit::new().call(&args, &ctx).await;
+    assert!(committed.is_error);
+    assert!(
+        github.seen.lock().unwrap().is_empty(),
+        "GitHub was never contacted"
+    );
+}
+
+#[tokio::test]
+async fn a_patch_id_names_one_unchanging_change() {
+    let checkout = Checkout::new();
+    let ctx = checkout.context();
+    let (first_worker, _) = proposer(usize::MAX);
+    let (second_worker, _) = proposer(usize::MAX);
+    let first = propose_as(&ctx, first_worker, "src/lib.rs", AFTER).await;
+    let store = ctx.patches.as_ref().unwrap().store.clone();
+    let described = store.describe(&first).unwrap();
+    assert!(described.contains("base="), "{described}");
+    assert!(described.contains("content="), "{described}");
+    // Another proposal for the same file is another patch: the first is
+    // unchanged, so an approval of it still means exactly what it showed.
+    let second = propose_as(&ctx, second_worker, "src/lib.rs", "pub fn one() {}\n").await;
+    assert_ne!(first, second);
+    assert_eq!(store.describe(&first).unwrap(), described);
+    assert_ne!(store.describe(&second).unwrap(), described);
+    assert_eq!(store.get(&first).unwrap().files[0].content, AFTER);
 }
