@@ -295,6 +295,7 @@ async fn the_live_run_scores_what_the_plan_rules_build() {
 }
 
 const KEY_VARIABLE: &str = "TYPESAFE_API_KEY";
+const DEFAULT_URL: &str = "https://api.typesafe.ai";
 const DEFAULT_REQUESTS: u32 = 24;
 const MAX_REQUESTS: u32 = 48;
 
@@ -305,40 +306,59 @@ fn env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-#[tokio::test]
-#[ignore = "calls the live TypeSafe API; run only by the protected jev-live workflow"]
-async fn live_specialist_selection_evaluation() {
-    assert!(
-        env(KEY_VARIABLE).is_some(),
-        "{KEY_VARIABLE} is not set: live selection evaluation is BLOCKED, not passed"
-    );
-    let limit = env("LIGHTAGENT_SELECTION_LIVE_MAX_REQUESTS")
+/// The request ceiling of a run: the variable, else one pass over the set,
+/// never above [`MAX_REQUESTS`].
+fn ceiling() -> u32 {
+    env("LIGHTAGENT_SELECTION_LIVE_MAX_REQUESTS")
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(DEFAULT_REQUESTS)
-        .min(MAX_REQUESTS);
-    let endpoint = super::Endpoint {
-        base_url: env("LIGHTAGENT_JEV_LIVE_URL")
-            .unwrap_or_else(|| "https://api.typesafe.ai".to_owned()),
-        api_key: Some(lightagent_core::SecretRef::env(KEY_VARIABLE)),
+        .min(MAX_REQUESTS)
+}
+
+/// The configuration every selection case runs under, against `base_url`.
+fn selection_config(base_url: String, api_key: Option<lightagent_core::SecretRef>) -> Config {
+    let mut config = super::config_for(&super::Endpoint {
+        base_url,
+        api_key,
         model: env("LIGHTAGENT_JEV_LIVE_MODEL"),
         timeout_secs: 10,
-    };
-    let mut config = super::config_for(&endpoint);
+    });
     config.subagents.selection = JevClassificationMode::Shadow;
-    let set = set();
-    let mut scored = Vec::new();
-    let mut failures: BTreeMap<String, usize> = BTreeMap::new();
-    let (mut requests, mut consecutive_failures) = (0u32, 0u32);
-    let (mut input_tokens, mut output_tokens) = (0u64, 0u64);
-    let mut latencies = Vec::new();
-    let mut stopped = None;
+    config
+}
+
+/// What one pass over the set produced.
+struct SetRun {
+    scored: Vec<Scored>,
+    requests: u32,
+    input_tokens: u64,
+    output_tokens: u64,
+    latencies: Vec<u64>,
+    failures: BTreeMap<String, usize>,
+    stopped: Option<&'static str>,
+}
+
+/// Classify and plan each case in turn, one request at a time, within
+/// `limit` requests. A credential failure, or three failures in a row, stops
+/// the run so nothing more is spent on a broken endpoint.
+async fn run_set(set: &SelectionSet, config: &Config, limit: u32) -> SetRun {
+    let mut run = SetRun {
+        scored: Vec::new(),
+        requests: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        latencies: Vec::new(),
+        failures: BTreeMap::new(),
+        stopped: None,
+    };
+    let mut consecutive_failures = 0u32;
     for case in &set.cases {
-        if requests >= limit {
-            stopped = Some("request_ceiling");
+        if run.requests >= limit {
+            run.stopped = Some("request_ceiling");
             break;
         }
         let report = crate::coordinator::classify::classify(
-            &config,
+            config,
             super::PERMITTED_PROFILE,
             &case.prompt,
             false,
@@ -346,53 +366,68 @@ async fn live_specialist_selection_evaluation() {
         )
         .await
         .expect("classification is on");
-        requests += u32::from(report.invoked);
+        run.requests += u32::from(report.invoked);
         if let Some(latency) = report.latency {
-            latencies.push(latency.as_millis());
+            run.latencies
+                .push(u64::try_from(latency.as_millis()).unwrap_or(u64::MAX));
         }
         match &report.outcome {
             Outcome::Classified(classification) => {
                 consecutive_failures = 0;
                 if let Some(usage) = classification.usage {
-                    input_tokens += usage.input_tokens.unwrap_or(0);
-                    output_tokens += usage.output_tokens.unwrap_or(0);
+                    run.input_tokens += usage.input_tokens.unwrap_or(0);
+                    run.output_tokens += usage.output_tokens.unwrap_or(0);
                 }
             }
             Outcome::Failed(code) | Outcome::Skipped(code) => {
-                *failures.entry((*code).to_owned()).or_default() += 1;
+                *run.failures.entry((*code).to_owned()).or_default() += 1;
                 consecutive_failures += 1;
-                // A credential problem, or three failures in a row, stops the
-                // run: nothing more is spent on a broken endpoint.
                 if super::failure_class(code) == "credential" || consecutive_failures >= 3 {
-                    stopped = Some("endpoint_failures");
+                    run.stopped = Some("endpoint_failures");
                 }
             }
         }
-        let record = plan(&config, &report);
-        let result = score_case(case, &record);
+        let result = score_case(case, &plan(config, &report));
         println!(
             "EVIDENCE {} planned={} decision_ok={} roles_ok={:?} fallback={:?}",
             result.id, result.planned, result.decision_ok, result.roles_ok, result.fallback
         );
-        scored.push(result);
-        if stopped.is_some() {
+        run.scored.push(result);
+        if run.stopped.is_some() {
             break;
         }
     }
-    let (totals, passed) = totals(&set, &scored);
+    run
+}
+
+/// Write the run's report and summary; whether it meets the pass rule.
+fn finish(set: &SelectionSet, run: &SetRun, measurement: &str, limit: u32) -> bool {
+    let (totals, passed) = totals(set, &run.scored);
+    let status = if run.stopped == Some("endpoint_failures") {
+        "FAILED"
+    } else if passed {
+        "PASSED"
+    } else {
+        "BELOW_THRESHOLD"
+    };
     let report = json!({
         "schema": "lightagent.specialist_selection_report.v1",
-        "measurement": "live_jev",
+        "evaluation": "jev_specialist_selection",
+        "status": status,
+        "evaluated": true,
+        "counts_as_competence_evidence": false,
+        "measurement": measurement,
         "commit": env("LIGHTAGENT_JEV_LIVE_COMMIT"),
-        "requests": requests,
+        "requests": run.requests,
         "request_ceiling": limit,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "latency_ms": latencies,
-        "failures": failures,
-        "stopped": stopped,
+        "retries": 0,
+        "input_tokens": run.input_tokens,
+        "output_tokens": run.output_tokens,
+        "latency_ms": run.latencies,
+        "failures": run.failures,
+        "stopped": run.stopped,
         "totals": totals,
-        "cases": scored.iter().map(|s| json!({
+        "cases": run.scored.iter().map(|s| json!({
             "id": s.id,
             "planned": s.planned,
             "decision_ok": s.decision_ok,
@@ -401,15 +436,212 @@ async fn live_specialist_selection_evaluation() {
         })).collect::<Vec<_>>(),
     });
     let summary = format!(
-        "### Specialist selection (live Jev)\n\nRequests {requests} of {limit}; tokens in {input_tokens}, out {output_tokens}; stopped: {}.\n\n```json\n{}\n```\n",
-        stopped.unwrap_or("no"),
+        "### Specialist selection ({measurement}): {status}\n\nRequests {} of {limit}; tokens in {}, out {}; stopped: {}. This measures Jev's selection only, not specialist competence.\n\n```json\n{}\n```\n",
+        run.requests,
+        run.input_tokens,
+        run.output_tokens,
+        run.stopped.unwrap_or("no"),
         serde_json::to_string_pretty(&totals).unwrap_or_default()
     );
     super::write_report("specialist-selection", &report, &summary);
     println!("{summary}");
     assert!(
-        stopped != Some("endpoint_failures"),
-        "the endpoint failed: {failures:?}"
+        run.stopped != Some("endpoint_failures"),
+        "the endpoint failed: {:?}",
+        run.failures
     );
-    assert!(passed, "below the recorded pass rule: {totals}");
+    passed
+}
+
+#[tokio::test]
+#[ignore = "calls the live TypeSafe API; run only by the protected jev-live workflow"]
+async fn live_specialist_selection_evaluation() {
+    assert!(
+        env(KEY_VARIABLE).is_some(),
+        "{KEY_VARIABLE} is not set: live selection evaluation is BLOCKED, not passed"
+    );
+    let limit = ceiling();
+    let config = selection_config(
+        env("LIGHTAGENT_JEV_LIVE_URL").unwrap_or_else(|| DEFAULT_URL.to_owned()),
+        Some(lightagent_core::SecretRef::env(KEY_VARIABLE)),
+    );
+    let set = set();
+    let run = run_set(&set, &config, limit).await;
+    assert!(
+        finish(&set, &run, "live_jev", limit),
+        "below the recorded pass rule"
+    );
+}
+
+/// Write each case's exact request body to `dir`, as `<id>.json`, with a
+/// manifest. Nothing is sent and no credential is read.
+fn export_requests(dir: &std::path::Path) -> Vec<String> {
+    let config = selection_config(DEFAULT_URL.to_owned(), None);
+    std::fs::create_dir_all(dir).expect("the export directory can be created");
+    let mut ids = Vec::new();
+    for case in &set().cases {
+        let request = crate::coordinator::classify::request_for(&config, &case.prompt)
+            .expect("every recorded prompt is sendable");
+        let body = serde_json::to_string(&request).expect("a request serializes");
+        std::fs::write(dir.join(format!("{}.json", case.id)), body).expect("written");
+        ids.push(case.id.clone());
+    }
+    let manifest = json!({
+        "schema": "lightagent.specialist_selection_requests.v1",
+        "commit": env("LIGHTAGENT_JEV_LIVE_COMMIT"),
+        "endpoint_path": "/v1/systemone",
+        "cases": ids,
+    });
+    std::fs::write(dir.join("manifest.json"), manifest.to_string()).expect("written");
+    ids
+}
+
+/// A loopback Jev that answers each request with the recorded response to
+/// the exported request of the same state, and 404 to anything else.
+async fn replay_server(requests: &std::path::Path, responses: &std::path::Path) -> String {
+    use tokio::io::AsyncWriteExt;
+    let mut answers: BTreeMap<String, String> = BTreeMap::new();
+    for case in &set().cases {
+        let Ok(request) = std::fs::read_to_string(requests.join(format!("{}.json", case.id)))
+        else {
+            continue;
+        };
+        let Ok(response) = std::fs::read_to_string(responses.join(format!("{}.json", case.id)))
+        else {
+            continue;
+        };
+        let state = serde_json::from_str::<Value>(&request)
+            .ok()
+            .and_then(|body| body["state"].as_str().map(str::to_owned));
+        if let Some(state) = state {
+            answers.insert(state, response);
+        }
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let answers = std::sync::Arc::new(answers);
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let answers = std::sync::Arc::clone(&answers);
+            tokio::spawn(async move {
+                let body = crate::coordinator::classify_read_request(&mut stream).await;
+                let state = serde_json::from_str::<Value>(&body)
+                    .ok()
+                    .and_then(|body| body["state"].as_str().map(str::to_owned));
+                let (status, text) = match state.and_then(|state| answers.get(&state).cloned()) {
+                    Some(text) => (200, text),
+                    None => (404, "{}".to_owned()),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{text}",
+                    text.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    format!("http://{address}")
+}
+
+#[test]
+#[ignore = "export: writes the selection requests for the protected send job"]
+fn export_selection_requests() {
+    let dir =
+        env("LIGHTAGENT_SELECTION_EXPORT").expect("LIGHTAGENT_SELECTION_EXPORT names a directory");
+    let ids = export_requests(std::path::Path::new(&dir));
+    println!("EVIDENCE exported {} requests", ids.len());
+}
+
+#[tokio::test]
+#[ignore = "replay: scores responses the protected send job recorded"]
+async fn replay_specialist_selection_evaluation() {
+    let requests = env("LIGHTAGENT_SELECTION_EXPORT").expect("the exported requests");
+    let responses = env("LIGHTAGENT_SELECTION_RESPONSES").expect("the recorded responses");
+    let url = replay_server(
+        std::path::Path::new(&requests),
+        std::path::Path::new(&responses),
+    )
+    .await;
+    let limit = ceiling();
+    let set = set();
+    let run = run_set(&set, &selection_config(url, None), limit).await;
+    assert!(
+        finish(&set, &run, "replayed_live_jev", limit),
+        "below the recorded pass rule"
+    );
+}
+
+#[tokio::test]
+async fn exported_requests_replay_exactly_and_unknown_requests_are_not_answered() {
+    let root = std::env::temp_dir().join(format!(
+        "lightagent-selection-replay-{}",
+        lightagent_core::RunId::new().as_str()
+    ));
+    let (requests, responses) = (root.join("requests"), root.join("responses"));
+    let ids = export_requests(&requests);
+    assert_eq!(ids.len(), set().cases.len());
+    // Every export is one typed request: no free-form generation, nothing
+    // beyond the recorded synthetic prompt in its state.
+    let first: Value =
+        serde_json::from_str(&std::fs::read_to_string(requests.join("sel-016.json")).unwrap())
+            .unwrap();
+    assert_eq!(first["questions"].as_object().unwrap().len(), 11);
+    assert!(first.get("api_key").is_none() && !first.to_string().contains("Bearer"));
+    // Record a stand-in response for one case only.
+    let mut body: Value =
+        serde_json::from_str(&crate::coordinator::test_support::answer("coding", 0.95)).unwrap();
+    let answers = body["answers"].as_object_mut().unwrap();
+    answers.insert("specialists".into(), json!({"type": "noul", "noul": 0.9}));
+    for (role, probability) in [
+        ("researcher", 0.1),
+        ("coder", 0.9),
+        ("reviewer", 0.1),
+        ("tester", 0.9),
+    ] {
+        answers.insert(
+            format!("role_{role}"),
+            json!({"type": "noul", "noul": probability}),
+        );
+    }
+    answers.insert(
+        "structure".into(),
+        json!({"type": "choice", "choice": "sequential", "confidence": 0.9,
+               "probabilities": {"single": 0.05, "independent": 0.05, "sequential": 0.9}}),
+    );
+    std::fs::create_dir_all(&responses).unwrap();
+    std::fs::write(responses.join("sel-016.json"), body.to_string()).unwrap();
+    let url = replay_server(&requests, &responses).await;
+    let config = selection_config(url, None);
+    let set = set();
+    let recorded = set.cases.iter().find(|case| case.id == "sel-016").unwrap();
+    let report = crate::coordinator::classify::classify(
+        &config,
+        super::PERMITTED_PROFILE,
+        &recorded.prompt,
+        false,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        score_case(recorded, &plan(&config, &report)).roles_ok,
+        Some(true)
+    );
+    // A case with no recorded response is a failure, never a guess.
+    let unrecorded = set.cases.iter().find(|case| case.id == "sel-001").unwrap();
+    let report = crate::coordinator::classify::classify(
+        &config,
+        super::PERMITTED_PROFILE,
+        &unrecorded.prompt,
+        false,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(report.outcome, Outcome::Failed(_)),
+        "{:?}",
+        report.outcome
+    );
+    let _ = std::fs::remove_dir_all(root);
 }

@@ -70,6 +70,10 @@ jobs:
           fi
           if [ -z "${TYPESAFE_API_KEY:-}" ]; then
             echo "status=pending" >> "$GITHUB_OUTPUT"
+            mkdir -p "$RUNNER_TEMP/jev-live"
+            printf '{"evaluation":"jev_live_contract","status":"BLOCKED","evaluated":false,"reason":"TYPESAFE_API_KEY is not configured in the jev-live environment","commit":"%s"}\n' \
+              "$GITHUB_SHA" > "$RUNNER_TEMP/jev-live/status.json"
+            echo "::notice title=Jev live contract BLOCKED::NOT EVALUATED: no credential. This run's success is not a pass."
             {
               echo "## Jev live contract: PENDING"
               echo
@@ -124,7 +128,7 @@ jobs:
           done
           exit 0
       - uses: actions/upload-artifact@v7
-        if: always() && steps.gate.outputs.status == 'ready'
+        if: always() && steps.gate.outputs.status != ''
         with:
           name: jev-live-reports
           path: ${{ runner.temp }}/jev-live/
