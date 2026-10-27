@@ -318,23 +318,11 @@ impl Tool for FsWrite {
 mod tests {
     use super::*;
     use crate::context::{WorkspaceContext, WorkspacePolicy};
+    use crate::test_dir::TestDir;
     use crate::workspace::Workspace;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
-
-    fn scratch() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "lightagent-fs-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
 
     fn ctx_for(root: &std::path::Path) -> ToolCtx {
         let ws = Workspace::new(root).unwrap();
@@ -352,8 +340,8 @@ mod tests {
 
     #[tokio::test]
     async fn write_then_read_round_trips_within_the_workspace() {
-        let root = scratch();
-        let ctx = ctx_for(&root);
+        let root = TestDir::new("fs");
+        let ctx = ctx_for(root.path());
         let wrote = FsWrite::new()
             .call(&json!({ "path": "notes/a.txt", "content": "hello" }), &ctx)
             .await;
@@ -365,18 +353,51 @@ mod tests {
         assert_eq!(read.content, "hello");
         let listed = FsList::new().call(&json!({ "path": "notes" }), &ctx).await;
         assert!(listed.content.contains("a.txt"));
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[tokio::test]
     async fn escaping_paths_are_refused() {
-        let root = scratch();
-        let ctx = ctx_for(&root);
+        let root = TestDir::new("fs");
+        let ctx = ctx_for(root.path());
         let out = FsWrite::new()
             .call(&json!({ "path": "../escape.txt", "content": "x" }), &ctx)
             .await;
         assert!(out.is_error);
-        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // Round trips and refused escapes running at once, each in its own
+    // directory, as the test harness runs tests: none disturbs another.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn parallel_round_trips_and_refused_escapes_stay_apart() {
+        let tasks: Vec<_> = (0..32)
+            .map(|i| {
+                tokio::spawn(async move {
+                    let root = TestDir::new("fs");
+                    let ctx = ctx_for(root.path());
+                    if i % 2 == 1 {
+                        let out = FsWrite::new()
+                            .call(&json!({ "path": "../escape.txt", "content": "x" }), &ctx)
+                            .await;
+                        assert!(out.is_error, "{}", out.content);
+                        return;
+                    }
+                    let content = format!("hello {i}");
+                    let wrote = FsWrite::new()
+                        .call(&json!({ "path": "notes/a.txt", "content": content }), &ctx)
+                        .await;
+                    assert!(!wrote.is_error, "{}", wrote.content);
+                    tokio::task::yield_now().await;
+                    let read = FsRead::new()
+                        .call(&json!({ "path": "notes/a.txt" }), &ctx)
+                        .await;
+                    assert!(!read.is_error, "{}", read.content);
+                    assert_eq!(read.content, content);
+                })
+            })
+            .collect();
+        for task in tasks {
+            task.await.unwrap();
+        }
     }
 
     #[tokio::test]

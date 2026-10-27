@@ -223,23 +223,11 @@ impl Tool for TerminalRun {
 mod tests {
     use super::*;
     use crate::context::{WorkspaceContext, WorkspacePolicy};
+    use crate::test_dir::TestDir;
     use crate::workspace::Workspace;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
-
-    fn scratch() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "lightagent-term-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
 
     fn ctx_for(root: &std::path::Path, allow: bool, allowlist: Vec<String>) -> ToolCtx {
         let policy = WorkspacePolicy {
@@ -256,51 +244,47 @@ mod tests {
 
     #[tokio::test]
     async fn runs_a_program_and_captures_output() {
-        let root = scratch();
-        let ctx = ctx_for(&root, true, Vec::new());
+        let root = TestDir::new("term");
+        let ctx = ctx_for(root.path(), true, Vec::new());
         let out = TerminalRun::new()
             .call(&json!({ "command": "echo", "args": ["hi"] }), &ctx)
             .await;
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("hi"));
         assert!(out.content.contains("exit: 0"));
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[tokio::test]
     async fn disabled_terminal_is_refused() {
-        let root = scratch();
-        let ctx = ctx_for(&root, false, Vec::new());
+        let root = TestDir::new("term");
+        let ctx = ctx_for(root.path(), false, Vec::new());
         let out = TerminalRun::new()
             .call(&json!({ "command": "echo" }), &ctx)
             .await;
         assert!(out.is_error);
         assert!(out.content.contains("disabled"));
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[tokio::test]
     async fn an_allowlist_blocks_other_programs() {
-        let root = scratch();
-        let ctx = ctx_for(&root, true, vec!["echo".to_owned()]);
+        let root = TestDir::new("term");
+        let ctx = ctx_for(root.path(), true, vec!["echo".to_owned()]);
         let out = TerminalRun::new()
             .call(&json!({ "command": "ls" }), &ctx)
             .await;
         assert!(out.is_error);
         assert!(out.content.contains("allowlist"));
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[tokio::test]
     async fn destructive_program_is_blocked_even_when_terminal_is_enabled() {
-        let root = scratch();
-        let ctx = ctx_for(&root, true, Vec::new());
+        let root = TestDir::new("term");
+        let ctx = ctx_for(root.path(), true, Vec::new());
         let out = TerminalRun::new()
             .call(&json!({"command":"/bin/rm","args":["-rf","."]}), &ctx)
             .await;
         assert!(out.is_error);
         assert!(out.content.contains("deny-list"));
-        assert!(root.is_dir());
-        std::fs::remove_dir_all(root).ok();
+        assert!(root.path().is_dir());
     }
 }

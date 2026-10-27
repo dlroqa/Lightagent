@@ -18,6 +18,7 @@ use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::{SocketAddr, UnixListener};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use lightagent_core::identity::{
@@ -85,17 +86,27 @@ fn private_dir(path: &Path) {
         .unwrap();
 }
 
+/// Distinguishes the fixtures of one process.
+static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+/// A private base directory no other fixture holds: created exclusively, so a
+/// name already taken is skipped, never shared (and never removed by another
+/// fixture's drop).
+fn private_base() -> PathBuf {
+    for _ in 0..1_000 {
+        let n = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!("lightagent-sbx-{}-{n}", std::process::id()));
+        match std::fs::DirBuilder::new().mode(0o700).create(&base) {
+            Ok(()) => return base,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => panic!("cannot create {}: {error}", base.display()),
+        }
+    }
+    panic!("no free fixture directory name");
+}
+
 fn fixture() -> Fixture {
-    let base = std::env::temp_dir().join(format!(
-        "lightagent-sbx-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    private_dir(&base);
-    let base = std::fs::canonicalize(&base).unwrap();
+    let base = std::fs::canonicalize(private_base()).unwrap();
     let dirs = [
         "research/workspace",
         "research/reference",
