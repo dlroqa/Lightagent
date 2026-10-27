@@ -400,7 +400,11 @@ async fn the_run_pool_caps_each_request_and_ends_research_when_low() {
     let pool = budget.output_pool.clone().expect("pool");
     let events = run(mock, small(), budget, Vec::new()).await;
     let requests = inspector.requests();
-    assert_eq!(requests[0].max_tokens, Some(700), "never more than the pool");
+    assert_eq!(
+        requests[0].max_tokens,
+        Some(700),
+        "never more than the pool"
+    );
     // 650 left is above the 512 reserve: an ordinary turn, granted the rest.
     assert_eq!(requests[1].max_tokens, Some(650));
     assert_eq!(pool.spent(), 80, "settled against reported usage");
@@ -408,7 +412,10 @@ async fn the_run_pool_caps_each_request_and_ends_research_when_low() {
     let last = reports(&events).pop().expect("a report");
     assert_eq!(last.configured_max_tokens, Some(1_024));
     assert_eq!(last.requested_max_tokens, Some(650));
-    assert_eq!((last.output_budget, last.output_spent), (Some(700), Some(80)));
+    assert_eq!(
+        (last.output_budget, last.output_spent),
+        (Some(700), Some(80))
+    );
     assert!(!last.output_estimated);
 }
 
@@ -463,14 +470,9 @@ async fn runs_sharing_a_pool_never_together_exceed_it() {
     let mocks: Vec<MockProvider> = (0..4)
         .map(|_| MockProvider::looping(vec![answer("part ", FinishReason::Length, None)]))
         .collect();
-    let runs = mocks.iter().map(|mock| {
-        run(
-            mock.clone(),
-            small(),
-            lead.for_worker(true),
-            Vec::new(),
-        )
-    });
+    let runs = mocks
+        .iter()
+        .map(|mock| run(mock.clone(), small(), lead.for_worker(true), Vec::new()));
     let outcomes = futures_util::future::join_all(runs).await;
     let granted: u32 = mocks
         .iter()

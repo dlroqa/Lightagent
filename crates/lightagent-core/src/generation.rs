@@ -768,15 +768,22 @@ mod tests {
         let provider = HistoryWindow::resolve(window(131_072), Some(4_096));
         assert_eq!(provider.tokens, 131_072, "never cut to a smaller setting");
         assert_eq!(provider.source, HistorySource::Provider);
-        let narrowed = HistoryWindow::resolve(ContextWindow::resolve(Some(32_768), Some(8_192)), None);
-        assert_eq!((narrowed.tokens, narrowed.source), (8_192, HistorySource::Configured));
+        let narrowed =
+            HistoryWindow::resolve(ContextWindow::resolve(Some(32_768), Some(8_192)), None);
+        assert_eq!(
+            (narrowed.tokens, narrowed.source),
+            (8_192, HistorySource::Configured)
+        );
         let placement = HistoryWindow::resolve(None, Some(16_384));
         assert_eq!(placement.source, HistorySource::Placement);
         assert_eq!(placement.known(), Some(16_384));
         let fallback = HistoryWindow::resolve(None, None);
         assert_eq!(fallback.tokens, FALLBACK_WINDOW);
         assert_eq!(fallback.known(), None, "a guess is not shown as known");
-        assert_eq!(HistoryWindow::resolve(None, Some(0)).source, HistorySource::Fallback);
+        assert_eq!(
+            HistoryWindow::resolve(None, Some(0)).source,
+            HistorySource::Fallback
+        );
     }
 
     #[test]

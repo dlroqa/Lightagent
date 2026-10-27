@@ -1497,27 +1497,71 @@ pub(crate) mod routing_tests {
         };
 
         // Served capacity above the placement setting is used, not cut down.
-        let above = resolved_history(capabilities("fast", 32_768), plain_models.clone(), placed(Some(4_096), None)).await;
-        assert_eq!((above.tokens, above.source), (32_768, HistorySource::Provider));
+        let above = resolved_history(
+            capabilities("fast", 32_768),
+            plain_models.clone(),
+            placed(Some(4_096), None),
+        )
+        .await;
+        assert_eq!(
+            (above.tokens, above.source),
+            (32_768, HistorySource::Provider)
+        );
         // A configured ceiling below it narrows it.
-        let ceiling = resolved_history(capabilities("fast", 32_768), plain_models.clone(), placed(None, Some(8_192))).await;
-        assert_eq!((ceiling.tokens, ceiling.source), (8_192, HistorySource::Configured));
+        let ceiling = resolved_history(
+            capabilities("fast", 32_768),
+            plain_models.clone(),
+            placed(None, Some(8_192)),
+        )
+        .await;
+        assert_eq!(
+            (ceiling.tokens, ceiling.source),
+            (8_192, HistorySource::Configured)
+        );
         // A configured figure above the served capacity never stretches it.
-        let stretched = resolved_history(capabilities("fast", 8_192), plain_models.clone(), placed(None, Some(65_536))).await;
-        assert_eq!((stretched.tokens, stretched.source), (8_192, HistorySource::Provider));
+        let stretched = resolved_history(
+            capabilities("fast", 8_192),
+            plain_models.clone(),
+            placed(None, Some(65_536)),
+        )
+        .await;
+        assert_eq!(
+            (stretched.tokens, stretched.source),
+            (8_192, HistorySource::Provider)
+        );
         // An older gateway: no capabilities, the window on its model row.
         let row = (
             200,
-            r#"{"data":[{"id":"fast","n_ctx":16384,"context_length":16384,"hermes":{}}]}"#.to_owned(),
+            r#"{"data":[{"id":"fast","n_ctx":16384,"context_length":16384,"hermes":{}}]}"#
+                .to_owned(),
         );
         let older = resolved_history((404, String::new()), row, placed(None, None)).await;
-        assert_eq!((older.tokens, older.source), (16_384, HistorySource::Provider));
+        assert_eq!(
+            (older.tokens, older.source),
+            (16_384, HistorySource::Provider)
+        );
         // Malformed discovery falls back to the placement setting, labelled so.
-        let malformed = resolved_history((200, "not json".into()), plain_models.clone(), placed(Some(12_288), None)).await;
-        assert_eq!((malformed.tokens, malformed.source), (12_288, HistorySource::Placement));
+        let malformed = resolved_history(
+            (200, "not json".into()),
+            plain_models.clone(),
+            placed(Some(12_288), None),
+        )
+        .await;
+        assert_eq!(
+            (malformed.tokens, malformed.source),
+            (12_288, HistorySource::Placement)
+        );
         // Another resident model's capacity is never borrowed.
-        let other = resolved_history(capabilities("other@64k", 65_536), plain_models.clone(), placed(None, None)).await;
-        assert_eq!((other.tokens, other.source), (4_096, HistorySource::Fallback));
+        let other = resolved_history(
+            capabilities("other@64k", 65_536),
+            plain_models.clone(),
+            placed(None, None),
+        )
+        .await;
+        assert_eq!(
+            (other.tokens, other.source),
+            (4_096, HistorySource::Fallback)
+        );
     }
 
     fn system_prompt(body: &serde_json::Value) -> String {

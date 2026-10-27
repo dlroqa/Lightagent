@@ -2411,7 +2411,10 @@ mod tests {
             "no allowance is invented"
         );
         assert_eq!(known.reserve_answer_tokens, 1_024);
-        assert_eq!(known.output_pool, None, "no run-wide bound unless asked for");
+        assert_eq!(
+            known.output_pool, None,
+            "no run-wide bound unless asked for"
+        );
         assert_eq!(
             legacy
                 .generation
