@@ -1295,10 +1295,10 @@ fn a_held_out_export_names_its_set_and_holds_only_its_prompts() {
             .jev
             .classification
             .max_input_chars;
-        let expected = sanitize::summarize(&case.prompt, limit)
-            .ok()
-            .expect("every held-out prompt is sendable")
-            .text;
+        let Ok(expected) = sanitize::summarize(&case.prompt, limit) else {
+            panic!("{} would not be sent", case.id);
+        };
+        let expected = expected.text;
         assert_eq!(state, expected, "{}", case.id);
         assert!(first.cases.iter().all(|other| other.prompt != state));
     }
