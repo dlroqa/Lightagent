@@ -1456,6 +1456,7 @@ fn get_key(config: &Config, key: &str) -> Option<String> {
             Some(config.platform.jev.classification.mode.as_str().to_owned())
         }
         "subagents.selection" => Some(config.subagents.selection.as_str().to_owned()),
+        "inference.tool_names" => Some(config.inference.tool_names.as_str().to_owned()),
         "subagents.selection_profiles" => Some(config.subagents.selection_profiles.join(",")),
         "platform.jev.classification.allowed_profiles" => Some(
             config
@@ -1685,6 +1686,9 @@ fn set_key(config: &mut Config, key: &str, value: &str) -> Result<(), String> {
         }
         "subagents.selection" => {
             config.subagents.selection = value.parse()?;
+        }
+        "inference.tool_names" => {
+            config.inference.tool_names = value.parse()?;
         }
         "subagents.selection_profiles" => {
             config.subagents.selection_profiles = value
