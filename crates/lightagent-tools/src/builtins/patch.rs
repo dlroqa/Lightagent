@@ -16,6 +16,13 @@
 //!   GitHub API, as a fast-forward of exactly the base commit, so it can
 //!   never replace anyone else's work. The commit is then built and verified
 //!   only by GitHub Actions, through the workflow broker, at its exact SHA.
+//!
+//! A patch id names one immutable change for the run's lifetime: ids are
+//! never reused, and the approval prompt shows the patch's files, base and a
+//! content identifier. A patch remembers the worker that proposed it; its
+//! assignment and ownership, and the run's authorization, are checked again
+//! immediately before anything is written or the branch is moved, so a
+//! worker withdrawn after proposing can no longer have its change used.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -58,47 +65,118 @@ pub struct Patch {
     pub files: Vec<PatchFile>,
 }
 
+/// The worker that proposed a patch: its label, and the check that its
+/// assignment and ownership still hold (none for a built-in or the lead).
+#[derive(Clone)]
+pub struct Proposer {
+    pub label: String,
+    pub validity: Option<crate::worker::WorkerValidity>,
+}
+
+impl std::fmt::Debug for Proposer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Proposer")
+            .field("label", &self.label)
+            .field("revocable", &self.validity.is_some())
+            .finish()
+    }
+}
+
+impl Proposer {
+    /// Whether the proposer's patch may still be used.
+    fn check(&self) -> Result<(), String> {
+        match &self.validity {
+            Some(valid) => valid().map_err(|_| {
+                format!(
+                    "the worker that proposed this patch ({}) is no longer authorized, so it was \
+                     not used",
+                    self.label
+                )
+            }),
+            None => Ok(()),
+        }
+    }
+}
+
+/// A recorded patch and the worker that proposed it.
+type Recorded = (Patch, Option<Proposer>);
+
 /// The patches proposed in one run, shared by the lead and its workers.
 #[derive(Clone, Debug, Default)]
 pub struct PatchStore {
-    inner: Arc<Mutex<BTreeMap<String, Patch>>>,
+    inner: Arc<Mutex<BTreeMap<String, Recorded>>>,
 }
 
 impl PatchStore {
-    fn insert(&self, patch: Patch) -> bool {
+    /// Record `patch`, refusing an id already in use: an id names one
+    /// change for the run's lifetime.
+    fn insert(&self, patch: Patch, proposer: Option<Proposer>) -> bool {
         match self.inner.lock() {
-            Ok(mut inner) => {
-                inner.insert(patch.id.clone(), patch);
+            Ok(mut inner) if !inner.contains_key(&patch.id) => {
+                inner.insert(patch.id.clone(), (patch, proposer));
                 true
             }
-            Err(_) => false,
+            _ => false,
         }
     }
 
     /// The patch `id`, if it was proposed in this run.
     pub fn get(&self, id: &str) -> Option<Patch> {
-        self.inner.lock().ok()?.get(id).cloned()
+        Some(self.inner.lock().ok()?.get(id)?.0.clone())
     }
 
-    /// What approving a change to patch `id` writes, for an approval prompt.
+    /// Whether patch `id` may still be used: its proposer is still
+    /// authorized. Unknown ids are refused.
+    pub fn still_valid(&self, id: &str) -> Result<(), String> {
+        let proposer = {
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|_| "the patch store is unavailable".to_owned())?;
+            let (_, proposer) = inner
+                .get(id)
+                .ok_or_else(|| format!("no patch {id:?} was proposed in this run"))?;
+            proposer.clone()
+        };
+        proposer.map_or(Ok(()), |proposer| proposer.check())
+    }
+
+    /// What approving a change to patch `id` writes, for an approval prompt:
+    /// its files, its base and an identifier of its content.
     pub fn describe(&self, id: &str) -> Option<String> {
         let patch = self.get(id)?;
         let files: Vec<&str> = patch.files.iter().map(|file| file.path.as_str()).collect();
         Some(format!(
-            "patch={id} base={} files={}",
+            "patch={id} base={} files={} content={}",
             patch.base_commit.as_deref().unwrap_or("none"),
-            files.join(",")
+            files.join(","),
+            content_id(&patch)
         ))
     }
 }
 
-/// The patch tools' context: the run's store, and the paths a worker may
+/// An identifier of a patch's content, so an approval names what it
+/// approves. Not a security hash: the store never changes a recorded patch.
+fn content_id(patch: &Patch) -> String {
+    let mut text = String::new();
+    for file in &patch.files {
+        text.push_str(&file.path);
+        text.push('\0');
+        text.push_str(&file.content);
+        text.push('\0');
+    }
+    fingerprint(&text)
+}
+
+/// The patch tools' context: the run's store, the paths a worker may
 /// change (`None` for the lead, which only applies or commits patches whose
-/// scope was checked when they were proposed).
+/// scope was checked when they were proposed), and the worker proposing
+/// (`None` for the lead).
 #[derive(Clone, Debug, Default)]
 pub struct PatchContext {
     pub store: PatchStore,
     pub scope: Option<Vec<String>>,
+    pub proposer: Option<Proposer>,
 }
 
 /// Whether `path` is inside one of `patterns`: an exact path, or `dir/**`.
@@ -360,7 +438,7 @@ fn propose(args: &Value, ctx: &ToolCtx) -> Result<Value, String> {
         })).collect::<Vec<_>>(),
         "note": "Nothing was written. The lead applies or commits this patch under its own approval.",
     });
-    if !patches.store.insert(patch) {
+    if !patches.store.insert(patch, patches.proposer.clone()) {
         return Err("the patch could not be recorded".to_owned());
     }
     Ok(report)
@@ -376,6 +454,16 @@ fn patch(ctx: &ToolCtx, args: &Value) -> Result<Patch, String> {
         .store
         .get(id)
         .ok_or_else(|| format!("no patch {id:?} was proposed in this run"))
+}
+
+/// Everything that must still hold the moment before a patch changes
+/// anything: the run's authorization and the proposing worker's.
+fn still_authorized(ctx: &ToolCtx, patch: &Patch) -> Result<(), String> {
+    ctx.authorized()?;
+    match &ctx.patches {
+        Some(patches) => patches.store.still_valid(&patch.id),
+        None => Err("patches are not available for this run".to_owned()),
+    }
 }
 
 /// Refuse a patch whose base is gone: a file changed since it was proposed,
@@ -465,6 +553,10 @@ impl Tool for PatchApply {
         if let Err(error) = check_base(ctx, &patch) {
             return ToolOutcome::error(error);
         }
+        // Checked last, immediately before the first write.
+        if let Err(error) = still_authorized(ctx, &patch) {
+            return ToolOutcome::error(error);
+        }
         let Some(ws) = &ctx.workspace else {
             return ToolOutcome::error("no workspace is available for this run");
         };
@@ -537,6 +629,7 @@ async fn commit(args: &Value, ctx: &ToolCtx) -> Result<Value, String> {
         return Err("no repository broker is configured for this run".to_owned());
     };
     let patch = patch(ctx, args)?;
+    still_authorized(ctx, &patch)?;
     let branch = args["branch"].as_str().unwrap_or_default();
     let message = args["message"].as_str().unwrap_or_default();
     if !valid_branch(branch) || !ref_allowed(&actions.policy.commit_refs, branch) {
@@ -620,6 +713,9 @@ async fn commit(args: &Value, ctx: &ToolCtx) -> Result<Value, String> {
     let Some(sha) = created.body["sha"].as_str().map(str::to_owned) else {
         return Err(api_error("creating the commit", &created));
     };
+    // The objects above are unreferenced until the branch moves: check the
+    // authority again immediately before moving it.
+    still_authorized(ctx, &patch)?;
     // Fast-forward only: a branch that moved meanwhile is refused here.
     let update = json!({ "sha": sha, "force": false });
     let moved = api(
