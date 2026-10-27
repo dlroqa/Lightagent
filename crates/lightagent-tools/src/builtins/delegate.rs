@@ -247,12 +247,38 @@ impl Tool for AgentDelegate {
             }
             (None, None) => return ToolOutcome::error("a worker profile or role is required"),
         };
-        // A planned role waits for the roles the plan puts before it.
+        // A planned role waits for the roles the plan puts before it, and a
+        // check of the coder's change is bound to exactly that change.
+        let mut task = args.task;
+        let mut subject = None;
         if let WorkerTarget::Role(role) = target
             && delegation.depth == 0
-            && let Err(error) = delegation.plan.check(role)
         {
-            return ToolOutcome::error(error);
+            if let Err(error) = delegation.plan.check(role) {
+                return ToolOutcome::error(error);
+            }
+            if delegation.plan.checks_a_change(role) {
+                let current = match crate::builtins::patch::current_subject(ctx) {
+                    Ok(Some(current)) => current,
+                    Ok(None) => {
+                        return ToolOutcome::error(format!(
+                            "the coder has proposed no change for the {role} to check yet"
+                        ));
+                    }
+                    Err(error) => return ToolOutcome::error(error),
+                };
+                if let Err(error) = delegation
+                    .plan
+                    .check_fresh(role, &current.key, &current.label)
+                {
+                    return ToolOutcome::error(error);
+                }
+                task = format!(
+                    "{task}\n\nCheck exactly this change and report only on it: {}.",
+                    current.label
+                );
+                subject = Some(current.key);
+            }
         }
         if let Err(error) = delegation.may_start_worker() {
             return ToolOutcome::error(error);
@@ -269,13 +295,49 @@ impl Tool for AgentDelegate {
             Err(error) => return ToolOutcome::error(error),
         };
         let request = WorkerRequest {
-            task: args.task,
+            task,
             max_turns: args.max_turns,
             max_seconds: args.max_seconds,
             tool_scope: args.tool_scope,
             write_scope: args.write_scope,
         };
-        run_worker(&delegation, spec, request, ctx).await
+        let role = spec.role;
+        let outcome = run_worker(&delegation, spec, request, ctx).await;
+        if delegation.depth == 0 && !outcome.is_error {
+            record_plan_progress(&delegation, role, subject.as_deref(), &outcome, ctx);
+        }
+        outcome
+    }
+}
+
+/// After a planned worker returns: a completed check is recorded against the
+/// change it verified, and a coder's new change reports which earlier checks
+/// it made stale (they must run again before anything depending on them).
+fn record_plan_progress(
+    delegation: &Delegation,
+    role: Option<lightagent_core::workers::WorkerRole>,
+    subject: Option<&str>,
+    outcome: &ToolOutcome,
+    ctx: &ToolCtx,
+) {
+    let completed = serde_json::from_str::<Value>(&outcome.content)
+        .ok()
+        .is_some_and(|report| report["status"] == "completed");
+    let Some(role) = role.filter(|_| completed) else {
+        return;
+    };
+    if let Some(key) = subject {
+        delegation.plan.verified(role.as_str(), key);
+    }
+    if role == lightagent_core::workers::WorkerRole::Coder {
+        let current = crate::builtins::patch::current_subject(ctx)
+            .ok()
+            .flatten()
+            .map(|current| current.key);
+        let stale = delegation.plan.stale(current.as_deref());
+        if !stale.is_empty() {
+            ctx.report(progress("plan.stale", Some(stale.join(",").as_str())));
+        }
     }
 }
 
