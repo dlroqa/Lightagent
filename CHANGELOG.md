@@ -20,6 +20,11 @@ All notable Lightagent changes are documented here.
   task kept with the lead) is kept as baseline evidence, with a per-prompt
   diagnosis and a held-out prompt set: `docs/subagents/selection-diagnosis.md`.
   Selection stays `off` by default.
+- `jev-selection-pinned.yml` takes the prompt set as a `set` input from a fixed
+  list (`selection.v1`, `selection-heldout.v1`), each pinned to its frozen
+  file's git blob id. The export, manifest, harness report and verdict must
+  name the same set, and the verdict adds delegation precision and recall,
+  role-set match over every delegation case, and expected-role coverage.
 
 ## [0.5.0] - Unreleased (prepared 2026-10-22; set the date when tagging)
 
