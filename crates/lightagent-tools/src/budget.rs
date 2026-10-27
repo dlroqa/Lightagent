@@ -382,7 +382,9 @@ mod tests {
             _: lightagent_core::ProviderRequest,
             _: CancellationToken,
         ) -> Result<lightagent_core::ProviderStream, lightagent_core::ProviderError> {
-            Err(lightagent_core::ProviderError::Upstream("never streamed".into()))
+            Err(lightagent_core::ProviderError::Upstream(
+                "never streamed".into(),
+            ))
         }
     }
 
@@ -447,10 +449,18 @@ mod tests {
         let worker = slot.for_worker_on(&routing("qwen@32k", None), &other).await;
         assert_eq!(asked(&other), 1);
         let window = worker.context_window.unwrap();
-        assert_eq!((window.tokens, window.source), (32_768, WindowSource::Provider));
+        assert_eq!(
+            (window.tokens, window.source),
+            (32_768, WindowSource::Provider)
+        );
         assert_eq!(worker.max_output_tokens, Some(1_024));
         assert_eq!(worker.reasoning, Reasoning::Default);
-        let held = worker.output_pool.as_ref().unwrap().reserve(Some(1_000)).unwrap();
+        let held = worker
+            .output_pool
+            .as_ref()
+            .unwrap()
+            .reserve(Some(1_000))
+            .unwrap();
         assert_eq!(pool.available(), 3_000, "the lead's pool, not a new one");
         drop(held);
         // Another endpoint's "default" model is budgeted by the model it
