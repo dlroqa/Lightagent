@@ -2,6 +2,7 @@
   "schema": "lightagent.specialist_selection_eval.v1",
   "split": "held_out",
   "recorded": "2026-10-27",
+  "frozen": "Prompts, labels and scoring rules are fixed as of 2026-10-27, before any request with these prompts; a CI fingerprint (the_held_out_set_is_frozen) fails on any change. If a rule, threshold or question is ever tuned against this set's responses, the set becomes development data and a new held-out set is needed before any held-out claim.",
   "purpose": "A held-out check of specialist selection after the rules were corrected against run 40503493185 on selection.v1.json. Not used to choose or tune any rule.",
   "labeling": "Labels were written by hand on 2026-10-27, after the diagnosis of run 40503493185 and by the same author who corrected the rules, but before any Jev or model request with these prompts; they are not changed after a run. Prompts are synthetic, distinct from selection.v1.json, and hold no personal data or credentials. Labels follow the documented policy: simple tasks, chat and single searches stay with the lead; a task is labeled for delegation only when it has a distinct piece of specialist work (research from external sources, a code change, an independent review, or building or running tests). Several keep-with-lead prompts are moderate but single-piece, to measure unnecessary delegation. `roles` lists every role set that counts as a correct plan, compared as unordered sets.",
   "scoring": {

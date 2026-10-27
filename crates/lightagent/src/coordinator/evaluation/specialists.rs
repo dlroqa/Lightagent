@@ -119,8 +119,12 @@ fn fallback_kind(code: &str) -> &'static str {
             "classification"
         }
         "delegation_not_useful" | "no_role_needed" => "jev_specialist_answers",
-        "delegation_unavailable" | "no_ready_role" | "insufficient_budget" | "cancelled"
-        | "not_asked" | "profile_not_enabled" => "runtime_policy",
+        "delegation_unavailable"
+        | "no_ready_role"
+        | "insufficient_budget"
+        | "cancelled"
+        | "not_asked"
+        | "profile_not_enabled" => "runtime_policy",
         _ => "classification_failed",
     }
 }
@@ -778,12 +782,18 @@ fn the_recorded_result_is_kept_as_the_baseline() {
     let dir = recorded_run();
     let verdict = read_json(&dir.join("verdict.json"));
     assert_eq!(verdict["status"], "BELOW_THRESHOLD");
-    assert_eq!(verdict["code_sha"], "b1ffd79c33bc39a13cf26ddf94126b6cb83bfd1c");
+    assert_eq!(
+        verdict["code_sha"],
+        "b1ffd79c33bc39a13cf26ddf94126b6cb83bfd1c"
+    );
     assert_eq!(verdict["metrics"]["decision_accuracy"]["numerator"], 12);
     assert_eq!(verdict["metrics"]["missed_delegation"]["numerator"], 12);
     assert_eq!(verdict["model_identifiers"], json!(["model=jev-1.14.0"]));
     let send = read_json(&dir.join("responses").join("send.json"));
-    assert_eq!(send, json!({"sent": 24, "ceiling": 24, "retries": 0, "stopped": "no"}));
+    assert_eq!(
+        send,
+        json!({"sent": 24, "ceiling": 24, "retries": 0, "stopped": "no"})
+    );
     let set = set();
     let agreed = set
         .cases
@@ -855,9 +865,18 @@ async fn the_corrected_rules_on_the_recorded_answers() {
     assert_eq!(totals["decision_accuracy"]["numerator"], 21);
     assert_eq!(totals["unnecessary_delegation"]["numerator"], 0);
     assert_eq!(totals["missed_delegation"]["numerator"], 3);
-    assert_eq!(totals["role_match"], json!({"numerator": 9, "denominator": 9, "value": 1.0}));
-    assert_eq!(totals["role_match_over_all_delegation_cases"]["numerator"], 9);
-    assert_eq!(totals["role_match_over_all_delegation_cases"]["denominator"], 12);
+    assert_eq!(
+        totals["role_match"],
+        json!({"numerator": 9, "denominator": 9, "value": 1.0})
+    );
+    assert_eq!(
+        totals["role_match_over_all_delegation_cases"]["numerator"],
+        9
+    );
+    assert_eq!(
+        totals["role_match_over_all_delegation_cases"]["denominator"],
+        12
+    );
     assert_eq!(totals["delegation_precision"]["value"], 1.0);
     assert_eq!(totals["delegation_recall"]["numerator"], 9);
     super::write_report(
@@ -1112,8 +1131,14 @@ fn the_held_out_set_is_well_formed_and_disjoint_from_the_first() {
     assert_eq!(held.schema, first.schema);
     // The same recorded pass rule.
     assert_eq!(
-        (held.pass.decision_accuracy_min, held.pass.unnecessary_delegation_max),
-        (first.pass.decision_accuracy_min, first.pass.unnecessary_delegation_max)
+        (
+            held.pass.decision_accuracy_min,
+            held.pass.unnecessary_delegation_max
+        ),
+        (
+            first.pass.decision_accuracy_min,
+            first.pass.unnecessary_delegation_max
+        )
     );
     // 24 cases with sel-NNN ids, as the pinned workflow and its guard require.
     assert_eq!(held.cases.len(), 24);
@@ -1125,7 +1150,10 @@ fn the_held_out_set_is_well_formed_and_disjoint_from_the_first() {
     let roles: BTreeSet<&str> = WorkerRole::ALL.iter().map(|role| role.as_str()).collect();
     for case in &held.cases {
         assert!(
-            first.cases.iter().all(|other| other.id != case.id && other.prompt != case.prompt),
+            first
+                .cases
+                .iter()
+                .all(|other| other.id != case.id && other.prompt != case.prompt),
             "{} repeats the first set",
             case.id
         );
@@ -1142,4 +1170,28 @@ fn the_held_out_set_is_well_formed_and_disjoint_from_the_first() {
     }
     let lead = held.cases.iter().filter(|case| !case.delegate).count();
     assert_eq!((lead, held.cases.len() - lead), (12, 12));
+}
+
+/// FNV-1a over the held-out file, line endings normalized: a fingerprint
+/// that changes with any byte of its prompts, labels or scoring rules.
+fn fingerprint(text: &str) -> u64 {
+    text.bytes()
+        .filter(|byte| *byte != b'\r')
+        .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        })
+}
+
+/// The held-out set as frozen on 2026-10-27. Changing it is a decision to
+/// record, not an edit: see its `frozen` note.
+const HELD_OUT_FINGERPRINT: u64 = 0;
+
+#[test]
+fn the_held_out_set_is_frozen() {
+    assert_eq!(
+        fingerprint(HELD_OUT),
+        HELD_OUT_FINGERPRINT,
+        "the held-out set changed: fingerprint {:#018x}",
+        fingerprint(HELD_OUT)
+    );
 }
