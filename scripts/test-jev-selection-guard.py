@@ -142,7 +142,7 @@ class PinTests(unittest.TestCase):
     def test_dispatch_is_from_master_with_a_full_commit_id_only(self):
         api = stub(comparison=compare("ahead"))
         self.assertIn("master only", self.refused(api, ref="refs/heads/feature"))
-        for sha in ("", CODE[:12], CODE.upper(), CODE + "0", "g" * 40):
+        for sha in ("", CODE[:12], "A" * 40, CODE + "0", CODE + "\n", "g" * 40):
             with self.subTest(sha=sha):
                 self.assertIn("full 40-character", self.refused(api, sha=sha))
         self.assertIn("dispatch commit", self.refused(api, workflow_sha="master"))

@@ -38,9 +38,9 @@ import re
 import subprocess
 import sys
 
-SHA = re.compile(r"^[0-9a-f]{40}$")
-DIGEST = re.compile(r"^[0-9a-f]{64}$")
-PROMPT_ID = re.compile(r"^sel-[0-9]{3}$")
+SHA = re.compile(r"[0-9a-f]{40}")
+DIGEST = re.compile(r"[0-9a-f]{64}")
+PROMPT_ID = re.compile(r"sel-[0-9]{3}")
 EXPECTED_PROMPTS = 24
 MODEL_FIELDS = ("model", "model_id", "model_version", "version")
 
@@ -80,14 +80,14 @@ def gh_api(path):
 def pin(event, ref, sha, workflow_sha, pr_sha, repo, api=gh_api):
     """The commit to evaluate, and why it may be; raises Refused otherwise."""
     if event != "workflow_dispatch":
-        if not SHA.match(pr_sha or ""):
+        if not SHA.fullmatch(pr_sha or ""):
             raise Refused("the pull request head is not a full commit id")
         return {"sha": pr_sha, "workflow_sha": workflow_sha, "pinned_by": "pull_request"}
     if ref != "refs/heads/master":
         raise Refused("Dispatch from master only: the workflow definition must be the reviewed one.")
-    if not SHA.match(sha or ""):
+    if not SHA.fullmatch(sha or ""):
         raise Refused("sha must be a full 40-character commit id")
-    if not SHA.match(workflow_sha or ""):
+    if not SHA.fullmatch(workflow_sha or ""):
         raise Refused("the dispatch commit is not a full commit id")
 
     # The current head of an open pull request from this repository.
@@ -217,7 +217,7 @@ def check_set(path, problems):
     ids = [field(case, "id") for case in cases]
     labels = {}
     for case_id, case in zip(ids, cases):
-        if not isinstance(case_id, str) or not PROMPT_ID.match(case_id):
+        if not isinstance(case_id, str) or not PROMPT_ID.fullmatch(case_id):
             problems.append(f"prompt id {case_id!r} is not sel-NNN")
         elif case_id in labels:
             problems.append(f"duplicate prompt id {case_id}")
@@ -248,7 +248,7 @@ def check_requests(directory, ids, digest, code_sha, problems):
         problems.append(f"unexpected exported file {name}")
     for name in sorted(expected - set(request_names)):
         problems.append(f"no exported request {name}")
-    if not DIGEST.match(digest or ""):
+    if not DIGEST.fullmatch(digest or ""):
         problems.append("prepare published no request digest")
     elif set(request_names) == expected and request_digest(directory, request_names) != digest:
         problems.append("the exported requests do not match the digest prepare published")
