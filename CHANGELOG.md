@@ -4,6 +4,20 @@ All notable Lightagent changes are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Output and context budgeting per model turn (`generation` settings).
+  The window the model is served with is read from Lightweight
+  (`/v1/capabilities`, or the `/v1/models` row on older gateways), never
+  guessed from a model name. Tool results that would crowd out the answer
+  are shortened in what the model sees and the next turn answers, ending
+  with the new `ContextLimit` stop reason. An optional output allowance is
+  sent as `max_tokens`. A reasoning label is sent only when declared
+  supported for the model. Each turn reports its budget and finish reason
+  as a privacy-safe `generation.report` event. Workers never get a larger
+  allowance than their lead. With nothing known or configured, requests
+  are unchanged. See `docs/architecture/generation-budget.md`.
+
 ### Changed
 
 - `jev-selection-pinned.yml` can evaluate an explicitly named commit already
