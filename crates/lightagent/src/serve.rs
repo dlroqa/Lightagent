@@ -905,6 +905,11 @@ pub(crate) mod routing_tests {
                             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                             body.len()
                         )
+                    } else if request.starts_with("GET ") {
+                        // Any other probe (`/v1/capabilities`, say) finds
+                        // an older gateway that does not serve it.
+                        "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                            .to_owned()
                     } else {
                         let body = request
                             .split_once("\r\n\r\n")
