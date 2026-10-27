@@ -183,6 +183,34 @@ wrong for unusual scripts or tokenizers, and the server's count decides.
 | continuations (#62) | per run, each spending one of that run's turns |
 | **`max_run_output_tokens`** (new) | **aggregate generated tokens for the lead, all its workers and all continuations** |
 
+### Workers on another model
+
+A worker that reaches the lead's model at the lead's endpoint runs under the
+lead's budget. A worker routed to **another model or endpoint** is budgeted
+for its own model, by the same settings:
+
+- **Discovery.** Its own provider is asked which model it serves (another
+  endpoint's `default` included) and with what window: the same two
+  questions the lead's budget comes from. The provider is the worker's
+  authorized provider, so a revoked run asks nothing. One request per worker
+  start, never cached, so one endpoint's capacity is never reused for
+  another.
+- **Budget.** `generation.budget_for` runs for that model, so its own
+  per-model overrides apply. The worker keeps:
+  - **its own window**, which may be larger than the lead's, because a
+    window is per-request capacity, not a grant;
+  - its own headroom;
+  - its own reasoning declaration, never the lead's label.
+- **Bounds that still hold.** Its `max_output_tokens` is the smaller of its
+  model's ceiling and the lead's. Its continuations are never more than the
+  lead's. It draws on the lead's `OutputPool` and the tree's `TreeBudget`,
+  never on pools of its own.
+- **Unknown window.** A provider that cannot report the window (not
+  Lightweight, unreachable, or no resident model) leaves it unknown, the
+  conservative case. There is no context guard and no continuation, and the
+  ceiling and the pool still apply. The worker's `generation.report` shows
+  `context_window: null`.
+
 Before #61 there was **no** aggregate token bound. The table's limits only
 implied one, of (lead turns + tree turns) × window, which is not a token
 allowance.

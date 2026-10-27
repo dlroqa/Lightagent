@@ -482,6 +482,28 @@ impl GenerationBudget {
         }
     }
 
+    /// The budget a worker routed to another model runs under. `own` is that
+    /// model's budget, resolved from the operator's settings and the window
+    /// its provider reports: the worker keeps that window (per-request
+    /// capacity, which may be larger than this run's), its reserve and its
+    /// own reasoning declaration. Its allowance is never larger than this
+    /// run's, its continuations never more, and it draws on this run's
+    /// output pool, never on one of its own.
+    pub fn for_routed_worker(&self, own: Self) -> Self {
+        let max_output_tokens = match (own.max_output_tokens, self.max_output_tokens) {
+            (Some(own), Some(lead)) => Some(own.min(lead)),
+            (own, lead) => own.or(lead),
+        };
+        Self {
+            context_window: own.context_window,
+            max_output_tokens,
+            reserve_answer_tokens: own.reserve_answer_tokens,
+            reasoning: own.reasoning,
+            output_pool: self.output_pool.clone(),
+            max_continuations: own.max_continuations.min(self.max_continuations),
+        }
+    }
+
     /// Whether a continuation would leave enough room once a prompt of
     /// `prompt` tokens, the partial answer included, is in.
     pub fn may_continue_with(&self, prompt: u32) -> bool {
@@ -1039,5 +1061,58 @@ mod tests {
         );
         assert_eq!(length_cause(None, None, usage(100, 100)), "unknown");
         assert_eq!(length_cause(Some(10), Some(100), None), "unknown");
+    }
+
+    #[test]
+    fn a_routed_worker_keeps_its_own_window_and_the_leads_bounds() {
+        let pool = OutputPool::new(4_000);
+        let lead = GenerationBudget {
+            context_window: window(8_192),
+            max_output_tokens: Some(1_024),
+            reserve_answer_tokens: 512,
+            reasoning: Reasoning::Applied("low".into()),
+            output_pool: Some(pool.clone()),
+            max_continuations: 1,
+        };
+        // The worker's model: a larger window, a larger ceiling of its own, a
+        // pool of its own from the same settings, and more continuations.
+        let own = GenerationBudget {
+            context_window: window(32_768),
+            max_output_tokens: Some(4_096),
+            reserve_answer_tokens: 1_024,
+            reasoning: Reasoning::Applied("none".into()),
+            output_pool: Some(OutputPool::new(4_000)),
+            max_continuations: 3,
+        };
+        let worker = lead.for_routed_worker(own.clone());
+        // Per-request capacity is the worker model's own, even when larger.
+        assert_eq!(worker.context_window, window(32_768));
+        assert_eq!(worker.reserve_answer_tokens, 1_024);
+        assert_eq!(worker.reasoning, Reasoning::Applied("none".into()));
+        // Never a larger allowance or more continuations than the lead's.
+        assert_eq!(worker.max_output_tokens, Some(1_024));
+        assert_eq!(worker.max_continuations, 1);
+        // The lead's pool, shared: what the worker reserves the lead loses.
+        let held = worker.output_pool.as_ref().unwrap().reserve(Some(1_000)).unwrap();
+        assert_eq!(pool.available(), 3_000);
+        drop(held);
+        // A smaller ceiling of its own wins; with none, the lead's applies.
+        let tighter = lead.for_routed_worker(GenerationBudget {
+            max_output_tokens: Some(256),
+            ..own.clone()
+        });
+        assert_eq!(tighter.max_output_tokens, Some(256));
+        let unset = GenerationBudget::default().for_routed_worker(GenerationBudget {
+            max_output_tokens: None,
+            ..own
+        });
+        assert_eq!(unset.max_output_tokens, None);
+        assert_eq!(unset.output_pool, None, "no pool of its own, ever");
+        // An unknown window stays unknown: no guard, no continuation.
+        let unknown = lead.for_routed_worker(GenerationBudget::default());
+        assert_eq!(unknown.context_window, None);
+        assert!(!unknown.guards_context());
+        assert!(!unknown.may_continue_with(0));
+        assert_eq!(unknown.max_output_tokens, Some(1_024));
     }
 }
