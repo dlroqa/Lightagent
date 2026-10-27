@@ -9,6 +9,9 @@ use lightagent_core::{
     AgentEvent, AgentLoop, ApprovalNeed, ContextWindow, GenerationBudget, GenerationReport,
     MockProvider, OutputPool, Reasoning, RunConfig, StopReason, ToolCall, ToolInvoker, ToolOutcome,
     ToolSchema, WindowSource,
+    AgentEvent, AgentLoop, AgentProvider, ApprovalNeed, ContextWindow, GenerationBudget,
+    GenerationReport, MockProvider, Reasoning, RunConfig, StopReason, ToolCall, ToolInvoker,
+    ToolOutcome, ToolSchema, WindowSource,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -157,6 +160,7 @@ async fn the_allowance_and_a_supported_reasoning_label_ride_on_every_turn() {
         reserve_answer_tokens: 512,
         reasoning: Reasoning::resolve(Some("low"), &["none".into(), "low".into()]),
         output_pool: None,
+        max_continuations: 0,
     };
     let events = run(mock, small(), budget, Vec::new()).await;
     let requests = inspector.requests();
@@ -385,6 +389,12 @@ fn pooled(total: u32) -> GenerationBudget {
         max_output_tokens: Some(1_024),
         reserve_answer_tokens: 512,
         output_pool: Some(OutputPool::new(total)),
+/// A budget that continues a cut-off answer up to `times` times.
+fn continuing(times: u32) -> GenerationBudget {
+    GenerationBudget {
+        context_window: window(8_192),
+        reserve_answer_tokens: 1_024,
+        max_continuations: times,
         ..GenerationBudget::default()
     }
 }
@@ -553,4 +563,246 @@ async fn shortening_large_results_keeps_every_tool_exchange_paired() {
     );
     assert_eq!(reports(&events)[1].shortened_results, 3);
     assert_eq!(stop_reason(&events), Some(StopReason::ContextLimit));
+async fn a_cut_off_answer_is_continued_by_a_tool_less_turn() {
+    let mock = MockProvider::new(vec![
+        answer("The bridge opened in", FinishReason::Length, usage(100, 50)),
+        answer(" 1932.", FinishReason::Stop, usage(160, 4)),
+    ]);
+    let inspector = mock.clone();
+    let events = run(mock, small(), continuing(1), Vec::new()).await;
+    assert_eq!(content(&events), "The bridge opened in 1932.");
+    assert_eq!(stop_reason(&events), Some(StopReason::EndTurn));
+    let requests = inspector.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].tools.is_empty(), "a continuation offers no tools");
+    let messages = &requests[1].messages;
+    let partial = &messages[messages.len() - 2];
+    assert_eq!(partial.role, Role::Assistant);
+    assert_eq!(partial.content, "The bridge opened in");
+    assert!(messages[messages.len() - 1].content.contains("cut off"));
+    let reports = reports(&events);
+    assert_eq!(reports[0].finish, "length");
+    assert_eq!(reports[1].purpose, "continuation");
+    assert_eq!(reports[1].continuations, 1);
+}
+
+#[tokio::test]
+async fn a_restated_ending_is_not_shown_twice() {
+    let mock = MockProvider::new(vec![
+        answer(
+            "Sources agree that the bridge opened in",
+            FinishReason::Length,
+            None,
+        ),
+        vec![
+            ProviderEvent::RoleStarted,
+            ProviderEvent::Content("Sources agree that the ".into()),
+            ProviderEvent::Content("bridge opened in 1932.".into()),
+            ProviderEvent::Finished {
+                reason: FinishReason::Stop,
+                usage: None,
+            },
+        ],
+    ]);
+    let events = run(mock, small(), continuing(1), Vec::new()).await;
+    assert_eq!(
+        content(&events),
+        "Sources agree that the bridge opened in 1932."
+    );
+}
+
+#[tokio::test]
+async fn continuations_stop_at_their_cap_and_keep_every_part() {
+    let mock = MockProvider::looping(vec![answer(
+        "more text ",
+        FinishReason::Length,
+        usage(200, 64),
+    )]);
+    let inspector = mock.clone();
+    let events = run(mock, small(), continuing(2), Vec::new()).await;
+    assert_eq!(inspector.requests().len(), 3, "the first turn and two more");
+    assert_eq!(content(&events), "more text more text more text ");
+    // Still cut off after the last permitted continuation: reported partial.
+    assert_eq!(stop_reason(&events), Some(StopReason::MaxTokens));
+    assert!(!StopReason::MaxTokens.is_complete());
+    let report = reports(&events).pop().expect("a report");
+    assert_eq!((report.finish.as_str(), report.continuations), ("length", 2));
+    // The parts are kept as one answer, so roles still alternate.
+    let last = inspector.requests().pop().expect("a request");
+    let assistants = last
+        .messages
+        .iter()
+        .filter(|message| message.role == Role::Assistant)
+        .count();
+    assert_eq!(assistants, 1);
+}
+
+#[tokio::test]
+async fn nothing_is_continued_that_is_unsafe_or_has_no_room() {
+    let truncated_call = vec![
+        ProviderEvent::RoleStarted,
+        ProviderEvent::Content("Let me look".into()),
+        ProviderEvent::ToolCallDelta {
+            index: 0,
+            id: Some("call_1".into()),
+            name: Some("rag.search".into()),
+            arguments: Some("{\"q\":".into()),
+        },
+        ProviderEvent::Finished {
+            reason: FinishReason::Length,
+            usage: None,
+        },
+    ];
+    let reasoning_only = vec![
+        ProviderEvent::RoleStarted,
+        ProviderEvent::Reasoning("thinking".into()),
+        ProviderEvent::Finished {
+            reason: FinishReason::Length,
+            usage: None,
+        },
+    ];
+    let full_window = answer("Most of", FinishReason::Length, usage(7_900, 200));
+    let cases = [
+        ("incomplete tool arguments", truncated_call, continuing(1)),
+        ("no visible text", reasoning_only.clone(), continuing(1)),
+        ("no room left", full_window, continuing(1)),
+        (
+            "no known window",
+            answer("Half", FinishReason::Length, None),
+            GenerationBudget {
+                max_continuations: 1,
+                ..GenerationBudget::default()
+            },
+        ),
+        ("continuations off", reasoning_only, continuing(0)),
+    ];
+    for (case, script, budget) in cases {
+        let mock = MockProvider::looping(vec![script]);
+        let inspector = mock.clone();
+        let events = run(mock, small(), budget, Vec::new()).await;
+        assert_eq!(inspector.requests().len(), 1, "{case}: continued");
+        assert_eq!(stop_reason(&events), Some(StopReason::MaxTokens), "{case}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ToolCallStarted { .. })),
+            "{case}: a tool ran"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_continuation_spends_the_runs_own_turns() {
+    let mock = MockProvider::new(vec![
+        search("call_1", None),
+        answer("The answer is", FinishReason::Length, None),
+        answer(" forty-two.", FinishReason::Stop, None),
+    ]);
+    let inspector = mock.clone();
+    let mut generation = continuing(1);
+    generation.max_continuations = 3;
+    let mut config = config(generation);
+    config.limits.max_turns = 3;
+    let events = AgentLoop::new(mock, small(), config.clone())
+        .run("research this", CancellationToken::new())
+        .await
+        .expect("run")
+        .into_events();
+    assert_eq!(inspector.requests().len(), 3);
+    assert_eq!(content(&events), "The answer is forty-two.");
+    assert_eq!(stop_reason(&events), Some(StopReason::EndTurn));
+
+    // With no turn left after the cut-off answer, it is not continued.
+    let mock = MockProvider::looping(vec![answer("Cut", FinishReason::Length, None)]);
+    let inspector = mock.clone();
+    config.limits.max_turns = 1;
+    let events = AgentLoop::new(mock, small(), config)
+        .run("research this", CancellationToken::new())
+        .await
+        .expect("run")
+        .into_events();
+    assert_eq!(inspector.requests().len(), 1);
+    assert_eq!(stop_reason(&events), Some(StopReason::MaxTokens));
+}
+
+/// A provider that cancels the run as its second turn is requested.
+struct CancelOnSecondTurn {
+    inner: MockProvider,
+    cancel: CancellationToken,
+    turns: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl AgentProvider for CancelOnSecondTurn {
+    async fn stream(
+        &self,
+        request: lightagent_core::ProviderRequest,
+        cancel: CancellationToken,
+    ) -> Result<lightagent_core::ProviderStream, lightagent_core::ProviderError> {
+        let turn = self
+            .turns
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if turn == 1 {
+            self.cancel.cancel();
+        }
+        self.inner.stream(request, cancel).await
+    }
+}
+
+#[tokio::test]
+async fn a_cancelled_continuation_keeps_the_partial_answer() {
+    let cancel = CancellationToken::new();
+    let provider = CancelOnSecondTurn {
+        inner: MockProvider::looping(vec![answer(
+            "The partial answer",
+            FinishReason::Length,
+            None,
+        )]),
+        cancel: cancel.clone(),
+        turns: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let events = AgentLoop::new(provider, small(), config(continuing(1)))
+        .run("research this", cancel)
+        .await
+        .expect("run")
+        .into_events();
+    assert_eq!(content(&events), "The partial answer");
+    assert_eq!(stop_reason(&events), Some(StopReason::Cancelled));
+}
+
+#[tokio::test]
+async fn continuations_obey_the_per_request_ceiling_and_the_run_pool() {
+    let mock = MockProvider::looping(vec![answer(
+        "chunk ",
+        FinishReason::Length,
+        usage(100, 256),
+    )]);
+    let inspector = mock.clone();
+    let mut budget = continuing(2);
+    budget.max_output_tokens = Some(256);
+    budget.output_pool = Some(OutputPool::new(600));
+    let pool = budget.output_pool.clone().expect("pool");
+    let events = run(mock, small(), budget, Vec::new()).await;
+    let requests = inspector.requests();
+    // The ceiling applies to every request, continuations included; the
+    // pool bounds the run. After two turns 88 tokens remain, too few to
+    // continue usefully, so the answer stays cut off.
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| request.max_tokens == Some(256)));
+    assert_eq!(pool.spent(), 512);
+    assert_eq!(stop_reason(&events), Some(StopReason::MaxTokens));
+    assert_eq!(content(&events), "chunk chunk ");
+}
+
+#[tokio::test]
+async fn legitimate_repetition_at_the_seam_is_kept() {
+    let mock = MockProvider::new(vec![
+        answer("The chorus goes: la la la", FinishReason::Length, None),
+        answer(" la la la, and then it ends.", FinishReason::Stop, None),
+    ]);
+    let events = run(mock, small(), continuing(1), Vec::new()).await;
+    assert_eq!(
+        content(&events),
+        "The chorus goes: la la la la la la, and then it ends."
+    );
 }

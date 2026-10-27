@@ -240,6 +240,7 @@ mod tests {
             reserve_answer_tokens: 512,
             reasoning: Reasoning::Applied("low".into()),
             output_pool: Some(lightagent_core::OutputPool::new(4_000)),
+            max_continuations: 1,
         };
         slot.set(Some(LeadGeneration {
             model: "lfm2@8k".into(),
