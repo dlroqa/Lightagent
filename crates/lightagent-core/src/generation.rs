@@ -856,7 +856,10 @@ mod tests {
     fn a_restated_ending_is_trimmed_from_a_continuation() {
         let so_far = "The three sources agree that the bridge opened in";
         assert_eq!(
-            strip_overlap(so_far, "three sources agree that the bridge opened in 1932, after"),
+            strip_overlap(
+                so_far,
+                "three sources agree that the bridge opened in 1932, after"
+            ),
             " 1932, after"
         );
         assert_eq!(strip_overlap(so_far, " 1932, after"), " 1932, after");
@@ -870,7 +873,11 @@ mod tests {
         assert_eq!(strip_overlap(ward, mid_word), mid_word, "starts mid-word");
         let key = "the key is 0123456789abcdef0123456789abcdef";
         let again = "0123456789abcdef0123456789abcdef, again";
-        assert_eq!(strip_overlap(key, again), again, "one word is not a restatement");
+        assert_eq!(
+            strip_overlap(key, again),
+            again,
+            "one word is not a restatement"
+        );
         assert_eq!(strip_overlap("", "anything"), "anything");
         let accented = "é".repeat(400);
         assert_eq!(tail(&accented).len(), OVERLAP_TAIL);

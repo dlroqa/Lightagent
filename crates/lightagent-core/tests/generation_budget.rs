@@ -389,6 +389,10 @@ fn pooled(total: u32) -> GenerationBudget {
         max_output_tokens: Some(1_024),
         reserve_answer_tokens: 512,
         output_pool: Some(OutputPool::new(total)),
+        ..GenerationBudget::default()
+    }
+}
+
 /// A budget that continues a cut-off answer up to `times` times.
 fn continuing(times: u32) -> GenerationBudget {
     GenerationBudget {
@@ -563,6 +567,9 @@ async fn shortening_large_results_keeps_every_tool_exchange_paired() {
     );
     assert_eq!(reports(&events)[1].shortened_results, 3);
     assert_eq!(stop_reason(&events), Some(StopReason::ContextLimit));
+}
+
+#[tokio::test]
 async fn a_cut_off_answer_is_continued_by_a_tool_less_turn() {
     let mock = MockProvider::new(vec![
         answer("The bridge opened in", FinishReason::Length, usage(100, 50)),
