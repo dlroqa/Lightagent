@@ -1043,10 +1043,10 @@ mod tests {
     }
 
     fn with_delegation(mut report: ClassificationReport, delegation: f64) -> ClassificationReport {
-        if let Outcome::Classified(classification) = &mut report.outcome {
-            if let Some(selection) = classification.selection.as_mut() {
-                selection.delegation = delegation;
-            }
+        if let Outcome::Classified(classification) = &mut report.outcome
+            && let Some(selection) = classification.selection.as_mut()
+        {
+            selection.delegation = delegation;
         }
         report
     }
