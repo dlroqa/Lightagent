@@ -1093,7 +1093,12 @@ mod tests {
         assert_eq!(worker.max_output_tokens, Some(1_024));
         assert_eq!(worker.max_continuations, 1);
         // The lead's pool, shared: what the worker reserves the lead loses.
-        let held = worker.output_pool.as_ref().unwrap().reserve(Some(1_000)).unwrap();
+        let held = worker
+            .output_pool
+            .as_ref()
+            .unwrap()
+            .reserve(Some(1_000))
+            .unwrap();
         assert_eq!(pool.available(), 3_000);
         drop(held);
         // A smaller ceiling of its own wins; with none, the lead's applies.

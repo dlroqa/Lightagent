@@ -210,6 +210,11 @@ for its own model, by the same settings:
   conservative case. There is no context guard and no continuation, and the
   ceiling and the pool still apply. The worker's `generation.report` shows
   `context_window: null`.
+- **Pool contention.** With no `max_output_tokens` and an unknown window, a
+  routed worker's turn asks the pool for everything it has left, as a turn
+  on the lead's model does. A sibling running at the same time may then
+  find the pool fully reserved and stop with `OutputBudget` (see
+  *Contention* above). Setting `max_output_tokens` bounds each reservation.
 
 Before #61 there was **no** aggregate token bound. The table's limits only
 implied one, of (lead turns + tree turns) × window, which is not a token
