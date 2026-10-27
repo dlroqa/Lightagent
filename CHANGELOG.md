@@ -38,9 +38,37 @@ All notable Lightagent changes are documented here.
     (`agent.research`, behind `subagents.remote_research`, off by default).
   - Operator capability presets: `lightagent profile preset <id> research@1`.
 - The Web UI shows each worker's progress and its typed result.
+- Jev-assisted specialist selection (`subagents.selection`: `off` by
+  default, `shadow`, `active`). Typed questions added to the existing
+  classification request, with no extra Jev call, ask whether splitting a
+  task helps, which roles, and whether the parts depend on each other.
+  Lightagent builds the plan with fixed rules over the profile's own role
+  readiness, policy and limits:
+  - simple tasks and single searches stay with the lead;
+  - a plan names at most `selection_max_workers` roles (1 to 3, never all
+    four), and a refused role is reported, never replaced;
+  - testers and reviewers follow the coder whose change they check.
+
+  In `active` mode, for the profiles in `selection_profiles` only, the lead
+  gets the plan and `agent.delegate` enforces its order. The plan is
+  reported as an additive `specialists` object on `classification.completed`.
+  It grants no tool, role, approval or budget.
+- `inference.tool_names = "portable"` (default `native`) maps dotted tool
+  names reversibly to `^[a-zA-Z0-9_-]{1,64}$` for endpoints that require it,
+  such as OpenAI's API. Declarations, history, tool results and streamed
+  calls are mapped consistently, unknown returned names are refused, and
+  ambiguous mappings are refused before sending.
+- A labeled specialist-selection set (`evaluation/subagents/selection.v1.json`)
+  and a protected, manually dispatched live run (`jev-selection-live.yml`).
+  The role evaluation takes pilot bounds: a task subset, runs per task and a
+  hard request ceiling.
 
 ### Changed
 
+- `patch.apply` and `repo.commit` check the run's authorization and the
+  proposing worker's assignment and ownership again immediately before
+  writing, and `repo.commit` again before moving the branch. Patch ids are
+  never reused, and the approval prompt shows a content identifier.
 - Workers below one lead run now share the lead's turns, tool calls and
   time, with at most `subagents.max_workers_per_run` workers. They are
   admitted through installation-wide and per-profile pools.
@@ -53,6 +81,11 @@ All notable Lightagent changes are documented here.
 
 ### Fixed
 
+- The experimental bubblewrap sandbox backend could leave a sandboxed
+  process alive when a run was cancelled within milliseconds of start, by
+  listing the process tree before the outer `bwrap` had actually stopped.
+  It now waits for the stop and kills until nothing is left. The backend is
+  not reachable from any request path.
 - Research runs now report how they really ended, and the Web UI no longer
   loses or hides their output.
   - A provider stream that ends without a finish reason or `[DONE]` now
