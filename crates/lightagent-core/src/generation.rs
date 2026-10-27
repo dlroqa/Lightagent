@@ -475,7 +475,10 @@ mod tests {
             "nothing is assumed supported"
         );
         assert_eq!(Reasoning::resolve(None, &supported), Reasoning::Default);
-        assert_eq!(Reasoning::resolve(Some("  "), &supported), Reasoning::Default);
+        assert_eq!(
+            Reasoning::resolve(Some("  "), &supported),
+            Reasoning::Default
+        );
     }
 
     #[test]

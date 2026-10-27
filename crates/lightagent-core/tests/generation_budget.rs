@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use lightagent_core::provider::{FinishReason, ProviderEvent, ProviderMessage, Role, Usage};
 use lightagent_core::{
     AgentEvent, AgentLoop, ApprovalNeed, ContextWindow, GenerationBudget, GenerationReport,
-    MockProvider, Reasoning, RunConfig, StopReason, ToolCall, ToolInvoker, ToolOutcome,
-    ToolSchema, WindowSource,
+    MockProvider, Reasoning, RunConfig, StopReason, ToolCall, ToolInvoker, ToolOutcome, ToolSchema,
+    WindowSource,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -194,7 +194,10 @@ async fn an_unsupported_reasoning_label_is_reported_and_never_sent() {
     let report = &reports(&events)[0];
     assert_eq!(report.reasoning, "unsupported");
     assert_eq!(report.reasoning_effort.as_deref(), Some("high"));
-    assert_eq!(report.context_window, None, "an unknown window is reported as such");
+    assert_eq!(
+        report.context_window, None,
+        "an unknown window is reported as such"
+    );
     assert_eq!(report.context_source, None);
 }
 
@@ -358,7 +361,13 @@ async fn a_length_stop_inside_tool_arguments_never_runs_the_call() {
         max_output_tokens: Some(64),
         ..GenerationBudget::default()
     };
-    let events = run(MockProvider::new(vec![truncated]), small(), budget, Vec::new()).await;
+    let events = run(
+        MockProvider::new(vec![truncated]),
+        small(),
+        budget,
+        Vec::new(),
+    )
+    .await;
     assert!(
         !events
             .iter()

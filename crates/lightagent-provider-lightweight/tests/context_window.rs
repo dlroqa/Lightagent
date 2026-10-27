@@ -8,9 +8,7 @@ use tokio::net::TcpListener;
 
 /// Answer each connection with the next `(status, body)`, recording the
 /// request lines.
-async fn server(
-    replies: Vec<(u16, String)>,
-) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+async fn server(replies: Vec<(u16, String)>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let task = tokio::spawn(async move {

@@ -825,7 +825,9 @@ fn validate_generation(at: &str, settings: &GenerationOverride) -> Result<(), Co
         ("context_window", settings.context_window),
     ] {
         if value == Some(0) {
-            return Err(ConfigError::Invalid(format!("{at}.{name} must be at least 1")));
+            return Err(ConfigError::Invalid(format!(
+                "{at}.{name} must be at least 1"
+            )));
         }
     }
     if let (Some(reserve), Some(window)) = (settings.reserve_answer_tokens, settings.context_window)
@@ -850,7 +852,9 @@ fn validate_generation(at: &str, settings: &GenerationOverride) -> Result<(), Co
         .flatten()
         .any(|effort| effort.trim().is_empty())
     {
-        return Err(ConfigError::Invalid(format!("{at}.reasoning_supported has an empty label")));
+        return Err(ConfigError::Invalid(format!(
+            "{at}.reasoning_supported has an empty label"
+        )));
     }
     Ok(())
 }
@@ -2390,7 +2394,11 @@ mod tests {
         assert_eq!(unknown.requested_max_tokens(), None);
         assert_eq!(unknown.reasoning, Reasoning::Default);
         let known = legacy.generation.budget_for("m", Some(8_192));
-        assert_eq!(known.requested_max_tokens(), None, "no allowance is invented");
+        assert_eq!(
+            known.requested_max_tokens(),
+            None,
+            "no allowance is invented"
+        );
         assert_eq!(known.reserve_answer_tokens, 1_024);
         assert_eq!(
             legacy

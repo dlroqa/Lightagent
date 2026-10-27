@@ -6,10 +6,10 @@
 //! is the master-plan event vocabulary, named for what happened rather than for
 //! the wire frame that carried it.
 
+use crate::generation::GenerationReport;
 use crate::ids::RunId;
 use crate::invoker::{ToolCall, ToolOutcome, ToolProgress};
 use crate::permissions::ApprovalId;
-use crate::generation::GenerationReport;
 use crate::provider::Usage;
 
 /// Why a run ended.

@@ -1564,9 +1564,10 @@ fn get_key(config: &Config, key: &str) -> Option<String> {
         "generation.max_output_tokens" => {
             config.generation.max_output_tokens.map(|v| v.to_string())
         }
-        "generation.reserve_answer_tokens" => {
-            config.generation.reserve_answer_tokens.map(|v| v.to_string())
-        }
+        "generation.reserve_answer_tokens" => config
+            .generation
+            .reserve_answer_tokens
+            .map(|v| v.to_string()),
         "generation.context_window" => config.generation.context_window.map(|v| v.to_string()),
         "generation.reasoning_effort" => config.generation.reasoning_effort.clone(),
         _ => None,

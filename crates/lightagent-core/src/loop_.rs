@@ -735,7 +735,11 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
         // Measured against the request actually sent, before it is moved.
         let planned = budget.is_active().then(|| {
             let (prompt, basis) = generation::prompt_tokens(driver.measured, &messages, &tools);
-            (prompt, basis, u32::try_from(tools.len()).unwrap_or(u32::MAX))
+            (
+                prompt,
+                basis,
+                u32::try_from(tools.len()).unwrap_or(u32::MAX),
+            )
         });
         let measured_from = driver.messages.len();
         let request = ProviderRequest {
@@ -957,7 +961,9 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             forward(driver, report);
         }
         let content = self.fit_to_context(driver, &outcome.content);
-        driver.messages.push(ProviderMessage::tool_result(call.id.clone(), content));
+        driver
+            .messages
+            .push(ProviderMessage::tool_result(call.id.clone(), content));
         driver.emit(AgentEvent::ToolCallCompleted {
             id: call.id.clone(),
             outcome,

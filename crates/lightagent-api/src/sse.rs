@@ -376,7 +376,11 @@ mod tests {
         assert_eq!(name(&event), "generation.report");
         let payload = data(&event);
         assert_eq!(payload["context_window"], 8_192);
-        assert_eq!(payload["requested_max_tokens"], json!(null), "unknown is null");
+        assert_eq!(
+            payload["requested_max_tokens"],
+            json!(null),
+            "unknown is null"
+        );
         assert_eq!(payload["length_cause"], "context_window");
         assert_eq!(payload.as_object().map(|object| object.len()), Some(15));
     }

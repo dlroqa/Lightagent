@@ -246,7 +246,10 @@ mod tests {
         }));
         assert_eq!(slot.for_worker(&routing("default", None)), budget);
         assert_eq!(slot.for_worker(&routing("lfm2@8k", None)), budget);
-        for other in [routing("qwen@32k", None), routing("lfm2@8k", Some("http://x"))] {
+        for other in [
+            routing("qwen@32k", None),
+            routing("lfm2@8k", Some("http://x")),
+        ] {
             let worker = slot.for_worker(&other);
             assert_eq!(worker.context_window, None);
             assert_eq!(worker.reasoning, Reasoning::Default);
