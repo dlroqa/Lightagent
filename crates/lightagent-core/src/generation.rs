@@ -13,23 +13,36 @@
 //!   — is estimated from its bytes ([`estimate_text`]) plus a tenth. An
 //!   estimate can still be wrong for an unusual tokenizer or script; the
 //!   server's own count is what finally decides.
-//! - The **output allowance** is what the operator asked for. It is sent as
+//! - The **output allowance** is a ceiling the operator may set. It is sent as
 //!   `max_tokens`, never above the window, and the server clamps it again to
-//!   the room its own count leaves. Reasoning and the visible answer share it:
-//!   a model that thinks first spends the same budget, and nothing here can
-//!   set part of it aside for the answer.
+//!   the room its own count leaves. Unset, nothing is sent and Lightweight
+//!   lets a turn use all the room the prompt leaves, so setting one can only
+//!   lower a turn's allowance, never raise it. Reasoning and the visible
+//!   answer share it: a model that thinks first spends the same budget, and
+//!   nothing here can set part of it aside for the answer.
 //! - A **reasoning effort** is sent only when the operator declared it
 //!   supported for the model. It is a label the model's template interprets,
 //!   not a token budget.
 //!
-//! What the loop does with a known window is keep room for the answer: a tool
+//! What the loop does with a known window is keep generation headroom: a tool
 //! result that would crowd it out is shortened in the conversation the model
 //! sees (the run's events keep it whole), and once the room left is below
 //! [`GenerationBudget::reserve_answer_tokens`] no more tools are offered and
-//! the model answers from what it has.
+//! the model answers from what it has. That headroom is room to generate in,
+//! not a promise of visible answer: where reasoning and answer share one
+//! budget, a model may spend it thinking.
+//!
+//! An optional [`OutputPool`] bounds what a whole run may generate: the lead,
+//! every worker it delegates to and every continuation draw on one pool, each
+//! turn reserving its `max_tokens` before it starts.
+//!
+//! Session history is packed against a [`HistoryWindow`], resolved the same
+//! way for every entry point.
 //!
 //! The default budget knows nothing and changes nothing: no `max_tokens`, no
 //! reasoning field, no early answer, no shortened result and no report.
+
+use std::sync::{Arc, Mutex};
 
 use crate::invoker::ToolSchema;
 use crate::provider::{ProviderMessage, Usage};
@@ -80,6 +93,214 @@ impl ContextWindow {
                 source: WindowSource::Configured,
             }),
             (None, None) => None,
+        }
+    }
+}
+
+/// Where the window a session's history is packed against came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistorySource {
+    /// The window the provider reported serving the model with.
+    Provider,
+    /// The operator's `generation.context_window`.
+    Configured,
+    /// `runtime.n_ctx`: the window a placement asks for, not one verified to
+    /// be loaded.
+    Placement,
+    /// Nothing was known; [`FALLBACK_WINDOW`] is assumed.
+    Fallback,
+}
+
+impl HistorySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Provider => "provider",
+            Self::Configured => "configured",
+            Self::Placement => "placement",
+            Self::Fallback => "fallback",
+        }
+    }
+}
+
+/// The window assumed for packing history when nothing better is known.
+pub const FALLBACK_WINDOW: u32 = 4_096;
+
+/// The window a session's history is packed against, and its source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HistoryWindow {
+    pub tokens: u32,
+    pub source: HistorySource,
+}
+
+impl HistoryWindow {
+    /// The run's budgeted window when one is known (a reported window,
+    /// narrowed by any configured one); otherwise the window a placement asks
+    /// for; otherwise [`FALLBACK_WINDOW`]. A reported window is never cut down
+    /// to the fallback or to the placement figure.
+    pub fn resolve(window: Option<ContextWindow>, placement: Option<u32>) -> Self {
+        if let Some(window) = window {
+            let source = match window.source {
+                WindowSource::Provider => HistorySource::Provider,
+                WindowSource::Configured => HistorySource::Configured,
+            };
+            return Self {
+                tokens: window.tokens,
+                source,
+            };
+        }
+        match placement.filter(|tokens| *tokens > 0) {
+            Some(tokens) => Self {
+                tokens,
+                source: HistorySource::Placement,
+            },
+            None => Self {
+                tokens: FALLBACK_WINDOW,
+                source: HistorySource::Fallback,
+            },
+        }
+    }
+
+    /// The window, unless it is only the fallback guess.
+    pub fn known(&self) -> Option<u32> {
+        (self.source != HistorySource::Fallback).then_some(self.tokens)
+    }
+}
+
+/// The least a turn may reserve from an [`OutputPool`] and still be taken.
+pub const MIN_GRANT: u32 = 16;
+
+/// A ceiling on what a whole run may generate, shared by the lead, its
+/// workers and its continuations.
+///
+/// A turn reserves its `max_tokens` before it starts, so turns running at the
+/// same time are never together granted more than remains. When the turn
+/// ends the reservation is settled against the provider's
+/// `completion_tokens`. A turn whose usage was not reported, or that was
+/// cancelled or failed before it could be settled, is charged its whole
+/// reservation, so the account errs high, never low, and
+/// [`OutputPool::estimated`] says that happened.
+#[derive(Clone, Debug)]
+pub struct OutputPool {
+    inner: Arc<Mutex<PoolState>>,
+}
+
+#[derive(Debug)]
+struct PoolState {
+    total: u32,
+    spent: u32,
+    reserved: u32,
+    estimated: bool,
+}
+
+/// Two handles are the same pool only if they share it.
+impl PartialEq for OutputPool {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl Eq for OutputPool {}
+
+impl OutputPool {
+    pub fn new(total: u32) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(PoolState {
+                total,
+                spent: 0,
+                reserved: 0,
+                estimated: false,
+            })),
+        }
+    }
+
+    fn read<T>(&self, read: impl FnOnce(&PoolState) -> T, otherwise: T) -> T {
+        self.inner.lock().map_or(otherwise, |state| read(&state))
+    }
+
+    /// The pool's size.
+    pub fn total(&self) -> u32 {
+        self.read(|state| state.total, 0)
+    }
+
+    /// Tokens charged so far.
+    pub fn spent(&self) -> u32 {
+        self.read(|state| state.spent, u32::MAX)
+    }
+
+    /// Tokens neither charged nor reserved by a turn in flight.
+    pub fn available(&self) -> u32 {
+        self.read(
+            |state| {
+                state
+                    .total
+                    .saturating_sub(state.spent)
+                    .saturating_sub(state.reserved)
+            },
+            0,
+        )
+    }
+
+    /// Whether any charge was a reservation standing in for unreported usage.
+    pub fn estimated(&self) -> bool {
+        self.read(|state| state.estimated, true)
+    }
+
+    /// Reserve up to `ask` tokens for one turn (everything available when
+    /// `None`), or `None` when less than [`MIN_GRANT`] is available.
+    pub fn reserve(&self, ask: Option<u32>) -> Option<Reservation> {
+        let mut state = self.inner.lock().ok()?;
+        let available = state
+            .total
+            .saturating_sub(state.spent)
+            .saturating_sub(state.reserved);
+        if available < MIN_GRANT {
+            return None;
+        }
+        let tokens = ask.map_or(available, |ask| ask.min(available)).max(1);
+        state.reserved = state.reserved.saturating_add(tokens);
+        Some(Reservation {
+            pool: self.clone(),
+            tokens,
+            settled: false,
+        })
+    }
+
+    fn charge(&self, reserved: u32, used: Option<u32>) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.reserved = state.reserved.saturating_sub(reserved);
+            state.spent = state.spent.saturating_add(used.unwrap_or(reserved));
+            state.estimated |= used.is_none();
+        }
+    }
+}
+
+/// One turn's claim on an [`OutputPool`]. Dropping it unsettled charges it
+/// in full.
+#[derive(Debug)]
+pub struct Reservation {
+    pool: OutputPool,
+    tokens: u32,
+    settled: bool,
+}
+
+impl Reservation {
+    /// The tokens reserved, which the turn sends as its `max_tokens`.
+    pub fn tokens(&self) -> u32 {
+        self.tokens
+    }
+
+    /// Charge what the turn generated: the provider's count, or the whole
+    /// reservation when it reported none.
+    pub fn settle(mut self, used: Option<u32>) {
+        self.pool.charge(self.tokens, used);
+        self.settled = true;
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.pool.charge(self.tokens, None);
         }
     }
 }
@@ -140,15 +361,19 @@ impl Reasoning {
 pub struct GenerationBudget {
     /// The window one request gets, when known.
     pub context_window: Option<ContextWindow>,
-    /// The output allowance to request per turn. `None` sends no `max_tokens`
-    /// and leaves the provider's default (Lightweight: all the room the
-    /// prompt leaves in the window).
+    /// The output ceiling per request. `None` sends no `max_tokens` and
+    /// leaves the provider's default (Lightweight: all the room the prompt
+    /// leaves in the window), so a value here can only lower it.
     pub max_output_tokens: Option<u32>,
-    /// Room kept for the answer once tools have run. Zero turns the context
-    /// guard off. Used only with a known window.
+    /// Generation headroom kept once tools have run: room to generate in,
+    /// which reasoning may consume, not a guaranteed visible answer. Zero
+    /// turns the context guard off. Used only with a known window.
     pub reserve_answer_tokens: u32,
     /// What to ask of the model's reasoning.
     pub reasoning: Reasoning,
+    /// What the whole run, workers and continuations included, may
+    /// generate. `None`: no run-wide token bound.
+    pub output_pool: Option<OutputPool>,
 }
 
 /// The tokens added to every estimate of a message, for its role and framing.
@@ -164,6 +389,7 @@ impl GenerationBudget {
         self.context_window.is_some()
             || self.max_output_tokens.is_some()
             || self.reasoning != Reasoning::Default
+            || self.output_pool.is_some()
     }
 
     /// The `max_tokens` to send: the operator's allowance, never above what
@@ -213,8 +439,9 @@ impl GenerationBudget {
     }
 
     /// The budget a delegated worker runs under. Its allowance is never
-    /// larger than this run's; the window and the reasoning setting carry
-    /// over only for the same model, because both were established for it.
+    /// larger than this run's and it draws on this run's output pool; the
+    /// window and the reasoning setting carry over only for the same model,
+    /// because both were established for it.
     pub fn for_worker(&self, same_model: bool) -> Self {
         Self {
             context_window: self.context_window.filter(|_| same_model),
@@ -225,6 +452,7 @@ impl GenerationBudget {
             } else {
                 Reasoning::Default
             },
+            output_pool: self.output_pool.clone(),
         }
     }
 }
@@ -387,7 +615,11 @@ pub struct GenerationReport {
     /// on a measured count (`measured`) or only an estimate (`estimated`).
     pub prompt_estimate: u32,
     pub prompt_basis: String,
-    /// The `max_tokens` sent, if any. The server may clamp it further.
+    /// The operator's ceiling, as configured.
+    pub configured_max_tokens: Option<u32>,
+    /// The `max_tokens` actually sent, if any: the ceiling, capped at the
+    /// window and at what the run's output pool granted. The server may clamp
+    /// it further; the allowance it applied is not reported to the client.
     pub requested_max_tokens: Option<u32>,
     /// `default`, `applied` or `unsupported`, with the configured label.
     pub reasoning: String,
@@ -405,6 +637,11 @@ pub struct GenerationReport {
     /// For a `length` finish: `output_allowance`, `context_window` or
     /// `unknown`.
     pub length_cause: Option<String>,
+    /// The run's output pool, when it has one: its size, what has been
+    /// charged so far, and whether any charge stood in for unreported usage.
+    pub output_budget: Option<u32>,
+    pub output_spent: Option<u32>,
+    pub output_estimated: bool,
 }
 
 #[cfg(test)]
@@ -512,12 +749,82 @@ mod tests {
             max_output_tokens: Some(1_024),
             reserve_answer_tokens: 512,
             reasoning: Reasoning::Applied("low".into()),
+            output_pool: Some(OutputPool::new(10_000)),
         };
         assert_eq!(lead.for_worker(true), lead);
+        assert_eq!(
+            lead.for_worker(false).output_pool,
+            lead.output_pool,
+            "every worker draws on the lead's pool"
+        );
         let other = lead.for_worker(false);
         assert_eq!(other.context_window, None);
         assert_eq!(other.reasoning, Reasoning::Default);
         assert_eq!(other.max_output_tokens, Some(1_024));
+    }
+
+    #[test]
+    fn history_is_packed_against_the_best_known_window() {
+        let provider = HistoryWindow::resolve(window(131_072), Some(4_096));
+        assert_eq!(provider.tokens, 131_072, "never cut to a smaller setting");
+        assert_eq!(provider.source, HistorySource::Provider);
+        let narrowed = HistoryWindow::resolve(ContextWindow::resolve(Some(32_768), Some(8_192)), None);
+        assert_eq!((narrowed.tokens, narrowed.source), (8_192, HistorySource::Configured));
+        let placement = HistoryWindow::resolve(None, Some(16_384));
+        assert_eq!(placement.source, HistorySource::Placement);
+        assert_eq!(placement.known(), Some(16_384));
+        let fallback = HistoryWindow::resolve(None, None);
+        assert_eq!(fallback.tokens, FALLBACK_WINDOW);
+        assert_eq!(fallback.known(), None, "a guess is not shown as known");
+        assert_eq!(HistoryWindow::resolve(None, Some(0)).source, HistorySource::Fallback);
+    }
+
+    #[test]
+    fn a_pool_reserves_up_front_and_settles_against_reported_usage() {
+        let pool = OutputPool::new(1_000);
+        let first = pool.reserve(Some(600)).unwrap();
+        let second = pool.reserve(Some(600)).unwrap();
+        assert_eq!(first.tokens(), 600);
+        assert_eq!(second.tokens(), 400, "never more than remains unreserved");
+        assert!(pool.reserve(Some(10)).is_none(), "nothing left to grant");
+        first.settle(Some(120));
+        assert_eq!(pool.spent(), 120);
+        assert_eq!(pool.available(), 1_000 - 120 - 400);
+        assert!(!pool.estimated());
+        // Unreported usage is charged in full, and said to be.
+        second.settle(None);
+        assert_eq!(pool.spent(), 520);
+        assert!(pool.estimated());
+        // A turn that never settles (cancelled, failed) is charged in full.
+        drop(pool.reserve(Some(300)).unwrap());
+        assert_eq!(pool.spent(), 820);
+        // A provider that reports more than it was granted is charged it.
+        pool.reserve(None).unwrap().settle(Some(400));
+        assert_eq!(pool.available(), 0);
+        assert!(pool.reserve(None).is_none());
+    }
+
+    #[test]
+    fn concurrent_reservations_never_exceed_the_pool() {
+        let pool = OutputPool::new(10_000);
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let pool = pool.clone();
+                std::thread::spawn(move || pool.reserve(Some(1_000)))
+            })
+            .collect();
+        let granted: Vec<Reservation> = handles
+            .into_iter()
+            .filter_map(|handle| handle.join().unwrap())
+            .collect();
+        let total: u32 = granted.iter().map(Reservation::tokens).sum();
+        assert!(total <= 10_000, "{total} granted");
+        assert_eq!(granted.len(), 10);
+        for reservation in granted {
+            reservation.settle(Some(10));
+        }
+        assert_eq!(pool.spent(), 100);
+        assert_eq!(pool.available(), 9_900);
     }
 
     #[test]

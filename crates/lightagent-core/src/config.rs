@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::generation::{ContextWindow, GenerationBudget, Reasoning};
+use crate::generation::{ContextWindow, GenerationBudget, OutputPool, Reasoning};
 use crate::paths;
 
 /// The on-disk format version of the config file.
@@ -724,15 +724,21 @@ impl Default for RuntimeConfig {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GenerationConfig {
-    /// The output allowance requested per model turn, as `max_tokens`. Unset
-    /// leaves the provider's default (Lightweight: all the room the prompt
-    /// leaves in the window). Reasoning and the answer share it.
+    /// An output ceiling per request, sent as `max_tokens`. Unset leaves the
+    /// provider's default (Lightweight: all the room the prompt leaves in the
+    /// window), so setting it can only lower a turn's allowance. Reasoning and
+    /// the answer share it.
     pub max_output_tokens: Option<u32>,
-    /// Room kept for the answer once tools have run: tool results are
+    /// Generation headroom kept once tools have run: tool results are
     /// shortened, and then tools withheld, so the window keeps this many
-    /// tokens for it. Unset uses the smaller of 1024 and a quarter of the
-    /// window; `0` turns the guard off.
+    /// tokens to generate in. Reasoning may use them, so this is not a
+    /// guaranteed visible answer. Unset uses the smaller of 1024 and a quarter
+    /// of the window; `0` turns the guard off.
     pub reserve_answer_tokens: Option<u32>,
+    /// A ceiling on what one run may generate in all: the lead, every worker
+    /// it delegates to and every continuation draw on it. Unset: no run-wide
+    /// token bound (turns, time and workers still bound the run).
+    pub max_run_output_tokens: Option<u32>,
     /// A window to budget against when the provider reports none, or a
     /// smaller one than it reports. Never stretches a reported window.
     pub context_window: Option<u32>,
@@ -754,6 +760,7 @@ pub struct GenerationConfig {
 pub struct GenerationOverride {
     pub max_output_tokens: Option<u32>,
     pub reserve_answer_tokens: Option<u32>,
+    pub max_run_output_tokens: Option<u32>,
     pub context_window: Option<u32>,
     pub reasoning_effort: Option<String>,
     pub reasoning_supported: Option<Vec<String>>,
@@ -792,6 +799,8 @@ impl GenerationConfig {
             max_output_tokens: pick(|o| o.max_output_tokens, self.max_output_tokens),
             reserve_answer_tokens,
             reasoning: Reasoning::resolve(effort, supported),
+            output_pool: pick(|o| o.max_run_output_tokens, self.max_run_output_tokens)
+                .map(OutputPool::new),
         }
     }
 
@@ -812,6 +821,7 @@ impl GenerationConfig {
         GenerationOverride {
             max_output_tokens: self.max_output_tokens,
             reserve_answer_tokens: self.reserve_answer_tokens,
+            max_run_output_tokens: self.max_run_output_tokens,
             context_window: self.context_window,
             reasoning_effort: self.reasoning_effort.clone(),
             reasoning_supported: Some(self.reasoning_supported.clone()),
@@ -822,6 +832,7 @@ impl GenerationConfig {
 fn validate_generation(at: &str, settings: &GenerationOverride) -> Result<(), ConfigError> {
     for (name, value) in [
         ("max_output_tokens", settings.max_output_tokens),
+        ("max_run_output_tokens", settings.max_run_output_tokens),
         ("context_window", settings.context_window),
     ] {
         if value == Some(0) {
@@ -2400,6 +2411,7 @@ mod tests {
             "no allowance is invented"
         );
         assert_eq!(known.reserve_answer_tokens, 1_024);
+        assert_eq!(known.output_pool, None, "no run-wide bound unless asked for");
         assert_eq!(
             legacy
                 .generation
@@ -2433,6 +2445,13 @@ mod tests {
             Reasoning::Unsupported("low".into()),
             "this model declares no reasoning labels"
         );
+        // Each run gets a pool of its own.
+        let pooled: Config =
+            serde_json::from_str(r#"{"generation":{"max_run_output_tokens":20000}}"#).unwrap();
+        let one = pooled.generation.budget_for("m", None).output_pool.unwrap();
+        let two = pooled.generation.budget_for("m", None).output_pool.unwrap();
+        assert_eq!(one.total(), 20_000);
+        assert_ne!(one, two, "runs never share a pool");
         // An allowance above the served window is never requested.
         let small = config.generation.budget_for("qwen@32k", Some(4_096));
         assert_eq!(small.requested_max_tokens(), Some(4_095));
@@ -2448,6 +2467,7 @@ mod tests {
             r#"{"generation":{"reasoning_supported":[""]}}"#,
             r#"{"generation":{"models":{"":{}}}}"#,
             r#"{"generation":{"models":{"m":{"max_output_tokens":0}}}}"#,
+            r#"{"generation":{"max_run_output_tokens":0}}"#,
         ] {
             let config: Config = serde_json::from_str(bad).expect("deserialize");
             assert!(config.validate().is_err(), "{bad} should be refused");

@@ -1192,6 +1192,7 @@ fn stop_code(reason: StopReason) -> &'static str {
         StopReason::WallClockExceeded => "wall_clock_exceeded",
         StopReason::MaxTokens => "max_tokens",
         StopReason::ContextLimit => "context_limit",
+        StopReason::OutputBudget => "output_budget",
         StopReason::Incomplete => "incomplete",
         StopReason::Cancelled => "cancelled",
         StopReason::Error => "error",

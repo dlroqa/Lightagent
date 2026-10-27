@@ -85,6 +85,11 @@ const CONTEXT_BUDGET_INSTRUCTION: &str = "The conversation has nearly filled the
     tool results above, cite the sources you used, and say briefly what is missing or could not \
     be checked.";
 
+/// The instruction for the turn after the run's output-token budget ran low.
+const OUTPUT_BUDGET_INSTRUCTION: &str = "The output budget for this request is nearly used up, \
+    so no more tools can be called. Answer the original request now, briefly, from the tool \
+    results above, and say what is missing or could not be checked.";
+
 /// The most progress reports forwarded for one tool call, so a chatty tool
 /// cannot flood the event log.
 const MAX_PROGRESS_PER_CALL: usize = 64;
@@ -100,6 +105,8 @@ enum WrapUp {
     ToolCallBudget,
     /// The room left in the context window is less than the answer needs.
     ContextBudget,
+    /// The run's output pool has less left than the answer needs.
+    OutputBudget,
 }
 
 impl WrapUp {
@@ -109,6 +116,7 @@ impl WrapUp {
             Self::TurnBudget => TURN_BUDGET_INSTRUCTION,
             Self::ToolCallBudget => TOOL_CALL_BUDGET_INSTRUCTION,
             Self::ContextBudget => CONTEXT_BUDGET_INSTRUCTION,
+            Self::OutputBudget => OUTPUT_BUDGET_INSTRUCTION,
         }
     }
 
@@ -120,6 +128,7 @@ impl WrapUp {
             Self::TurnBudget => StopReason::MaxTurns,
             Self::ToolCallBudget => StopReason::MaxToolCalls,
             Self::ContextBudget => StopReason::ContextLimit,
+            Self::OutputBudget => StopReason::OutputBudget,
         }
     }
 }
@@ -307,6 +316,8 @@ struct Driver {
     measured: Option<Measured>,
     /// Tool results shortened to fit the context window so far.
     shortened_results: u32,
+    /// The `max_tokens` the latest turn was sent with.
+    sent_max_tokens: Option<u32>,
 }
 
 impl Driver {
@@ -515,6 +526,7 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             wrap_up: None,
             measured: None,
             shortened_results: 0,
+            sent_max_tokens: None,
         };
         driver.emit(AgentEvent::RunStarted {
             run,
@@ -720,6 +732,32 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             }
         }
 
+        // A run-wide output budget too low for more research is answered
+        // now, from what the tools returned, with what is left.
+        if driver.wrap_up.is_none()
+            && driver.has_tool_results()
+            && let Some(pool) = &budget.output_pool
+            && pool.available() < budget.reserve_answer_tokens.max(generation::MIN_GRANT)
+        {
+            driver.wrap_up = Some(WrapUp::OutputBudget);
+        }
+
+        // Every turn reserves what it may generate from the run's output
+        // pool before it starts, and is sent no more than it was granted.
+        // With nothing left to grant, no turn is taken.
+        let ceiling = budget.requested_max_tokens();
+        let ask = ceiling.or_else(|| budget.context_window.map(|window| window.tokens));
+        let reservation = match &budget.output_pool {
+            Some(pool) => match pool.reserve(ask) {
+                Some(reservation) => Some(reservation),
+                None => return Ok(driver.end(StopReason::OutputBudget)),
+            },
+            None => None,
+        };
+        driver.sent_max_tokens = reservation
+            .as_ref()
+            .map_or(ceiling, |reservation| Some(reservation.tokens()));
+
         driver.turn += 1;
 
         // The final turn after a budget ran out offers no tools and says why,
@@ -747,7 +785,7 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             messages,
             tools,
             temperature: None,
-            max_tokens: budget.requested_max_tokens(),
+            max_tokens: driver.sent_max_tokens,
             reasoning_effort: budget.reasoning.effort().map(str::to_owned),
         };
 
@@ -805,6 +843,9 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
         // A stream that ended without its terminal event did not say the turn
         // was finished.
         let (reason, usage) = finish.unwrap_or((FinishReason::Incomplete, None));
+        if let Some(reservation) = reservation {
+            reservation.settle(usage.map(|usage| usage.completion_tokens));
+        }
         if let Some(usage) = usage.filter(|usage| usage.prompt_tokens > 0) {
             driver.measured = Some(Measured {
                 messages: measured_from,
@@ -1008,7 +1049,8 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
         let budget = &self.config.generation;
         let window = budget.context_window;
         let tokens = window.map(|window| window.tokens);
-        let requested = budget.requested_max_tokens();
+        let requested = driver.sent_max_tokens;
+        let pool = budget.output_pool.as_ref();
         let purpose = if driver.wrap_up.is_some() {
             "answer"
         } else {
@@ -1023,6 +1065,7 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             context_source: window.map(|window| window.source.as_str().to_owned()),
             prompt_estimate: prompt,
             prompt_basis: basis.as_str().to_owned(),
+            configured_max_tokens: budget.max_output_tokens,
             requested_max_tokens: requested,
             reasoning: budget.reasoning.as_str().to_owned(),
             reasoning_effort: budget.reasoning.label().map(str::to_owned),
@@ -1032,6 +1075,9 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             prompt_tokens: usage.map(|usage| usage.prompt_tokens),
             completion_tokens: usage.map(|usage| usage.completion_tokens),
             length_cause,
+            output_budget: pool.map(generation::OutputPool::total),
+            output_spent: pool.map(generation::OutputPool::spent),
+            output_estimated: pool.is_some_and(generation::OutputPool::estimated),
         }
     }
 }

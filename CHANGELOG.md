@@ -7,16 +7,29 @@ All notable Lightagent changes are documented here.
 ### Added
 
 - Output and context budgeting per model turn (`generation` settings).
-  The window the model is served with is read from Lightweight
-  (`/v1/capabilities`, or the `/v1/models` row on older gateways), never
-  guessed from a model name. Tool results that would crowd out the answer
-  are shortened in what the model sees and the next turn answers, ending
-  with the new `ContextLimit` stop reason. An optional output allowance is
-  sent as `max_tokens`. A reasoning label is sent only when declared
-  supported for the model. Each turn reports its budget and finish reason
-  as a privacy-safe `generation.report` event. Workers never get a larger
-  allowance than their lead. With nothing known or configured, requests
-  are unchanged. See `docs/architecture/generation-budget.md`.
+  - **Context window.** The window the model is served with is read from
+    Lightweight (`/v1/capabilities`, or the `/v1/models` row on older
+    gateways), never guessed from a model name. It is resolved the same way
+    for the terminal, the HTTP API, ACP and workers.
+  - **Session history.** History is packed against that window instead of
+    `runtime.n_ctx` or 4096. Those are now fallbacks, labelled as such. A
+    configured `context_window` can narrow a reported window, never stretch
+    it.
+  - **Tool results.** A result that would crowd out the generation headroom
+    is shortened in what the model sees, and the next turn answers, ending
+    with the new `ContextLimit` stop reason.
+  - **Per-request ceilings.** `max_output_tokens` (sent as `max_tokens`) can
+    only lower a turn's allowance. A reasoning label is sent only when
+    declared supported for the model.
+  - **Run-wide pool.** The optional `max_run_output_tokens` pool bounds what
+    the lead, its workers and its continuations generate together. Turns
+    reserve up front and settle against reported usage; missing usage is
+    charged in full. The run ends with the new `OutputBudget` stop reason.
+  - **Diagnostics.** Each turn reports its budget and finish reason as a
+    privacy-safe `generation.report` event.
+  - **Defaults.** With nothing configured, no `max_tokens` or reasoning
+    field is sent.
+  - See `docs/architecture/generation-budget.md`.
 
 ### Changed
 

@@ -49,7 +49,10 @@ pub use event::{
     AgentEvent, ClassificationDiagnostics, SpecialistRestriction, SpecialistSelection,
     SpecialistStep, StopReason,
 };
-pub use generation::{ContextWindow, GenerationBudget, GenerationReport, Reasoning, WindowSource};
+pub use generation::{
+    ContextWindow, GenerationBudget, GenerationReport, HistorySource, HistoryWindow, OutputPool,
+    Reasoning, WindowSource,
+};
 pub use ids::RunId;
 pub use invoker::{
     NullInvoker, ToolCall, ToolInvoker, ToolOutcome, ToolProgress, ToolProgressSink, ToolSchema,

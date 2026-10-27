@@ -357,6 +357,17 @@ impl AcpServer {
                     return;
                 };
                 let text = protocol::prompt_text(params.get("prompt").unwrap_or(&Value::Null));
+                // Resolved before the session is locked for the prompt, the
+                // same way the HTTP API resolves it: it may ask the provider.
+                let session_profile = sessions
+                    .lock()
+                    .await
+                    .get(&session_id)
+                    .and_then(|session| session.profile.clone());
+                let history_limit = self
+                    .manager
+                    .history_limit(session_profile.as_deref(), None, self.context_limit)
+                    .await;
                 let (profile, cwd, history) = match sessions.lock().await.get_mut(&session_id) {
                     Some(session) if session.busy => {
                         let _ = outbound.send(protocol::error(
@@ -367,7 +378,7 @@ impl AcpServer {
                         return;
                     }
                     Some(session) => {
-                        let history = model_history(&session.stored, &text, self.context_limit);
+                        let history = model_history(&session.stored, &text, history_limit);
                         let mut updated = session.stored.clone();
                         updated.push_message(StoredMessage::new("user", &text));
                         if let Some(store) = &session.store

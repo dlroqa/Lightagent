@@ -253,6 +253,14 @@ function describeStop(reason: string, answered: boolean): { label: string; text:
     case "WallClockExceeded":
       notice = { label: "limit reached", text: limit("time limit") };
       break;
+    case "OutputBudget":
+      notice = {
+        label: "limit reached",
+        text: answered
+          ? "Research reached this run's output-token budget, so this answer was written from the evidence gathered so far."
+          : "Research reached this run's output-token budget before an answer was written. The tool results above are what it found.",
+      };
+      break;
     case "ContextLimit":
       notice = {
         label: "limit reached",

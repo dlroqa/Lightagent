@@ -31,6 +31,10 @@ pub enum StopReason {
     /// The conversation left too little of the model's context window for
     /// more tool results, so the last turn answered from what was gathered.
     ContextLimit,
+    /// The run's output-token budget, shared with its workers, was used up
+    /// or too low to research further; any answer was written from what
+    /// was gathered.
+    OutputBudget,
     /// The provider stream ended without saying the turn was finished, so the
     /// answer may be cut short. What arrived is kept.
     Incomplete,
@@ -57,6 +61,7 @@ impl StopReason {
             Self::WallClockExceeded => Some("the run reached its time limit"),
             Self::MaxTokens => Some("the answer was cut off at the model's output limit"),
             Self::ContextLimit => Some("the run filled the model's context window"),
+            Self::OutputBudget => Some("the run used its output-token budget"),
             Self::Incomplete => Some("the model stream ended early; the answer may be incomplete"),
             Self::Cancelled => Some("the run was cancelled"),
             Self::Error => Some("the run failed"),

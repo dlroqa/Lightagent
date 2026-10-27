@@ -115,6 +115,7 @@ pub fn data(event: &AgentEvent) -> serde_json::Value {
             "context_source": r.context_source,
             "prompt_estimate": r.prompt_estimate,
             "prompt_basis": r.prompt_basis,
+            "configured_max_tokens": r.configured_max_tokens,
             "requested_max_tokens": r.requested_max_tokens,
             "reasoning": r.reasoning,
             "reasoning_effort": r.reasoning_effort,
@@ -124,6 +125,9 @@ pub fn data(event: &AgentEvent) -> serde_json::Value {
             "prompt_tokens": r.prompt_tokens,
             "completion_tokens": r.completion_tokens,
             "length_cause": r.length_cause,
+            "output_budget": r.output_budget,
+            "output_spent": r.output_spent,
+            "output_estimated": r.output_estimated,
         }),
         AgentEvent::TurnCompleted { usage: Some(usage) } => json!({
             "prompt_tokens": usage.prompt_tokens,
@@ -339,6 +343,7 @@ mod tests {
             StopReason::MaxTurns,
             StopReason::MaxToolCalls,
             StopReason::ContextLimit,
+            StopReason::OutputBudget,
         ] {
             let event = AgentEvent::RunCompleted { reason };
             assert_eq!(name(&event), "run.completed");
@@ -362,6 +367,7 @@ mod tests {
                 context_source: Some("provider".into()),
                 prompt_estimate: 7_000,
                 prompt_basis: "measured".into(),
+                configured_max_tokens: None,
                 requested_max_tokens: None,
                 reasoning: "default".into(),
                 reasoning_effort: None,
@@ -371,6 +377,9 @@ mod tests {
                 prompt_tokens: Some(7_000),
                 completion_tokens: Some(1_191),
                 length_cause: Some("context_window".into()),
+                output_budget: None,
+                output_spent: None,
+                output_estimated: false,
             }),
         };
         assert_eq!(name(&event), "generation.report");
@@ -382,7 +391,7 @@ mod tests {
             "unknown is null"
         );
         assert_eq!(payload["length_cause"], "context_window");
-        assert_eq!(payload.as_object().map(|object| object.len()), Some(15));
+        assert_eq!(payload.as_object().map(|object| object.len()), Some(19));
     }
 
     #[test]

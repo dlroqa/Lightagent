@@ -213,6 +213,40 @@ impl RunFactory for LightweightRunFactory {
             .map(|status| status["verification"].clone())
     }
 
+    /// Resolved exactly as the run resolves it, for the profile and model
+    /// the run would start with; `None` when the configuration or profile
+    /// cannot be read, leaving the caller's limit in place.
+    async fn history_window(
+        &self,
+        profile: Option<&str>,
+        model: Option<&str>,
+    ) -> Option<lightagent_core::HistoryWindow> {
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let config = ConfigStore::at(&paths).load().ok()?;
+        let profiles = ProfileStore::new(&self.root);
+        let profile = resolve_profile(&profiles, &config, profile.map(str::to_owned)).ok()?;
+        let base_url = profile
+            .routing
+            .base_url
+            .clone()
+            .unwrap_or_else(|| config.inference.base_url.clone());
+        let model = model
+            .map(str::to_owned)
+            .unwrap_or_else(|| configured_model(&profile.routing.model, &config));
+        let mut provider_config =
+            ProviderConfig::new(base_url, model).with_tool_names(config.inference.tool_names);
+        if let Some(key) = config
+            .inference
+            .api_key
+            .as_ref()
+            .and_then(|secret| secret.resolve())
+        {
+            provider_config = provider_config.with_api_key(key);
+        }
+        let provider = LightweightProvider::new(provider_config).ok()?;
+        Some(crate::generation::resolve(&config, &provider).await.history)
+    }
+
     async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
         let paths = LightagentPaths::rooted_at(&self.root);
         let config = ConfigStore::at(&paths)
@@ -416,7 +450,7 @@ impl LightweightRunFactory {
         };
         // The window the model is served with, as the provider reports it;
         // the lead and every worker it delegates to are budgeted against it.
-        let generation = crate::generation::for_run(&config, &provider).await;
+        let generation = crate::generation::resolve(&config, &provider).await.lead;
 
         // An ACP session's `cwd` becomes the confined workspace root, so the
         // agent edits the editor's project; otherwise the profile's own workspace.
@@ -1368,6 +1402,122 @@ pub(crate) mod routing_tests {
             .collect();
         std::fs::remove_dir_all(root).ok();
         (status, seen, bodies)
+    }
+
+    /// A gateway answering `GET /v1/capabilities` and `GET /v1/models` with
+    /// the given statuses and bodies, and anything else with 404.
+    async fn probe_stub(capabilities: (u16, String), models: (u16, String)) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let (capabilities, models) = (capabilities.clone(), models.clone());
+                tokio::spawn(async move {
+                    let mut bytes = Vec::new();
+                    let mut buf = [0; 4096];
+                    while !bytes.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(count) => bytes.extend_from_slice(&buf[..count]),
+                        }
+                    }
+                    let request = String::from_utf8_lossy(&bytes);
+                    let (status, body) = if request.starts_with("GET /v1/capabilities") {
+                        capabilities
+                    } else if request.starts_with("GET /v1/models") {
+                        models
+                    } else {
+                        (404, String::new())
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        format!("http://{address}")
+    }
+
+    /// The history window serve resolves for the active `lead` profile
+    /// (model `fast`) against a stub gateway, under `config`.
+    async fn resolved_history(
+        capabilities: (u16, String),
+        models: (u16, String),
+        mut config: lightagent_core::Config,
+    ) -> lightagent_core::HistoryWindow {
+        let root = std::env::temp_dir().join(format!(
+            "lightagent-history-{}-{}",
+            std::process::id(),
+            RunId::new().as_str()
+        ));
+        config.inference.base_url = probe_stub(capabilities, models).await;
+        ConfigStore::at(&LightagentPaths::rooted_at(&root))
+            .save(&config)
+            .unwrap();
+        let store = ProfileStore::new(&root);
+        let lead = lightagent_core::AgentProfile::new(
+            lightagent_core::ProfileId::new("lead").unwrap(),
+            "Lead",
+            "Persona",
+            "fast",
+        );
+        store.create(&lead).unwrap();
+        store.set_active(&lead.id).unwrap();
+        let factory = LightweightRunFactory {
+            root: root.clone(),
+            jev: crate::coordinator::JevState::new(),
+        };
+        let window = factory.history_window(None, None).await.unwrap();
+        std::fs::remove_dir_all(root).ok();
+        window
+    }
+
+    #[tokio::test]
+    async fn serve_resolves_the_history_window_like_the_run_does() {
+        use lightagent_core::HistorySource;
+        let capabilities = |id: &str, tokens: u32| {
+            (
+                200,
+                serde_json::json!({
+                    "protocol": {"name": "lightweight-public-inference", "version": 1},
+                    "state": {"model_loaded": true, "model": {"id": id, "context_length": tokens}},
+                })
+                .to_string(),
+            )
+        };
+        let plain_models = (200, r#"{"data":[{"id":"fast"}]}"#.to_owned());
+        let placed = |n_ctx: Option<u32>, window: Option<u32>| {
+            let mut config = lightagent_core::Config::default();
+            config.runtime.n_ctx = n_ctx;
+            config.generation.context_window = window;
+            config
+        };
+
+        // Served capacity above the placement setting is used, not cut down.
+        let above = resolved_history(capabilities("fast", 32_768), plain_models.clone(), placed(Some(4_096), None)).await;
+        assert_eq!((above.tokens, above.source), (32_768, HistorySource::Provider));
+        // A configured ceiling below it narrows it.
+        let ceiling = resolved_history(capabilities("fast", 32_768), plain_models.clone(), placed(None, Some(8_192))).await;
+        assert_eq!((ceiling.tokens, ceiling.source), (8_192, HistorySource::Configured));
+        // A configured figure above the served capacity never stretches it.
+        let stretched = resolved_history(capabilities("fast", 8_192), plain_models.clone(), placed(None, Some(65_536))).await;
+        assert_eq!((stretched.tokens, stretched.source), (8_192, HistorySource::Provider));
+        // An older gateway: no capabilities, the window on its model row.
+        let row = (
+            200,
+            r#"{"data":[{"id":"fast","n_ctx":16384,"context_length":16384,"hermes":{}}]}"#.to_owned(),
+        );
+        let older = resolved_history((404, String::new()), row, placed(None, None)).await;
+        assert_eq!((older.tokens, older.source), (16_384, HistorySource::Provider));
+        // Malformed discovery falls back to the placement setting, labelled so.
+        let malformed = resolved_history((200, "not json".into()), plain_models.clone(), placed(Some(12_288), None)).await;
+        assert_eq!((malformed.tokens, malformed.source), (12_288, HistorySource::Placement));
+        // Another resident model's capacity is never borrowed.
+        let other = resolved_history(capabilities("other@64k", 65_536), plain_models.clone(), placed(None, None)).await;
+        assert_eq!((other.tokens, other.source), (4_096, HistorySource::Fallback));
     }
 
     fn system_prompt(body: &serde_json::Value) -> String {
