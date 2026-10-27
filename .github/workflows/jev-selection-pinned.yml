@@ -14,14 +14,28 @@ name: jev specialist selection (pinned PR commit)
 #                          One pass at most: 24 requests, no retries. A
 #                          second pass is a new dispatch and a new approval.
 #   score    no secret     builds the pinned commit again and scores the
-#                          recorded responses with its own rules.
+#                          recorded responses with its own rules; then
+#                          decides the authoritative status (see below).
+#   unscored no secret     when `score` did not get as far as a status,
+#                          records why the run is not a result.
 #
 # The workflow definition always comes from master (a manual dispatch runs
 # the default branch's file), so a pull request cannot change these steps.
 # The pinned commit must be the current head of an open pull request from a
-# branch of this repository. On pull requests only `prepare` runs, with no
-# secret, to keep the export path tested; a commit without the export
-# harness (master before the stack merges) has nothing to export.
+# branch of this repository, or master's dispatch commit or one of its
+# ancestors (an explicitly selected, already merged commit); a commit ahead
+# of master or diverged from it is refused, as is any API error.
+#
+# scripts/jev-selection-guard.py makes both decisions, the pin and the
+# status, and always runs from the workflow's own commit, never from the
+# pinned one, and never in `send`. The status is PASSED only when all 24
+# prompts were sent once and answered and every record agrees; any failed,
+# missing, duplicate or malformed response, or a stopped or partial run, is
+# INCOMPLETE and fails, with its ratios kept apart as diagnostics.
+#
+# On pull requests `prepare` runs with no secret, to keep the export path
+# tested, with the guard's own tests; a commit without the export harness
+# (master before the stack merges) has nothing to export.
 
 on:
   pull_request:
@@ -29,10 +43,12 @@ on:
       - .github/workflows/jev-selection-pinned.yml
       - crates/lightagent/src/coordinator/**
       - evaluation/subagents/selection.v1.json
+      - scripts/jev-selection-guard.py
+      - scripts/test-jev-selection-guard.py
   workflow_dispatch:
     inputs:
       sha:
-        description: The reviewed pull-request head commit to evaluate (40 hex characters)
+        description: The commit to evaluate (40 hex characters) - an open pull-request head, or a commit on master
         required: true
       max_requests:
         description: Maximum Jev requests (1-24; one pass over the 24 prompts)
@@ -59,11 +75,22 @@ jobs:
       pull-requests: read
     outputs:
       sha: ${{ steps.pin.outputs.sha }}
+      workflow_sha: ${{ steps.pin.outputs.workflow_sha }}
       digest: ${{ steps.digest.outputs.digest }}
     defaults:
       run:
         shell: bash
     steps:
+      # The guard comes from the workflow's own commit; the checkout of the
+      # pinned commit below replaces it.
+      - name: Check out the guard (workflow source)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: .jev-guard
+          sparse-checkout: scripts/jev-selection-guard.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
       - name: Pin the commit
         id: pin
         env:
@@ -71,26 +98,11 @@ jobs:
           EVENT: ${{ github.event_name }}
           INPUT_SHA: ${{ inputs.sha }}
           PR_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          if [ "$EVENT" != workflow_dispatch ]; then
-            echo "sha=$PR_SHA" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "$GITHUB_REF" != refs/heads/master ]; then
-            echo "Dispatch from master only: the workflow definition must be the reviewed one."; exit 1
-          fi
-          if ! [[ "$INPUT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "sha must be a full 40-character commit id"; exit 1
-          fi
-          # The current head of an open pull request from this repository.
-          open=$(gh api "repos/$GITHUB_REPOSITORY/commits/$INPUT_SHA/pulls" \
-            --jq "[.[] | select(.state == \"open\" and .head.sha == \"$INPUT_SHA\" and .head.repo.full_name == \"$GITHUB_REPOSITORY\") | .number] | join(\",\")")
-          if [ -z "$open" ]; then
-            echo "$INPUT_SHA is not the head of an open pull request from this repository"; exit 1
-          fi
-          echo "Pinned $INPUT_SHA, head of pull request(s) $open." | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "sha=$INPUT_SHA" >> "$GITHUB_OUTPUT"
+        run: >-
+          python3 .jev-guard/scripts/jev-selection-guard.py pin
+          --event "$EVENT" --ref "$GITHUB_REF" --sha "$INPUT_SHA"
+          --workflow-sha "$GITHUB_SHA" --pr-sha "$PR_SHA" --repo "$GITHUB_REPOSITORY"
+          --output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@v7
         with:
           ref: ${{ steps.pin.outputs.sha }}
@@ -131,7 +143,7 @@ jobs:
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           {
             echo "### Exported requests"
-            echo "Pinned commit: \`${{ steps.pin.outputs.sha }}\`. Digest of the request set: \`$digest\`."
+            echo "Workflow source: \`${{ steps.pin.outputs.workflow_sha }}\`. Code under test: \`${{ steps.pin.outputs.sha }}\`. Digest of the request set: \`$digest\`."
             echo '```'
             sha256sum sel-*.json
             echo '```'
@@ -239,6 +251,8 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && needs.send.outputs.status == 'SENT'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    outputs:
+      verdict: ${{ steps.verdict.outputs.status }}
     defaults:
       run:
         shell: bash
@@ -246,6 +260,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - name: Check out the guard (workflow source)
+        if: always()
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: .jev-guard
+          sparse-checkout: scripts/jev-selection-guard.py
+          sparse-checkout-cone-mode: false
           persist-credentials: false
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
@@ -259,28 +282,119 @@ jobs:
         with:
           name: selection-responses
           path: ${{ runner.temp }}/selection-responses
+      # The harness's own report is an input to the verdict, not a result:
+      # it scores a failed request as the lead keeping the task.
       - name: Score with the pinned commit's rules
         env:
           LIGHTAGENT_SELECTION_EXPORT: ${{ runner.temp }}/selection-requests
           LIGHTAGENT_SELECTION_RESPONSES: ${{ runner.temp }}/selection-responses
           LIGHTAGENT_SELECTION_LIVE_MAX_REQUESTS: ${{ inputs.max_requests }}
           LIGHTAGENT_JEV_LIVE_COMMIT: ${{ needs.prepare.outputs.sha }}
-          LIGHTAGENT_JEV_EVAL_OUT: ${{ runner.temp }}/jev-selection
+          LIGHTAGENT_JEV_EVAL_OUT: ${{ runner.temp }}/harness
         run: >-
           cargo test -p lightagent --lib replay_specialist_selection_evaluation
           -- --ignored --nocapture --test-threads=1
-      - name: Summarize
+      - name: Decide the evaluation status
+        id: verdict
         if: always()
         env:
-          LIGHTAGENT_JEV_EVAL_OUT: ${{ runner.temp }}/jev-selection
-        run: |
-          for summary in "$LIGHTAGENT_JEV_EVAL_OUT"/*.md; do
-            [ -f "$summary" ] && { cat "$summary"; echo; } >> "$GITHUB_STEP_SUMMARY"
-          done
-          exit 0
+          DIGEST: ${{ needs.prepare.outputs.digest }}
+          CODE_SHA: ${{ needs.prepare.outputs.sha }}
+          WORKFLOW_SHA: ${{ needs.prepare.outputs.workflow_sha }}
+        run: >-
+          python3 .jev-guard/scripts/jev-selection-guard.py verdict
+          --set evaluation/subagents/selection.v1.json
+          --requests "$RUNNER_TEMP/selection-requests"
+          --responses "$RUNNER_TEMP/selection-responses"
+          --reports "$RUNNER_TEMP/harness"
+          --digest "$DIGEST" --code-sha "$CODE_SHA" --workflow-sha "$WORKFLOW_SHA"
+          --out "$RUNNER_TEMP/jev-selection"
+          --output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: jev-selection-reports
           path: ${{ runner.temp }}/jev-selection/
           if-no-files-found: warn
+
+  unscored:
+    name: Record a run that was not scored (no secret)
+    needs: [prepare, send, score]
+    if: >-
+      always() && github.event_name == 'workflow_dispatch'
+      && needs.prepare.result == 'success' && needs.score.outputs.verdict == ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the guard (workflow source)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: .jev-guard
+          sparse-checkout: scripts/jev-selection-guard.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Check out the prompt set (code under test)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          path: .jev-code
+          sparse-checkout: evaluation/subagents/selection.v1.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: selection-requests
+          path: ${{ runner.temp }}/selection-requests
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: selection-responses
+          path: ${{ runner.temp }}/selection-responses
+      - name: Decide the evaluation status
+        env:
+          DIGEST: ${{ needs.prepare.outputs.digest }}
+          CODE_SHA: ${{ needs.prepare.outputs.sha }}
+          WORKFLOW_SHA: ${{ needs.prepare.outputs.workflow_sha }}
+        run: >-
+          python3 .jev-guard/scripts/jev-selection-guard.py verdict
+          --set .jev-code/evaluation/subagents/selection.v1.json
+          --requests "$RUNNER_TEMP/selection-requests"
+          --responses "$RUNNER_TEMP/selection-responses"
+          --reports "$RUNNER_TEMP/harness"
+          --digest "$DIGEST" --code-sha "$CODE_SHA" --workflow-sha "$WORKFLOW_SHA"
+          --out "$RUNNER_TEMP/jev-selection" --summary "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: jev-selection-reports
+          path: ${{ runner.temp }}/jev-selection/
+          if-no-files-found: warn
+
+  guard-tests:
+    name: Test the pin and status guards (no secret)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Stubbed API and fixture runs
+        run: python3 scripts/test-jev-selection-guard.py -v
+      - name: Read-only pins against the real GitHub API
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JEV_GUARD_LIVE_REPO: ${{ github.repository }}
+          JEV_GUARD_LIVE_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/test-jev-selection-guard.py -v LivePinTests
