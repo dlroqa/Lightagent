@@ -402,7 +402,8 @@ impl LightweightRunFactory {
             .as_ref()
             .and_then(|secret| secret.resolve());
 
-        let mut provider_config = ProviderConfig::new(base_url.clone(), model);
+        let mut provider_config = ProviderConfig::new(base_url.clone(), model)
+            .with_tool_names(config.inference.tool_names);
         if let Some(key) = &api_key {
             provider_config = provider_config.with_api_key(key.clone());
         }
@@ -486,7 +487,11 @@ impl LightweightRunFactory {
             registry: &registry,
             guard: guard.clone(),
             enforced: tool_policy.enforced,
-            factory: Arc::new(LightweightFactory { base_url, api_key }),
+            factory: Arc::new(LightweightFactory {
+                base_url,
+                api_key,
+                tool_names: config.inference.tool_names,
+            }),
         });
         // Classification only advises. The workflow policy inspects the
         // registry, the approval policy and the limits without changing them;

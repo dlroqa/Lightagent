@@ -5,8 +5,11 @@
 //! runs real models through the real worker runtime and tools against local
 //! fixtures; it needs an operator-approved endpoint
 //! (`LIGHTAGENT_EVAL_BASE_URL`, `LIGHTAGENT_EVAL_MODEL`, and optionally
-//! `LIGHTAGENT_EVAL_API_KEY`) and reports BLOCKED without one. Its results
-//! measure the named model on these tasks only.
+//! `LIGHTAGENT_EVAL_API_KEY`) and reports BLOCKED without one. An endpoint
+//! that refuses dotted function names is evaluated with
+//! `LIGHTAGENT_EVAL_TOOL_NAMES=portable`, the same mapping as
+//! `inference.tool_names`. Its results measure the named model on these
+//! tasks only.
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -215,11 +218,13 @@ fn scoring_follows_the_recorded_rules() {
 struct Factory {
     base_url: String,
     api_key: Option<String>,
+    tool_names: lightagent_core::ToolNameMode,
 }
 
 impl lightagent_core::ProviderFactory for Factory {
     fn provider(&self, routing: &ModelRouting) -> Result<Arc<dyn AgentProvider>, ProviderError> {
-        let mut config = ProviderConfig::new(self.base_url.clone(), routing.model.clone());
+        let mut config = ProviderConfig::new(self.base_url.clone(), routing.model.clone())
+            .with_tool_names(self.tool_names);
         if let Some(key) = &self.api_key {
             config = config.with_api_key(key.clone());
         }
@@ -509,9 +514,16 @@ async fn live_role_evaluation() {
         panic!("BLOCKED: LIGHTAGENT_EVAL_BASE_URL and LIGHTAGENT_EVAL_MODEL are required");
     };
     let set = evaluation_set();
+    let tool_names = match env("LIGHTAGENT_EVAL_TOOL_NAMES") {
+        Some(value) => value
+            .parse()
+            .expect("LIGHTAGENT_EVAL_TOOL_NAMES: native or portable"),
+        None => lightagent_core::ToolNameMode::Native,
+    };
     let factory = Arc::new(Factory {
         base_url,
         api_key: env("LIGHTAGENT_EVAL_API_KEY"),
+        tool_names,
     });
     let root: PathBuf =
         std::env::temp_dir().join(format!("lightagent-role-eval-{}", RunId::new().as_str()));

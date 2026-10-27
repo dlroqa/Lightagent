@@ -16,6 +16,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod embed;
+pub mod names;
 pub mod provider;
 pub mod sse;
 pub mod tls;
