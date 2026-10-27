@@ -574,7 +574,10 @@ async fn a_cut_off_answer_is_continued_by_a_tool_less_turn() {
     assert_eq!(stop_reason(&events), Some(StopReason::EndTurn));
     let requests = inspector.requests();
     assert_eq!(requests.len(), 2);
-    assert!(requests[1].tools.is_empty(), "a continuation offers no tools");
+    assert!(
+        requests[1].tools.is_empty(),
+        "a continuation offers no tools"
+    );
     let messages = &requests[1].messages;
     let partial = &messages[messages.len() - 2];
     assert_eq!(partial.role, Role::Assistant);
@@ -739,9 +742,7 @@ impl AgentProvider for CancelOnSecondTurn {
         request: lightagent_core::ProviderRequest,
         cancel: CancellationToken,
     ) -> Result<lightagent_core::ProviderStream, lightagent_core::ProviderError> {
-        let turn = self
-            .turns
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let turn = self.turns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if turn == 1 {
             self.cancel.cancel();
         }

@@ -830,10 +830,7 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
         // A continuation's opening is held until it can be compared with
         // the end of the answer so far, so a restated ending is not shown
         // twice.
-        let mut held = driver
-            .continuing
-            .clone()
-            .map(|tail| (tail, String::new()));
+        let mut held = driver.continuing.clone().map(|tail| (tail, String::new()));
 
         loop {
             let next = tokio::select! {
@@ -926,7 +923,9 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
                     {
                         answer.content.push_str(&assistant_text);
                     } else {
-                        driver.messages.push(ProviderMessage::assistant(assistant_text));
+                        driver
+                            .messages
+                            .push(ProviderMessage::assistant(assistant_text));
                     }
                     let so_far = driver.messages.last().map_or("", |m| m.content.as_str());
                     driver.continuing = Some(generation::tail(so_far).to_owned());
