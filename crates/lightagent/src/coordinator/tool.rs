@@ -326,11 +326,127 @@ mod tests {
             .await
     }
 
-    /// What an ordinary user sees is its own profile's state only: no other
-    /// profile's record, no endpoint, model version, allow-list or
-    /// threshold.
-    #[test]
-    fn the_user_status_holds_only_the_profiles_own_state() {
+    /// The fields the user view may hold, by object path ("" is the top).
+    /// Any other field, at any depth, is a disclosure.
+    const USER_VIEW_FIELDS: &[(&str, &[&str])] = &[
+        (
+            "",
+            &[
+                "name",
+                "kind",
+                "scope",
+                "profile",
+                "enabled",
+                "routing",
+                "classification",
+                "explicit_tool",
+                "last_classification",
+            ],
+        ),
+        ("routing", &["profile_permission"]),
+        ("classification", &["mode", "profile_permitted"]),
+        ("explicit_tool", &["name", "available"]),
+        (
+            "last_classification",
+            &[
+                "outcome",
+                "category",
+                "category_confidence",
+                "complexity",
+                "fallback_reason",
+                "workflow",
+                "influenced",
+                "recorded_at_unix",
+            ],
+        ),
+    ];
+
+    /// Operator-only fields, refused wherever they appear in the user view.
+    const OPERATOR_FIELDS: &[&str] = &[
+        "input_tokens",
+        "output_tokens",
+        "model_version",
+        "threshold",
+        "default_threshold",
+        "version_thresholds",
+        "allowed_profiles",
+        "verification",
+        "endpoint_configured",
+        "api_key_configured",
+        "api_key_resolvable",
+        "jev_calls",
+    ];
+
+    /// Every object in `value` with its path, and every string with its path.
+    fn walk<'a>(
+        value: &'a Value,
+        path: &str,
+        objects: &mut Vec<(String, &'a serde_json::Map<String, Value>)>,
+        strings: &mut Vec<(String, &'a str)>,
+    ) {
+        match value {
+            Value::Object(map) => {
+                objects.push((path.to_owned(), map));
+                for (key, child) in map {
+                    let child_path = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    walk(child, &child_path, objects, strings);
+                }
+            }
+            Value::Array(items) => {
+                for (i, child) in items.iter().enumerate() {
+                    walk(child, &format!("{path}[{i}]"), objects, strings);
+                }
+            }
+            Value::String(text) => strings.push((path.to_owned(), text)),
+            _ => {}
+        }
+    }
+
+    /// Why `view` is not a private user view of `profile`, judged by its
+    /// structure: only the allowed fields at each place, no operator field
+    /// anywhere, and no string naming any of `others` (another profile, its
+    /// record, or installation details). Numbers are never matched as text,
+    /// so a timestamp is just a timestamp.
+    fn user_view_problems(view: &Value, profile: &str, others: &[&str]) -> Vec<String> {
+        let mut problems = Vec::new();
+        if view["scope"] != "profile" || view["profile"] != profile {
+            problems.push(format!(
+                "not scoped to {profile}: {} {}",
+                view["scope"], view["profile"]
+            ));
+        }
+        let (mut objects, mut strings) = (Vec::new(), Vec::new());
+        walk(view, "", &mut objects, &mut strings);
+        for (path, map) in &objects {
+            let allowed = USER_VIEW_FIELDS
+                .iter()
+                .find(|(at, _)| at == path)
+                .map(|(_, fields)| *fields);
+            for key in map.keys() {
+                if OPERATOR_FIELDS.contains(&key.as_str()) {
+                    problems.push(format!("operator field {key} at '{path}'"));
+                } else if !allowed.is_some_and(|fields| fields.contains(&key.as_str())) {
+                    problems.push(format!("unexpected field {key} at '{path}'"));
+                }
+            }
+        }
+        for (path, text) in &strings {
+            for other in others {
+                if text.contains(other) {
+                    problems.push(format!("'{other}' in {path}: {text}"));
+                }
+            }
+        }
+        problems
+    }
+
+    /// Two profiles with records: alice's carries the operator-only model
+    /// version and token count.
+    fn two_profiles() -> (Config, Arc<JevState>) {
         let mut config = config("http://jev.test", JevClassificationMode::Shadow);
         config.platform.jev.routing_allowed_profiles = vec!["alice-bot".into(), "bob-bot".into()];
         let state = JevState::new();
@@ -350,26 +466,95 @@ mod tests {
                 ..Default::default()
             },
         );
-        let view = user_status(&config, "alice-bot", &state);
-        let text = view.to_string();
-        assert!(text.contains("alice-category"), "{text}");
-        assert_eq!(view["scope"], "profile");
-        for leaked in [
-            "bob",
-            "jev.test",
-            "jev-9.9.9",
-            "321",
-            "allowed_profiles",
-            "threshold",
-            "api_key",
-            "verification",
-            "endpoint",
-        ] {
-            assert!(!text.contains(leaked), "{leaked}: {text}");
-        }
+        (config, state)
+    }
+
+    /// What an ordinary user sees is its own profile's state only: no other
+    /// profile's record, no endpoint, model version, token count, allow-list
+    /// or threshold. The operator's status still carries those details.
+    #[test]
+    fn the_user_status_holds_only_the_profiles_own_state() {
+        let (config, state) = two_profiles();
+        let alice = user_status(&config, "alice-bot", &state);
+        assert_eq!(alice["last_classification"]["category"], "alice-category");
+        let problems = user_view_problems(&alice, "alice-bot", &["bob", "jev.test", "jev-9.9.9"]);
+        assert!(problems.is_empty(), "{problems:?}: {alice}");
+
+        let bob = user_status(&config, "bob-bot", &state);
+        assert_eq!(bob["last_classification"]["category"], "bob-category");
+        let problems = user_view_problems(&bob, "bob-bot", &["alice", "jev.test", "jev-9.9.9"]);
+        assert!(problems.is_empty(), "{problems:?}: {bob}");
+
         // The operator's status is unchanged and still carries the details.
-        let full = status(&config, "alice-bot", &state).to_string();
-        assert!(full.contains("allowed_profiles") && full.contains("jev-9.9.9"));
+        let full = status(&config, "alice-bot", &state);
+        let last = &full["last_classification"];
+        assert_eq!(last["category"], "alice-category");
+        assert_eq!(last["input_tokens"], 321);
+        assert_eq!(last["model_version"], "jev-9.9.9");
+        assert_eq!(
+            full["routing"]["allowed_profiles"],
+            json!(["alice-bot", "bob-bot"])
+        );
+    }
+
+    /// The failed run (40433941746) recorded alice's classification at Unix
+    /// time 1793065321, which contains her token count's digits; matching the
+    /// view's text for "321" took that for a disclosure. A view with such a
+    /// timestamp is accepted, while a token field, another profile's state or
+    /// an operator section is refused wherever it appears.
+    #[test]
+    fn a_timestamp_with_the_token_digits_is_not_a_disclosure() {
+        let (config, state) = two_profiles();
+        let mut view = user_status(&config, "alice-bot", &state);
+        let others = ["bob", "jev.test", "jev-9.9.9"];
+        for timestamp in [1_793_065_321_u64, 3_210_000_000, 1_321_321_321] {
+            view["last_classification"]["recorded_at_unix"] = json!(timestamp);
+            assert!(view.to_string().contains("321"));
+            let problems = user_view_problems(&view, "alice-bot", &others);
+            assert!(problems.is_empty(), "{timestamp}: {problems:?}");
+        }
+
+        let refused = |change: &dyn Fn(&mut Value), expected: &str| {
+            let mut leaked = view.clone();
+            change(&mut leaked);
+            let problems = user_view_problems(&leaked, "alice-bot", &others);
+            assert!(
+                problems.iter().any(|problem| problem.contains(expected)),
+                "{expected}: {problems:?}"
+            );
+        };
+        refused(
+            &|v| v["last_classification"]["input_tokens"] = json!(321),
+            "operator field input_tokens at 'last_classification'",
+        );
+        refused(
+            &|v| v["classification"]["output_tokens"] = json!(7),
+            "operator field output_tokens at 'classification'",
+        );
+        refused(
+            &|v| v["model_version"] = json!("jev-9.9.9"),
+            "operator field model_version at ''",
+        );
+        refused(
+            &|v| v["verification"] = json!({ "ok": true }),
+            "operator field verification at ''",
+        );
+        refused(
+            &|v| v["routing"]["allowed_profiles"] = json!(["alice-bot", "bob-bot"]),
+            "operator field allowed_profiles at 'routing'",
+        );
+        refused(
+            &|v| v["last_classification"]["category"] = json!("bob-category"),
+            "'bob' in last_classification.category",
+        );
+        refused(
+            &|v| v["profile"] = json!("bob-bot"),
+            "not scoped to alice-bot",
+        );
+        refused(
+            &|v| v["last_classification"]["extra"] = json!({ "note": "x" }),
+            "unexpected field extra at 'last_classification'",
+        );
     }
 
     #[test]
