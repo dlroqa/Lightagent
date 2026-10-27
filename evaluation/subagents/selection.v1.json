@@ -1,0 +1,43 @@
+{
+  "schema": "lightagent.specialist_selection_eval.v1",
+  "recorded": "2026-10-21",
+  "purpose": "Whether Jev-assisted specialist selection keeps simple work with the lead and plans useful, minimal workers for work that benefits from them.",
+  "labeling": "Labels were written by hand on 2026-10-21, before any Jev or model request was made, and are not changed after a run. Prompts are synthetic and hold no personal data or credentials. `roles` lists every role set that counts as a correct plan, compared as unordered sets.",
+  "scoring": {
+    "decision": "A case's decision is correct when a plan was built exactly when `delegate` is true.",
+    "unnecessary_delegation": "`delegate` is false and a plan was built.",
+    "missed_delegation": "`delegate` is true and the lead kept the task.",
+    "roles": "Among cases where both say delegate, the planned roles equal one of the `roles` sets.",
+    "failures": "A case whose classification failed or was skipped counts as the lead keeping the task, and is also reported separately."
+  },
+  "pass": {
+    "decision_accuracy_min": 0.8,
+    "unnecessary_delegation_max": 0.1
+  },
+  "cases": [
+    { "id": "sel-001", "delegate": false, "prompt": "What is the capital of Australia?" },
+    { "id": "sel-002", "delegate": false, "prompt": "Thanks, that worked perfectly." },
+    { "id": "sel-003", "delegate": false, "prompt": "Explain the difference between TCP and UDP in two sentences." },
+    { "id": "sel-004", "delegate": false, "prompt": "Search the web for the latest stable release of the Rust compiler." },
+    { "id": "sel-005", "delegate": false, "prompt": "Find the official documentation page for Python's asyncio.gather." },
+    { "id": "sel-006", "delegate": false, "prompt": "Rename the variable cnt to count in src/main.rs." },
+    { "id": "sel-007", "delegate": false, "prompt": "What strings does the regular expression ^a+b$ match?" },
+    { "id": "sel-008", "delegate": false, "prompt": "Write a haiku about autumn leaves." },
+    { "id": "sel-009", "delegate": false, "prompt": "Convert 72 degrees Fahrenheit to Celsius." },
+    { "id": "sel-010", "delegate": false, "prompt": "Is Vec::with_capacity faster than Vec::new followed by pushes? Answer briefly." },
+    { "id": "sel-011", "delegate": false, "prompt": "List the files in the project's src directory." },
+    { "id": "sel-012", "delegate": false, "prompt": "Summarize this sentence in five words: the quarterly report shows revenue grew while costs stayed flat." },
+    { "id": "sel-013", "delegate": true, "roles": [["coder", "tester"]], "prompt": "Investigate why our CSV import fails on files with quoted newlines, fix the parser in src/csv.rs, and add regression tests that run in CI." },
+    { "id": "sel-014", "delegate": true, "roles": [["researcher", "coder"]], "prompt": "Research current best practices for rotating JWT signing keys, then update our auth service in src/auth/ to support key rotation." },
+    { "id": "sel-015", "delegate": true, "roles": [["reviewer"]], "prompt": "Review the pending changes in src/billing/ for security defects and report each finding with its file and line." },
+    { "id": "sel-016", "delegate": true, "roles": [["coder", "tester"]], "prompt": "Add input validation to the signup form handler and make sure the existing test suite still passes in CI." },
+    { "id": "sel-017", "delegate": true, "roles": [["researcher"]], "prompt": "Compare the three most cited 2025 papers on retrieval-augmented generation, with sources, and summarize how each one evaluates its method." },
+    { "id": "sel-018", "delegate": true, "roles": [["coder", "reviewer"]], "prompt": "Refactor the payment retry logic in src/payments/retry.rs to use exponential backoff, then have the change reviewed for regressions." },
+    { "id": "sel-019", "delegate": true, "roles": [["tester"]], "prompt": "Our nightly CI workflow started failing yesterday; find out which test fails on the latest commit and why." },
+    { "id": "sel-020", "delegate": true, "roles": [["researcher"]], "prompt": "Gather the license terms of our five largest dependencies from their repositories and check whether any conflicts with Apache-2.0." },
+    { "id": "sel-021", "delegate": true, "roles": [["coder", "tester"], ["coder"]], "prompt": "Implement the CSV export endpoint described in docs/export.md, including unit tests." },
+    { "id": "sel-022", "delegate": true, "roles": [["researcher", "coder"], ["coder", "tester"], ["researcher", "coder", "tester"]], "prompt": "Find the upstream fix for a recent zlib buffer overflow advisory, port it to our vendored copy in third_party/zlib, and verify the build in CI." },
+    { "id": "sel-023", "delegate": true, "roles": [["reviewer"]], "prompt": "Audit the authentication module for timing attacks without changing any code, and report what you find." },
+    { "id": "sel-024", "delegate": true, "roles": [["coder", "tester"]], "prompt": "Write a database migration that adds a non-null created_at column with a default to the orders table, and test it with the CI database job." }
+  ]
+}
