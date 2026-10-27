@@ -239,6 +239,7 @@ mod tests {
             max_output_tokens: Some(1_024),
             reserve_answer_tokens: 512,
             reasoning: Reasoning::Applied("low".into()),
+            max_continuations: 1,
         };
         slot.set(Some(LeadGeneration {
             model: "lfm2@8k".into(),

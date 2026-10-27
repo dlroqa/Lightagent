@@ -28,7 +28,10 @@
 //! answer: a tool result that would crowd it out is shortened in the
 //! conversation the model sees, and once the room left is too small the next
 //! turn is that same tool-less answer, ending with
-//! [`StopReason::ContextLimit`]. The default budget changes none of this.
+//! [`StopReason::ContextLimit`]. An answer cut off at its length limit may be
+//! continued by a bounded number of tool-less turns, each spending a turn of
+//! the run's budget; see [`GenerationBudget::max_continuations`]. The default
+//! budget changes none of this.
 //!
 //! A turn the provider did not finish is never mistaken for an answer: a
 //! token-limited turn ends with [`StopReason::MaxTokens`] and a stream that
@@ -84,6 +87,12 @@ const CONTEXT_BUDGET_INSTRUCTION: &str = "The conversation has nearly filled the
     context window, so no more tools can be called. Answer the original request now from the \
     tool results above, cite the sources you used, and say briefly what is missing or could not \
     be checked.";
+
+/// The instruction for a turn that continues an answer cut off at its length
+/// limit. It rides on that one request only.
+const CONTINUE_INSTRUCTION: &str = "Your previous reply was cut off by the output limit. \
+    Continue it exactly where it stopped: do not repeat anything already written, do not \
+    start again, and do not call tools.";
 
 /// The most progress reports forwarded for one tool call, so a chatty tool
 /// cannot flood the event log.
@@ -307,6 +316,11 @@ struct Driver {
     measured: Option<Measured>,
     /// Tool results shortened to fit the context window so far.
     shortened_results: u32,
+    /// Continuations taken so far.
+    continuations: u32,
+    /// Set when the next turn continues an answer cut off at its length
+    /// limit: the end of the answer so far, to trim a restated opening.
+    continuing: Option<String>,
 }
 
 impl Driver {
@@ -345,6 +359,9 @@ enum TurnResult {
     Batch,
     /// The wall clock ran out with unread tool results, and the run pauses.
     OutOfTime(Duration),
+    /// The answer was cut off at its length limit and the next turn
+    /// continues it.
+    Continue,
 }
 
 /// What processing a tool batch produced.
@@ -515,6 +532,8 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             wrap_up: None,
             measured: None,
             shortened_results: 0,
+            continuations: 0,
+            continuing: None,
         };
         driver.emit(AgentEvent::RunStarted {
             run,
@@ -613,6 +632,7 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
                 match self.take_turn(&mut driver, &cancel).await? {
                     TurnResult::Finished(outcome) => return Ok(*outcome),
                     TurnResult::Batch => {}
+                    TurnResult::Continue => continue,
                     TurnResult::OutOfTime(elapsed) => {
                         return Ok(RunOutcome::OutOfTime {
                             events: driver.events.clone(),
@@ -677,9 +697,13 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
                 .last()
                 .is_some_and(|message| message.role == Role::Tool);
             if !unread_results {
-                driver.emit(AgentEvent::RunCompleted {
-                    reason: StopReason::WallClockExceeded,
-                });
+                // An answer the clock stopped from continuing stays cut off.
+                let reason = if driver.continuing.is_some() {
+                    StopReason::MaxTokens
+                } else {
+                    StopReason::WallClockExceeded
+                };
+                driver.emit(AgentEvent::RunCompleted { reason });
                 return Ok(TurnResult::Finished(Box::new(RunOutcome::Completed {
                     events: std::mem::take(&mut driver.events),
                 })));
@@ -701,6 +725,7 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
         // and the run would end before anyone read it. The budget is not
         // extended; with no tool results yet, the turn is an ordinary one.
         if driver.wrap_up.is_none()
+            && driver.continuing.is_none()
             && driver.turn.saturating_add(1) >= driver.limits.max_turns
             && driver.has_tool_results()
         {
@@ -711,7 +736,11 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
         // answer needs is answered now: offered tools, the model would add
         // results the window cannot hold, and the answer would be cut off.
         let budget = &self.config.generation;
-        if driver.wrap_up.is_none() && budget.guards_context() && driver.has_tool_results() {
+        if driver.wrap_up.is_none()
+            && driver.continuing.is_none()
+            && budget.guards_context()
+            && driver.has_tool_results()
+        {
             let schemas = self.invoker.schemas();
             let (prompt, _) =
                 generation::prompt_tokens(driver.measured, &driver.messages, &schemas);
@@ -724,8 +753,13 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
 
         // The final turn after a budget ran out offers no tools and says why,
         // so the model answers from what it has instead of asking for more.
-        // The instruction rides on this one request only.
-        let (messages, tools) = if let Some(wrap_up) = driver.wrap_up {
+        // A continuation offers none either. The instruction rides on this
+        // one request only.
+        let (messages, tools) = if driver.continuing.is_some() {
+            let mut messages = driver.messages.clone();
+            messages.push(ProviderMessage::user(CONTINUE_INSTRUCTION));
+            (messages, Vec::new())
+        } else if let Some(wrap_up) = driver.wrap_up {
             let mut messages = driver.messages.clone();
             messages.push(ProviderMessage::user(wrap_up.instruction()));
             (messages, Vec::new())
@@ -755,11 +789,19 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
         let mut accumulator = ToolCallAccumulator::new();
         let mut assistant_text = String::new();
         let mut finish: Option<(FinishReason, Option<Usage>)> = None;
+        // A continuation's opening is held until it can be compared with
+        // the end of the answer so far, so a restated ending is not shown
+        // twice.
+        let mut held = driver
+            .continuing
+            .clone()
+            .map(|tail| (tail, String::new()));
 
         loop {
             let next = tokio::select! {
                 biased;
                 () = cancel.cancelled() => {
+                    release(driver, &mut held, &mut assistant_text);
                     driver.emit(AgentEvent::RunCompleted { reason: StopReason::Cancelled });
                     return Ok(TurnResult::Finished(Box::new(RunOutcome::Completed {
                         events: std::mem::take(&mut driver.events),
@@ -773,10 +815,18 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
                 Ok(ProviderEvent::Reasoning(text)) => {
                     driver.emit(AgentEvent::Reasoning { text });
                 }
-                Ok(ProviderEvent::Content(text)) => {
-                    assistant_text.push_str(&text);
-                    driver.emit(AgentEvent::Content { text });
-                }
+                Ok(ProviderEvent::Content(text)) => match held.as_mut() {
+                    Some((tail, opening)) => {
+                        opening.push_str(&text);
+                        if opening.len() >= tail.len() {
+                            release(driver, &mut held, &mut assistant_text);
+                        }
+                    }
+                    None => {
+                        assistant_text.push_str(&text);
+                        driver.emit(AgentEvent::Content { text });
+                    }
+                },
                 Ok(ProviderEvent::ToolCallDelta {
                     index,
                     id,
@@ -789,6 +839,7 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
                     finish = Some((reason, usage));
                 }
                 Err(err) => {
+                    release(driver, &mut held, &mut assistant_text);
                     driver.emit(AgentEvent::Error {
                         message: err.to_string(),
                     });
@@ -802,6 +853,7 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             }
         }
 
+        release(driver, &mut held, &mut assistant_text);
         // A stream that ended without its terminal event did not say the turn
         // was finished.
         let (reason, usage) = finish.unwrap_or((FinishReason::Incomplete, None));
@@ -818,18 +870,38 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             });
         }
         driver.emit(AgentEvent::TurnCompleted { usage });
+        let continued = driver.continuing.take().is_some();
 
         match reason {
-            // A turn cut short ends the run: its text is already in the log,
-            // and a tool call it was streaming is not run, because its
-            // arguments may be truncated. Nothing is retried.
-            FinishReason::Length => Ok(driver.end(StopReason::MaxTokens)),
+            // A turn cut short keeps its text, already in the log, and never
+            // runs a tool call it was streaming, because its arguments may be
+            // truncated. Its answer is continued when the budget allows;
+            // otherwise the run ends here.
+            FinishReason::Length => {
+                if self.may_continue(driver, &assistant_text, !accumulator.is_empty(), cancel) {
+                    if continued
+                        && let Some(answer) = driver.messages.last_mut()
+                        && answer.role == Role::Assistant
+                    {
+                        answer.content.push_str(&assistant_text);
+                    } else {
+                        driver.messages.push(ProviderMessage::assistant(assistant_text));
+                    }
+                    let so_far = driver.messages.last().map_or("", |m| m.content.as_str());
+                    driver.continuing = Some(generation::tail(so_far).to_owned());
+                    driver.continuations = driver.continuations.saturating_add(1);
+                    return Ok(TurnResult::Continue);
+                }
+                Ok(driver.end(StopReason::MaxTokens))
+            }
             FinishReason::Incomplete => Ok(driver.end(StopReason::Incomplete)),
             // The wrap-up turn is the last one whatever it produced: its
             // answer stands, and any tool calls it asked for anyway are not
             // run. The stop reason still records that a budget, not the
-            // model, ended the run.
-            FinishReason::Stop | FinishReason::ToolCalls if driver.wrap_up.is_some() => {
+            // model, ended the run. A continuation is tool-less the same way.
+            FinishReason::Stop | FinishReason::ToolCalls
+                if driver.wrap_up.is_some() || continued =>
+            {
                 let reason = driver.wrap_up.map_or(StopReason::EndTurn, WrapUp::reason);
                 Ok(driver.end(reason))
             }
@@ -995,6 +1067,37 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
         }
     }
 
+    /// Whether an answer cut off at its length limit may be continued: the
+    /// budget allows another continuation and the run another turn and more
+    /// time, it was not cancelled, it asked for no tool, some answer text
+    /// arrived, and the window still has room once that text is in.
+    fn may_continue(
+        &self,
+        driver: &Driver,
+        text: &str,
+        asked_for_tools: bool,
+        cancel: &CancellationToken,
+    ) -> bool {
+        let budget = &self.config.generation;
+        if driver.continuations >= budget.max_continuations.min(generation::MAX_CONTINUATIONS)
+            || asked_for_tools
+            || text.trim().is_empty()
+            || cancel.is_cancelled()
+            || driver.turn >= driver.limits.max_turns
+            || driver
+                .limits
+                .wall_clock()
+                .is_some_and(|limit| driver.started.elapsed() >= limit)
+        {
+            return false;
+        }
+        let mut messages = driver.messages.clone();
+        messages.push(ProviderMessage::assistant(text));
+        messages.push(ProviderMessage::user(CONTINUE_INSTRUCTION));
+        let (prompt, _) = generation::prompt_tokens(driver.measured, &messages, &[]);
+        budget.may_continue_with(prompt)
+    }
+
     /// The diagnostics record for a finished turn.
     fn report(
         &self,
@@ -1009,7 +1112,9 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
         let window = budget.context_window;
         let tokens = window.map(|window| window.tokens);
         let requested = budget.requested_max_tokens();
-        let purpose = if driver.wrap_up.is_some() {
+        let purpose = if driver.continuing.is_some() {
+            "continuation"
+        } else if driver.wrap_up.is_some() {
             "answer"
         } else {
             "turn"
@@ -1032,6 +1137,21 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             prompt_tokens: usage.map(|usage| usage.prompt_tokens),
             completion_tokens: usage.map(|usage| usage.completion_tokens),
             length_cause,
+            continuations: driver.continuations,
+        }
+    }
+}
+
+/// Emit a continuation's held opening, less any ending of the answer so far
+/// it restates. Nothing is held outside a continuation.
+fn release(driver: &mut Driver, held: &mut Option<(String, String)>, text: &mut String) {
+    if let Some((tail, opening)) = held.take() {
+        let fresh = generation::strip_overlap(&tail, &opening);
+        if !fresh.is_empty() {
+            text.push_str(fresh);
+            driver.emit(AgentEvent::Content {
+                text: fresh.to_owned(),
+            });
         }
     }
 }

@@ -124,6 +124,7 @@ pub fn data(event: &AgentEvent) -> serde_json::Value {
             "prompt_tokens": r.prompt_tokens,
             "completion_tokens": r.completion_tokens,
             "length_cause": r.length_cause,
+            "continuations": r.continuations,
         }),
         AgentEvent::TurnCompleted { usage: Some(usage) } => json!({
             "prompt_tokens": usage.prompt_tokens,
@@ -371,6 +372,7 @@ mod tests {
                 prompt_tokens: Some(7_000),
                 completion_tokens: Some(1_191),
                 length_cause: Some("context_window".into()),
+                continuations: 0,
             }),
         };
         assert_eq!(name(&event), "generation.report");
@@ -382,7 +384,7 @@ mod tests {
             "unknown is null"
         );
         assert_eq!(payload["length_cause"], "context_window");
-        assert_eq!(payload.as_object().map(|object| object.len()), Some(15));
+        assert_eq!(payload.as_object().map(|object| object.len()), Some(16));
     }
 
     #[test]

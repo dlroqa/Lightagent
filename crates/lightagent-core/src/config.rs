@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::generation::{ContextWindow, GenerationBudget, Reasoning};
+use crate::generation::{ContextWindow, GenerationBudget, MAX_CONTINUATIONS, Reasoning};
 use crate::paths;
 
 /// The on-disk format version of the config file.
@@ -719,8 +719,9 @@ impl Default for RuntimeConfig {
 /// `context_window` only narrows what a run budgets against, and the window a
 /// model is served with stays the server's (`runtime.n_ctx` asks for one on
 /// an explicit placement). With every field at its default, requests carry no
-/// `max_tokens` and no reasoning field, as before; the one default that acts
-/// is the answer reserve, and only when the provider reports its window.
+/// `max_tokens` and no reasoning field, as before; the defaults that act are
+/// the answer reserve and one continuation of a cut-off answer, and both only
+/// when the provider reports its window.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GenerationConfig {
@@ -743,6 +744,11 @@ pub struct GenerationConfig {
     pub reasoning_effort: Option<String>,
     /// The effort labels the operator has verified the model honours.
     pub reasoning_supported: Vec<String>,
+    /// How many times (0–3) an answer cut off at its length limit may be
+    /// continued by a tool-less turn. Unset allows one. Only with a known
+    /// window that still has room; each continuation spends one of the run's
+    /// turns.
+    pub continuations: Option<u32>,
     /// Overrides for one model id, exactly as the provider names it. A field
     /// left unset falls back to the setting above.
     pub models: BTreeMap<String, GenerationOverride>,
@@ -757,6 +763,7 @@ pub struct GenerationOverride {
     pub context_window: Option<u32>,
     pub reasoning_effort: Option<String>,
     pub reasoning_supported: Option<Vec<String>>,
+    pub continuations: Option<u32>,
 }
 
 /// The answer reserve when none is configured: 1024 tokens, or a quarter of a
@@ -792,6 +799,7 @@ impl GenerationConfig {
             max_output_tokens: pick(|o| o.max_output_tokens, self.max_output_tokens),
             reserve_answer_tokens,
             reasoning: Reasoning::resolve(effort, supported),
+            max_continuations: pick(|o| o.continuations, self.continuations).unwrap_or(1),
         }
     }
 
@@ -815,6 +823,7 @@ impl GenerationConfig {
             context_window: self.context_window,
             reasoning_effort: self.reasoning_effort.clone(),
             reasoning_supported: Some(self.reasoning_supported.clone()),
+            continuations: self.continuations,
         }
     }
 }
@@ -829,6 +838,14 @@ fn validate_generation(at: &str, settings: &GenerationOverride) -> Result<(), Co
                 "{at}.{name} must be at least 1"
             )));
         }
+    }
+    if settings
+        .continuations
+        .is_some_and(|count| count > MAX_CONTINUATIONS)
+    {
+        return Err(ConfigError::Invalid(format!(
+            "{at}.continuations must be between 0 and {MAX_CONTINUATIONS}"
+        )));
     }
     if let (Some(reserve), Some(window)) = (settings.reserve_answer_tokens, settings.context_window)
         && reserve >= window
@@ -2400,6 +2417,7 @@ mod tests {
             "no allowance is invented"
         );
         assert_eq!(known.reserve_answer_tokens, 1_024);
+        assert_eq!(known.max_continuations, 1, "one continuation by default");
         assert_eq!(
             legacy
                 .generation
@@ -2448,6 +2466,8 @@ mod tests {
             r#"{"generation":{"reasoning_supported":[""]}}"#,
             r#"{"generation":{"models":{"":{}}}}"#,
             r#"{"generation":{"models":{"m":{"max_output_tokens":0}}}}"#,
+            r#"{"generation":{"continuations":4}}"#,
+            r#"{"generation":{"models":{"m":{"continuations":9}}}}"#,
         ] {
             let config: Config = serde_json::from_str(bad).expect("deserialize");
             assert!(config.validate().is_err(), "{bad} should be refused");
