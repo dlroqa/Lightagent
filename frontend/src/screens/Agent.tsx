@@ -253,6 +253,14 @@ function describeStop(reason: string, answered: boolean): { label: string; text:
     case "WallClockExceeded":
       notice = { label: "limit reached", text: limit("time limit") };
       break;
+    case "ContextLimit":
+      notice = {
+        label: "limit reached",
+        text: answered
+          ? "Research filled the model's context window, so this answer was written from the evidence gathered so far."
+          : "Research filled the model's context window before an answer was written. The tool results above are what it found.",
+      };
+      break;
     case "RepeatedToolCalls":
       notice = { label: "limit reached", text: "The run stopped because it kept repeating the same tool call." };
       break;

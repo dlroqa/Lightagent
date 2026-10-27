@@ -20,6 +20,7 @@
 pub mod config;
 pub mod credentials;
 pub mod event;
+pub mod generation;
 pub mod identity;
 pub mod ids;
 pub mod invoker;
@@ -37,17 +38,18 @@ pub mod workers;
 
 pub use config::{
     AgentConfig, AllowedWorkflow, ApprovalPolicy, Config, ConfigError, ConfigStore,
-    DUCKDUCKGO_SEARCH_ENDPOINT, ExtensionsConfig, GithubActionsConfig, InferenceConfig,
-    InfinityConfig, JevClassificationConfig, JevClassificationMode, JevConfig, JevRoutingGrant,
-    JevRoutingInput, JevRoutingPermission, McpConfig, McpServerEntry, OpenTerminalConfig,
-    PlatformConfig, PlatformEndpointConfig, QdrantConfig, SavedProvider, SecretRef, SecurityConfig,
-    SubagentsConfig, ToolNameMode, ToolPolicyMode, ToolsConfig, WebConfig, WebSearchConfig,
-    WorkerResolution,
+    DUCKDUCKGO_SEARCH_ENDPOINT, ExtensionsConfig, GenerationConfig, GenerationOverride,
+    GithubActionsConfig, InferenceConfig, InfinityConfig, JevClassificationConfig,
+    JevClassificationMode, JevConfig, JevRoutingGrant, JevRoutingInput, JevRoutingPermission,
+    McpConfig, McpServerEntry, OpenTerminalConfig, PlatformConfig, PlatformEndpointConfig,
+    QdrantConfig, SavedProvider, SecretRef, SecurityConfig, SubagentsConfig, ToolNameMode,
+    ToolPolicyMode, ToolsConfig, WebConfig, WebSearchConfig, WorkerResolution,
 };
 pub use event::{
     AgentEvent, ClassificationDiagnostics, SpecialistRestriction, SpecialistSelection,
     SpecialistStep, StopReason,
 };
+pub use generation::{ContextWindow, GenerationBudget, GenerationReport, Reasoning, WindowSource};
 pub use ids::RunId;
 pub use invoker::{
     NullInvoker, ToolCall, ToolInvoker, ToolOutcome, ToolProgress, ToolProgressSink, ToolSchema,

@@ -856,6 +856,9 @@ struct ChatRuntime {
     workflow_registry: ToolRegistry,
     /// The session's specialist plan slot, replaced at every turn.
     plan: lightagent_tools::plan::PlanSlot,
+    /// The lead's output and context budget for its workers, replaced at
+    /// every turn.
+    generation: lightagent_tools::GenerationSlot,
 }
 
 /// Build a fresh runtime from the installed extension set. The same path is
@@ -941,6 +944,7 @@ async fn build_chat_runtime(
     let tools = registry.names();
     let workflow_registry = registry.clone();
     let plan = delegation.plan.clone();
+    let generation = delegation.generation.clone();
     let permission_policy = PolicyEngine::new(profile.approval_policy.into());
     let tool_permissions = tools
         .iter()
@@ -1018,6 +1022,7 @@ async fn build_chat_runtime(
         jev_budget,
         workflow_registry,
         plan,
+        generation,
     }
 }
 
@@ -1114,6 +1119,7 @@ pub async fn run(
     let mut routing_notice_shown = false;
     let mut workflow_registry = runtime.workflow_registry;
     let mut plan_slot = runtime.plan;
+    let mut generation_slot = runtime.generation;
     if session.approvals_unrestricted {
         agent.invoker().allow_without_restrictions();
     }
@@ -1322,6 +1328,7 @@ pub async fn run(
                 jev_budget = runtime.jev_budget;
                 workflow_registry = runtime.workflow_registry;
                 plan_slot = runtime.plan;
+                generation_slot = runtime.generation;
                 config = new_config;
                 profile = new_profile;
                 if let Err(error) = operation {
@@ -1504,6 +1511,11 @@ pub async fn run(
         if initialization_notice_due(&mut initialization_shown) {
             print_initializing();
         }
+        // Read for each turn: the resident model, or the route, may have
+        // changed since the last one.
+        let generation = crate::generation::for_run(&config, &provider).await;
+        generation_slot.set(Some(generation.clone()));
+        agent.set_generation(generation.budget);
         let mut active = Duration::ZERO;
         let mut renderer = ModelRenderer::new(config.tui.show_reasoning);
         let (sink, mut stream) = tokio::sync::mpsc::unbounded_channel();

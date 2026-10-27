@@ -414,6 +414,9 @@ impl LightweightRunFactory {
                 return RunStatus::Failed;
             }
         };
+        // The window the model is served with, as the provider reports it;
+        // the lead and every worker it delegates to are budgeted against it.
+        let generation = crate::generation::for_run(&config, &provider).await;
 
         // An ACP session's `cwd` becomes the confined workspace root, so the
         // agent edits the editor's project; otherwise the profile's own workspace.
@@ -493,6 +496,7 @@ impl LightweightRunFactory {
                 tool_names: config.inference.tool_names,
             }),
         });
+        delegation.generation.set(Some(generation.clone()));
         // Classification only advises. The workflow policy inspects the
         // registry, the approval policy and the limits without changing them;
         // the executor below is built exactly as without Jev.
@@ -628,7 +632,8 @@ impl LightweightRunFactory {
         let authorization =
             authorization.unwrap_or_else(|| RunAuthorization::unconditional(cancel.clone()));
         let provider = AuthorizedProvider::new(provider, authorization.clone());
-        let agent = AgentLoop::from_profile(provider, executor, &profile);
+        let agent = AgentLoop::from_profile(provider, executor, &profile)
+            .with_generation(generation.budget);
         manager::drive_supervised(
             agent,
             request.history,

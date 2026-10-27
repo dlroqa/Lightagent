@@ -9,6 +9,7 @@
 use crate::ids::RunId;
 use crate::invoker::{ToolCall, ToolOutcome, ToolProgress};
 use crate::permissions::ApprovalId;
+use crate::generation::GenerationReport;
 use crate::provider::Usage;
 
 /// Why a run ended.
@@ -27,6 +28,9 @@ pub enum StopReason {
     WallClockExceeded,
     /// The model's answer was cut off at its output-token limit.
     MaxTokens,
+    /// The conversation left too little of the model's context window for
+    /// more tool results, so the last turn answered from what was gathered.
+    ContextLimit,
     /// The provider stream ended without saying the turn was finished, so the
     /// answer may be cut short. What arrived is kept.
     Incomplete,
@@ -52,6 +56,7 @@ impl StopReason {
             Self::RepeatedToolCalls => Some("the run stopped repeating the same tool call"),
             Self::WallClockExceeded => Some("the run reached its time limit"),
             Self::MaxTokens => Some("the answer was cut off at the model's output limit"),
+            Self::ContextLimit => Some("the run filled the model's context window"),
             Self::Incomplete => Some("the model stream ended early; the answer may be incomplete"),
             Self::Cancelled => Some("the run was cancelled"),
             Self::Error => Some("the run failed"),
@@ -109,6 +114,10 @@ pub enum AgentEvent {
         tool_call_id: String,
         name: String,
     },
+    /// One model turn's output budget and how the turn ended, just before its
+    /// [`TurnCompleted`](AgentEvent::TurnCompleted). Emitted only when the run
+    /// has an active [`GenerationBudget`](crate::generation::GenerationBudget).
+    GenerationReport { report: Box<GenerationReport> },
     /// One model turn completed, with its token accounting when known.
     TurnCompleted { usage: Option<Usage> },
     /// The wall-clock budget ran out while tool results the model has not read

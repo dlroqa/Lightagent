@@ -15,6 +15,7 @@ mod banner;
 mod chat;
 mod coordinator;
 mod extensions;
+mod generation;
 mod identity_admin;
 mod import;
 mod jev;
@@ -1560,6 +1561,14 @@ fn get_key(config: &Config, key: &str) -> Option<String> {
         "runtime.kv_type" => config.runtime.kv_type.clone(),
         "runtime.load_mode" => config.runtime.load_mode.clone(),
         "runtime.ubatch" => config.runtime.ubatch.map(|v| v.to_string()),
+        "generation.max_output_tokens" => {
+            config.generation.max_output_tokens.map(|v| v.to_string())
+        }
+        "generation.reserve_answer_tokens" => {
+            config.generation.reserve_answer_tokens.map(|v| v.to_string())
+        }
+        "generation.context_window" => config.generation.context_window.map(|v| v.to_string()),
+        "generation.reasoning_effort" => config.generation.reasoning_effort.clone(),
         _ => None,
     }
 }
@@ -1780,6 +1789,16 @@ fn set_key(config: &mut Config, key: &str, value: &str) -> Result<(), String> {
         "runtime.ubatch" => config.runtime.ubatch = parse_opt_u32(value)?,
         "runtime.kv_type" => config.runtime.kv_type = parse_opt_string(value),
         "runtime.load_mode" => config.runtime.load_mode = parse_opt_string(value),
+        "generation.max_output_tokens" => {
+            config.generation.max_output_tokens = parse_opt_u32(value)?
+        }
+        "generation.reserve_answer_tokens" => {
+            config.generation.reserve_answer_tokens = parse_opt_u32(value)?
+        }
+        "generation.context_window" => config.generation.context_window = parse_opt_u32(value)?,
+        "generation.reasoning_effort" => {
+            config.generation.reasoning_effort = parse_opt_string(value)
+        }
         _ => return Err(format!("unknown or read-only config key '{key}'")),
     }
     Ok(())
@@ -2182,6 +2201,22 @@ mod tests {
         assert_eq!(get_key(&config, "runtime.n_ctx").as_deref(), Some("8192"));
         set_key(&mut config, "runtime.n_ctx", "").unwrap();
         assert!(get_key(&config, "runtime.n_ctx").is_none());
+        for key in [
+            "generation.max_output_tokens",
+            "generation.reserve_answer_tokens",
+            "generation.context_window",
+        ] {
+            assert!(get_key(&config, key).is_none());
+            set_key(&mut config, key, "2048").unwrap();
+            assert_eq!(get_key(&config, key).as_deref(), Some("2048"));
+            set_key(&mut config, key, "").unwrap();
+            assert!(get_key(&config, key).is_none());
+        }
+        set_key(&mut config, "generation.reasoning_effort", "low").unwrap();
+        assert_eq!(
+            get_key(&config, "generation.reasoning_effort").as_deref(),
+            Some("low")
+        );
         // A non-numeric context is refused.
         assert!(set_key(&mut config, "runtime.threads", "lots").is_err());
     }
