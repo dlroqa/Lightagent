@@ -645,3 +645,300 @@ async fn exported_requests_replay_exactly_and_unknown_requests_are_not_answered(
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// The owner-approved live run 40503493185 (2026-10-27, `jev-1.14.0`), kept
+/// for offline diagnosis. Development evidence only: replaying it reproduces
+/// that run's answers to that run's questions, never a new live result, and
+/// never how Jev would answer different questions.
+fn recorded_run() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evaluation/subagents/runs/2026-10-27-40503493185")
+}
+
+/// How each prompt ended in the recorded run, as its score job logged it.
+const RECORDED_FALLBACKS: [(&str, &str); 24] = [
+    ("sel-001", "simple_task"),
+    ("sel-002", "simple_task"),
+    ("sel-003", "low_confidence"),
+    ("sel-004", "simple_task"),
+    ("sel-005", "simple_task"),
+    ("sel-006", "simple_task"),
+    ("sel-007", "low_confidence"),
+    ("sel-008", "simple_task"),
+    ("sel-009", "simple_task"),
+    ("sel-010", "low_confidence"),
+    ("sel-011", "low_confidence"),
+    ("sel-012", "low_confidence"),
+    ("sel-013", "low_confidence"),
+    ("sel-014", "low_confidence"),
+    ("sel-015", "low_confidence"),
+    ("sel-016", "delegation_not_useful"),
+    ("sel-017", "low_confidence"),
+    ("sel-018", "low_confidence"),
+    ("sel-019", "low_confidence"),
+    ("sel-020", "low_confidence"),
+    ("sel-021", "delegation_not_useful"),
+    ("sel-022", "low_confidence"),
+    ("sel-023", "low_confidence"),
+    ("sel-024", "low_confidence"),
+];
+
+fn read_json(path: &std::path::Path) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(path).expect("a recorded file"))
+        .expect("recorded JSON")
+}
+
+/// The replay answers these exact requests only: a request that differs in
+/// any byte from the recorded one (another question, another wording) gets
+/// no recorded answer to stand in for Jev's.
+#[test]
+fn the_recorded_requests_are_what_this_code_exports() {
+    let dir = std::env::temp_dir().join(format!(
+        "lightagent-selection-export-{}",
+        lightagent_core::RunId::new().as_str()
+    ));
+    let ids = export_requests(&dir);
+    let recorded = recorded_run().join("requests");
+    for id in &ids {
+        let exported = std::fs::read_to_string(dir.join(format!("{id}.json"))).unwrap();
+        let kept = std::fs::read_to_string(recorded.join(format!("{id}.json"))).unwrap();
+        assert_eq!(exported, kept, "{id} is no longer the recorded request");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn the_recorded_run_replays_to_its_recorded_result() {
+    let dir = recorded_run();
+    let url = replay_server(&dir.join("requests"), &dir.join("responses")).await;
+    let set = set();
+    let run = run_set(&set, &selection_config(url, None), DEFAULT_REQUESTS).await;
+    let ended: Vec<(&str, &str)> = run
+        .scored
+        .iter()
+        .map(|s| (s.id.as_str(), s.fallback.as_deref().unwrap_or("plan")))
+        .collect();
+    assert_eq!(ended, RECORDED_FALLBACKS);
+    assert_eq!((run.requests, run.failures.len()), (24, 0));
+    let (totals, passed) = totals(&set, &run.scored);
+    assert!(!passed);
+    assert_eq!(totals["decision_accuracy"]["numerator"], 12);
+    assert_eq!(totals["missed_delegation"]["numerator"], 12);
+    let verdict = read_json(&dir.join("verdict.json"));
+    assert_eq!(verdict["status"], "BELOW_THRESHOLD");
+    assert_eq!(verdict["metrics"]["decision_accuracy"]["numerator"], 12);
+}
+
+/// Precision and recall of `predicted` against `expected`, per case.
+fn precision_recall(pairs: &[(bool, bool)]) -> Value {
+    let tp = pairs.iter().filter(|(e, p)| *e && *p).count();
+    let fp = pairs.iter().filter(|(e, p)| !*e && *p).count();
+    let fn_ = pairs.iter().filter(|(e, p)| *e && !*p).count();
+    json!({"precision": ratio(tp, tp + fp), "recall": ratio(tp, tp + fn_)})
+}
+
+/// The share of the best-matching labeled role set that `got` covers, and
+/// whether `got` equals one of the sets.
+fn role_coverage(labeled: &[Vec<String>], got: &BTreeSet<String>) -> (f64, bool) {
+    let mut best = 0.0f64;
+    let mut exact = false;
+    for set in labeled {
+        let want: BTreeSet<String> = set.iter().cloned().collect();
+        let covered = want.intersection(got).count() as f64 / want.len() as f64;
+        best = best.max(covered);
+        exact |= &want == got;
+    }
+    (best, exact)
+}
+
+fn planned_roles(record: &SpecialistSelection) -> BTreeSet<String> {
+    if record.outcome != "plan" {
+        return BTreeSet::new();
+    }
+    record.steps.iter().map(|step| step.role.clone()).collect()
+}
+
+fn ended(record: &SpecialistSelection) -> String {
+    match record.outcome.as_str() {
+        "plan" => "plan".to_owned(),
+        _ => record.fallback_reason.clone().unwrap_or_default(),
+    }
+}
+
+/// Codes only the run's own permissions, readiness or limits produce.
+const RUNTIME_CODES: [&str; 3] = ["delegation_unavailable", "no_ready_role", "insufficient_budget"];
+
+/// The recorded run traced prompt by prompt: what was sent, what Jev
+/// answered, which rule ended selection and with what threshold, and what
+/// the later rules would have done had the earlier ones passed. Every value
+/// comes from the recorded answers through this code's own parsing and
+/// rules; the "if passed" plans are counterfactual readings of the same
+/// answers, not predictions of Jev.
+#[tokio::test]
+async fn diagnose_the_recorded_run() {
+    let dir = recorded_run();
+    let url = replay_server(&dir.join("requests"), &dir.join("responses")).await;
+    let config = selection_config(url, None);
+    let selection_threshold = f64::from(config.subagents.selection_threshold_percent) / 100.0;
+    let set = set();
+    let mut rows = Vec::new();
+    let mut table = String::from(
+        "| Case | Expected | Category (conf) | Complexity | specialists | researcher / coder / reviewer / tester | Structure | Rule that ended it | Next rule if confidence passed | Plan from roles alone |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+    );
+    let (mut actual, mut raw, mut roles_only) = (Vec::new(), Vec::new(), Vec::new());
+    let mut coverage = BTreeMap::<&str, (f64, usize)>::new();
+    for case in &set.cases {
+        let request = read_json(&dir.join("requests").join(format!("{}.json", case.id)));
+        let response = read_json(&dir.join("responses").join(format!("{}.json", case.id)));
+        let report = crate::coordinator::classify::classify(
+            &config,
+            super::PERMITTED_PROFILE,
+            &case.prompt,
+            false,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("classification is on");
+        let Outcome::Classified(classification) = &report.outcome else {
+            panic!("{} did not replay: {:?}", case.id, report.outcome);
+        };
+        let answers = classification.selection.as_ref().expect("selection asked");
+        let record = plan(&config, &report);
+        // The same answers with the category-confidence rule passed, and
+        // then with the specialists rule passed too: the rules after them.
+        let mut past_confidence = report.clone();
+        let mut past_both = report.clone();
+        if let Outcome::Classified(c) = &mut past_confidence.outcome {
+            c.category_confidence = 1.0;
+        }
+        if let Outcome::Classified(c) = &mut past_both.outcome {
+            c.category_confidence = 1.0;
+            if let Some(s) = c.selection.as_mut() {
+                s.delegation = 1.0;
+            }
+        }
+        let next = plan(&config, &past_confidence);
+        let from_roles = plan(&config, &past_both);
+        let recommended: BTreeSet<String> = answers
+            .roles
+            .iter()
+            .filter(|(_, p)| **p >= selection_threshold)
+            .map(|(role, _)| role.as_str().to_owned())
+            .collect();
+        let runtime_affected = [&record, &next, &from_roles].iter().any(|r| {
+            RUNTIME_CODES.contains(&ended(r).as_str())
+                || r.restricted.iter().any(|x| {
+                    !matches!(x.reason.as_str(), "not_for_this_task" | "worker_cap" | "needs_coder")
+                })
+        });
+        let state = request["state"].as_str().unwrap_or_default();
+        let role_p = |role: WorkerRole| answers.roles.get(&role).copied().unwrap_or(f64::NAN);
+        let delegation_recommended = answers.delegation >= selection_threshold;
+        actual.push((case.delegate, record.outcome == "plan"));
+        raw.push((case.delegate, delegation_recommended));
+        roles_only.push((case.delegate, from_roles.outcome == "plan"));
+        if case.delegate {
+            for (name, got) in [
+                ("planned", planned_roles(&record)),
+                ("jev_roles_at_threshold", recommended.clone()),
+                ("plan_from_roles_alone", planned_roles(&from_roles)),
+            ] {
+                let (covered, exact) = role_coverage(&case.roles, &got);
+                let entry = coverage.entry(name).or_default();
+                entry.0 += covered;
+                entry.1 += usize::from(exact);
+            }
+        }
+        rows.push(json!({
+            "id": case.id,
+            "expected": {"delegate": case.delegate, "roles": case.roles},
+            "state_sent": state,
+            "state_equals_prompt": state == case.prompt,
+            "jev": {
+                "model": response["model"],
+                "category": classification.category.as_str(),
+                "category_confidence": classification.category_confidence,
+                "category_probabilities": response["answers"]["task"]["probabilities"],
+                "complexity_score": response["answers"]["complexity"]["score"],
+                "complexity": classification.complexity.as_str(),
+                "complexity_confidence": classification.complexity_confidence,
+                "planning": classification.planning_probability,
+                "retrieval": classification.retrieval_probability,
+                "tools": classification.tools_probability,
+                "specialists": answers.delegation,
+                "roles": answers.roles.iter().map(|(r, p)| (r.as_str().to_owned(), json!(p))).collect::<serde_json::Map<_, _>>(),
+                "structure": format!("{:?}", answers.structure).to_lowercase(),
+                "structure_confidence": answers.structure_confidence,
+            },
+            "rules": {
+                "category_confidence": {"value": classification.category_confidence, "threshold": classification.threshold, "passes": classification.accepted()},
+                "not_simple": classification.complexity.as_str() != "simple",
+                "not_conversation": classification.category.as_str() != "conversation",
+                "specialists": {"value": answers.delegation, "threshold": selection_threshold, "passes": delegation_recommended},
+                "roles_at_threshold": recommended,
+            },
+            "ended": ended(&record),
+            "next_rule_if_confidence_passed": ended(&next),
+            "plan_from_roles_alone": {"ended": ended(&from_roles), "roles": planned_roles(&from_roles), "restricted": from_roles.restricted.iter().map(|x| format!("{}:{}", x.role, x.reason)).collect::<Vec<_>>()},
+            "runtime_checks_affected_decision": runtime_affected,
+        }));
+        table.push_str(&format!(
+            "| {} | {} | {} ({:.2}) | {} ({}) | {:.2} | {:.2} / {:.2} / {:.2} / {:.2} | {:?} ({:.2}) | {} | {} | {} {:?} |\n",
+            case.id,
+            if case.delegate { format!("delegate {:?}", case.roles) } else { "lead".to_owned() },
+            classification.category.as_str(),
+            classification.category_confidence,
+            classification.complexity.as_str(),
+            response["answers"]["complexity"]["score"],
+            answers.delegation,
+            role_p(WorkerRole::Researcher),
+            role_p(WorkerRole::Coder),
+            role_p(WorkerRole::Reviewer),
+            role_p(WorkerRole::Tester),
+            answers.structure,
+            answers.structure_confidence,
+            ended(&record),
+            ended(&next),
+            ended(&from_roles),
+            planned_roles(&from_roles),
+        ));
+    }
+    let delegate_cases = set.cases.iter().filter(|case| case.delegate).count();
+    let coverage_json: serde_json::Map<String, Value> = coverage
+        .iter()
+        .map(|(name, (sum, exact))| {
+            (
+                (*name).to_owned(),
+                json!({
+                    "mean_expected_role_coverage": sum / delegate_cases as f64,
+                    "exact_role_set_match": ratio(*exact, delegate_cases),
+                }),
+            )
+        })
+        .collect();
+    let report = json!({
+        "schema": "lightagent.specialist_selection_diagnosis.v1",
+        "run": 40503493185u64,
+        "evidence": "development: recorded answers replayed through this code; not a live result",
+        "selection_threshold": selection_threshold,
+        "category_confidence_threshold": config.platform.jev.classification.default_threshold,
+        "delegation": {
+            "planned": precision_recall(&actual),
+            "jev_specialists_at_threshold": precision_recall(&raw),
+            "plan_from_roles_alone": precision_recall(&roles_only),
+        },
+        "should_delegate_role_coverage": coverage_json,
+        "cases": rows,
+    });
+    let summary = format!(
+        "### Selection diagnosis: recorded run 40503493185 (development evidence, replayed)\n\n{table}\n```json\n{}\n```\n",
+        serde_json::to_string_pretty(&json!({
+            "delegation": report["delegation"],
+            "should_delegate_role_coverage": report["should_delegate_role_coverage"],
+        }))
+        .unwrap_or_default()
+    );
+    super::write_report("selection-diagnosis", &report, &summary);
+    println!("{summary}");
+    assert_eq!(rows.len(), 24);
+}
