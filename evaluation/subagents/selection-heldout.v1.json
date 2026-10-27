@@ -1,0 +1,46 @@
+{
+  "schema": "lightagent.specialist_selection_eval.v1",
+  "split": "held_out",
+  "recorded": "2026-10-27",
+  "frozen": "Prompts, labels and scoring rules are fixed as of 2026-10-27, before any request with these prompts; a CI fingerprint (the_held_out_set_is_frozen) fails on any change. If a rule, threshold or question is ever tuned against this set's responses, the set becomes development data and a new held-out set is needed before any held-out claim.",
+  "purpose": "A held-out check of specialist selection after the rules were corrected against run 40503493185 on selection.v1.json. Not used to choose or tune any rule.",
+  "labeling": "Labels were written by hand on 2026-10-27, after the diagnosis of run 40503493185 and by the same author who corrected the rules, but before any Jev or model request with these prompts; they are not changed after a run. Prompts are synthetic, distinct from selection.v1.json, and hold no personal data or credentials. Labels follow the documented policy: simple tasks, chat and single searches stay with the lead; a task is labeled for delegation only when it has a distinct piece of specialist work (research from external sources, a code change, an independent review, or building or running tests). Several keep-with-lead prompts are moderate but single-piece, to measure unnecessary delegation. `roles` lists every role set that counts as a correct plan, compared as unordered sets.",
+  "scoring": {
+    "decision": "A case's decision is correct when a plan was built exactly when `delegate` is true.",
+    "unnecessary_delegation": "`delegate` is false and a plan was built.",
+    "missed_delegation": "`delegate` is true and the lead kept the task.",
+    "roles": "Among cases where both say delegate, the planned roles equal one of the `roles` sets.",
+    "failures": "Any failed, missing or malformed response makes the run INCOMPLETE (jev-selection-guard.py); it is never scored as a decision.",
+    "reported_not_gating": "Delegation precision and recall, exact role-set match over all 12 cases labeled for delegation, mean expected-role coverage, and which kind of rule kept each task with the lead. Reported with the result; the pass rule below alone decides PASSED."
+  },
+  "pass": {
+    "decision_accuracy_min": 0.8,
+    "unnecessary_delegation_max": 0.1
+  },
+  "cases": [
+    { "id": "sel-101", "delegate": true, "roles": [["coder", "tester"]], "prompt": "Fix the off-by-one error in the pagination helper in src/api/pages.rs and add tests covering the first and last page." },
+    { "id": "sel-102", "delegate": true, "roles": [["researcher", "coder"]], "prompt": "Look up how the current OpenTelemetry Rust SDK configures batch exporters, then update our tracing setup in src/telemetry.rs to match it." },
+    { "id": "sel-103", "delegate": true, "roles": [["reviewer"]], "prompt": "Review the open change to src/session/store.rs for race conditions and list each concern with its line." },
+    { "id": "sel-104", "delegate": true, "roles": [["researcher"]], "prompt": "Find and compare the published 2025 benchmarks of three popular Rust HTTP frameworks, citing the source of each number." },
+    { "id": "sel-105", "delegate": true, "roles": [["coder", "reviewer"]], "prompt": "Rewrite the config loader in src/config/load.rs so it validates every field, then have the rewrite reviewed for behavior changes." },
+    { "id": "sel-106", "delegate": true, "roles": [["tester"]], "prompt": "Run the full integration test suite against the staging build and report which tests fail, with their error messages." },
+    { "id": "sel-107", "delegate": true, "roles": [["coder", "tester"], ["coder"]], "prompt": "Add a --dry-run flag to the deploy command in src/cli/deploy.rs, with tests for both modes." },
+    { "id": "sel-108", "delegate": true, "roles": [["researcher", "coder"], ["coder", "tester"], ["researcher", "coder", "tester"]], "prompt": "Read the upstream migration guide for the next major version of our HTTP client library, apply the needed changes across our crates, and make sure CI still passes." },
+    { "id": "sel-109", "delegate": true, "roles": [["reviewer"]], "prompt": "Audit our GitHub Actions workflows for steps that could leak secrets, without modifying them, and report each risk you find." },
+    { "id": "sel-110", "delegate": true, "roles": [["coder", "tester"]], "prompt": "Port the date parsing utilities from tools/dates.py to Rust in src/dates.rs and write tests that compare both implementations on the same inputs." },
+    { "id": "sel-111", "delegate": true, "roles": [["researcher"]], "prompt": "Collect the end-of-life dates for every database version we run from the vendors' official pages, and flag any that end within a year." },
+    { "id": "sel-112", "delegate": true, "roles": [["coder", "reviewer"]], "prompt": "Replace the hand-written SQL in src/reports/ with the query builder, then get the change independently reviewed for injection risks." },
+    { "id": "sel-113", "delegate": false, "prompt": "What does the HTTP status code 418 mean?" },
+    { "id": "sel-114", "delegate": false, "prompt": "Translate 'good morning' into Spanish and French." },
+    { "id": "sel-115", "delegate": false, "prompt": "Fix the typo 'recieve' in the README." },
+    { "id": "sel-116", "delegate": false, "prompt": "Add a one-line doc comment to the parse_args function in src/main.rs." },
+    { "id": "sel-117", "delegate": false, "prompt": "Search for the current version of the tokio crate." },
+    { "id": "sel-118", "delegate": false, "prompt": "Explain what a mutex is to a beginner in one paragraph." },
+    { "id": "sel-119", "delegate": false, "prompt": "Calculate the monthly payment on a 200000 loan at 5 percent interest over 30 years." },
+    { "id": "sel-120", "delegate": false, "prompt": "Which is larger, 2 to the 30th power or 10 to the 9th power?" },
+    { "id": "sel-121", "delegate": false, "prompt": "Change the default port from 8080 to 9090 in config/server.toml." },
+    { "id": "sel-122", "delegate": false, "prompt": "Write a short commit message for a change that updates our dependencies." },
+    { "id": "sel-123", "delegate": false, "prompt": "Show me the contents of Cargo.toml." },
+    { "id": "sel-124", "delegate": false, "prompt": "Explain the trade-offs between optimistic and pessimistic locking for a small web app, in a few paragraphs." }
+  ]
+}

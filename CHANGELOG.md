@@ -54,6 +54,20 @@ All notable Lightagent changes are documented here.
   pull-request head, and reports a run as PASSED only when all 24 prompts
   were answered and every record agrees; anything less is INCOMPLETE and
   fails. Both checks live in `scripts/jev-selection-guard.py`, with tests.
+- Specialist selection no longer ends on the task category's confidence
+  (a role fits when the categories it serves hold the category threshold of
+  the distribution), and only a confident no on Jev's `specialists` answer
+  (at or below 30% by default) keeps the task with the lead. This changes
+  the decision policy: an answer above 30% may now lead to a plan when each
+  planned role is at least 70% and every other rule passes. The first live run (BELOW_THRESHOLD, every
+  task kept with the lead) is kept as baseline evidence, with a per-prompt
+  diagnosis and a held-out prompt set: `docs/subagents/selection-diagnosis.md`.
+  Selection stays `off` by default.
+- `jev-selection-pinned.yml` takes the prompt set as a `set` input from a fixed
+  list (`selection.v1`, `selection-heldout.v1`), each pinned to its frozen
+  file's git blob id. The export, manifest, harness report and verdict must
+  name the same set, and the verdict adds delegation precision and recall,
+  role-set match over every delegation case, and expected-role coverage.
 
 ## [0.5.0] - Unreleased (prepared 2026-10-22; set the date when tagging)
 
