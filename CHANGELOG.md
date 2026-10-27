@@ -30,6 +30,17 @@ All notable Lightagent changes are documented here.
   - **Defaults.** With nothing configured, no `max_tokens` or reasoning
     field is sent.
   - See `docs/architecture/generation-budget.md`.
+- Bounded continuation of an answer cut off at its length limit
+  (`generation.continuations`, default 1, at most 3).
+  - **What it does.** A tool-less turn asks the model to carry on.
+  - **When.** Only with a known window that still has room, no tool call in
+    flight, and a turn and time left in the run's budget.
+  - **Budgets.** Every continuation request carries the same per-request
+    ceiling and draws on the run's output pool.
+  - **Overlap.** Only a clear restated ending is trimmed (at least 32 bytes,
+    more than one word); legitimate repetition is kept.
+  - **Partial answers.** A cancelled continuation keeps the partial answer.
+    An answer still cut off after the last one ends `MaxTokens`.
 
 ### Changed
 
