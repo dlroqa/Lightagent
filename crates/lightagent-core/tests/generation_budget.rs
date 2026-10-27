@@ -6,12 +6,9 @@
 use async_trait::async_trait;
 use lightagent_core::provider::{FinishReason, ProviderEvent, ProviderMessage, Role, Usage};
 use lightagent_core::{
-    AgentEvent, AgentLoop, ApprovalNeed, ContextWindow, GenerationBudget, GenerationReport,
-    MockProvider, OutputPool, Reasoning, RunConfig, StopReason, ToolCall, ToolInvoker, ToolOutcome,
-    ToolSchema, WindowSource,
     AgentEvent, AgentLoop, AgentProvider, ApprovalNeed, ContextWindow, GenerationBudget,
-    GenerationReport, MockProvider, Reasoning, RunConfig, StopReason, ToolCall, ToolInvoker,
-    ToolOutcome, ToolSchema, WindowSource,
+    GenerationReport, MockProvider, OutputPool, Reasoning, RunConfig, StopReason, ToolCall,
+    ToolInvoker, ToolOutcome, ToolSchema, WindowSource,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -636,7 +633,10 @@ async fn continuations_stop_at_their_cap_and_keep_every_part() {
     assert_eq!(stop_reason(&events), Some(StopReason::MaxTokens));
     assert!(!StopReason::MaxTokens.is_complete());
     let report = reports(&events).pop().expect("a report");
-    assert_eq!((report.finish.as_str(), report.continuations), ("length", 2));
+    assert_eq!(
+        (report.finish.as_str(), report.continuations),
+        ("length", 2)
+    );
     // The parts are kept as one answer, so roles still alternate.
     let last = inspector.requests().pop().expect("a request");
     let assistants = last
@@ -796,7 +796,11 @@ async fn continuations_obey_the_per_request_ceiling_and_the_run_pool() {
     // pool bounds the run. After two turns 88 tokens remain, too few to
     // continue usefully, so the answer stays cut off.
     assert_eq!(requests.len(), 2);
-    assert!(requests.iter().all(|request| request.max_tokens == Some(256)));
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.max_tokens == Some(256))
+    );
     assert_eq!(pool.spent(), 512);
     assert_eq!(stop_reason(&events), Some(StopReason::MaxTokens));
     assert_eq!(content(&events), "chunk chunk ");
