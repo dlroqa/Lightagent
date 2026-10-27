@@ -61,7 +61,27 @@ Depth: a worker may start one only while one more generation fits under `subagen
    - `repo.commit` commits through the GitHub API to an allowlisted branch (`platform.github_actions.commit_refs`) as a fast-forward of exactly the base commit, with `force: false`.
 
    A stale base or a concurrent edit is refused, never overwritten.
+
+   A patch remembers the worker that proposed it. Immediately before writing, and for `repo.commit` again immediately before moving the branch, the run's authorization and that worker's assignment and ownership are checked. A worker withdrawn after proposing can no longer have its change used. A patch id names one change for the run's lifetime, and the approval prompt also shows a content identifier.
 4. The commit is built and verified only by dispatching an allowlisted workflow at its exact SHA (the tester, or the lead).
+
+## Choosing specialists automatically
+
+With `subagents.selection` set to `shadow` or `active`, the task classification request also asks Jev typed questions:
+- whether splitting the task helps;
+- which roles;
+- whether the parts are independent or sequential.
+
+Lightagent then builds a plan with fixed rules over the profile's own readiness, policy and limits. Simple tasks and single searches stay with the lead. A plan has at most `selection_max_workers` roles (never all four), and a refused role is reported and never replaced. Testers and reviewers follow the coder whose change they check. In `active` mode, for the profiles in `selection_profiles`, the lead gets the plan and `agent.delegate` enforces its order. See [specialist-selection.md](specialist-selection.md).
+
+## Model endpoints and tool names
+
+Tool names contain dots (`web.search`). OpenAI's API, and endpoints that copy its validation, accept only `^[a-zA-Z0-9_-]{1,64}$`. Set `inference.tool_names = "portable"` for such an endpoint:
+- names are mapped reversibly and without collisions for each request: declarations, history, tool results and streamed calls;
+- an unknown returned name is refused;
+- approvals, policy, audit and workers keep seeing the internal names.
+
+The default, `native`, sends names unchanged.
 
 ## What the lead and the UI see
 

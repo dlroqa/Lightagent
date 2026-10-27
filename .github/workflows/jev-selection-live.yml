@@ -1,0 +1,118 @@
+name: jev specialist selection (live)
+
+# Jev's specialist selection on the recorded, labeled prompts in
+# evaluation/subagents/selection.v1.json: one classification request per
+# prompt, through the real plan rules, scored against labels fixed before
+# any run. It measures selection only, not task completion or specialist
+# competence (docs/subagents/live-evaluation-proposal.md, stage 1).
+#
+# * Manual dispatch only, from master only, in the protected `jev-live`
+#   environment (the same credential and reviewers as the Jev live
+#   contract). Pull requests never run it and never read the key.
+# * At most max_requests requests (hard ceiling 48), one at a time, with the
+#   production adapter's timeout and no retries. A credential error or three
+#   failures in a row stop the run.
+# * Without the key the run reports BLOCKED, never a pass. Reports hold case
+#   ids, fixed codes and numbers; the key is never printed or uploaded.
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_requests:
+        description: Maximum Jev requests (1-48; the set has 24 prompts)
+        required: true
+        default: '24'
+      model:
+        description: Jev model to request (blank for the configured default)
+        required: false
+        default: ''
+
+concurrency:
+  group: jev-live
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  selection:
+    name: Jev specialist selection (live)
+    if: github.repository == 'dlroqa/Lightagent'
+    runs-on: ubuntu-24.04
+    environment: jev-live
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check the credential and inputs
+        id: gate
+        env:
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          MAX_REQUESTS: ${{ inputs.max_requests }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/master" ]; then
+            echo "The live selection evaluation runs only from master, not $GITHUB_REF."
+            exit 1
+          fi
+          if [ -z "${TYPESAFE_API_KEY:-}" ]; then
+            echo "status=blocked" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Jev specialist selection: BLOCKED"
+              echo
+              echo "TYPESAFE_API_KEY is not configured in the jev-live environment, so no request was made."
+              echo "This is not a pass."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          case "$MAX_REQUESTS" in
+            ''|*[!0-9]*) echo "max_requests must be a whole number"; exit 1 ;;
+          esac
+          if [ "$MAX_REQUESTS" -lt 1 ] || [ "$MAX_REQUESTS" -gt 48 ]; then
+            echo "max_requests must be between 1 and 48"; exit 1
+          fi
+          echo "status=ready" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        if: steps.gate.outputs.status == 'ready'
+        with:
+          persist-credentials: false
+      - if: steps.gate.outputs.status == 'ready'
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        if: steps.gate.outputs.status == 'ready'
+        with:
+          key: jev-live
+      - name: Build the test binary without the credential
+        if: steps.gate.outputs.status == 'ready'
+        run: cargo test -p lightagent --lib --no-run
+      - name: Run the selection evaluation
+        if: steps.gate.outputs.status == 'ready'
+        timeout-minutes: 15
+        env:
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          LIGHTAGENT_SELECTION_LIVE_MAX_REQUESTS: ${{ inputs.max_requests }}
+          LIGHTAGENT_JEV_LIVE_MODEL: ${{ inputs.model }}
+          LIGHTAGENT_JEV_EVAL_OUT: ${{ runner.temp }}/jev-selection
+          LIGHTAGENT_JEV_LIVE_COMMIT: ${{ github.sha }}
+        run: >-
+          cargo test -p lightagent --lib live_specialist_selection_evaluation
+          -- --ignored --test-threads=1 --nocapture
+      - name: Summarize
+        if: always() && steps.gate.outputs.status == 'ready'
+        env:
+          LIGHTAGENT_JEV_EVAL_OUT: ${{ runner.temp }}/jev-selection
+        run: |
+          for summary in "$LIGHTAGENT_JEV_EVAL_OUT"/*.md; do
+            [ -f "$summary" ] && { cat "$summary"; echo; } >> "$GITHUB_STEP_SUMMARY"
+          done
+          exit 0
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.gate.outputs.status == 'ready'
+        with:
+          name: jev-selection-reports
+          path: ${{ runner.temp }}/jev-selection/
+          if-no-files-found: warn
