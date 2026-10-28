@@ -51,7 +51,9 @@ jobs:
         run: |
           bin=$(head -1 "$RUNNER_TEMP/bin")
           out="$RUNNER_TEMP/out"; mkdir -p "$out"
-          run() { perl -e 'alarm shift; exec @ARGV' 120 "$bin" "$@"; }
+          # Always at least two words for exec, or perl hands the command to
+          # sh -c, which drops the backslashes of a Windows path.
+          run() { perl -e 'alarm shift; exec @ARGV' 120 "$bin" --color never "$@"; }
           reg=0 suite=0
           for round in $(seq 1 40); do
             run concurrent_mcp_configs_never_share_a_token_directory \
