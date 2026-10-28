@@ -1225,6 +1225,15 @@ async fn create_run(
         {
             return no_session();
         }
+        // Resolved before the session lock is taken: it may ask the provider.
+        let history_limit = state
+            .manager
+            .history_limit(
+                Some(&session_profile),
+                body.model.as_deref(),
+                state.context_limit,
+            )
+            .await;
         let mut busy = state.busy_sessions.lock().await;
         if !busy.insert(id.clone()) {
             return (
@@ -1248,7 +1257,7 @@ async fn create_run(
             busy.remove(&id);
             return bad_request("session profile does not match");
         }
-        history = model_history(&session, &body.message, state.context_limit);
+        history = model_history(&session, &body.message, history_limit);
         profile = Some(session.profile.clone());
         if session.messages.is_empty() && session.title == "agent session" {
             session.title = session_title(&body.message);

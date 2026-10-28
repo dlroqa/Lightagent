@@ -396,6 +396,18 @@ pub trait RunFactory: Send + Sync + 'static {
         Err("provider capability discovery is not available in this embedding".to_owned())
     }
 
+    /// The window to pack a session's history against before a run of
+    /// `profile` (the active one when `None`) with `model`, resolved as the
+    /// run itself resolves its budget. `None`, the default, leaves the
+    /// caller's configured limit in place.
+    async fn history_window(
+        &self,
+        _profile: Option<&str>,
+        _model: Option<&str>,
+    ) -> Option<lightagent_core::HistoryWindow> {
+        None
+    }
+
     /// The privacy-safe Jev status for the active profile: what is configured,
     /// enabled and verified, and that profile's latest classification record.
     async fn jev_status(&self) -> Result<serde_json::Value, String> {
@@ -812,6 +824,21 @@ impl RunManager {
     /// Discover the selected provider's current model catalog and capabilities.
     pub async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
         self.factory.provider_capabilities().await
+    }
+
+    /// The token limit to pack a session's history with before a run of
+    /// `profile` and `model`: the factory's resolved window when it has one,
+    /// otherwise `configured`. The API and ACP both pack through this.
+    pub async fn history_limit(
+        &self,
+        profile: Option<&str>,
+        model: Option<&str>,
+        configured: usize,
+    ) -> usize {
+        self.factory
+            .history_window(profile, model)
+            .await
+            .map_or(configured, |window| window.tokens as usize)
     }
 
     /// The active profile's Jev status.

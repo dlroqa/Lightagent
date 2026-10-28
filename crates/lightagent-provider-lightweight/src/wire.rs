@@ -110,6 +110,46 @@ pub struct ModelsResponse {
 pub struct ModelEntry {
     #[serde(default)]
     pub id: String,
+    /// Lightweight's effective window for this row. Read only alongside
+    /// `hermes`, Lightweight's own namespace, so another server's field of
+    /// the same name is never taken for it.
+    #[serde(default)]
+    pub n_ctx: Option<u32>,
+    #[serde(default)]
+    pub hermes: Option<serde_json::Value>,
+}
+
+/// The protocol name of Lightweight's versioned `/v1/capabilities` contract.
+pub const CAPABILITIES_PROTOCOL: &str = "lightweight-public-inference";
+
+/// The subset of `GET /v1/capabilities` the adapter reads: which contract
+/// answered, and the resident model's id and loaded window.
+#[derive(Debug, Default, Deserialize)]
+pub struct CapabilitiesResponse {
+    #[serde(default)]
+    pub protocol: CapabilitiesProtocol,
+    #[serde(default)]
+    pub state: CapabilitiesState,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct CapabilitiesProtocol {
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct CapabilitiesState {
+    #[serde(default)]
+    pub model: Option<CapabilitiesModel>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct CapabilitiesModel {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub context_length: Option<u32>,
 }
 
 #[cfg(test)]

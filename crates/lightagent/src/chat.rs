@@ -856,6 +856,9 @@ struct ChatRuntime {
     workflow_registry: ToolRegistry,
     /// The session's specialist plan slot, replaced at every turn.
     plan: lightagent_tools::plan::PlanSlot,
+    /// The lead's output and context budget for its workers, replaced at
+    /// every turn.
+    generation: lightagent_tools::GenerationSlot,
 }
 
 /// Build a fresh runtime from the installed extension set. The same path is
@@ -941,6 +944,7 @@ async fn build_chat_runtime(
     let tools = registry.names();
     let workflow_registry = registry.clone();
     let plan = delegation.plan.clone();
+    let generation = delegation.generation.clone();
     let permission_policy = PolicyEngine::new(profile.approval_policy.into());
     let tool_permissions = tools
         .iter()
@@ -1018,6 +1022,7 @@ async fn build_chat_runtime(
         jev_budget,
         workflow_registry,
         plan,
+        generation,
     }
 }
 
@@ -1114,6 +1119,7 @@ pub async fn run(
     let mut routing_notice_shown = false;
     let mut workflow_registry = runtime.workflow_registry;
     let mut plan_slot = runtime.plan;
+    let mut generation_slot = runtime.generation;
     if session.approvals_unrestricted {
         agent.invoker().allow_without_restrictions();
     }
@@ -1138,7 +1144,12 @@ pub async fn run(
     }
 
     let stdin = std::io::stdin();
-    let mut context_limit = configured_context_limit(config.runtime.n_ctx, &active_model);
+    // The window the status line shows: one the provider reported or the
+    // operator set, never a guess from the model's name.
+    let mut context_limit = crate::generation::resolve(&config, &provider)
+        .await
+        .history
+        .known();
     let mut last_turn = TurnStatus::default();
     let mut prompt = TerminalPrompt::new();
     let mut initialization_shown = false;
@@ -1322,6 +1333,7 @@ pub async fn run(
                 jev_budget = runtime.jev_budget;
                 workflow_registry = runtime.workflow_registry;
                 plan_slot = runtime.plan;
+                generation_slot = runtime.generation;
                 config = new_config;
                 profile = new_profile;
                 if let Err(error) = operation {
@@ -1469,14 +1481,18 @@ pub async fn run(
                     };
                     provider = candidate;
                     active_model = resolved_model;
-                    context_limit = configured_context_limit(config.runtime.n_ctx, &active_model);
                     current_route_model = candidate_model.clone();
                     agent.set_inference_route(provider.clone(), candidate_model);
                     break;
                 }
             }
         }
-        let mut history = model_history(&session, &line, context_limit);
+        // Resolved for each turn: the resident model, the route or the window
+        // it is loaded with may have changed since the last one. History,
+        // the run and its workers all use this one resolution.
+        let resolved = crate::generation::resolve(&config, &provider).await;
+        context_limit = resolved.history.known();
+        let mut history = model_history(&session, &line, resolved.history.tokens);
         match crate::memory::relevant_catalog(&profile_dir, &config, &line).await {
             Ok(catalog) if !catalog.is_empty() => {
                 history.insert(0, ProviderMessage::system(catalog));
@@ -1504,6 +1520,8 @@ pub async fn run(
         if initialization_notice_due(&mut initialization_shown) {
             print_initializing();
         }
+        generation_slot.set(Some(resolved.lead.clone()));
+        agent.set_generation(resolved.lead.budget);
         let mut active = Duration::ZERO;
         let mut renderer = ModelRenderer::new(config.tui.show_reasoning);
         let (sink, mut stream) = tokio::sync::mpsc::unbounded_channel();
@@ -1661,21 +1679,6 @@ impl TurnStatus {
             elapsed,
         }
     }
-}
-
-fn configured_context_limit(configured: Option<u32>, model: &str) -> Option<u32> {
-    configured.or_else(|| {
-        let suffix = model.rsplit_once('@')?.1.trim().to_ascii_lowercase();
-        let (number, multiplier) = if let Some(number) = suffix.strip_suffix('k') {
-            (number, 1_000_u32)
-        } else {
-            (suffix.as_str(), 1_u32)
-        };
-        number
-            .parse::<u32>()
-            .ok()
-            .and_then(|value| value.checked_mul(multiplier))
-    })
 }
 
 fn status_line(
@@ -2470,12 +2473,8 @@ fn thinking_indicator(frame: usize, colour: bool) -> String {
 /// Convert the durable transcript into the model context for the next turn.
 /// Stored run/tool metadata remains audit history; only conversational roles
 /// belong in a fresh provider request.
-fn model_history(
-    session: &Session,
-    current: &str,
-    context_limit: Option<u32>,
-) -> Vec<ProviderMessage> {
-    build_model_history(session, current, context_limit.unwrap_or(4_096) as usize)
+fn model_history(session: &Session, current: &str, context_limit: u32) -> Vec<ProviderMessage> {
+    build_model_history(session, current, context_limit as usize)
 }
 
 /// Fold one completed run's events into the session: the assistant's answer as a
@@ -3085,13 +3084,13 @@ mod model_tests {
             tools: Vec::new(),
         });
         assert_eq!(
-            model_history(&session, "second", Some(4_096)),
+            model_history(&session, "second", 4_096),
             vec![
                 ProviderMessage::user("first"),
                 ProviderMessage::assistant("answer")
             ]
         );
-        assert!(model_history(&Session::new("default", "new"), "hi", Some(4_096)).is_empty());
+        assert!(model_history(&Session::new("default", "new"), "hi", 4_096).is_empty());
     }
 
     #[test]
@@ -3105,20 +3104,6 @@ mod model_tests {
         assert_eq!(configured_model("", &config), "minicpm5-1b-q4_k_m@16k");
         assert_eq!(configured_model("pinned-model", &config), "pinned-model");
         assert_eq!(configured_model("default", &Config::default()), "default");
-    }
-
-    #[test]
-    fn the_model_suffix_supplies_the_context_limit() {
-        assert_eq!(
-            configured_context_limit(None, "minicpm5-1b-q4_k_m@16k"),
-            Some(16_000)
-        );
-        assert_eq!(configured_context_limit(None, "model@32768"), Some(32_768));
-        assert_eq!(configured_context_limit(None, "model"), None);
-        assert_eq!(
-            configured_context_limit(Some(8_192), "model@16k"),
-            Some(8_192)
-        );
     }
 
     #[test]
@@ -3765,7 +3750,7 @@ for line in sys.stdin:
             if mode == Off {
                 assert!(preflight.classification.is_none(), "off evaluates nothing");
             }
-            let mut history = model_history(&session, line, Some(4_096));
+            let mut history = model_history(&session, line, 4_096);
             history.insert(0, ProviderMessage::system("memory catalog"));
             with_turn_guidance(&mut history, turn_guidance);
             let systems: Vec<&str> = history
@@ -3793,7 +3778,7 @@ for line in sys.stdin:
             // is rebuilt from the session alone.
             assert_eq!(session.messages.len(), stored_before);
             assert!(
-                model_history(&session, "next", Some(4_096))
+                model_history(&session, "next", 4_096)
                     .iter()
                     .all(|message| !message.content.contains("Task assessment"))
             );

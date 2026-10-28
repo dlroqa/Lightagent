@@ -517,3 +517,76 @@ async fn named_profile_sessions_are_stored_and_loaded_in_their_own_profile() {
     .await
     .unwrap();
 }
+
+/// As [`HistoryFactory`], reporting `window` as the resolved history window.
+struct WindowedFactory {
+    window: Option<u32>,
+    inner: HistoryFactory,
+}
+
+#[async_trait]
+impl RunFactory for WindowedFactory {
+    async fn run(
+        &self,
+        request: StartRun,
+        sink: AgentEventSink,
+        cancel: CancellationToken,
+        decisions: UnboundedReceiver<ApprovalDecision>,
+    ) -> RunStatus {
+        self.inner.run(request, sink, cancel, decisions).await
+    }
+
+    async fn history_window(
+        &self,
+        _profile: Option<&str>,
+        _model: Option<&str>,
+    ) -> Option<lightagent_core::HistoryWindow> {
+        self.window.map(|tokens| lightagent_core::HistoryWindow {
+            tokens,
+            source: lightagent_core::HistorySource::Provider,
+        })
+    }
+}
+
+/// The history ACP packs for a follow-up to a long first prompt, when the
+/// factory resolves `window` and the server's own limit is the default 4096.
+async fn acp_follow_up_history(window: Option<u32>) -> Vec<ProviderMessage> {
+    let directory =
+        std::env::temp_dir().join(format!("lightagent-acp-{}", SessionId::generate().as_str()));
+    let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let manager = RunManager::new(Arc::new(WindowedFactory {
+        window,
+        inner: HistoryFactory {
+            requests: Arc::clone(&requests),
+        },
+    }));
+    let (mut writer, mut reader) =
+        open_history_client(manager, SessionStore::new(&directory)).await;
+    send(
+        &mut writer,
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "session/new",
+        "params": { "cwd": "/tmp/project", "mcpServers": [] } }),
+    )
+    .await;
+    let session = recv(&mut reader).await["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    prompt_and_finish(&mut writer, &mut reader, 3, &session, &"L".repeat(2_000)).await;
+    prompt_and_finish(&mut writer, &mut reader, 4, &session, "next").await;
+    let _ = std::fs::remove_dir_all(&directory);
+    requests.lock().await[1].history.clone()
+}
+
+#[tokio::test]
+async fn acp_packs_history_against_the_same_resolved_window_as_the_api() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let long = "L".repeat(2_000);
+        let carries = |history: &[ProviderMessage]| history.iter().any(|m| m.content == long);
+        assert!(carries(&acp_follow_up_history(None).await));
+        assert!(carries(&acp_follow_up_history(Some(131_072)).await));
+        assert!(!carries(&acp_follow_up_history(Some(200)).await));
+    })
+    .await
+    .unwrap();
+}
