@@ -78,22 +78,24 @@ pub(crate) fn plan(
         .iter()
         .filter_map(|step| WorkerRole::parse(&step.role))
         .collect();
-    let complex = match (mode, report.map(|report| &report.outcome)) {
+    // Jev's only demand signal: the task's complexity, held to the
+    // classification's own threshold. Only `complex` changes a class.
+    let complexity = match (mode, report.map(|report| &report.outcome)) {
         (AdaptiveAllocation::Jev, Some(Outcome::Classified(classification))) => {
             if classification.complexity_confidence >= f64::from(classification.threshold) {
-                plan.source = "jev_complexity".to_owned();
-                classification.complexity == Complexity::Complex
+                Some(classification.complexity)
             } else {
                 plan.fallback_reason = Some("complexity_low_confidence".to_owned());
-                false
+                None
             }
         }
         (AdaptiveAllocation::Jev, _) => {
             plan.fallback_reason = Some("classification_unavailable".to_owned());
-            false
+            None
         }
-        _ => false,
+        _ => None,
     };
+    let complex = complexity == Some(Complexity::Complex);
     plan.shares = roles
         .iter()
         .map(|role| {
@@ -107,6 +109,30 @@ pub(crate) fn plan(
             }
         })
         .collect();
+    // Named for what actually happened: a confident classification that
+    // changed no relative weight leaves the fixed classes, and says why. A
+    // coder is already heavy, so only a planned researcher can be raised,
+    // and a sole share takes the whole worker part whatever its class.
+    if complexity.is_some() {
+        let changed = plan.shares.len() > 1
+            && plan
+                .shares
+                .iter()
+                .zip(&roles)
+                .any(|(share, role)| share.demand != role_demand(*role));
+        if changed {
+            plan.source = "jev_complexity".to_owned();
+        } else {
+            plan.fallback_reason = Some(
+                if complex {
+                    "complexity_changes_no_share"
+                } else {
+                    "complexity_not_complex"
+                }
+                .to_owned(),
+            );
+        }
+    }
     let has = |role: WorkerRole| roles.contains(&role);
     plan.follow_up |= config.subagents.max_repair_rounds > 0
         && has(WorkerRole::Coder)
@@ -405,5 +431,75 @@ mod tests {
         );
         let again = install(&on, None, Some(&chosen), &budget).unwrap();
         assert!(again.contains("already installed"), "{again}");
+    }
+
+    /// The source, the fallback reason and the worker shares of 32,000
+    /// (lead 8,000 and follow-up 3,200 in every case) for `roles`.
+    fn outcome(
+        mode: AdaptiveAllocation,
+        complexity: Option<Complexity>,
+        roles: &[&str],
+    ) -> (String, Option<String>, Vec<u32>) {
+        let classified = complexity.map(|complexity| report(complexity, 0.95));
+        let chosen = selection(roles, true);
+        let budget = lead(Some(32_000));
+        let plan = plan(
+            &config(mode, 0),
+            classified.as_ref(),
+            Some(&chosen),
+            &budget,
+        )
+        .unwrap();
+        let allocation = lightagent_core::allocation::allocate(32_000, &plan);
+        assert_eq!((allocation.lead, allocation.follow_up), (8_000, 3_200));
+        (plan.source, plan.fallback_reason, allocation.shares)
+    }
+
+    #[test]
+    fn jev_differs_from_plan_only_for_a_complex_task_that_plans_a_researcher() {
+        use AdaptiveAllocation::{Jev, Plan};
+        let research = ["researcher", "reviewer"];
+        let as_plan = outcome(Plan, Some(Complexity::Complex), &research);
+        assert_eq!(
+            as_plan,
+            ("role_defaults".into(), None, vec![10_400, 10_400])
+        );
+        // Complex: the researcher is raised to heavy, 3 : 2.
+        assert_eq!(
+            outcome(Jev, Some(Complexity::Complex), &research),
+            ("jev_complexity".into(), None, vec![12_480, 8_320])
+        );
+        // Simple or moderate: identical to `plan`, and said so. (Selection
+        // keeps a simple task with the lead, so it never has a plan.)
+        for level in [Complexity::Simple, Complexity::Moderate] {
+            assert_eq!(
+                outcome(Jev, Some(level), &research),
+                (
+                    "role_defaults".into(),
+                    Some("complexity_not_complex".into()),
+                    vec![10_400, 10_400]
+                )
+            );
+        }
+        // No researcher planned: complex changes nothing (a coder is heavy
+        // already), and says so; nor for a sole share.
+        let code = ["coder", "tester"];
+        assert_eq!(
+            outcome(Jev, Some(Complexity::Complex), &code),
+            (
+                "role_defaults".into(),
+                Some("complexity_changes_no_share".into()),
+                vec![15_600, 5_200]
+            )
+        );
+        assert_eq!(outcome(Plan, None, &code).2, vec![15_600, 5_200]);
+        assert_eq!(
+            outcome(Jev, Some(Complexity::Complex), &["researcher"]),
+            (
+                "role_defaults".into(),
+                Some("complexity_changes_no_share".into()),
+                vec![20_800]
+            )
+        );
     }
 }
