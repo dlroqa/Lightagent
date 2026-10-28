@@ -4026,16 +4026,44 @@ for line in sys.stdin:
     const MCP_TOKEN: &str = "synthetic-mcp-bearer-not-a-secret";
     const MCP_HEADER: &str = "synthetic-mcp-header-not-a-secret";
 
+    /// Distinguishes the directories `mcp_config` hands out in one process.
+    static MCP_DIRS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// Create a directory in `parent` under the first name from `name` that
+    /// nobody holds. `create_dir` is exclusive, so two tests are never handed
+    /// one directory, however close together they ask: a name already taken
+    /// (by another test, or left over from an earlier process with the same
+    /// id) is skipped, never shared.
+    ///
+    /// This replaces naming the directory after the process id and the clock
+    /// and creating it with `create_dir_all`, which succeeds on a directory
+    /// that already exists. Two tests reading one clock value (macOS reports
+    /// whole microseconds) shared a directory, and the first to finish
+    /// deleted the other's token file before it was read.
+    fn exclusive_dir(parent: &Path, mut name: impl FnMut() -> String) -> PathBuf {
+        for _ in 0..1_000 {
+            let path = parent.join(name());
+            match std::fs::create_dir(&path) {
+                Ok(()) => return path,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => panic!("cannot create {}: {error}", path.display()),
+            }
+        }
+        panic!("no free directory name in {}", parent.display());
+    }
+
+    /// An HTTP MCP server entry whose bearer is a token file in a directory
+    /// of this call's own. The caller removes that directory, and only it.
     fn mcp_config(url: &str, untrusted: &[&str], credentials: &[&str]) -> (Config, PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "lightagent-mcp-grant-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let pid = std::process::id();
+        let dir = exclusive_dir(&std::env::temp_dir(), || {
+            let n = MCP_DIRS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            format!("lightagent-mcp-grant-{pid}-{n}")
+        });
+        (mcp_config_at(&dir, url, untrusted, credentials), dir)
+    }
+
+    fn mcp_config_at(dir: &Path, url: &str, untrusted: &[&str], credentials: &[&str]) -> Config {
         let token = dir.join("token");
         std::fs::write(&token, MCP_TOKEN).unwrap();
         let mut config = Config::default();
@@ -4049,7 +4077,7 @@ for line in sys.stdin:
             untrusted_profiles: untrusted.iter().map(|p| (*p).to_owned()).collect(),
             credential_profiles: credentials.iter().map(|p| (*p).to_owned()).collect(),
         });
-        (config, dir)
+        config
     }
 
     fn sent_credentials(requests: &[BTreeMap<String, String>]) -> (bool, bool) {
@@ -4122,6 +4150,87 @@ for line in sys.stdin:
         );
         assert!(log.lock().unwrap().is_empty());
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn concurrent_mcp_configs_never_share_a_token_directory() {
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        let threads: Vec<_> = (0..16)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    (0..25)
+                        .map(|_| mcp_config("http://127.0.0.1:9/mcp", &[], &[]).1)
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let dirs: Vec<PathBuf> = threads
+            .into_iter()
+            .flat_map(|thread| thread.join().unwrap())
+            .collect();
+        let unique: BTreeSet<&PathBuf> = dirs.iter().collect();
+        let total = dirs.len();
+        let (removed, kept): (Vec<_>, Vec<_>) =
+            dirs.iter().enumerate().partition(|(i, _)| i % 2 == 0);
+        for (_, dir) in &removed {
+            std::fs::remove_dir_all(dir).ok();
+        }
+        // Another test's cleanup leaves every remaining token in place.
+        let readable = kept
+            .iter()
+            .filter(|(_, dir)| std::fs::read_to_string(dir.join("token")).is_ok())
+            .count();
+        let kept_count = kept.len();
+        for (_, dir) in &kept {
+            std::fs::remove_dir_all(dir).ok();
+        }
+        assert_eq!(unique.len(), total, "two calls were handed one directory");
+        assert_eq!(readable, kept_count, "a token was removed by another call");
+    }
+
+    /// The replaced helper, with the clock held still: two tests are handed
+    /// one directory, the other's cleanup deletes the token file, and the
+    /// server is reached with the custom header but no bearer, the
+    /// `(false, true)` of the failed macOS run. Under the same collision,
+    /// `exclusive_dir` gives the second test a directory of its own.
+    #[tokio::test]
+    async fn a_shared_token_directory_dropped_the_bearer_under_the_replaced_helper() {
+        lightagent_provider_lightweight::ensure_provider();
+        let none = ExtensionStore::load(&[]);
+        let pid = std::process::id();
+        let parent = exclusive_dir(&std::env::temp_dir(), || {
+            let n = MCP_DIRS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            format!("lightagent-mcp-clock-{pid}-{n}")
+        });
+        let replaced = |nanos: u128| {
+            let dir = parent.join(format!("lightagent-mcp-grant-{pid}-{nanos}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        };
+        let (url, log) = mcp_http_stub(None).await;
+        let mine = replaced(1_000);
+        let config = mcp_config_at(&mine, &url, &[], &[]);
+        let other = replaced(1_000);
+        assert_eq!(mine, other, "both tests were handed one directory");
+        std::fs::remove_dir_all(&other).unwrap();
+        let tools = mcp_tools(&config, &none, RemoteAccess::Operator).await;
+        assert_eq!(tools.len(), 3);
+        assert_eq!(sent_credentials(&log.lock().unwrap()), (false, true));
+
+        let tick = || format!("lightagent-mcp-grant-{pid}-1000");
+        let (url, log) = mcp_http_stub(None).await;
+        let mine = exclusive_dir(&parent, tick);
+        let config = mcp_config_at(&mine, &url, &[], &[]);
+        let mut names = [tick(), format!("{}-b", tick())].into_iter();
+        let other = exclusive_dir(&parent, || names.next().unwrap());
+        assert_ne!(mine, other);
+        std::fs::remove_dir_all(&other).unwrap();
+        let tools = mcp_tools(&config, &none, RemoteAccess::Operator).await;
+        assert_eq!(tools.len(), 3);
+        assert_eq!(sent_credentials(&log.lock().unwrap()), (true, true));
+        std::fs::remove_dir_all(&parent).ok();
     }
 
     #[tokio::test]
