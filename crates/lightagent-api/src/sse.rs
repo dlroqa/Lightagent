@@ -129,6 +129,8 @@ pub fn data(event: &AgentEvent) -> serde_json::Value {
             "output_spent": r.output_spent,
             "output_estimated": r.output_estimated,
             "continuations": r.continuations,
+            "reservation_basis": r.reservation_basis,
+            "output_overrun": r.output_overrun,
         }),
         AgentEvent::TurnCompleted { usage: Some(usage) } => json!({
             "prompt_tokens": usage.prompt_tokens,
@@ -382,6 +384,8 @@ mod tests {
                 output_spent: None,
                 output_estimated: false,
                 continuations: 0,
+                reservation_basis: None,
+                output_overrun: 0,
             }),
         };
         assert_eq!(name(&event), "generation.report");
@@ -393,7 +397,7 @@ mod tests {
             "unknown is null"
         );
         assert_eq!(payload["length_cause"], "context_window");
-        assert_eq!(payload.as_object().map(|object| object.len()), Some(20));
+        assert_eq!(payload.as_object().map(|object| object.len()), Some(22));
     }
 
     #[test]
