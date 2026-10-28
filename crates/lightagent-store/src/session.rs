@@ -574,6 +574,38 @@ mod tests {
     }
 
     #[test]
+    fn a_continued_answer_is_saved_once_with_its_final_stop_reason() {
+        use lightagent_core::{AgentEvent, RunId, StopReason};
+        let events = vec![
+            AgentEvent::RunStarted {
+                run: RunId::new(),
+                parent: None,
+            },
+            AgentEvent::Content {
+                text: "The bridge opened in".into(),
+            },
+            AgentEvent::TurnCompleted { usage: None },
+            AgentEvent::Content {
+                text: " 1932.".into(),
+            },
+            AgentEvent::TurnCompleted { usage: None },
+            AgentEvent::RunCompleted {
+                reason: StopReason::EndTurn,
+            },
+        ];
+        let mut session = Session::new("default", "chat");
+        session.record_run_events(&events, "EndTurn");
+        let answers: Vec<&str> = session
+            .messages
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .map(|message| message.content.as_str())
+            .collect();
+        assert_eq!(answers, ["The bridge opened in 1932."]);
+        assert_eq!(session.runs[0].stop_reason.as_deref(), Some("EndTurn"));
+    }
+
+    #[test]
     fn ids_are_generated_and_only_the_generated_shape_parses() {
         let id = SessionId::generate();
         assert_eq!(id.as_str().len(), 32);
