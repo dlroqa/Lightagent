@@ -1,0 +1,81 @@
+name: diag-mcp-regression
+
+# DIAGNOSTIC ONLY (branches diag/mcp-tempdir-before and -after, never
+# merged). Runs the MCP token-directory regressions and then the whole
+# lightagent lib suite for bounded rounds, against the replaced helper
+# (before) or the fix (after). A failed round fails the job.
+
+on:
+  push:
+    branches: [diag/mcp-tempdir-before, diag/mcp-tempdir-after]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  regression:
+    name: regression (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, label: macos-arm64 }
+          - { os: windows-latest, label: windows-x64 }
+          - { os: ubuntu-24.04, label: linux-x64 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: diag-${{ matrix.label }}
+      - name: Build the lightagent lib tests
+        run: |
+          cargo test -p lightagent --lib --no-run --message-format=json \
+            | jq -r 'select(.reason=="compiler-artifact" and .profile.test==true and .target.kind==["lib"]) | .executable' \
+            | grep -v '^null$' > "$RUNNER_TEMP/bin"
+          cat "$RUNNER_TEMP/bin"
+      - name: Regressions, then the lib suite (bounded rounds)
+        timeout-minutes: 30
+        working-directory: crates/lightagent
+        env:
+          CARGO_MANIFEST_DIR: ${{ github.workspace }}/crates/lightagent
+        run: |
+          bin=$(head -1 "$RUNNER_TEMP/bin")
+          out="$RUNNER_TEMP/out"; mkdir -p "$out"
+          run() { perl -e 'alarm shift; exec @ARGV' 120 "$bin" "$@"; }
+          reg=0 suite=0
+          for round in $(seq 1 40); do
+            run concurrent_mcp_configs_never_share_a_token_directory \
+                a_shared_token_directory_dropped_the_bearer_under_the_replaced_helper \
+                > "$out/reg-$round.log" 2>&1 || reg=$((reg+1))
+          done
+          for round in $(seq 1 40); do
+            run > "$out/suite-$round.log" 2>&1 || suite=$((suite+1))
+          done
+          {
+            echo "## ${{ matrix.label }} at $(git rev-parse HEAD)"
+            echo "regression rounds failed: $reg of 40"
+            echo "regression tests executed (passed+failed) per round: $(grep -h '^test result' "$out"/reg-1.log)"
+            echo "lib-suite rounds failed: $suite of 40"
+            echo "lib-suite totals of round 1: $(grep -h '^test result' "$out"/suite-1.log)"
+            echo "failing tests (count of rounds):"
+            grep -h -- '^---- .* stdout ----' "$out"/*.log | sort | uniq -c || true
+            echo "assertion messages:"
+            grep -h -E "two calls were handed|a token was removed|left: |right: " "$out"/*.log | sort | uniq -c | head -20 || true
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$reg" -eq 0 ] && [ "$suite" -eq 0 ]
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: regression-${{ matrix.label }}
+          path: ${{ runner.temp }}/out
+          retention-days: 14
