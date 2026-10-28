@@ -1537,4 +1537,58 @@ mod tests {
             report.outcome
         );
     }
+
+    /// Integration only (selection #63/#64 with adaptive allocation #67):
+    /// the plan this module decides is what divides the run's output pool,
+    /// only when it is applied, and Jev's complexity raises a class only at
+    /// the classification's own threshold.
+    #[test]
+    fn the_decided_plan_is_what_divides_the_output_pool() {
+        use lightagent_core::{AdaptiveAllocation, GenerationBudget, OutputPool};
+        let lead = || GenerationBudget {
+            output_pool: Some(OutputPool::new(32_000)),
+            max_continuations: 1,
+            ..GenerationBudget::default()
+        };
+        let install = |case: &Case, selection: &Selection| {
+            crate::coordinator::allocation::install(
+                &case.config,
+                Some(&case.report),
+                Some(selection),
+                &lead(),
+            )
+            .unwrap()
+        };
+        let mut case = Case::new(coding_task([0.92, 0.92, 0.1, 0.85]));
+        case.config.generation.max_run_output_tokens = Some(32_000);
+        case.config.generation.adaptive_allocation = AdaptiveAllocation::Jev;
+        let selection = case.decide().unwrap();
+        assert_eq!(roles(&selection), ["researcher", "coder", "tester"]);
+        // The fixture's complexity confidence (0.8) is below its threshold
+        // (0.9): the fixed classes, 2 : 3 : 1 of 20,800.
+        let line = install(&case, &selection);
+        assert_eq!(
+            line,
+            "· Output allocation (jev, role defaults, complexity low confidence): lead 8000, \
+             follow-up 3200, researcher 6933 (standard), coder 10400 (heavy), tester 3466 \
+             (light), unallocated 1 of 32000"
+        );
+        // Confident: research grows with a complex task, 3 : 3 : 1.
+        if let Outcome::Classified(classification) = &mut case.report.outcome {
+            classification.complexity_confidence = 0.95;
+        }
+        let line = install(&case, &selection);
+        assert_eq!(
+            line,
+            "· Output allocation (jev, jev complexity): lead 8000, follow-up 3200, researcher \
+             8914 (heavy), coder 8914 (heavy), tester 2971 (light), unallocated 1 of 32000"
+        );
+        // A recorded (shadow) plan divides nothing among workers.
+        case.config.subagents.selection = JevClassificationMode::Shadow;
+        let shadow = case.decide().unwrap();
+        assert_eq!(shadow.record.outcome, "plan");
+        let line = install(&case, &shadow);
+        assert!(line.contains("no plan, plan not applied"), "{line}");
+        assert!(line.contains("unallocated 20800"), "{line}");
+    }
 }
