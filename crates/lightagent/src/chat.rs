@@ -4023,6 +4023,26 @@ for line in sys.stdin:
         (format!("http://{address}/mcp"), log)
     }
 
+    // DIAGNOSTIC ONLY (branch diag/mcp-tempdir, never merged): directory
+    // names and lifecycle events, never file contents.
+    fn mcpdiag(event: &str, dir: &std::path::Path, flag: bool) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        eprintln!(
+            "MCPDIAG event={event} dir={} flag={flag} test={} at={nanos}",
+            dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            std::thread::current().name().unwrap_or("?")
+        );
+    }
+
+    fn mcpdiag_remove(dir: impl AsRef<std::path::Path>) {
+        let dir = dir.as_ref();
+        mcpdiag("remove", dir, dir.exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     const MCP_TOKEN: &str = "synthetic-mcp-bearer-not-a-secret";
     const MCP_HEADER: &str = "synthetic-mcp-header-not-a-secret";
 
@@ -4035,7 +4055,9 @@ for line in sys.stdin:
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         ));
+        let preexisting = dir.exists();
         std::fs::create_dir_all(&dir).unwrap();
+        mcpdiag("create", &dir, preexisting);
         let token = dir.join("token");
         std::fs::write(&token, MCP_TOKEN).unwrap();
         let mut config = Config::default();
@@ -4075,8 +4097,9 @@ for line in sys.stdin:
         let (config, dir) = mcp_config(&url, &[], &[]);
         let tools = mcp_tools(&config, &none, RemoteAccess::Operator).await;
         assert_eq!(tools.len(), 3);
+        mcpdiag("token-present-after-use", &dir, dir.join("token").exists());
         assert_eq!(sent_credentials(&log.lock().unwrap()), (true, true));
-        std::fs::remove_dir_all(dir).ok();
+        mcpdiag_remove(dir);
 
         // Untrusted, profile not granted the server: never contacted.
         let (url, log) = mcp_http_stub(None).await;
@@ -4094,8 +4117,9 @@ for line in sys.stdin:
                 .len(),
             3
         );
+        mcpdiag("token-present-after-use", &dir, dir.join("token").exists());
         assert_eq!(sent_credentials(&log.lock().unwrap()), (true, true));
-        std::fs::remove_dir_all(dir).ok();
+        mcpdiag_remove(dir);
 
         // Granted the server but not its credentials: neither the bearer nor
         // the custom header is sent.
@@ -4110,7 +4134,7 @@ for line in sys.stdin:
         let requests = log.lock().unwrap().clone();
         assert!(!requests.is_empty());
         assert_eq!(sent_credentials(&requests), (false, false));
-        std::fs::remove_dir_all(dir).ok();
+        mcpdiag_remove(dir);
 
         // Revocation: removing the grant denies the next run.
         let (url, log) = mcp_http_stub(None).await;
@@ -4121,7 +4145,7 @@ for line in sys.stdin:
                 .is_empty()
         );
         assert!(log.lock().unwrap().is_empty());
-        std::fs::remove_dir_all(dir).ok();
+        mcpdiag_remove(dir);
     }
 
     #[tokio::test]
@@ -4135,7 +4159,7 @@ for line in sys.stdin:
                 mcp_tools(&config, &ExtensionStore::load(&[]), RemoteAccess::Operator).await;
             assert!(tools.is_empty(), "a redirecting server offers no tools");
             assert_eq!(log.lock().unwrap().len(), 1, "one request, not followed");
-            std::fs::remove_dir_all(dir).ok();
+            mcpdiag_remove(dir);
         }
         assert!(
             elsewhere_log.lock().unwrap().is_empty(),
@@ -4202,7 +4226,7 @@ for line in sys.stdin:
             let tools = mcp_tools(&config, &none, RemoteAccess::Untrusted(&research)).await;
             assert!(needs(tools, name), "{name}");
         }
-        std::fs::remove_dir_all(dir).ok();
+        mcpdiag_remove(dir);
     }
 
     #[test]
@@ -4260,7 +4284,7 @@ for line in sys.stdin:
         let revoked = web_context_for(&config, RemoteAccess::Untrusted(&research)).unwrap();
         assert!(revoked.policy.search_api_key.is_none());
         assert!(revoked.policy.search_credential_withheld);
-        std::fs::remove_dir_all(dir).ok();
+        mcpdiag_remove(dir);
     }
 
     // --- profile-scoped vault credentials ------------------------------------
@@ -4628,7 +4652,7 @@ for line in sys.stdin:
                 .is_empty()
         );
         assert_eq!(log.lock().unwrap().len(), before);
-        std::fs::remove_dir_all(dir).ok();
+        mcpdiag_remove(dir);
         std::fs::remove_dir_all(home).ok();
     }
 }

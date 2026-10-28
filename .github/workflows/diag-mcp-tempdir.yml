@@ -1,0 +1,135 @@
+name: diag-mcp-tempdir
+
+# DIAGNOSTIC ONLY, on branch diag/mcp-tempdir (never merged). Measures the
+# system clock's granularity and loops the lightagent lib tests with the
+# unchanged mcp_config helper instrumented to log directory names and
+# lifecycle events (never token contents). Bounded rounds and timeouts.
+
+on:
+  push:
+    branches: [diag/mcp-tempdir]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  clock:
+    name: clock granularity (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup show
+      - name: Sample SystemTime::now from 8 concurrent threads
+        run: |
+          cat > "$RUNNER_TEMP/clock.rs" <<'EOF'
+          use std::time::{SystemTime, UNIX_EPOCH};
+          fn now() -> u128 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() }
+          fn main() {
+              let samples: Vec<u128> = (0..200_000).map(|_| now()).collect();
+              let mut deltas: Vec<u128> = samples.windows(2).map(|w| w[1] - w[0]).filter(|d| *d > 0).collect();
+              deltas.sort();
+              let whole_us = samples.iter().filter(|n| *n % 1000 == 0).count();
+              println!("single thread: {} samples, {} distinct steps, smallest step {} ns, {} of {} values are whole microseconds",
+                  samples.len(), deltas.len() + 1, deltas.first().copied().unwrap_or(0), whole_us, samples.len());
+              // Two threads released together, as two tests starting at once.
+              let mut same = 0;
+              let rounds = 2_000;
+              for _ in 0..rounds {
+                  let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+                  let handles: Vec<_> = (0..2).map(|_| { let b = barrier.clone(); std::thread::spawn(move || { b.wait(); now() }) }).collect();
+                  let v: Vec<u128> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+                  if v[0] == v[1] { same += 1; }
+              }
+              println!("two threads released together: identical value in {same} of {rounds} rounds");
+          }
+          EOF
+          rustc -O -o "$RUNNER_TEMP/clock" "$RUNNER_TEMP/clock.rs"
+          "$RUNNER_TEMP/clock" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  stress:
+    name: instrumented helper (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, label: macos-arm64 }
+          - { os: windows-latest, label: windows-x64 }
+          - { os: ubuntu-24.04, label: linux-x64 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: diag-${{ matrix.label }}
+      - name: Build the lightagent lib tests
+        run: |
+          cargo test -p lightagent --lib --no-run --message-format=json \
+            | jq -r 'select(.reason=="compiler-artifact" and .profile.test==true and .target.kind==["lib"]) | .executable' \
+            | grep -v '^null$' > "$RUNNER_TEMP/bin"
+          cat "$RUNNER_TEMP/bin"
+      - name: Loop the lib tests (bounded)
+        timeout-minutes: 30
+        working-directory: crates/lightagent
+        env:
+          CARGO_MANIFEST_DIR: ${{ github.workspace }}/crates/lightagent
+        run: |
+          bin=$(head -1 "$RUNNER_TEMP/bin")
+          mkdir -p "$RUNNER_TEMP/out"
+          fails=0
+          # Phase A: the whole lib suite, as CI runs it. Phase B: the chat
+          # model tests only.
+          for round in $(seq 1 60); do
+            if ! perl -e 'alarm shift; exec @ARGV' 120 "$bin" --nocapture > "$RUNNER_TEMP/out/a-$round.log" 2>&1; then
+              fails=$((fails+1)); echo "phase A round $round FAILED"
+            fi
+          done
+          for round in $(seq 1 150); do
+            if ! perl -e 'alarm shift; exec @ARGV' 120 "$bin" chat::model_tests:: --nocapture > "$RUNNER_TEMP/out/b-$round.log" 2>&1; then
+              fails=$((fails+1)); echo "phase B round $round FAILED"
+            fi
+          done
+          echo "failed rounds: $fails" | tee "$RUNNER_TEMP/out/summary.txt"
+      - name: Summarise directory lifecycle
+        if: always()
+        run: |
+          cd "$RUNNER_TEMP/out"
+          {
+            echo "## ${{ matrix.label }}"
+            echo "rounds failed: $(grep -l 'test result: FAILED' *.log | wc -l)"
+            echo "failing tests:"; grep -h -- '---- .* stdout ----' *.log | sort | uniq -c || true
+            echo "mcp_config calls: $(grep -h 'MCPDIAG event=create' *.log | wc -l)"
+            echo "calls handed an existing directory (collisions): $(grep -h 'MCPDIAG event=create.*flag=true' *.log | wc -l)"
+            echo "token missing after use: $(grep -h 'event=token-present-after-use.*flag=false' *.log | wc -l)"
+            echo "rounds with a collision: $(grep -l 'MCPDIAG event=create.*flag=true' *.log | wc -l)"
+            echo "values that are whole microseconds: $(grep -h 'MCPDIAG event=create' *.log | grep -c -E 'dir=lightagent-mcp-grant-[0-9]+-[0-9]*000 ' || true) of $(grep -h 'MCPDIAG event=create' *.log | wc -l)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          # For each collided name, every event on it, in order.
+          for f in $(grep -l 'MCPDIAG event=create.*flag=true' *.log); do
+            for d in $(grep -h 'MCPDIAG event=create.*flag=true' "$f" | sed -E 's/.*dir=([^ ]+).*/\1/'); do
+              echo "== $f $d"; grep -h "dir=$d " "$f" | sed -E 's/^.*(MCPDIAG)/\1/'
+              grep -h -A4 -- '---- .* stdout ----' "$f" | grep -v MCPDIAG || true
+            done
+          done | tee collisions.txt | head -200
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: diag-${{ matrix.label }}
+          path: ${{ runner.temp }}/out
+          retention-days: 14
