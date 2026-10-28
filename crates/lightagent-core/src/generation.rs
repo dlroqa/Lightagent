@@ -214,11 +214,15 @@ pub const DEFAULT_UNKNOWN_CAPACITY_TURN_TOKENS: u32 = 2_048;
 /// Once an [`OutputPlan`] is [installed](OutputPool::install), each handle
 /// reserves for its [`Account`]: the lead from its reserve, a planned
 /// role's first worker from that role's share, a repeat start from the
-/// follow-up reserve, and each of them from what is unallocated. No account
-/// can reach what another holds, so a worker can never take the lead's
-/// reserve, and the accounts together never hold more than the pool had
-/// when the plan was installed. Without a plan every handle draws on the
-/// whole pool alike, exactly as before.
+/// follow-up reserve, and each of them from what is unallocated. No worker
+/// can reach what another account holds, so a worker can never take the
+/// lead's reserve. The lead, last, may also use the follow-up reserve and
+/// the shares of roles that have not started, so a run whose workers never
+/// start (or that has none) can still spend its pool on its own answer; it
+/// never reaches the share of a worker that is running. The accounts
+/// together never hold more than the pool had when the plan was installed.
+/// Without a plan every handle draws on the whole pool alike, exactly as
+/// before.
 #[derive(Clone, Debug)]
 pub struct OutputPool {
     inner: Arc<Mutex<PoolState>>,
@@ -246,17 +250,45 @@ impl PoolState {
     }
 
     /// What `account` may reserve: its own tokens, the follow-up reserve
-    /// when it may use it, and the free rest.
-    fn reachable(&self, account: &Account, continuation: bool) -> (u32, u32, u32) {
+    /// when it may use it, the free rest, and (the lead only) the shares of
+    /// roles not started yet.
+    fn reachable(&self, account: &Account, continuation: bool) -> Reach {
         let Some(plan) = &self.plan else {
-            return (0, 0, self.free());
+            return Reach {
+                free: self.free(),
+                ..Reach::default()
+            };
         };
-        let follow_up = if continuation || *account == Account::FollowUp {
+        let lead = *account == Account::Lead;
+        let follow_up = if lead || continuation || *account == Account::FollowUp {
             plan.follow_up_left
         } else {
             0
         };
-        (plan.own(account), follow_up, self.free())
+        Reach {
+            own: plan.own(account),
+            follow_up,
+            free: self.free(),
+            unstarted: if lead { plan.unstarted() } else { 0 },
+        }
+    }
+}
+
+/// What one account may reserve, by where it comes from.
+#[derive(Clone, Copy, Debug, Default)]
+struct Reach {
+    own: u32,
+    follow_up: u32,
+    free: u32,
+    unstarted: u32,
+}
+
+impl Reach {
+    fn total(self) -> u32 {
+        self.own
+            .saturating_add(self.follow_up)
+            .saturating_add(self.free)
+            .saturating_add(self.unstarted)
     }
 }
 
@@ -314,6 +346,33 @@ impl PlanState {
         self.shares.iter_mut().find(|share| share.role == role)
     }
 
+    /// What the shares of roles not started yet still hold.
+    fn unstarted(&self) -> u32 {
+        self.shares
+            .iter()
+            .filter(|share| share.stage == Stage::Planned)
+            .fold(0u32, |sum, share| sum.saturating_add(share.left))
+    }
+
+    /// Lend the lead `tokens` from the shares of roles not started yet, in
+    /// plan order, and say how much came from each.
+    fn lend(&mut self, mut tokens: u32) -> Vec<(usize, u32)> {
+        let mut lent = Vec::new();
+        for (index, share) in self.shares.iter_mut().enumerate() {
+            if tokens == 0 {
+                break;
+            }
+            if share.stage != Stage::Planned || share.left == 0 {
+                continue;
+            }
+            let taken = tokens.min(share.left);
+            share.left -= taken;
+            tokens -= taken;
+            lent.push((index, taken));
+        }
+        lent
+    }
+
     /// What `account` holds of its own: the lead's reserve, or the share of
     /// a running worker.
     fn own(&self, account: &Account) -> u32 {
@@ -339,6 +398,16 @@ impl PlanState {
             Account::FollowUp | Account::Unplanned => {}
         }
         self.follow_up_left = self.follow_up_left.saturating_sub(follow_up);
+    }
+
+    /// Return what the lead borrowed from a share and did not use, unless
+    /// that share was released meanwhile: its tokens then stay free.
+    fn repay(&mut self, index: usize, tokens: u32) {
+        if let Some(share) = self.shares.get_mut(index)
+            && share.stage != Stage::Released
+        {
+            share.left = share.left.saturating_add(tokens);
+        }
     }
 
     /// Return what a turn reserved and did not use to the account it came
@@ -461,10 +530,7 @@ impl OutputPool {
     /// may also use the follow-up reserve).
     pub fn available_for(&self, continuation: bool) -> u32 {
         self.read(
-            |state| {
-                let (own, follow_up, free) = state.reachable(&self.account, continuation);
-                own.saturating_add(follow_up).saturating_add(free)
-            },
+            |state| state.reachable(&self.account, continuation).total(),
             0,
         )
     }
@@ -489,16 +555,29 @@ impl OutputPool {
         if state.overrun > 0 {
             return None;
         }
-        let (own, follow_up, free) = state.reachable(&self.account, continuation);
-        let available = own.saturating_add(follow_up).saturating_add(free);
+        let reach = state.reachable(&self.account, continuation);
+        let available = reach.total();
         if available < MIN_GRANT {
             return None;
         }
         let tokens = ask.map_or(available, |ask| ask.min(available)).max(1);
-        let from_own = tokens.min(own);
-        let from_follow_up = tokens.saturating_sub(from_own).min(follow_up);
+        // Its own tokens first. A worker's continuation or repeat start then
+        // uses the follow-up reserve kept for it before the free rest; the
+        // lead uses the free rest, then the follow-up reserve, and only then
+        // borrows from shares of roles that have not started.
+        let from_own = tokens.min(reach.own);
+        let rest = tokens - from_own;
+        let (from_follow_up, from_unstarted) = if self.account == Account::Lead {
+            let rest = rest - rest.min(reach.free);
+            let from_follow_up = rest.min(reach.follow_up);
+            (from_follow_up, (rest - from_follow_up).min(reach.unstarted))
+        } else {
+            (rest.min(reach.follow_up), 0)
+        };
+        let mut lent = Vec::new();
         if let Some(plan) = state.plan.as_mut() {
             plan.take(&self.account, from_own, from_follow_up);
+            lent = plan.lend(from_unstarted);
         }
         state.reserved = state.reserved.saturating_add(tokens);
         Some(Reservation {
@@ -506,6 +585,7 @@ impl OutputPool {
             tokens,
             own: from_own,
             follow_up: from_follow_up,
+            lent,
             settled: false,
         })
     }
@@ -519,15 +599,23 @@ impl OutputPool {
             if let Some(used) = used {
                 state.overrun = state.overrun.saturating_add(used.saturating_sub(reserved));
                 // What was used counts against the account's own tokens
-                // first; what was not goes back to where it came from.
+                // first, then the follow-up reserve, then what the lead
+                // borrowed; what was not goes back to where it came from.
                 let used_own = used.min(reservation.own);
-                let used_follow_up = (used - used_own).min(reservation.follow_up);
+                let mut rest = used - used_own;
+                let used_follow_up = rest.min(reservation.follow_up);
+                rest -= used_follow_up;
                 if let Some(plan) = state.plan.as_mut() {
                     plan.give_back(
                         &self.account,
                         reservation.own - used_own,
                         reservation.follow_up - used_follow_up,
                     );
+                    for (index, lent) in &reservation.lent {
+                        let used_lent = rest.min(*lent);
+                        rest -= used_lent;
+                        plan.repay(*index, *lent - used_lent);
+                    }
                 }
             }
         }
@@ -680,10 +768,12 @@ impl Drop for ShareClaim {
 pub struct Reservation {
     pool: OutputPool,
     tokens: u32,
-    /// What came from the account's own tokens and from the follow-up
-    /// reserve; the rest came from the free part of the pool.
+    /// What came from the account's own tokens, from the follow-up reserve
+    /// and (the lead only) from each share not started yet, by its index;
+    /// the rest came from the free part of the pool.
     own: u32,
     follow_up: u32,
+    lent: Vec<(usize, u32)>,
     settled: bool,
 }
 
