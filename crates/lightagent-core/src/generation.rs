@@ -544,10 +544,7 @@ impl OutputPool {
 
     /// As [`Self::available`], for a turn of `purpose`.
     pub fn available_in(&self, purpose: TurnPurpose) -> u32 {
-        self.read(
-            |state| state.reachable(&self.account, purpose).total(),
-            0,
-        )
+        self.read(|state| state.reachable(&self.account, purpose).total(), 0)
     }
 
     /// Whether any charge was a reservation standing in for unreported usage.

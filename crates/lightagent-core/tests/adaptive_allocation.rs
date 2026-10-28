@@ -347,7 +347,10 @@ fn accounts_reach_only_their_own_tokens_and_the_free_rest() {
         "the lead reserve is untouched"
     );
     // The lead never reaches a running worker's share, even to answer.
-    assert_eq!(pool.available_in(TurnPurpose::Answer), 8_000 + 3_200 + 5_200);
+    assert_eq!(
+        pool.available_in(TurnPurpose::Answer),
+        8_000 + 3_200 + 5_200
+    );
     assert_eq!(accounted(&pool, 15_600), 32_000);
     grant.settle(Some(600));
     assert_eq!(coder.available(), 15_000, "the unused part came back to it");
@@ -735,7 +738,10 @@ fn the_lead_borrows_last_and_never_from_a_running_worker() {
     .expect("installed");
     // An ordinary lead turn, which may still delegate, reaches only its
     // reserve: coordination never eats into what workers were planned.
-    assert_eq!(pool.reserve(Some(10_000)).map(|grant| grant.tokens()), Some(8_000));
+    assert_eq!(
+        pool.reserve(Some(10_000)).map(|grant| grant.tokens()),
+        Some(8_000)
+    );
     assert_eq!(pool.spent(), 8_000, "dropped unsettled: charged in full");
     let pool = OutputPool::new(32_000);
     pool.install(plan(
@@ -808,9 +814,7 @@ fn shares_of_workers_that_fail_or_never_start_are_not_stranded() {
     // final answer may use its share, last.
     assert_eq!(pool.available(), 2_500 + 3_250);
     assert_eq!(pool.available_in(TurnPurpose::Answer), 10_000);
-    let grant = pool
-        .reserve_in(None, TurnPurpose::Answer)
-        .expect("granted");
+    let grant = pool.reserve_in(None, TurnPurpose::Answer).expect("granted");
     assert_eq!(grant.tokens(), 10_000);
     // Cancelled before any usage: charged in full, nothing comes back.
     drop(grant);
@@ -888,9 +892,11 @@ async fn with_no_worker_running_the_lead_still_answers_from_the_whole_pool() {
         let last = reports(&events).pop().expect("a report");
         assert_eq!(last.purpose, "answer", "a tool-less final answer");
         assert_eq!(stop_reason(&events), Some(StopReason::OutputBudget));
-        assert!(events.iter().any(
-            |event| matches!(event, AgentEvent::Content { text } if text == "the answer")
-        ));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Content { text } if text == "the answer"))
+        );
     }
 }
 
@@ -933,7 +939,10 @@ async fn lead_coordination_leaves_planned_workers_their_whole_shares() {
     );
     assert_eq!(stop_reason(&events), Some(StopReason::EndTurn));
     assert_eq!(planned(&pool), [6_933, 10_400, 3_466]);
-    assert_eq!(pool.allocation_report(None).expect("plan").follow_up_left, 3_200);
+    assert_eq!(
+        pool.allocation_report(None).expect("plan").follow_up_left,
+        3_200
+    );
     // Workers then start one at a time (admission allows one): each finds
     // its whole share, whatever the lead did and however long it waited.
     for (role, share) in [("researcher", 6_933), ("coder", 10_400), ("tester", 3_466)] {
@@ -977,7 +986,10 @@ async fn the_final_answer_may_use_what_workers_and_follow_ups_left() {
     assert_eq!(stop_reason(&events), Some(StopReason::EndTurn));
     assert_eq!(sent(&lead), [Some(2_500 + 6_000)]);
     assert_eq!(pool.spent(), 4_500);
-    assert_eq!(pool.allocation_report(None).expect("plan").follow_up_left, 1_000);
+    assert_eq!(
+        pool.allocation_report(None).expect("plan").follow_up_left,
+        1_000
+    );
     assert_eq!(accounted(&pool, 0), 10_000);
 }
 
