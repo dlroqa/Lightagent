@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::generation::{ContextWindow, GenerationBudget, OutputPool, Reasoning};
 use crate::paths;
 
 /// The on-disk format version of the config file.
@@ -711,6 +712,164 @@ impl Default for RuntimeConfig {
     }
 }
 
+/// Output and context budgeting for model turns; see
+/// [`crate::generation`] for what each figure can and cannot promise.
+///
+/// Nothing here loads a model or is sent to the server as a context size:
+/// `context_window` only narrows what a run budgets against, and the window a
+/// model is served with stays the server's (`runtime.n_ctx` asks for one on
+/// an explicit placement). With every field at its default, requests carry no
+/// `max_tokens` and no reasoning field, as before; the one default that acts
+/// is the answer reserve, and only when the provider reports its window.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GenerationConfig {
+    /// An output ceiling per request, sent as `max_tokens`. Unset leaves the
+    /// provider's default (Lightweight: all the room the prompt leaves in the
+    /// window), so setting it can only lower a turn's allowance. Reasoning and
+    /// the answer share it.
+    pub max_output_tokens: Option<u32>,
+    /// Generation headroom kept once tools have run: tool results are
+    /// shortened, and then tools withheld, so the window keeps this many
+    /// tokens to generate in. Reasoning may use them, so this is not a
+    /// guaranteed visible answer. Unset uses the smaller of 1024 and a quarter
+    /// of the window; `0` turns the guard off.
+    pub reserve_answer_tokens: Option<u32>,
+    /// A ceiling on what one run may generate in all: the lead, every worker
+    /// it delegates to and every continuation draw on it. Unset: no run-wide
+    /// token bound (turns, time and workers still bound the run).
+    pub max_run_output_tokens: Option<u32>,
+    /// A window to budget against when the provider reports none, or a
+    /// smaller one than it reports. Never stretches a reported window.
+    pub context_window: Option<u32>,
+    /// A reasoning effort label to send (`none`, `low`, …). Sent only when it
+    /// is listed in `reasoning_supported`: whether a label does anything
+    /// depends on the backend build and the model's template, and it is never
+    /// a token budget.
+    pub reasoning_effort: Option<String>,
+    /// The effort labels the operator has verified the model honours.
+    pub reasoning_supported: Vec<String>,
+    /// Overrides for one model id, exactly as the provider names it. A field
+    /// left unset falls back to the setting above.
+    pub models: BTreeMap<String, GenerationOverride>,
+}
+
+/// One model's overrides of [`GenerationConfig`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GenerationOverride {
+    pub max_output_tokens: Option<u32>,
+    pub reserve_answer_tokens: Option<u32>,
+    pub max_run_output_tokens: Option<u32>,
+    pub context_window: Option<u32>,
+    pub reasoning_effort: Option<String>,
+    pub reasoning_supported: Option<Vec<String>>,
+}
+
+/// The answer reserve when none is configured: 1024 tokens, or a quarter of a
+/// smaller window.
+const DEFAULT_ANSWER_RESERVE: u32 = 1_024;
+
+impl GenerationConfig {
+    /// The budget for a run of `model`, given the window the provider
+    /// reported serving it with, if any.
+    pub fn budget_for(&self, model: &str, reported_window: Option<u32>) -> GenerationBudget {
+        let own = self.models.get(model);
+        let pick = |field: fn(&GenerationOverride) -> Option<u32>, base: Option<u32>| {
+            own.and_then(field).or(base)
+        };
+        let context_window = ContextWindow::resolve(
+            reported_window,
+            pick(|o| o.context_window, self.context_window),
+        );
+        let reserve_answer_tokens = pick(|o| o.reserve_answer_tokens, self.reserve_answer_tokens)
+            .unwrap_or_else(|| {
+                context_window.map_or(DEFAULT_ANSWER_RESERVE, |window| {
+                    DEFAULT_ANSWER_RESERVE.min(window.tokens / 4)
+                })
+            });
+        let effort = own
+            .and_then(|o| o.reasoning_effort.as_deref())
+            .or(self.reasoning_effort.as_deref());
+        let supported = own
+            .and_then(|o| o.reasoning_supported.as_deref())
+            .unwrap_or(&self.reasoning_supported);
+        GenerationBudget {
+            context_window,
+            max_output_tokens: pick(|o| o.max_output_tokens, self.max_output_tokens),
+            reserve_answer_tokens,
+            reasoning: Reasoning::resolve(effort, supported),
+            output_pool: pick(|o| o.max_run_output_tokens, self.max_run_output_tokens)
+                .map(OutputPool::new),
+        }
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        validate_generation("generation", &self.as_override())?;
+        for (model, own) in &self.models {
+            if model.trim().is_empty() {
+                return Err(ConfigError::Invalid(
+                    "generation.models has an empty model id".to_owned(),
+                ));
+            }
+            validate_generation(&format!("generation.models.{model:?}"), own)?;
+        }
+        Ok(())
+    }
+
+    fn as_override(&self) -> GenerationOverride {
+        GenerationOverride {
+            max_output_tokens: self.max_output_tokens,
+            reserve_answer_tokens: self.reserve_answer_tokens,
+            max_run_output_tokens: self.max_run_output_tokens,
+            context_window: self.context_window,
+            reasoning_effort: self.reasoning_effort.clone(),
+            reasoning_supported: Some(self.reasoning_supported.clone()),
+        }
+    }
+}
+
+fn validate_generation(at: &str, settings: &GenerationOverride) -> Result<(), ConfigError> {
+    for (name, value) in [
+        ("max_output_tokens", settings.max_output_tokens),
+        ("max_run_output_tokens", settings.max_run_output_tokens),
+        ("context_window", settings.context_window),
+    ] {
+        if value == Some(0) {
+            return Err(ConfigError::Invalid(format!(
+                "{at}.{name} must be at least 1"
+            )));
+        }
+    }
+    if let (Some(reserve), Some(window)) = (settings.reserve_answer_tokens, settings.context_window)
+        && reserve >= window
+    {
+        return Err(ConfigError::Invalid(format!(
+            "{at}.reserve_answer_tokens must be smaller than {at}.context_window"
+        )));
+    }
+    if settings
+        .reasoning_effort
+        .as_deref()
+        .is_some_and(|effort| effort.trim().is_empty())
+    {
+        return Err(ConfigError::Invalid(format!(
+            "{at}.reasoning_effort must not be empty; leave it unset to send none"
+        )));
+    }
+    if settings
+        .reasoning_supported
+        .iter()
+        .flatten()
+        .any(|effort| effort.trim().is_empty())
+    {
+        return Err(ConfigError::Invalid(format!(
+            "{at}.reasoning_supported has an empty label"
+        )));
+    }
+    Ok(())
+}
+
 /// Presentation preferences for the attended terminal chat.
 ///
 /// These affect only what the CLI renders. Provider events, session records,
@@ -1336,6 +1495,9 @@ pub struct Config {
     pub extensions: ExtensionsConfig,
     #[serde(default)]
     pub runtime: RuntimeConfig,
+    /// Output allowance, answer reserve and reasoning label per model turn.
+    #[serde(default)]
+    pub generation: GenerationConfig,
     #[serde(default)]
     pub tui: TuiConfig,
     /// Addresses for optional, externally operated platform components.
@@ -1885,6 +2047,7 @@ impl Config {
                 }
             }
         }
+        self.generation.validate()?;
         Ok(())
     }
 
@@ -2230,6 +2393,92 @@ mod tests {
         let json = serde_json::to_string(&config).expect("serialize");
         let back: Config = serde_json::from_str(&json).expect("deserialize");
         assert!(!back.tui.show_reasoning);
+    }
+
+    #[test]
+    fn generation_defaults_change_no_request_and_old_configs_load() {
+        let legacy: Config = serde_json::from_str("{}").expect("deserialize old config");
+        assert_eq!(legacy.generation, GenerationConfig::default());
+        legacy.validate().expect("defaults validate");
+        let unknown = legacy.generation.budget_for("m", None);
+        assert!(!unknown.is_active(), "nothing known, nothing changed");
+        assert_eq!(unknown.requested_max_tokens(), None);
+        assert_eq!(unknown.reasoning, Reasoning::Default);
+        let known = legacy.generation.budget_for("m", Some(8_192));
+        assert_eq!(
+            known.requested_max_tokens(),
+            None,
+            "no allowance is invented"
+        );
+        assert_eq!(known.reserve_answer_tokens, 1_024);
+        assert_eq!(
+            known.output_pool, None,
+            "no run-wide bound unless asked for"
+        );
+        assert_eq!(
+            legacy
+                .generation
+                .budget_for("m", Some(2_048))
+                .reserve_answer_tokens,
+            512,
+            "a small window keeps a quarter for the answer"
+        );
+    }
+
+    #[test]
+    fn a_model_override_wins_field_by_field() {
+        let config: Config = serde_json::from_str(
+            r#"{"generation":{
+                "max_output_tokens": 2048, "reserve_answer_tokens": 512,
+                "reasoning_effort": "low", "reasoning_supported": ["none", "low"],
+                "models": {"qwen@32k": {"max_output_tokens": 8192, "reasoning_supported": []}}
+            }}"#,
+        )
+        .expect("deserialize");
+        config.validate().expect("valid");
+        let base = config.generation.budget_for("lfm2@8k", Some(8_192));
+        assert_eq!(base.requested_max_tokens(), Some(2_048));
+        assert_eq!(base.reserve_answer_tokens, 512);
+        assert_eq!(base.reasoning, Reasoning::Applied("low".into()));
+        let own = config.generation.budget_for("qwen@32k", Some(32_768));
+        assert_eq!(own.requested_max_tokens(), Some(8_192));
+        assert_eq!(own.reserve_answer_tokens, 512, "inherited");
+        assert_eq!(
+            own.reasoning,
+            Reasoning::Unsupported("low".into()),
+            "this model declares no reasoning labels"
+        );
+        // Each run gets a pool of its own.
+        let pooled: Config =
+            serde_json::from_str(r#"{"generation":{"max_run_output_tokens":20000}}"#).unwrap();
+        let one = pooled.generation.budget_for("m", None).output_pool.unwrap();
+        let two = pooled.generation.budget_for("m", None).output_pool.unwrap();
+        assert_eq!(one.total(), 20_000);
+        assert_ne!(one, two, "runs never share a pool");
+        // An allowance above the served window is never requested.
+        let small = config.generation.budget_for("qwen@32k", Some(4_096));
+        assert_eq!(small.requested_max_tokens(), Some(4_095));
+    }
+
+    #[test]
+    fn generation_validation_rejects_meaningless_settings() {
+        for bad in [
+            r#"{"generation":{"max_output_tokens":0}}"#,
+            r#"{"generation":{"context_window":0}}"#,
+            r#"{"generation":{"context_window":1024,"reserve_answer_tokens":1024}}"#,
+            r#"{"generation":{"reasoning_effort":" "}}"#,
+            r#"{"generation":{"reasoning_supported":[""]}}"#,
+            r#"{"generation":{"models":{"":{}}}}"#,
+            r#"{"generation":{"models":{"m":{"max_output_tokens":0}}}}"#,
+            r#"{"generation":{"max_run_output_tokens":0}}"#,
+        ] {
+            let config: Config = serde_json::from_str(bad).expect("deserialize");
+            assert!(config.validate().is_err(), "{bad} should be refused");
+        }
+        let off: Config =
+            serde_json::from_str(r#"{"generation":{"reserve_answer_tokens":0}}"#).unwrap();
+        off.validate().expect("zero turns the guard off");
+        assert!(!off.generation.budget_for("m", Some(8_192)).guards_context());
     }
 
     #[test]

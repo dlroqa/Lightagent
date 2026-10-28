@@ -649,6 +649,9 @@ pub async fn run_worker(
     config.system = Some(persona);
     config.limits = limits;
     config.parent = ctx.run.clone();
+    // Never a larger allowance than the lead's; a continuation or an answer
+    // turn still spends the turns the tree granted above.
+    config.generation = delegation.generation.for_worker(&spec.routing);
 
     ctx.report(progress("worker.started", None));
     let (sink, events) = tokio::sync::mpsc::unbounded_channel();
@@ -1188,6 +1191,8 @@ fn stop_code(reason: StopReason) -> &'static str {
         StopReason::RepeatedToolCalls => "repeated_tool_calls",
         StopReason::WallClockExceeded => "wall_clock_exceeded",
         StopReason::MaxTokens => "max_tokens",
+        StopReason::ContextLimit => "context_limit",
+        StopReason::OutputBudget => "output_budget",
         StopReason::Incomplete => "incomplete",
         StopReason::Cancelled => "cancelled",
         StopReason::Error => "error",

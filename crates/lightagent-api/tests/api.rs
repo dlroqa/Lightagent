@@ -1261,3 +1261,93 @@ async fn routing_permission_settings_round_trip_and_need_the_administrator() {
     );
     std::fs::remove_dir_all(root).ok();
 }
+
+/// Records each run's packed history, and reports `window` as the window the
+/// run's model is served with, as the real factory resolves it.
+struct WindowedFactory {
+    window: Option<u32>,
+    requests: Arc<tokio::sync::Mutex<Vec<Vec<ProviderMessage>>>>,
+}
+
+#[async_trait]
+impl RunFactory for WindowedFactory {
+    async fn run(
+        &self,
+        request: StartRun,
+        sink: AgentEventSink,
+        cancel: tokio_util::sync::CancellationToken,
+        decisions: UnboundedReceiver<ApprovalDecision>,
+    ) -> RunStatus {
+        self.requests.lock().await.push(request.history.clone());
+        MockFactory.run(request, sink, cancel, decisions).await
+    }
+
+    async fn history_window(
+        &self,
+        _profile: Option<&str>,
+        _model: Option<&str>,
+    ) -> Option<lightagent_core::HistoryWindow> {
+        self.window.map(|tokens| lightagent_core::HistoryWindow {
+            tokens,
+            source: lightagent_core::HistorySource::Provider,
+        })
+    }
+}
+
+/// The history the API packs for a follow-up to a long first message, when
+/// the factory resolves `window` and the server's configured limit is 4096.
+async fn follow_up_history(window: Option<u32>) -> Vec<ProviderMessage> {
+    let mut state = app_state(AuthConfig::open());
+    let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    state.manager = RunManager::new(Arc::new(WindowedFactory {
+        window,
+        requests: Arc::clone(&requests),
+    }));
+    let store = state.sessions.clone();
+    let addr = spawn_server(state).await;
+    let (_, body) = http(
+        &addr,
+        "POST",
+        "/api/lightagent/v1/sessions",
+        &[],
+        Some("{}"),
+    )
+    .await;
+    let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let parsed = lightagent_store::SessionId::parse(&id).unwrap();
+    for (index, message) in ["L".repeat(2_000), "next".to_owned()].iter().enumerate() {
+        let payload = serde_json::json!({ "message": message, "session_id": id }).to_string();
+        let (status, body) = http(
+            &addr,
+            "POST",
+            "/api/lightagent/v1/runs",
+            &[],
+            Some(&payload),
+        )
+        .await;
+        assert_eq!(status, 202, "{body}");
+        while store.load(&parsed).unwrap().runs.len() <= index {
+            tokio::task::yield_now().await;
+        }
+    }
+    let requests = requests.lock().await;
+    requests[1].clone()
+}
+
+#[tokio::test]
+async fn session_history_is_packed_against_the_resolved_window() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let long = "L".repeat(2_000);
+        let carries = |history: &[ProviderMessage]| history.iter().any(|m| m.content == long);
+        // The configured 4096 applies only when nothing was resolved.
+        assert!(carries(&follow_up_history(None).await));
+        // A larger served window keeps it; a smaller one is respected.
+        assert!(carries(&follow_up_history(Some(131_072)).await));
+        assert!(!carries(&follow_up_history(Some(200)).await));
+    })
+    .await
+    .unwrap();
+}
