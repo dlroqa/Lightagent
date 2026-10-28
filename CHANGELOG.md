@@ -18,9 +18,11 @@ All notable Lightagent changes are documented here.
     plan with another role. Jev is asked nothing new and supplies no
     numbers.
   - **Enforcement.** Each account is enforced inside the same atomic pool,
-    so workers can never reserve the lead's reserve. The lead may, last, use
-    the follow-up reserve and the shares of roles not started, so it is
-    never held to 25% when no worker runs. A worker's share is
+    so workers can never reserve the lead's reserve, and the lead's ordinary
+    (coordinating) turns never reach the follow-up reserve or a planned
+    share. Its tool-less final answer or continuation may, last, use the
+    follow-up reserve and the shares of roles that never started, so the
+    answer is never held to 25% when no worker runs. A worker's share is
     capped by what its own model can be granted, and the excess goes to
     roles not yet started. Its remainder is released when it ends.
   - **Unchanged.** Per-request policy, the 2048 unknown-capacity default,

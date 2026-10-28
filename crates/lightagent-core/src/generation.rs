@@ -56,7 +56,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::allocation::{
-    self, Account, Allocation, AllocationReport, Demand, OutputPlan, ShareReport,
+    self, Account, Allocation, AllocationReport, Demand, OutputPlan, ShareReport, TurnPurpose,
 };
 use crate::invoker::ToolSchema;
 use crate::provider::{ProviderMessage, Usage};
@@ -216,10 +216,13 @@ pub const DEFAULT_UNKNOWN_CAPACITY_TURN_TOKENS: u32 = 2_048;
 /// role's first worker from that role's share, a repeat start from the
 /// follow-up reserve, and each of them from what is unallocated. No worker
 /// can reach what another account holds, so a worker can never take the
-/// lead's reserve. The lead, last, may also use the follow-up reserve and
-/// the shares of roles that have not started, so a run whose workers never
-/// start (or that has none) can still spend its pool on its own answer; it
-/// never reaches the share of a worker that is running. The accounts
+/// lead's reserve. The lead's ordinary turns, which may still delegate, use
+/// only its reserve and the free rest, so its coordination never eats into
+/// what planned workers or follow-ups were given. Its tool-less final turns
+/// (a budget wrap-up answer or a continuation), after which it delegates
+/// nothing more, may last also use the follow-up reserve and the shares of
+/// roles that never started, so budget no worker will use still reaches the
+/// answer; never the share of a worker that is running. The accounts
 /// together never hold more than the pool had when the plan was installed.
 /// Without a plan every handle draws on the whole pool alike, exactly as
 /// before.
@@ -249,18 +252,21 @@ impl PoolState {
             .saturating_sub(self.plan.as_ref().map_or(0, PlanState::held))
     }
 
-    /// What `account` may reserve: its own tokens, the follow-up reserve
-    /// when it may use it, the free rest, and (the lead only) the shares of
-    /// roles not started yet.
-    fn reachable(&self, account: &Account, continuation: bool) -> Reach {
+    /// What `account` may reserve for a turn of `purpose`: its own tokens,
+    /// the follow-up reserve when it may use it, the free rest, and (the
+    /// lead's final turns only) the shares of roles not started.
+    fn reachable(&self, account: &Account, purpose: TurnPurpose) -> Reach {
         let Some(plan) = &self.plan else {
             return Reach {
                 free: self.free(),
                 ..Reach::default()
             };
         };
-        let lead = *account == Account::Lead;
-        let follow_up = if lead || continuation || *account == Account::FollowUp {
+        let lead_final = *account == Account::Lead && purpose.is_final();
+        let follow_up = if lead_final
+            || purpose == TurnPurpose::Continuation
+            || *account == Account::FollowUp
+        {
             plan.follow_up_left
         } else {
             0
@@ -269,7 +275,7 @@ impl PoolState {
             own: plan.own(account),
             follow_up,
             free: self.free(),
-            unstarted: if lead { plan.unstarted() } else { 0 },
+            unstarted: if lead_final { plan.unstarted() } else { 0 },
         }
     }
 }
@@ -529,8 +535,17 @@ impl OutputPool {
     /// As [`Self::available`], for a continuation when `continuation` (which
     /// may also use the follow-up reserve).
     pub fn available_for(&self, continuation: bool) -> u32 {
+        self.available_in(if continuation {
+            TurnPurpose::Continuation
+        } else {
+            TurnPurpose::Turn
+        })
+    }
+
+    /// As [`Self::available`], for a turn of `purpose`.
+    pub fn available_in(&self, purpose: TurnPurpose) -> u32 {
         self.read(
-            |state| state.reachable(&self.account, continuation).total(),
+            |state| state.reachable(&self.account, purpose).total(),
             0,
         )
     }
@@ -551,11 +566,22 @@ impl OutputPool {
     /// plan installed, the turn takes from its account's own tokens first,
     /// then the follow-up reserve when it may use it, then the free rest.
     pub fn reserve_for(&self, ask: Option<u32>, continuation: bool) -> Option<Reservation> {
+        let purpose = if continuation {
+            TurnPurpose::Continuation
+        } else {
+            TurnPurpose::Turn
+        };
+        self.reserve_in(ask, purpose)
+    }
+
+    /// As [`Self::reserve`], for a turn of `purpose` (see
+    /// [`Self::reserve_for`] for the order accounts are drawn on).
+    pub fn reserve_in(&self, ask: Option<u32>, purpose: TurnPurpose) -> Option<Reservation> {
         let mut state = self.inner.lock().ok()?;
         if state.overrun > 0 {
             return None;
         }
-        let reach = state.reachable(&self.account, continuation);
+        let reach = state.reachable(&self.account, purpose);
         let available = reach.total();
         if available < MIN_GRANT {
             return None;
@@ -563,8 +589,9 @@ impl OutputPool {
         let tokens = ask.map_or(available, |ask| ask.min(available)).max(1);
         // Its own tokens first. A worker's continuation or repeat start then
         // uses the follow-up reserve kept for it before the free rest; the
-        // lead uses the free rest, then the follow-up reserve, and only then
-        // borrows from shares of roles that have not started.
+        // lead uses the free rest, then (final turns only, see `reachable`)
+        // the follow-up reserve, and only then borrows from shares of roles
+        // that have not started.
         let from_own = tokens.min(reach.own);
         let rest = tokens - from_own;
         let (from_follow_up, from_unstarted) = if self.account == Account::Lead {

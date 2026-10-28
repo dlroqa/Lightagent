@@ -37,7 +37,9 @@ pub mod skills;
 pub mod tool_stream;
 pub mod workers;
 
-pub use allocation::{Account, AllocationReport, Demand, OutputPlan, PlannedShare, ShareReport};
+pub use allocation::{
+    Account, AllocationReport, Demand, OutputPlan, PlannedShare, ShareReport, TurnPurpose,
+};
 pub use config::{
     AdaptiveAllocation, AgentConfig, AllowedWorkflow, ApprovalPolicy, Config, ConfigError,
     ConfigStore, DUCKDUCKGO_SEARCH_ENDPOINT, ExtensionsConfig, GenerationConfig,
