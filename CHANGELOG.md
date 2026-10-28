@@ -13,10 +13,14 @@ All notable Lightagent changes are documented here.
     continuations and repairs (10%), and a share per role of an applied
     specialist plan, weighted by fixed demand classes.
   - **`jev` mode.** A confident `complex` classification from the same Jev
-    request may raise the researcher's and coder's class. Jev is asked
-    nothing new and supplies no numbers.
+    request raises a planned researcher's class. That is the only difference
+    from `plan`, and it changes numbers only when a researcher shares the
+    plan with another role. Jev is asked nothing new and supplies no
+    numbers.
   - **Enforcement.** Each account is enforced inside the same atomic pool,
-    so workers can never reserve the lead's reserve. A worker's share is
+    so workers can never reserve the lead's reserve. The lead may, last, use
+    the follow-up reserve and the shares of roles not started, so it is
+    never held to 25% when no worker runs. A worker's share is
     capped by what its own model can be granted, and the excess goes to
     roles not yet started. Its remainder is released when it ends.
   - **Unchanged.** Per-request policy, the 2048 unknown-capacity default,
