@@ -17,7 +17,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use lightagent_core::{GenerationBudget, ModelRouting, RunLimits};
+use lightagent_core::{AgentProvider, GenerationBudget, GenerationConfig, ModelRouting, RunLimits};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
@@ -26,6 +26,10 @@ use tokio_util::sync::CancellationToken;
 pub struct LeadGeneration {
     pub model: String,
     pub budget: GenerationBudget,
+    /// The operator's generation settings the lead's budget came from, so a
+    /// worker on another model is budgeted by the same settings for its own
+    /// model. `None`: such a worker gets an unknown window.
+    pub settings: Option<Arc<GenerationConfig>>,
 }
 
 /// The lead's budget, shared by its delegations. Empty: workers run with the
@@ -53,11 +57,45 @@ impl GenerationSlot {
         let Some(lead) = inner.as_ref() else {
             return GenerationBudget::default();
         };
-        let model = routing.model.trim();
-        let same_model = routing.base_url.is_none()
-            && (model.is_empty() || model == "default" || model == lead.model);
-        lead.budget.for_worker(same_model)
+        lead.budget.for_worker(same_model(routing, &lead.model))
     }
+
+    /// The budget for a worker routed by `routing` whose provider is
+    /// `provider`. The lead's model gets [`Self::for_worker`]. Another model
+    /// is asked, through the worker's own (authorized) provider, which model
+    /// it serves and with what window, and is budgeted by the lead's
+    /// settings for that model: its own window, never a larger allowance
+    /// than the lead's, the lead's output pool. A window it cannot report
+    /// stays unknown: no context guard and no continuation, the allowance
+    /// and the pool still apply.
+    pub async fn for_worker_on(
+        &self,
+        routing: &ModelRouting,
+        provider: &dyn AgentProvider,
+    ) -> GenerationBudget {
+        let lead = self.inner.lock().ok().and_then(|inner| inner.clone());
+        let Some(lead) = lead else {
+            return GenerationBudget::default();
+        };
+        if same_model(routing, &lead.model) {
+            return lead.budget.for_worker(true);
+        }
+        let Some(settings) = &lead.settings else {
+            return lead.budget.for_worker(false);
+        };
+        let served = provider.served_model().await;
+        let model = served
+            .model
+            .unwrap_or_else(|| routing.model.trim().to_owned());
+        lead.budget
+            .for_routed_worker(settings.budget_for(&model, served.context_window))
+    }
+}
+
+/// Whether `routing` reaches the lead's model at the lead's endpoint.
+fn same_model(routing: &ModelRouting, lead_model: &str) -> bool {
+    let model = routing.model.trim();
+    routing.base_url.is_none() && (model.is_empty() || model == "default" || model == lead_model)
 }
 
 /// The allowance shared by one delegation tree.
@@ -245,6 +283,7 @@ mod tests {
         slot.set(Some(LeadGeneration {
             model: "lfm2@8k".into(),
             budget: budget.clone(),
+            settings: None,
         }));
         assert_eq!(slot.for_worker(&routing("default", None)), budget);
         assert_eq!(slot.for_worker(&routing("lfm2@8k", None)), budget);
@@ -323,5 +362,135 @@ mod tests {
         cancelled.cancel();
         let error = admission.admit(&cancelled, || {}).await.unwrap_err();
         assert!(error.contains("cancelled"), "{error}");
+    }
+
+    /// A worker's provider that reports a served model and counts each ask.
+    struct Reports {
+        served: lightagent_core::ServedModel,
+        asked: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentProvider for Reports {
+        async fn served_model(&self) -> lightagent_core::ServedModel {
+            self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.served.clone()
+        }
+
+        async fn stream(
+            &self,
+            _: lightagent_core::ProviderRequest,
+            _: CancellationToken,
+        ) -> Result<lightagent_core::ProviderStream, lightagent_core::ProviderError> {
+            Err(lightagent_core::ProviderError::Upstream(
+                "never streamed".into(),
+            ))
+        }
+    }
+
+    fn reports(model: Option<&str>, window: Option<u32>) -> Reports {
+        Reports {
+            served: lightagent_core::ServedModel {
+                model: model.map(str::to_owned),
+                context_window: window,
+            },
+            asked: Arc::default(),
+        }
+    }
+
+    fn asked(provider: &Reports) -> usize {
+        provider.asked.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn a_worker_on_another_model_is_budgeted_for_that_model() {
+        let routing = |model: &str, base_url: Option<&str>| ModelRouting {
+            model: model.to_owned(),
+            base_url: base_url.map(str::to_owned),
+            ..ModelRouting::default()
+        };
+        let mut settings = GenerationConfig {
+            max_output_tokens: Some(1_024),
+            max_run_output_tokens: Some(4_000),
+            ..GenerationConfig::default()
+        };
+        settings.models.insert(
+            "remote-model".to_owned(),
+            lightagent_core::GenerationOverride {
+                max_output_tokens: Some(512),
+                reasoning_effort: Some("none".to_owned()),
+                reasoning_supported: Some(vec!["none".to_owned()]),
+                ..Default::default()
+            },
+        );
+        let lead_budget = settings.budget_for("lfm2@8k", Some(8_192));
+        let pool = lead_budget.output_pool.clone().unwrap();
+        let slot = GenerationSlot::default();
+        let other = reports(Some("qwen@32k"), Some(32_768));
+        // No lead budget: nothing changes and nothing is asked.
+        assert_eq!(
+            slot.for_worker_on(&routing("qwen@32k", None), &other).await,
+            GenerationBudget::default()
+        );
+        assert_eq!(asked(&other), 0);
+        slot.set(Some(LeadGeneration {
+            model: "lfm2@8k".into(),
+            budget: lead_budget.clone(),
+            settings: Some(Arc::new(settings)),
+        }));
+        // The lead's model: the lead's budget, and no discovery request.
+        assert_eq!(
+            slot.for_worker_on(&routing("default", None), &other).await,
+            lead_budget
+        );
+        assert_eq!(asked(&other), 0);
+        // Another model: its own, larger window, asked once; the lead's
+        // ceiling and pool.
+        let worker = slot.for_worker_on(&routing("qwen@32k", None), &other).await;
+        assert_eq!(asked(&other), 1);
+        let window = worker.context_window.unwrap();
+        assert_eq!(
+            (window.tokens, window.source),
+            (32_768, WindowSource::Provider)
+        );
+        assert_eq!(worker.max_output_tokens, Some(1_024));
+        assert_eq!(worker.reasoning, Reasoning::Default);
+        let held = worker
+            .output_pool
+            .as_ref()
+            .unwrap()
+            .reserve(Some(1_000))
+            .unwrap();
+        assert_eq!(pool.available(), 3_000, "the lead's pool, not a new one");
+        drop(held);
+        // Another endpoint's "default" model is budgeted by the model it
+        // resolves to: that model's own ceiling and reasoning declaration.
+        let remote = reports(Some("remote-model"), Some(16_384));
+        let worker = slot
+            .for_worker_on(&routing("default", Some("http://other:8080")), &remote)
+            .await;
+        assert_eq!(worker.context_window.map(|w| w.tokens), Some(16_384));
+        assert_eq!(worker.max_output_tokens, Some(512));
+        assert_eq!(worker.reasoning, Reasoning::Applied("none".into()));
+        // A model that cannot report its window: unknown, the conservative
+        // case; the ceiling and the pool still apply.
+        let silent = reports(None, None);
+        let worker = slot.for_worker_on(&routing("mystery", None), &silent).await;
+        assert_eq!(worker.context_window, None);
+        assert!(!worker.guards_context() && !worker.may_continue_with(0));
+        assert_eq!(worker.max_output_tokens, Some(1_024));
+        assert!(worker.output_pool.is_some());
+        // Every spawn asks again: nothing is cached across endpoints.
+        slot.for_worker_on(&routing("qwen@32k", None), &other).await;
+        assert_eq!(asked(&other), 2);
+        // Without the lead's settings, the earlier rule: unknown window.
+        slot.set(Some(LeadGeneration {
+            model: "lfm2@8k".into(),
+            budget: lead_budget,
+            settings: None,
+        }));
+        let worker = slot.for_worker_on(&routing("qwen@32k", None), &other).await;
+        assert_eq!(worker.context_window, None);
+        assert_eq!(asked(&other), 2);
     }
 }

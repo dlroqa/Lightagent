@@ -36,7 +36,11 @@ pub(crate) async fn resolve(config: &Config, provider: &LightweightProvider) -> 
     let budget = config.generation.budget_for(&model, reported);
     let history = HistoryWindow::resolve(budget.context_window, config.runtime.n_ctx);
     Resolved {
-        lead: LeadGeneration { model, budget },
+        lead: LeadGeneration {
+            model,
+            budget,
+            settings: Some(std::sync::Arc::new(config.generation.clone())),
+        },
         history,
     }
 }

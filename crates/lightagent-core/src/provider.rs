@@ -231,6 +231,14 @@ pub enum ProviderError {
 /// A source of model turns, independent of how it talks to one.
 #[async_trait]
 pub trait AgentProvider: Send + Sync {
+    /// The model this provider serves and the context window it serves it
+    /// with, as far as it can say. The default says nothing, and a run on it
+    /// is budgeted as having an unknown window. Asked once when a worker is
+    /// started on a model other than its lead's; never cached.
+    async fn served_model(&self) -> ServedModel {
+        ServedModel::default()
+    }
+
     /// Start one turn and return the decoded event stream.
     ///
     /// Cancellation ends the stream: dropping it closes the underlying
@@ -247,6 +255,10 @@ pub trait AgentProvider: Send + Sync {
 /// concrete one, with no second implementation.
 #[async_trait]
 impl AgentProvider for Arc<dyn AgentProvider> {
+    async fn served_model(&self) -> ServedModel {
+        (**self).served_model().await
+    }
+
     async fn stream(
         &self,
         request: ProviderRequest,
@@ -254,6 +266,15 @@ impl AgentProvider for Arc<dyn AgentProvider> {
     ) -> Result<ProviderStream, ProviderError> {
         (**self).stream(request, cancel).await
     }
+}
+
+/// What a provider reports about the model it serves.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ServedModel {
+    /// The model its configured model resolves to.
+    pub model: Option<String>,
+    /// The window, in tokens, it serves that model with.
+    pub context_window: Option<u32>,
 }
 
 /// Builds a provider for a profile's [`ModelRouting`].
