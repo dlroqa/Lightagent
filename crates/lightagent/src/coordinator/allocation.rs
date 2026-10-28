@@ -172,18 +172,23 @@ mod tests {
     use crate::coordinator::classify::TaskClassification;
     use lightagent_core::{
         GenerationConfig, JevClassificationMode, OutputPool, SpecialistSelection, SpecialistStep,
+        SubagentsConfig,
     };
     use std::time::Duration;
 
     fn config(mode: AdaptiveAllocation, repairs: u8) -> Config {
-        let mut config = Config::default();
-        config.generation = GenerationConfig {
-            max_run_output_tokens: Some(32_000),
-            adaptive_allocation: mode,
-            ..GenerationConfig::default()
-        };
-        config.subagents.max_repair_rounds = repairs;
-        config
+        Config {
+            generation: GenerationConfig {
+                max_run_output_tokens: Some(32_000),
+                adaptive_allocation: mode,
+                ..GenerationConfig::default()
+            },
+            subagents: SubagentsConfig {
+                max_repair_rounds: repairs,
+                ..SubagentsConfig::default()
+            },
+            ..Config::default()
+        }
     }
 
     fn lead(pool: Option<u32>) -> GenerationBudget {

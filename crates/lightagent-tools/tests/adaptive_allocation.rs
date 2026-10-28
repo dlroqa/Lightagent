@@ -194,22 +194,6 @@ fn context(root: &Path) -> ToolCtx {
     })
 }
 
-fn read() -> Vec<ProviderEvent> {
-    vec![
-        ProviderEvent::RoleStarted,
-        ProviderEvent::ToolCallDelta {
-            index: 0,
-            id: Some("r".into()),
-            name: Some("fs.read".into()),
-            arguments: Some(json!({ "path": "src/a.rs" }).to_string()),
-        },
-        ProviderEvent::Finished {
-            reason: FinishReason::ToolCalls,
-            usage: None,
-        },
-    ]
-}
-
 fn answer(text: &str) -> Vec<ProviderEvent> {
     vec![
         ProviderEvent::Content(text.into()),
