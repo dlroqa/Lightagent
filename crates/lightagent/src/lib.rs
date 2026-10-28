@@ -1579,6 +1579,9 @@ fn get_key(config: &Config, key: &str) -> Option<String> {
             .max_run_output_tokens
             .map(|v| v.to_string()),
         "generation.continuations" => config.generation.continuations.map(|v| v.to_string()),
+        "generation.adaptive_allocation" => {
+            Some(config.generation.adaptive_allocation.as_str().to_owned())
+        }
         _ => None,
     }
 }
@@ -1816,6 +1819,9 @@ fn set_key(config: &mut Config, key: &str, value: &str) -> Result<(), String> {
             config.generation.unknown_capacity_turn_tokens = parse_opt_u32(value)?
         }
         "generation.continuations" => config.generation.continuations = parse_opt_u32(value)?,
+        "generation.adaptive_allocation" => {
+            config.generation.adaptive_allocation = value.parse()?;
+        }
         _ => return Err(format!("unknown or read-only config key '{key}'")),
     }
     Ok(())
@@ -2232,6 +2238,18 @@ mod tests {
             set_key(&mut config, key, "").unwrap();
             assert!(get_key(&config, key).is_none());
         }
+        assert_eq!(
+            get_key(&config, "generation.adaptive_allocation").as_deref(),
+            Some("off")
+        );
+        for mode in ["plan", "jev", "off"] {
+            set_key(&mut config, "generation.adaptive_allocation", mode).unwrap();
+            assert_eq!(
+                get_key(&config, "generation.adaptive_allocation").as_deref(),
+                Some(mode)
+            );
+        }
+        assert!(set_key(&mut config, "generation.adaptive_allocation", "always").is_err());
         set_key(&mut config, "generation.reasoning_effort", "low").unwrap();
         assert_eq!(
             get_key(&config, "generation.reasoning_effort").as_deref(),
