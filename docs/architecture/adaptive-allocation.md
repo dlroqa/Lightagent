@@ -1,8 +1,8 @@
 # Adaptive output allocation (opt-in)
 
 Status: draft PR #67, stacked on #66 (`fix/pool-turn-reservation`), with
-the review corrections in a dependent draft PR on #67. Not merged. Disabled
-by default.
+review corrections in dependent drafts #68 (on #67) and a final one on #68.
+Not merged. Disabled by default.
 
 This divides a run's output pool (`generation.max_run_output_tokens`)
 between the lead and the specialist workers of the run's plan. Jev's part is
@@ -150,7 +150,8 @@ The pool keeps one account per part, inside the same atomic pool:
 
 | Account (`allocation.account`) | Who | May reserve from |
 |---|---|---|
-| `lead` | the lead's own turns | its reserve, then the free rest, then the follow-up reserve, then (last) the shares of roles **not started** |
+| `lead` | the lead's ordinary turns (which may still call tools and delegate) | its reserve, then the free rest |
+| `lead`, final turns | the lead's tool-less budget wrap-up answer, or a continuation of its answer | as above, then the follow-up reserve, then (last) the shares of roles **not started** |
 | `share` | the **first** worker of a planned role, while it runs | its share, then the free rest |
 | `follow_up` | a repeat start of a planned role (a repair or re-check) | follow-up reserve, then the free rest |
 | `unplanned` | any other worker (a role not in the plan, a profile worker, a nested worker) | the free rest only |
@@ -162,21 +163,36 @@ The asymmetry is deliberate:
 
 - **Workers** never reach the lead's reserve, another role's share, or a
   share whose worker has not started.
-- **The lead**, last, may use what no worker is using. So a run with no
-  plan, an empty plan, or planned workers that decline, fail, are refused or
-  are cancelled can still spend its pool on its own work and final answer.
-  It is not held to its 25% reserve.
-- **The lead never reaches a running worker's share.** What it borrows from a
-  share and does not use goes back to that share.
-- **A worker that starts after the lead borrowed** gets what is left of its
-  share, and its report shows that.
+- **Lead coordination never eats into planned work.** The lead's ordinary
+  turns can still delegate, so they reach only its reserve and the free
+  rest. However much the lead coordinates first, a planned worker that
+  starts later, or waits for an admission slot, finds its whole share, and
+  the follow-up reserve is intact. Workers start only from the lead's tool
+  calls, which run one at a time, so a lead turn and a worker never hold
+  reservations at once.
+- **What no worker will use still reaches the answer.** When the lead's
+  ordinary reach runs low after it has used tools, the loop already owes a
+  tool-less final answer (`OutputBudget` wrap-up). That turn, and any
+  continuation of the lead's answer, can no longer delegate, so it may
+  borrow, last, the follow-up reserve and the shares of roles that never
+  started. This covers no plan, an empty plan, and planned workers that
+  decline, fail, are refused or are cancelled: the lead is never held to its
+  25% reserve for its answer.
+- **The lead never reaches a running worker's share**, even to answer. What
+  it borrows from a share and does not use goes back to that share.
+- **The tradeoff.** A lead that answers in an ordinary turn (the model simply
+  stops calling tools) gets its reserve and the free rest, including what
+  finished workers released, but not the follow-up reserve or unstarted
+  shares. If that answer is cut off, its continuation may use them.
 
 ### The follow-up reserve, step by step
 
 - **Who uses it:**
   - a continuation, of the lead or any worker, after its own tokens;
   - a repeat start of a planned role (`follow_up` account), first;
-  - the lead, after the free rest.
+  - the lead's tool-less final answer (budget wrap-up), after the free rest.
+
+  The lead's ordinary turns never do.
 
   An ordinary turn of a planned or unplanned worker never does.
 - **Authorization:** continuations are governed by #62's rules (known window,
@@ -184,8 +200,8 @@ The asymmetry is deliberate:
   governed by the plan's repair rules (`subagents.max_repair_rounds`) and
   the child limits. The reserve grants no permission. It only funds a turn
   that was already allowed.
-- **Never needed:** it is not lost. It stays reachable by the lead (after its
-  reserve and the free rest) for the final answer.
+- **Never needed:** it is not lost. It stays reachable by the lead's
+  final answer or its continuation, after its reserve and the free rest.
 - **Concurrency:** reservations are atomic under the pool's lock. Together,
   concurrent continuations and repairs are never granted more than it holds.
 - **Cancellation or failure:** the reservation is charged in full and nothing
@@ -384,8 +400,8 @@ per-request ceiling (lead floor 2048) and one continuation allowed
 
 | Case | Before (`off`) | After (`plan`, or `jev` where noted) |
 |---|---|---|
-| Simple request, no subagent | One pool of 32,000; the lead's turns reserve per #66. | `no_plan` (`lead_keeps_task`): lead 8,000, follow-up 3,200, free 20,800. The lead can use all 32,000, the follow-up reserve last. An ad-hoc worker can use only the free 20,800. |
-| Planned workers that never start | — | Their shares stay held from other workers, and the lead may borrow them last. A worker that started and failed has released its share to everyone. |
+| Simple request, no subagent | One pool of 32,000; the lead's turns reserve per #66. | `no_plan` (`lead_keeps_task`): lead 8,000, follow-up 3,200, free 20,800. Lead coordination can use 28,800; its owed final answer or continuation, the follow-up 3,200 too. An ad-hoc worker can use only the free 20,800. |
+| Planned workers that never start | — | Their shares stay held from other workers and from lead coordination. The lead's owed final answer may borrow them last. A worker that started and failed has released its share to everyone. |
 | One specialist (researcher) | The worker can draw the whole pool. | Lead 8,000, follow-up 3,200, researcher 20,800. |
 | Two equal specialists (researcher, reviewer) | First come, first served. | 10,400 each. |
 | Unequal: coder + tester | First come, first served. | Coder 15,600 (heavy), tester 5,200 (light). |
@@ -409,9 +425,10 @@ per-request ceiling (lead floor 2048) and one continuation allowed
   guaranteed, for the lead or any worker.
 - **The lead reserve is a floor, not a guarantee.** It covers coordination
   turns too. A lead that spends it on research has less for the answer.
-- **The lead can shrink a planned share.** It does so only last, and only
-  for roles that have not started. A worker that starts afterwards gets the
-  remainder.
+- **Only the lead's final turns can shrink a planned share**, last, and only
+  for roles that have not started. Those turns cannot delegate, so no worker
+  of this run can start afterwards.
+- **An ordinary final answer does not borrow.** See the tradeoff above.
 - **The share cap is an upper bound.** It assumes an empty prompt each turn.
   It frees less for other roles than a tighter estimate would, but never
   lets a request exceed its current room.
