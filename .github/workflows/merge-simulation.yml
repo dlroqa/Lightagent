@@ -1,0 +1,124 @@
+name: nine-PR merge simulation (test-only)
+run-name: nine-PR merge simulation ${{ github.ref_name }} at ${{ github.sha }}
+
+# TEST-ONLY. Lives on a sim/ branch, never on master. It replays the proposed
+# merge-commit sequence on a hosted runner, records each step's commits,
+# tree and incremental diff, uploads the ledger as an artifact, and pushes
+# the two commits whose trees no PR head has (step 8 and the final step) to
+# candidate/ branches so they can be validated as they are. It merges nothing
+# into master, retargets nothing and sends nothing outside GitHub.
+
+on:
+  push:
+    branches: ['sim/nine-pr-merge-r1']
+
+permissions:
+  contents: write
+
+jobs:
+  simulate:
+    name: simulate the nine merges
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      MASTER: 0a07e74a343a34ea56a1373e6c740f5912c7f76e
+      R5: c43df9ed2619b9046ebc672997c06557838a15af
+      # step | PR | head | base the PR's own diff is taken against | expected tree prefix
+      STEPS: |
+        1 61 8aaf13058bd2e6ec04832f8c1d2eb229e59ea9d8 0a07e74a343a34ea56a1373e6c740f5912c7f76e 77ca6a4
+        2 62 cc006fb9ac710deaa877a1597854cdc001d606f7 8aaf13058bd2e6ec04832f8c1d2eb229e59ea9d8 a62877c
+        3 65 d7cd0c84d27a365f89e035a2255a106e34efd2b4 cc006fb9ac710deaa877a1597854cdc001d606f7 055b87f
+        4 66 c7b4986423d4066ff8ad69c66284b2a10b9a01d4 d7cd0c84d27a365f89e035a2255a106e34efd2b4 cff7d9d
+        5 67 a28c0862589c70048a0753eeebcee81082108933 c7b4986423d4066ff8ad69c66284b2a10b9a01d4 b7d1da4
+        6 68 aa8c59e5751fbae8acc347cee865e3f5a046f935 a28c0862589c70048a0753eeebcee81082108933 921d469
+        7 69 0efeb3cd41e2827783162c8459c9bb71c50f5da5 aa8c59e5751fbae8acc347cee865e3f5a046f935 cbba7e1
+        8 63 b2d8788ab5d2be10500fa184abdc5fffb93d39c4 0a07e74a343a34ea56a1373e6c740f5912c7f76e a8e9450
+        9 64 afc5ec3879195e2294950f13b902b41cbff08a2b b2d8788ab5d2be10500fa184abdc5fffb93d39c4 da38df7
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Verify the pinned state and simulate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/ledger"; mkdir -p "$out/diffs"
+          exec > >(tee "$out/simulation.log") 2>&1
+          git config user.name "merge simulation (test-only)"
+          git config user.email "merge-simulation@invalid"
+          git fetch -q origin "+refs/heads/master:refs/remotes/origin/master" "+refs/pull/*/head:refs/remotes/pull/*"
+          stop() { echo "STOP: $*"; echo "STOP: $*" >> "$out/ledger.md"; exit 1; }
+          {
+            echo "# Nine-PR merge simulation ledger"
+            echo
+            echo "Runner: $ImageOS $ImageVersion. Workflow commit: $GITHUB_SHA. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+          } > "$out/ledger.md"
+          [ "$(git rev-parse origin/master)" = "$MASTER" ] || stop "master moved: $(git rev-parse origin/master)"
+          echo "Pinned master: \`$MASTER\` (tree \`$(git rev-parse "$MASTER^{tree}")\`)" >> "$out/ledger.md"
+          echo >> "$out/ledger.md"
+          echo "| Step | PR | Head | Parents (previous, head) | Simulated merge | Tree | Expected | Head tree | Incremental diff = PR's own diff | Files |" >> "$out/ledger.md"
+          echo "|---|---|---|---|---|---|---|---|---|---|" >> "$out/ledger.md"
+          printf 'step\tpr\thead\tprevious\tmerge\ttree\texpected\thead_tree\tpatch_id_match\n' > "$out/ledger.tsv"
+          git checkout -q --detach "$MASTER"
+          while read -r step pr head base expected; do
+            [ -n "$step" ] || continue
+            actual=$(git rev-parse "refs/remotes/pull/$pr" 2>/dev/null || true)
+            [ "$actual" = "$head" ] || stop "#$pr head moved: $actual (pinned $head)"
+            prev=$(git rev-parse HEAD)
+            if ! git merge -q --no-ff --no-edit -m "Simulated merge of #$pr ($head)" "$head"; then
+              git diff --name-only --diff-filter=U > "$out/conflict-step-$step.txt" || true
+              stop "step $step (#$pr) conflicts: $(tr '\n' ' ' < "$out/conflict-step-$step.txt")"
+            fi
+            merge=$(git rev-parse HEAD); tree=$(git rev-parse HEAD^{tree}); head_tree=$(git rev-parse "$head^{tree}")
+            git diff "$prev" "$merge" > "$out/diffs/step-$step-pr$pr.patch"
+            git diff --stat "$prev" "$merge" > "$out/diffs/step-$step-pr$pr.stat"
+            git diff "$base" "$head" > "$out/diffs/pr$pr-own.patch"
+            # Compare the two diffs file by file (patch-id ignores line numbers).
+            rm -rf "$RUNNER_TEMP/a" "$RUNNER_TEMP/b"; mkdir -p "$RUNNER_TEMP/a" "$RUNNER_TEMP/b"
+            awk -v d="$RUNNER_TEMP/a" '/^diff --git/{n++} {print > (d "/" sprintf("%04d",n))}' "$out/diffs/step-$step-pr$pr.patch"
+            awk -v d="$RUNNER_TEMP/b" '/^diff --git/{n++} {print > (d "/" sprintf("%04d",n))}' "$out/diffs/pr$pr-own.patch"
+            ids() { for f in "$1"/*; do [ -s "$f" ] && git patch-id --stable < "$f" | awk '{print $1}'; done | sort | tr '\n' ,; }
+            if [ "$(ids "$RUNNER_TEMP/a")" = "$(ids "$RUNNER_TEMP/b")" ]; then match=yes; else
+              match=no
+              diff <(git diff --name-only "$prev" "$merge" | sort) <(git diff --name-only "$base" "$head" | sort) \
+                && echo "step $step: same files; per-file patch-id differs (context), see diffs/" || true
+            fi
+            files=$(git diff --name-only "$prev" "$merge" | wc -l)
+            case "$tree" in "$expected"*) ok="\`$expected\` ✓";; *) ok="\`$expected\` ✗";; esac
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$step" "$pr" "$head" "$prev" "$merge" "$tree" "$expected" "$head_tree" "$match" >> "$out/ledger.tsv"
+            echo "| $step | #$pr | \`$head\` | \`${prev:0:12}\`, \`${head:0:12}\` | \`$merge\` | \`$tree\` | $ok | \`$head_tree\`$([ "$tree" = "$head_tree" ] && echo ' (= merged)') | $match | $files |" >> "$out/ledger.md"
+            echo "step $step #$pr merge=$merge tree=$tree head_tree=$head_tree patch_id_match=$match"
+            case "$tree" in "$expected"*) ;; *) stop "step $step (#$pr) tree $tree is not the expected $expected";; esac
+            [ "$step" = 8 ] && step8="$merge"
+          done <<< "$STEPS"
+          final=$(git rev-parse HEAD)
+          {
+            echo
+            echo "Final simulated production commit: \`$final\`, tree \`$(git rev-parse HEAD^{tree})\`."
+            echo
+            echo "## Final tree versus test-only integration r5 (\`$R5\`, tree \`$(git rev-parse "$R5^{tree}")\`)"
+            echo
+            echo '```'
+            git diff --stat "$final" "$R5"
+            echo '```'
+          } >> "$out/ledger.md"
+          git diff "$final" "$R5" > "$out/diffs/final-vs-r5.patch"
+          extra=$(git diff --name-only "$final" "$R5" | sort | tr '\n' ' ')
+          echo "final-vs-r5 files: $extra"
+          [ "$extra" = "crates/lightagent-tools/tests/selection_generation.rs crates/lightagent/src/coordinator/selection.rs " ] \
+            || stop "r5 differs from the final tree in more than the integration-only tests: $extra"
+          # r5 only adds: no line of the final tree is removed or changed.
+          removed=$(git diff --numstat "$final" "$R5" | awk '{s+=$2} END {print s+0}')
+          [ "$removed" = 0 ] || stop "r5 removes or changes $removed production lines"
+          echo "r5 adds integration-only tests and nothing else." >> "$out/ledger.md"
+          git push -q origin "$step8:refs/heads/candidate/nine-pr-step8-r1" "$final:refs/heads/candidate/nine-pr-final-r1"
+          echo "Pushed candidate/nine-pr-step8-r1 = \`$step8\` and candidate/nine-pr-final-r1 = \`$final\`." >> "$out/ledger.md"
+          cat "$out/ledger.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: nine-pr-merge-ledger
+          path: ${{ runner.temp }}/ledger
+          retention-days: 90
