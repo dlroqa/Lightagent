@@ -83,13 +83,28 @@ impl GenerationSlot {
         let Some(settings) = &lead.settings else {
             return lead.budget.for_worker(false);
         };
-        let served = provider.served_model().await;
+        let served = served_within(provider, DISCOVERY_TIMEOUT).await;
         let model = served
             .model
             .unwrap_or_else(|| routing.model.trim().to_owned());
         lead.budget
             .for_routed_worker(settings.budget_for(&model, served.context_window))
     }
+}
+
+/// How long a worker's capability discovery may take before its window is
+/// treated as unknown.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// What `provider` reports serving, or unknown when it does not answer
+/// within `limit`.
+async fn served_within(
+    provider: &dyn AgentProvider,
+    limit: Duration,
+) -> lightagent_core::ServedModel {
+    tokio::time::timeout(limit, provider.served_model())
+        .await
+        .unwrap_or_default()
 }
 
 /// Whether `routing` reaches the lead's model at the lead's endpoint.
@@ -386,6 +401,35 @@ mod tests {
                 "never streamed".into(),
             ))
         }
+    }
+
+    /// A provider whose discovery never answers.
+    struct Silent;
+
+    #[async_trait::async_trait]
+    impl AgentProvider for Silent {
+        async fn served_model(&self) -> lightagent_core::ServedModel {
+            tokio::time::sleep(Duration::from_secs(3_600)).await;
+            lightagent_core::ServedModel::default()
+        }
+
+        async fn stream(
+            &self,
+            _: lightagent_core::ProviderRequest,
+            _: CancellationToken,
+        ) -> Result<lightagent_core::ProviderStream, lightagent_core::ProviderError> {
+            Err(lightagent_core::ProviderError::Upstream(
+                "never streamed".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_that_never_answers_leaves_the_window_unknown() {
+        let started = Instant::now();
+        let served = served_within(&Silent, Duration::from_millis(50)).await;
+        assert_eq!(served, lightagent_core::ServedModel::default());
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     fn reports(model: Option<&str>, window: Option<u32>) -> Reports {

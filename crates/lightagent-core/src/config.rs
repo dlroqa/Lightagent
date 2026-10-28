@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::generation::{
-    ContextWindow, GenerationBudget, MAX_CONTINUATIONS, OutputPool, Reasoning,
+    ContextWindow, DEFAULT_UNKNOWN_CAPACITY_TURN_TOKENS, GenerationBudget, MAX_CONTINUATIONS,
+    MIN_GRANT, OutputPool, Reasoning,
 };
 use crate::paths;
 
@@ -742,6 +743,12 @@ pub struct GenerationConfig {
     /// it delegates to and every continuation draw on it. Unset: no run-wide
     /// token bound (turns, time and workers still bound the run).
     pub max_run_output_tokens: Option<u32>,
+    /// With `max_run_output_tokens`, what a turn reserves from the pool, and
+    /// is sent as `max_tokens`, when nothing else bounds it: no output
+    /// ceiling and no known window. Unset: 2048. It bounds consumption only;
+    /// the model's context capacity stays unknown. Without a pool it is not
+    /// used and requests are unchanged.
+    pub unknown_capacity_turn_tokens: Option<u32>,
     /// A window to budget against when the provider reports none, or a
     /// smaller one than it reports. Never stretches a reported window.
     pub context_window: Option<u32>,
@@ -808,14 +815,28 @@ impl GenerationConfig {
             max_output_tokens: pick(|o| o.max_output_tokens, self.max_output_tokens),
             reserve_answer_tokens,
             reasoning: Reasoning::resolve(effort, supported),
-            output_pool: pick(|o| o.max_run_output_tokens, self.max_run_output_tokens)
-                .map(OutputPool::new),
+            output_pool: pick(|o| o.max_run_output_tokens, self.max_run_output_tokens).map(
+                |total| {
+                    OutputPool::new(total).with_turn_tokens(
+                        self.unknown_capacity_turn_tokens
+                            .unwrap_or(DEFAULT_UNKNOWN_CAPACITY_TURN_TOKENS),
+                    )
+                },
+            ),
             max_continuations: pick(|o| o.continuations, self.continuations).unwrap_or(1),
         }
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
         validate_generation("generation", &self.as_override())?;
+        if self
+            .unknown_capacity_turn_tokens
+            .is_some_and(|tokens| tokens < MIN_GRANT)
+        {
+            return Err(ConfigError::Invalid(format!(
+                "generation.unknown_capacity_turn_tokens must be at least {MIN_GRANT}"
+            )));
+        }
         for (model, own) in &self.models {
             if model.trim().is_empty() {
                 return Err(ConfigError::Invalid(
@@ -2474,6 +2495,13 @@ mod tests {
         let one = pooled.generation.budget_for("m", None).output_pool.unwrap();
         let two = pooled.generation.budget_for("m", None).output_pool.unwrap();
         assert_eq!(one.total(), 20_000);
+        assert_eq!(one.turn_tokens(), 2_048, "the documented default");
+        let tuned: Config = serde_json::from_str(
+            r#"{"generation":{"max_run_output_tokens":20000,"unknown_capacity_turn_tokens":512}}"#,
+        )
+        .unwrap();
+        let pool = tuned.generation.budget_for("m", None).output_pool.unwrap();
+        assert_eq!(pool.turn_tokens(), 512);
         assert_ne!(one, two, "runs never share a pool");
         // An allowance above the served window is never requested.
         let small = config.generation.budget_for("qwen@32k", Some(4_096));
@@ -2491,6 +2519,7 @@ mod tests {
             r#"{"generation":{"models":{"":{}}}}"#,
             r#"{"generation":{"models":{"m":{"max_output_tokens":0}}}}"#,
             r#"{"generation":{"max_run_output_tokens":0}}"#,
+            r#"{"generation":{"max_run_output_tokens":1000,"unknown_capacity_turn_tokens":8}}"#,
             r#"{"generation":{"continuations":4}}"#,
             r#"{"generation":{"models":{"m":{"continuations":9}}}}"#,
         ] {

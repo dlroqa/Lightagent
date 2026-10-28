@@ -177,6 +177,14 @@ impl HistoryWindow {
 /// The least a turn may reserve from an [`OutputPool`] and still be taken.
 pub const MIN_GRANT: u32 = 16;
 
+/// What a pool-backed turn reserves, and is sent as its `max_tokens`, when
+/// nothing else bounds it: no output ceiling and no known window. Room for a
+/// full worker report (roughly 1,500 English words), small enough that the
+/// default four concurrent workers hold at most 8,192 tokens of a pool at
+/// once. It says nothing about the model's context capacity, which stays
+/// unknown, and it is never derived from another model's window.
+pub const DEFAULT_UNKNOWN_CAPACITY_TURN_TOKENS: u32 = 2_048;
+
 /// A ceiling on what a whole run may generate, shared by the lead, its
 /// workers and its continuations.
 ///
@@ -187,6 +195,15 @@ pub const MIN_GRANT: u32 = 16;
 /// cancelled or failed before it could be settled, is charged its whole
 /// reservation, so the account errs high, never low, and
 /// [`OutputPool::estimated`] says that happened.
+///
+/// A turn never reserves the whole pool merely because nothing else bounded
+/// it: the loop asks for its output ceiling, or the room its known window
+/// leaves, or [`OutputPool::turn_tokens`]. The amount is sent as the turn's
+/// `max_tokens`, which is what makes the reservation binding on a provider
+/// that honours it. A provider that reports more than it was granted has not
+/// honoured it: the excess is charged and recorded as an
+/// [`overrun`](OutputPool::overrun), and the pool grants nothing more, so
+/// the overspend is bounded by the turns already in flight.
 #[derive(Clone, Debug)]
 pub struct OutputPool {
     inner: Arc<Mutex<PoolState>>,
@@ -198,6 +215,8 @@ struct PoolState {
     spent: u32,
     reserved: u32,
     estimated: bool,
+    turn_tokens: u32,
+    overrun: u32,
 }
 
 /// Two handles are the same pool only if they share it.
@@ -217,8 +236,30 @@ impl OutputPool {
                 spent: 0,
                 reserved: 0,
                 estimated: false,
+                turn_tokens: DEFAULT_UNKNOWN_CAPACITY_TURN_TOKENS,
+                overrun: 0,
             })),
         }
+    }
+
+    /// Set what a turn with nothing else to bound it reserves (at least
+    /// [`MIN_GRANT`]).
+    pub fn with_turn_tokens(self, tokens: u32) -> Self {
+        if let Ok(mut state) = self.inner.lock() {
+            state.turn_tokens = tokens.max(MIN_GRANT);
+        }
+        self
+    }
+
+    /// What a turn with no output ceiling and no known window reserves.
+    pub fn turn_tokens(&self) -> u32 {
+        self.read(|state| state.turn_tokens, MIN_GRANT)
+    }
+
+    /// Tokens reported beyond what turns were granted. Once any are, the
+    /// pool grants nothing more.
+    pub fn overrun(&self) -> u32 {
+        self.read(|state| state.overrun, u32::MAX)
     }
 
     fn read<T>(&self, read: impl FnOnce(&PoolState) -> T, otherwise: T) -> T {
@@ -254,9 +295,13 @@ impl OutputPool {
     }
 
     /// Reserve up to `ask` tokens for one turn (everything available when
-    /// `None`), or `None` when less than [`MIN_GRANT`] is available.
+    /// `None`), or `None` when less than [`MIN_GRANT`] is available or a
+    /// provider has overrun an earlier grant.
     pub fn reserve(&self, ask: Option<u32>) -> Option<Reservation> {
         let mut state = self.inner.lock().ok()?;
+        if state.overrun > 0 {
+            return None;
+        }
         let available = state
             .total
             .saturating_sub(state.spent)
@@ -278,6 +323,9 @@ impl OutputPool {
             state.reserved = state.reserved.saturating_sub(reserved);
             state.spent = state.spent.saturating_add(used.unwrap_or(reserved));
             state.estimated |= used.is_none();
+            if let Some(used) = used {
+                state.overrun = state.overrun.saturating_add(used.saturating_sub(reserved));
+            }
         }
     }
 }
@@ -735,6 +783,14 @@ pub struct GenerationReport {
     pub output_estimated: bool,
     /// Continuations taken so far in this run, this turn included.
     pub continuations: u32,
+    /// What bounded this turn's reservation from the pool: `ceiling` (an
+    /// explicit or inherited `max_output_tokens`), `remaining_context` (the
+    /// known window less the estimated prompt) or `unknown_capacity` (the
+    /// pool's per-turn default; the window is unknown and stays so). `None`
+    /// without a pool.
+    pub reservation_basis: Option<String>,
+    /// Tokens the provider reported beyond what turns were granted, so far.
+    pub output_overrun: u32,
 }
 
 #[cfg(test)]
@@ -953,10 +1009,29 @@ mod tests {
         // A turn that never settles (cancelled, failed) is charged in full.
         drop(pool.reserve(Some(300)).unwrap());
         assert_eq!(pool.spent(), 820);
-        // A provider that reports more than it was granted is charged it.
+        // A provider that reports more than it was granted is charged it,
+        // and the excess is recorded.
         pool.reserve(None).unwrap().settle(Some(400));
         assert_eq!(pool.available(), 0);
+        assert_eq!(pool.overrun(), 220);
         assert!(pool.reserve(None).is_none());
+    }
+
+    #[test]
+    fn an_overrun_stops_further_grants_even_with_tokens_left() {
+        let pool = OutputPool::new(10_000);
+        assert_eq!(pool.turn_tokens(), DEFAULT_UNKNOWN_CAPACITY_TURN_TOKENS);
+        assert_eq!(
+            OutputPool::new(10).with_turn_tokens(4).turn_tokens(),
+            MIN_GRANT
+        );
+        pool.reserve(Some(100)).unwrap().settle(Some(150));
+        assert_eq!((pool.spent(), pool.overrun()), (150, 50));
+        assert!(pool.available() > 9_000);
+        assert!(
+            pool.reserve(Some(100)).is_none(),
+            "the ceiling was not honoured"
+        );
     }
 
     #[test]
