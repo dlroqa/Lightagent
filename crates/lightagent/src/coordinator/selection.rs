@@ -1562,6 +1562,8 @@ mod tests {
         let mut case = Case::new(coding_task([0.92, 0.92, 0.1, 0.85]));
         case.config.generation.max_run_output_tokens = Some(32_000);
         case.config.generation.adaptive_allocation = AdaptiveAllocation::Jev;
+        // Three workers, so the tester is not left out by the default cap.
+        case.config.subagents.selection_max_workers = 3;
         let selection = case.decide().unwrap();
         assert_eq!(roles(&selection), ["researcher", "coder", "tester"]);
         // The fixture's complexity confidence (0.8) is below its threshold
