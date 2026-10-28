@@ -1,7 +1,8 @@
 # Adaptive output allocation (opt-in)
 
-Status: draft PR, stacked on #66 (`fix/pool-turn-reservation`). Not merged.
-Disabled by default.
+Status: draft PR #67, stacked on #66 (`fix/pool-turn-reservation`), with
+the review corrections in a dependent draft PR on #67. Not merged. Disabled
+by default.
 
 This divides a run's output pool (`generation.max_run_output_tokens`)
 between the lead and the specialist workers of the run's plan. Jev's part is
@@ -57,7 +58,47 @@ What reaches the allocator from Jev, indirectly:
 | Signal | Used for | Condition |
 |---|---|---|
 | The roles of the run's specialist plan | which roles get a share | the plan was **applied**: `subagents.selection = active` and the profile is listed |
-| Task complexity `complex` | raises the researcher's and coder's demand class one step | `adaptive_allocation = jev` **and** complexity confidence ≥ the classification's own threshold |
+| Task complexity `complex` | raises a planned researcher from standard to heavy (a coder is already heavy, so it does not change) | `adaptive_allocation = jev` **and** complexity confidence ≥ the classification's own threshold |
+
+### What `jev` mode actually changes
+
+Exactly one thing: with a confident `complex` classification, a planned
+**researcher** weighs 3 instead of 2. Nothing else.
+
+- **Reserves stay the same.** The lead and follow-up reserves never depend on
+  complexity.
+- **Absolute amounts stay the same.** There is no extra pool or allowance.
+- **No uniform scaling.** Every other class stays as it is.
+
+So `jev` produces different numbers from `plan` only when **all** of these
+hold:
+
+- the classification is confident, at or above its own threshold;
+- it says `complex`;
+- the applied plan has a researcher **and** at least one other role.
+
+In every other supported case it is identical to `plan`, and the diagnostics
+say why:
+
+- `complexity_not_complex`: `simple` or `moderate`.
+- `complexity_changes_no_share`: no researcher was planned, or the
+  researcher was the only role.
+- `complexity_low_confidence`: below the threshold.
+- `classification_unavailable`: no classification.
+
+`source` is `jev_complexity` only when a relative share actually changed.
+
+Illustrative, with a 32,000 pool, lead 8,000 and follow-up 3,200 in every
+row, so 20,800 for workers. The same splits are pinned by the test
+`jev_differs_from_plan_only_for_a_complex_task_that_plans_a_researcher`.
+
+| Plan | `plan` | `jev`, simple or moderate | `jev`, complex |
+|---|---|---|---|
+| researcher + reviewer | 10,400 / 10,400 | same (`complexity_not_complex`) | 12,480 / 8,320 (3 : 2) |
+| coder + tester | 15,600 / 5,200 | same | same (`complexity_changes_no_share`) |
+| researcher alone | 20,800 | same | same (`complexity_changes_no_share`) |
+
+A simple task never reaches this point: selection keeps it with the lead.
 
 Jev never supplies a token count, a model capacity, a ceiling, a permission
 or a setting. Its confidence is not treated as proof that a share is enough.
@@ -70,7 +111,7 @@ or a setting. Its confidence is not treated as proof that a share is enough.
 |---|---|
 | `shares` | Each planned role once, with a `Demand` class: `light` (weight 1), `standard` (2), `heavy` (3). At most 4. |
 | `source` | `role_defaults`, `jev_complexity` or `no_plan`. |
-| `fallback_reason` | Why a richer source was not used: `no_selection`, `lead_keeps_task`, `plan_not_applied`, `complexity_low_confidence`, `classification_unavailable`. |
+| `fallback_reason` | Why a richer source was not used: `no_selection`, `lead_keeps_task`, `plan_not_applied`, `complexity_low_confidence`, `classification_unavailable`, `complexity_not_complex`, `complexity_changes_no_share`. |
 | `lead_floor` | The lead's own per-turn reservation: its `max_output_tokens`, else `unknown_capacity_turn_tokens`. |
 | `follow_up` | Whether a follow-up reserve is kept: continuations allowed, or repair rounds possible (a coder with a tester or reviewer, `max_repair_rounds > 0`). |
 
@@ -109,12 +150,49 @@ The pool keeps one account per part, inside the same atomic pool:
 
 | Account (`allocation.account`) | Who | May reserve from |
 |---|---|---|
-| `lead` | the lead's own turns | lead reserve, then the free rest |
+| `lead` | the lead's own turns | its reserve, then the free rest, then the follow-up reserve, then (last) the shares of roles **not started** |
 | `share` | the **first** worker of a planned role, while it runs | its share, then the free rest |
-| `follow_up` | a repeat start of a planned role | follow-up reserve, then the free rest |
+| `follow_up` | a repeat start of a planned role (a repair or re-check) | follow-up reserve, then the free rest |
 | `unplanned` | any other worker (a role not in the plan, a profile worker, a nested worker) | the free rest only |
 
-Any continuation may also use the follow-up reserve.
+A worker's continuation may also use the follow-up reserve, after its own
+tokens and before the free rest.
+
+The asymmetry is deliberate:
+
+- **Workers** never reach the lead's reserve, another role's share, or a
+  share whose worker has not started.
+- **The lead**, last, may use what no worker is using. So a run with no
+  plan, an empty plan, or planned workers that decline, fail, are refused or
+  are cancelled can still spend its pool on its own work and final answer.
+  It is not held to its 25% reserve.
+- **The lead never reaches a running worker's share.** What it borrows from a
+  share and does not use goes back to that share.
+- **A worker that starts after the lead borrowed** gets what is left of its
+  share, and its report shows that.
+
+### The follow-up reserve, step by step
+
+- **Who uses it:**
+  - a continuation, of the lead or any worker, after its own tokens;
+  - a repeat start of a planned role (`follow_up` account), first;
+  - the lead, after the free rest.
+
+  An ordinary turn of a planned or unplanned worker never does.
+- **Authorization:** continuations are governed by #62's rules (known window,
+  turn and time left, `generation.continuations`). Repeat starts are
+  governed by the plan's repair rules (`subagents.max_repair_rounds`) and
+  the child limits. The reserve grants no permission. It only funds a turn
+  that was already allowed.
+- **Never needed:** it is not lost. It stays reachable by the lead (after its
+  reserve and the free rest) for the final answer.
+- **Concurrency:** reservations are atomic under the pool's lock. Together,
+  concurrent continuations and repairs are never granted more than it holds.
+- **Cancellation or failure:** the reservation is charged in full and nothing
+  returns (conservative).
+- **Settled turns:** what a settled turn did not use returns to the reserve.
+- **Exhaustion:** once it is spent, a continuation that has nothing else to
+  draw on is not taken. #62 then reports the answer as cut off (`MaxTokens`).
 
 Per request, nothing about the policy changes. The ask is still the ceiling,
 else the known room, else the per-turn default. The account and the pool can
@@ -136,10 +214,27 @@ Lifecycle of a share:
 
 - **Planned.** Held for its role from installation, reachable by no one.
 - **Running.** Reachable by its worker once it starts. At start it is capped
-  at what the worker can use: its per-turn capacity (ceiling, else its window
-  less the 2% margin, else the per-turn default) × the turns it was granted.
+  at an **upper bound** of what the worker could ever be granted: its
+  per-turn capacity × the turns it was granted. Per-turn capacity is its
+  ceiling, else its whole window less the 2% margin, else the per-turn
+  default.
+
   The excess is split between roles that have **not started**, by weight. A
-  running share is never cut back later.
+  running share is never cut back later, and released capacity is never
+  handed back to it: a repeat start is a `follow_up` account, not a second
+  share.
+
+  The cap is not a prediction that every turn has that room. Each request is
+  still sized when it is made, by the room its window leaves **after the
+  prompt it actually has** (history and tool results included). It is then
+  bounded by the ceilings, the account and the pool. As the conversation
+  grows, requests shrink (test
+  `each_turn_is_bounded_by_the_room_left_now_not_by_the_share`).
+
+  Granted turns include continuations and wrap-up answers, which each spend
+  one of the worker's turns. Repairs are separate starts, funded by the
+  follow-up reserve. The cap is fixed when the worker starts; it is not
+  recomputed if the tree's remaining turns change later.
 - **Released.** When its worker ends (completed, failed, cancelled, revoked,
   or a parked worker expires), what is left becomes free for later work.
   Released tokens never extend a generation already running. They can fund a
@@ -289,12 +384,13 @@ per-request ceiling (lead floor 2048) and one continuation allowed
 
 | Case | Before (`off`) | After (`plan`, or `jev` where noted) |
 |---|---|---|
-| Simple request, no subagent | One pool of 32,000; the lead's turns reserve per #66. | `no_plan` (`lead_keeps_task`): lead 8,000, follow-up 3,200, free 20,800. The lead can use 28,800. An ad-hoc worker can use only the free 20,800. |
+| Simple request, no subagent | One pool of 32,000; the lead's turns reserve per #66. | `no_plan` (`lead_keeps_task`): lead 8,000, follow-up 3,200, free 20,800. The lead can use all 32,000, the follow-up reserve last. An ad-hoc worker can use only the free 20,800. |
+| Planned workers that never start | — | Their shares stay held from other workers, and the lead may borrow them last. A worker that started and failed has released its share to everyone. |
 | One specialist (researcher) | The worker can draw the whole pool. | Lead 8,000, follow-up 3,200, researcher 20,800. |
 | Two equal specialists (researcher, reviewer) | First come, first served. | 10,400 each. |
 | Unequal: coder + tester | First come, first served. | Coder 15,600 (heavy), tester 5,200 (light). |
 | Researcher + coder + reviewer, `plan` (or `jev` with moderate complexity) | — | 5,942 / 8,914 / 5,942 (2 : 3 : 2), 2 unallocated by rounding. |
-| Same, `jev`, confident `complex` | — | 7,800 / 7,800 / 5,200 (3 : 3 : 2). |
+| Same, `jev`, confident `complex` | — | 7,800 / 7,800 / 5,200 (3 : 3 : 2): only the researcher changed. |
 | Mixed capacities: coder (unknown window, `max_turns` 3) + tester (16k window) | Coder asks 2,048 per turn; the tester its window's room; one pool. | The coder's share is capped at 3 × 2,048 = 6,144, and 9,456 moves to the tester: 14,656. Coder requests stay at 2,048. Tester requests: its window's room, bounded by 14,656. |
 | Missing Jev or unknown capacity | As above. | `jev` with a failed classification: no applied plan, so `no_plan`. With a plan but low-confidence complexity: `role_defaults` (`complexity_low_confidence`). Unknown capacity: as in the row above. |
 | Continuation and repair | Every continuation and repair draws on one pool. | A cut-off answer's continuation may use the follow-up 3,200 even when its share is spent. A second coder start (repair) is `follow_up` and draws on the follow-up reserve, then the free rest (including what earlier workers released). |
@@ -313,6 +409,12 @@ per-request ceiling (lead floor 2048) and one continuation allowed
   guaranteed, for the lead or any worker.
 - **The lead reserve is a floor, not a guarantee.** It covers coordination
   turns too. A lead that spends it on research has less for the answer.
+- **The lead can shrink a planned share.** It does so only last, and only
+  for roles that have not started. A worker that starts afterwards gets the
+  remainder.
+- **The share cap is an upper bound.** It assumes an empty prompt each turn.
+  It frees less for other roles than a tighter estimate would, but never
+  lets a request exceed its current room.
 - **No waiting.** Refusal is immediate. There is no queueing for released
   tokens.
 - **Plans don't change mid-run.** A plan is fixed when the run starts (the
