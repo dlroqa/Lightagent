@@ -212,9 +212,61 @@ lowers `max_tokens` or declines to start a turn.
 
 ### #62: bounded continuation (stacked)
 
-See that PR. After a `length` stop it can take up to `continuations`
-tool-less turns. Each obeys the per-request ceiling, reserves from the
-pool, and spends a turn and time from the run's own budget.
+After a `length` stop, the loop may take up to `generation.continuations`
+more turns (default 1, at most 3) asking the model to carry on from where
+it stopped. These turns are **answer-only**: no tools are offered, and any
+tool call a continuation produces is not run.
+
+A continuation is taken only when **all** of these hold:
+
+- the window is known;
+- visible text arrived (a reasoning-only stop is reported `MaxTokens`,
+  not continued);
+- no tool call was being streamed (its arguments may be cut off; it is
+  never run, and completed tools are never replayed);
+- the run is not cancelled;
+- the run has a turn and time left in its own budget (each continuation
+  spends one turn);
+- the window still has at least 256 tokens of room once the partial answer
+  is in;
+- the run's output pool, if set, can still grant at least that much.
+
+Limits:
+
+- **Per request.** `max_output_tokens` applies to each continuation
+  request exactly as to any other.
+- **Per run.** Total generation is bounded only by `max_run_output_tokens`,
+  which continuations reserve from like any turn.
+- Without a pool, a run's total is at most (1 + continuations) × ceiling
+  for its answer, inside its turn and time limits.
+
+Text handling:
+
+- The parts are replayed as **one** assistant message, so roles still
+  alternate.
+- A continuation's opening is held until it can be compared with the end
+  of the answer so far. Only a **clear** restatement is trimmed: at least
+  32 bytes, more than one word, and starting at a word boundary in the
+  earlier text.
+- Shorter, single-word or mid-word repeats are kept, so legitimate
+  repetition (a refrain, a repeated identifier) is never removed. The cost
+  is that a short restatement may appear twice.
+- A model that starts its whole answer again is not detected.
+
+Persistence and replay:
+
+- SSE events keep their buffer ids, so a reconnect resumes without
+  duplicates.
+- The saved session concatenates the parts into one assistant message.
+- A cancelled or failed continuation keeps the partial answer already
+  emitted.
+
+Completion status. The terminal reason says whether the answer finished:
+
+- `EndTurn` (or the wrap-up's reason) when a continuation finished it;
+- `MaxTokens` (`complete: false`) when it is still cut off after the last
+  permitted continuation, or when no continuation was allowed;
+- `generation.report` counts the continuations taken.
 
 ## Settings
 

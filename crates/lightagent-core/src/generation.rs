@@ -39,8 +39,16 @@
 //! Session history is packed against a [`HistoryWindow`], resolved the same
 //! way for every entry point.
 //!
+//! An answer cut off at its length limit may be **continued**: one more
+//! tool-less turn asks the model to carry on from where it stopped, at most
+//! [`GenerationBudget::max_continuations`] times, and only with a known
+//! window that still has room once the partial answer is in. Each
+//! continuation spends a turn of the run's own budget, so the run's turn,
+//! time and tree limits bound it too.
+//!
 //! The default budget knows nothing and changes nothing: no `max_tokens`, no
-//! reasoning field, no early answer, no shortened result and no report.
+//! reasoning field, no early answer, no shortened result, no continuation and
+//! no report.
 
 use std::sync::{Arc, Mutex};
 
@@ -374,6 +382,9 @@ pub struct GenerationBudget {
     /// What the whole run, workers and continuations included, may
     /// generate. `None`: no run-wide token bound.
     pub output_pool: Option<OutputPool>,
+    /// How many times an answer cut off at its length limit may be
+    /// continued. Used only with a known window.
+    pub max_continuations: u32,
 }
 
 /// The tokens added to every estimate of a message, for its role and framing.
@@ -381,6 +392,20 @@ const MESSAGE_OVERHEAD: u32 = 5;
 
 /// The tokens a shortened result's note may take.
 const NOTE_TOKENS: u32 = 48;
+
+/// The least room a continuation must leave for the model to write in.
+pub const CONTINUE_MIN_TOKENS: u32 = 256;
+
+/// The most continuations a budget may allow.
+pub const MAX_CONTINUATIONS: u32 = 3;
+
+/// The shortest restatement of earlier text a continuation is trimmed of:
+/// below this, a match is as likely a deliberate repeat as a restated
+/// ending.
+const MIN_OVERLAP: usize = 32;
+
+/// How much of the text so far a continuation is compared with.
+pub(crate) const OVERLAP_TAIL: usize = 512;
 
 impl GenerationBudget {
     /// Whether the budget changes anything about a run. An inactive budget
@@ -453,7 +478,15 @@ impl GenerationBudget {
                 Reasoning::Default
             },
             output_pool: self.output_pool.clone(),
+            max_continuations: self.max_continuations,
         }
+    }
+
+    /// Whether a continuation would leave enough room once a prompt of
+    /// `prompt` tokens, the partial answer included, is in.
+    pub fn may_continue_with(&self, prompt: u32) -> bool {
+        self.room(prompt)
+            .is_some_and(|room| room >= CONTINUE_MIN_TOKENS)
     }
 }
 
@@ -574,6 +607,42 @@ pub(crate) fn fit_result(content: &str, allowance: u32) -> Option<String> {
     ))
 }
 
+/// The end of `text`, at most [`OVERLAP_TAIL`] bytes, cut on a character
+/// boundary.
+pub(crate) fn tail(text: &str) -> &str {
+    let mut start = text.len().saturating_sub(OVERLAP_TAIL);
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    &text[start..]
+}
+
+/// `next` without any opening it restates from the end of `tail`: asked to
+/// continue, a model sometimes repeats its last words first. Only a clear
+/// restatement is trimmed: at least [`MIN_OVERLAP`] bytes, more than one
+/// word, starting where a word starts in the earlier text. Anything less —
+/// a short refrain, a repeated identifier, a match beginning mid-word — is
+/// kept, so legitimate repetition is never removed; the cost is that a short
+/// restatement may show twice. A model that starts its whole answer again
+/// is not detected.
+pub(crate) fn strip_overlap<'a>(tail: &str, next: &'a str) -> &'a str {
+    let longest = tail.len().min(next.len());
+    for length in (MIN_OVERLAP..=longest).rev() {
+        if !next.is_char_boundary(length) || !tail.ends_with(&next[..length]) {
+            continue;
+        }
+        let restated = &next[..length];
+        let starts_a_word = tail[..tail.len() - length]
+            .chars()
+            .next_back()
+            .is_none_or(char::is_whitespace);
+        if starts_a_word && restated.trim().contains(char::is_whitespace) {
+            return &next[length..];
+        }
+    }
+    next
+}
+
 /// Why a turn that stopped at its length limit most likely stopped, from the
 /// provider's counts: the requested allowance was spent, or prompt and output
 /// filled the window. Unknown without the counts to tell.
@@ -642,6 +711,8 @@ pub struct GenerationReport {
     pub output_budget: Option<u32>,
     pub output_spent: Option<u32>,
     pub output_estimated: bool,
+    /// Continuations taken so far in this run, this turn included.
+    pub continuations: u32,
 }
 
 #[cfg(test)]
@@ -750,6 +821,7 @@ mod tests {
             reserve_answer_tokens: 512,
             reasoning: Reasoning::Applied("low".into()),
             output_pool: Some(OutputPool::new(10_000)),
+            max_continuations: 1,
         };
         assert_eq!(lead.for_worker(true), lead);
         assert_eq!(
@@ -761,6 +833,60 @@ mod tests {
         assert_eq!(other.context_window, None);
         assert_eq!(other.reasoning, Reasoning::Default);
         assert_eq!(other.max_output_tokens, Some(1_024));
+        assert_eq!(other.max_continuations, 1);
+    }
+
+    #[test]
+    fn a_continuation_needs_a_known_window_with_room_left() {
+        let unknown = GenerationBudget {
+            max_continuations: 1,
+            ..GenerationBudget::default()
+        };
+        assert!(!unknown.may_continue_with(0), "no window, no continuation");
+        let known = GenerationBudget {
+            context_window: window(4_096),
+            ..unknown
+        };
+        let margin = margin(4_096);
+        assert!(known.may_continue_with(4_096 - margin - CONTINUE_MIN_TOKENS));
+        assert!(!known.may_continue_with(4_096 - margin - CONTINUE_MIN_TOKENS + 1));
+    }
+
+    #[test]
+    fn a_restated_ending_is_trimmed_from_a_continuation() {
+        let so_far = "The three sources agree that the bridge opened in";
+        assert_eq!(
+            strip_overlap(
+                so_far,
+                "three sources agree that the bridge opened in 1932, after"
+            ),
+            " 1932, after"
+        );
+        assert_eq!(strip_overlap(so_far, " 1932, after"), " 1932, after");
+        assert_eq!(
+            strip_overlap(so_far, "agree that the bridge opened in 1932"),
+            "agree that the bridge opened in 1932",
+            "a repeat under 32 bytes is kept"
+        );
+        let ward = "They toured the warehouse district by the river opened in";
+        let mid_word = "house district by the river opened in 1932";
+        assert_eq!(strip_overlap(ward, mid_word), mid_word, "starts mid-word");
+        let key = "the key is 0123456789abcdef0123456789abcdef";
+        let again = "0123456789abcdef0123456789abcdef, again";
+        assert_eq!(
+            strip_overlap(key, again),
+            again,
+            "one word is not a restatement"
+        );
+        assert_eq!(strip_overlap("", "anything"), "anything");
+        let accented = "é".repeat(400);
+        assert_eq!(tail(&accented).len(), OVERLAP_TAIL);
+        assert_eq!(tail("short"), "short");
+        let french = "le café crème était très bon et le thé aussi";
+        assert_eq!(
+            strip_overlap(french, "café crème était très bon et le thé aussi, merci"),
+            ", merci"
+        );
     }
 
     #[test]
