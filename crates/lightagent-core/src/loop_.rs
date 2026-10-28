@@ -786,7 +786,8 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
         // starved. With nothing left to grant, no turn is taken. With an
         // allocation installed, the turn reserves from its own account (a
         // continuation may also use the follow-up reserve), never from what
-        // another account holds.
+        // another account holds; only the lead's tool-less final turns may
+        // borrow what planned workers never started on.
         let ceiling = budget.requested_max_tokens();
         let reservation = match &budget.output_pool {
             Some(pool) => {
@@ -802,7 +803,14 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
                     (None, None) => (pool.turn_tokens(), "unknown_capacity"),
                 };
                 driver.reservation_basis = Some(basis);
-                match pool.reserve_for(Some(ask), driver.continuing.is_some()) {
+                let purpose = if driver.continuing.is_some() {
+                    crate::allocation::TurnPurpose::Continuation
+                } else if driver.wrap_up.is_some() {
+                    crate::allocation::TurnPurpose::Answer
+                } else {
+                    crate::allocation::TurnPurpose::Turn
+                };
+                match pool.reserve_in(Some(ask), purpose) {
                     Some(reservation) => {
                         driver.grant = Some((ask, reservation.tokens()));
                         Some(reservation)

@@ -15,7 +15,7 @@ use lightagent_core::provider::{FinishReason, ProviderEvent, Usage};
 use lightagent_core::{
     Account, AgentEvent, AgentLoop, ApprovalNeed, ContextWindow, Demand, GenerationBudget,
     GenerationReport, MockProvider, OutputPlan, OutputPool, PlannedShare, RunConfig, StopReason,
-    ToolCall, ToolInvoker, ToolOutcome, ToolSchema, WindowSource,
+    ToolCall, ToolInvoker, ToolOutcome, ToolSchema, TurnPurpose, WindowSource,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -323,9 +323,11 @@ fn accounts_reach_only_their_own_tokens_and_the_free_rest() {
     pool.install(plan.clone()).expect("installed");
     assert_eq!(pool.install(plan).err(), Some("already_installed"));
 
-    // Everything is held. No worker has started, so the lead could, last,
-    // borrow all of it; an unplanned worker reaches nothing at all.
-    assert_eq!(pool.available(), 32_000);
+    // Everything is held. The lead's ordinary turns reach only its reserve;
+    // its final answer could, last, borrow the rest, since no worker has
+    // started; an unplanned worker reaches nothing at all.
+    assert_eq!(pool.available(), 8_000);
+    assert_eq!(pool.available_in(TurnPurpose::Answer), 32_000);
     let unplanned = pool.with_account(Account::Unplanned);
     assert_eq!(unplanned.available(), 0);
     assert!(unplanned.reserve(Some(100)).is_none());
@@ -344,8 +346,11 @@ fn accounts_reach_only_their_own_tokens_and_the_free_rest() {
         report.lead_reserve_left, 8_000,
         "the lead reserve is untouched"
     );
-    // The lead never reaches a running worker's share.
-    assert_eq!(pool.available(), 8_000 + 3_200 + 5_200);
+    // The lead never reaches a running worker's share, even to answer.
+    assert_eq!(
+        pool.available_in(TurnPurpose::Answer),
+        8_000 + 3_200 + 5_200
+    );
     assert_eq!(accounted(&pool, 15_600), 32_000);
     grant.settle(Some(600));
     assert_eq!(coder.available(), 15_000, "the unused part came back to it");
@@ -359,7 +364,11 @@ fn accounts_reach_only_their_own_tokens_and_the_free_rest() {
         "now only as part of the free rest"
     );
     assert_eq!(unplanned.available(), 15_000);
-    assert_eq!(pool.available(), 8_000 + 15_000 + 3_200 + 5_200);
+    assert_eq!(pool.available(), 8_000 + 15_000);
+    assert_eq!(
+        pool.available_in(TurnPurpose::Answer),
+        8_000 + 15_000 + 3_200 + 5_200
+    );
     assert_eq!(accounted(&pool, 0), 32_000);
 
     // A repeat start of the coder (a repair) reserves from the follow-up
@@ -488,9 +497,13 @@ fn random_interleavings_never_create_tokens_or_reach_the_lead_reserve() {
                     let handle = &handles[random.next(handles.len() as u32) as usize];
                     let ask = random.next(8_000);
                     let before = pool.allocation_report(None).expect("plan");
-                    let continuation = random.next(3) == 0;
-                    let reachable = handle.available_for(continuation);
-                    if let Some(grant) = handle.reserve_for(Some(ask), continuation) {
+                    let purpose = [
+                        TurnPurpose::Turn,
+                        TurnPurpose::Answer,
+                        TurnPurpose::Continuation,
+                    ][random.next(3) as usize];
+                    let reachable = handle.available_in(purpose);
+                    if let Some(grant) = handle.reserve_in(Some(ask), purpose) {
                         assert!(grant.tokens() <= ask.max(1), "seed {seed}");
                         assert!(grant.tokens() <= reachable, "seed {seed}");
                         let after = pool.allocation_report(None).expect("plan");
@@ -508,6 +521,13 @@ fn random_interleavings_never_create_tokens_or_reach_the_lead_reserve() {
                                 left(&before, "running"),
                                 "seed {seed}: the lead reached a running share"
                             );
+                            if purpose == TurnPurpose::Turn {
+                                assert_eq!(
+                                    (left(&after, "planned"), after.follow_up_left),
+                                    (left(&before, "planned"), before.follow_up_left),
+                                    "seed {seed}: lead coordination reached planned work"
+                                );
+                            }
                         } else {
                             assert_eq!(
                                 after.lead_reserve_left, before.lead_reserve_left,
@@ -716,9 +736,27 @@ fn the_lead_borrows_last_and_never_from_a_running_worker() {
         true,
     ))
     .expect("installed");
-    // In order: its own reserve, the free rest, the follow-up reserve, then
-    // the shares of roles not started.
-    let grant = pool.reserve(Some(10_000)).expect("granted");
+    // An ordinary lead turn, which may still delegate, reaches only its
+    // reserve: coordination never eats into what workers were planned.
+    assert_eq!(
+        pool.reserve(Some(10_000)).map(|grant| grant.tokens()),
+        Some(8_000)
+    );
+    assert_eq!(pool.spent(), 8_000, "dropped unsettled: charged in full");
+    let pool = OutputPool::new(32_000);
+    pool.install(plan(
+        vec![
+            share("coder", Demand::Heavy),
+            share("tester", Demand::Light),
+        ],
+        true,
+    ))
+    .expect("installed");
+    // A final answer: its own reserve, the free rest, the follow-up
+    // reserve, then the shares of roles not started.
+    let grant = pool
+        .reserve_in(Some(10_000), TurnPurpose::Answer)
+        .expect("granted");
     let report = pool.allocation_report(None).expect("plan");
     assert_eq!(
         (report.lead_reserve_left, report.follow_up_left),
@@ -739,8 +777,11 @@ fn the_lead_borrows_last_and_never_from_a_running_worker() {
 
     // The coder starts: its share is never lent.
     let (coder, _claim) = pool.claim("coder", None);
-    assert_eq!(pool.available(), 2_200 + 5_200);
-    let grant = pool.reserve(Some(50_000)).expect("granted");
+    assert_eq!(pool.available(), 0, "nothing for coordination");
+    assert_eq!(pool.available_in(TurnPurpose::Answer), 2_200 + 5_200);
+    let grant = pool
+        .reserve_in(Some(50_000), TurnPurpose::Answer)
+        .expect("granted");
     assert_eq!(grant.tokens(), 7_400);
     assert_eq!(coder.available(), 15_600, "the coder's share is whole");
     // What the lead borrowed and did not use goes back to that share.
@@ -769,16 +810,17 @@ fn shares_of_workers_that_fail_or_never_start_are_not_stranded() {
     let (_, claim) = pool.claim("reviewer", None);
     drop(claim);
     assert_eq!(pool.with_account(Account::Unplanned).available(), 3_250);
-    // The researcher never started (declined or refused): only the lead
-    // may use its share, last.
-    assert_eq!(pool.available(), 10_000);
-    let grant = pool.reserve(None).expect("granted");
+    // The researcher never started (declined or refused): only the lead's
+    // final answer may use its share, last.
+    assert_eq!(pool.available(), 2_500 + 3_250);
+    assert_eq!(pool.available_in(TurnPurpose::Answer), 10_000);
+    let grant = pool.reserve_in(None, TurnPurpose::Answer).expect("granted");
     assert_eq!(grant.tokens(), 10_000);
     // Cancelled before any usage: charged in full, nothing comes back.
     drop(grant);
     assert_eq!(pool.spent(), 10_000);
     assert!(pool.estimated());
-    assert_eq!(pool.available(), 0);
+    assert_eq!(pool.available_in(TurnPurpose::Answer), 0);
     assert_eq!(accounted(&pool, 0), 10_000);
 }
 
@@ -812,23 +854,106 @@ fn continuations_and_repeat_starts_share_one_follow_up_reserve() {
     assert_eq!(report.follow_up_left, 1_500);
     assert_eq!(pool.spent(), 1_700);
     assert_eq!(accounted(&pool, 0), 32_000);
-    // Never needed again, what is left is the lead's to use, last.
-    assert_eq!(pool.available(), 8_000 + 1_500);
+    // Never needed again, what is left reaches the lead's final answer (or
+    // its continuation), never its coordination.
+    assert_eq!(pool.available(), 8_000);
+    assert_eq!(pool.available_in(TurnPurpose::Answer), 8_000 + 1_500);
+    assert_eq!(pool.available_for(true), 8_000 + 1_500);
 }
 
 #[tokio::test]
-async fn with_no_worker_running_the_lead_can_spend_the_whole_pool() {
-    // No plan at all, and a plan whose coder never starts.
-    for shares in [Vec::new(), vec![share("coder", Demand::Heavy)]] {
+async fn with_no_worker_running_the_lead_still_answers_from_the_whole_pool() {
+    // Lead 2,048 (one turn), follow-up 500, and 2,452 either free (no
+    // plan) or the share of a coder that never starts. Each turn asks no
+    // more than the per-turn default.
+    for (shares, script, expected) in [
+        // No plan: coordination uses its reserve and the free rest; once
+        // that is gone, the owed answer gets the follow-up reserve.
+        (
+            Vec::new(),
+            vec![search(None), search(None), search(None)],
+            vec![Some(2_048), Some(2_048), Some(404), Some(500)],
+        ),
+        // A coder that never starts: coordination uses only its reserve;
+        // the owed answer then borrows the follow-up reserve and the share.
+        (
+            vec![share("coder", Demand::Heavy)],
+            vec![search(None)],
+            vec![Some(2_048), Some(2_048)],
+        ),
+    ] {
         let pool = OutputPool::new(5_000);
         pool.install(plan(shares, true)).expect("installed");
-        let lead = MockProvider::looping(vec![search(None)]);
+        let mut script = script;
+        script.push(answer("the answer", FinishReason::Stop, None));
+        let lead = MockProvider::new(script);
         let events = run(lead.clone(), on(pool.clone())).await;
+        assert_eq!(sent(&lead), expected);
+        let last = reports(&events).pop().expect("a report");
+        assert_eq!(last.purpose, "answer", "a tool-less final answer");
         assert_eq!(stop_reason(&events), Some(StopReason::OutputBudget));
-        // Each turn still asks no more than the per-turn default.
-        assert_eq!(sent(&lead), [Some(2_048), Some(2_048), Some(904)]);
-        assert_eq!(pool.spent(), 5_000, "not only its 25% reserve");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Content { text } if text == "the answer"))
+        );
     }
+}
+
+#[tokio::test]
+async fn lead_coordination_leaves_planned_workers_their_whole_shares() {
+    let pool = OutputPool::new(32_000);
+    pool.install(plan(
+        vec![
+            share("researcher", Demand::Standard),
+            share("coder", Demand::Heavy),
+            share("tester", Demand::Light),
+        ],
+        true,
+    ))
+    .expect("installed");
+    // Lead 8,000, follow-up 3,200; 20,800 split 2 : 3 : 1.
+    let planned = |pool: &OutputPool| {
+        pool.allocation_report(None)
+            .expect("plan")
+            .shares
+            .iter()
+            .map(|share| share.left)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(planned(&pool), [6_933, 10_400, 3_466]);
+    // The lead coordinates first, three tool turns and an answer, every one
+    // an ordinary turn: it spends its own reserve (and the one token the
+    // split's rounding left free), never a planned share or the follow-up
+    // reserve.
+    let lead = MockProvider::new(vec![
+        search(None),
+        search(None),
+        search(None),
+        answer("the plan", FinishReason::Stop, None),
+    ]);
+    let events = run(lead.clone(), on(pool.clone())).await;
+    assert_eq!(
+        sent(&lead),
+        [Some(2_048), Some(2_048), Some(2_048), Some(1_857)]
+    );
+    assert_eq!(stop_reason(&events), Some(StopReason::EndTurn));
+    assert_eq!(planned(&pool), [6_933, 10_400, 3_466]);
+    assert_eq!(
+        pool.allocation_report(None).expect("plan").follow_up_left,
+        3_200
+    );
+    // Workers then start one at a time (admission allows one): each finds
+    // its whole share, whatever the lead did and however long it waited.
+    for (role, share) in [("researcher", 6_933), ("coder", 10_400), ("tester", 3_466)] {
+        let (worker, claim) = pool.claim(role, None);
+        assert!(worker.available() >= share, "{role}");
+        let grant = worker.reserve(Some(share)).expect("granted");
+        assert_eq!(grant.tokens(), share, "{role}");
+        grant.settle(Some(share / 2));
+        drop(claim);
+    }
+    assert_eq!(accounted(&pool, 0), 32_000);
 }
 
 #[tokio::test]
@@ -845,7 +970,9 @@ async fn the_final_answer_may_use_what_workers_and_follow_ups_left() {
         .settle(Some(500));
     drop(claim);
     // The lead's answer, under an operator ceiling of 9,000 per request,
-    // gets more than its own reserve and never more than the ceiling.
+    // gets more than its own reserve (what the worker released), never
+    // more than the ceiling. As an ordinary turn it does not touch the
+    // follow-up reserve, which stays for a continuation of this answer.
     let lead = MockProvider::new(vec![answer(
         "the answer",
         FinishReason::Stop,
@@ -857,8 +984,12 @@ async fn the_final_answer_may_use_what_workers_and_follow_ups_left() {
     };
     let events = run(lead.clone(), budget).await;
     assert_eq!(stop_reason(&events), Some(StopReason::EndTurn));
-    assert_eq!(sent(&lead), [Some(9_000)]);
+    assert_eq!(sent(&lead), [Some(2_500 + 6_000)]);
     assert_eq!(pool.spent(), 4_500);
+    assert_eq!(
+        pool.allocation_report(None).expect("plan").follow_up_left,
+        1_000
+    );
     assert_eq!(accounted(&pool, 0), 10_000);
 }
 
