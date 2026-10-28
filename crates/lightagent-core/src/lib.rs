@@ -17,6 +17,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod allocation;
 pub mod config;
 pub mod credentials;
 pub mod event;
@@ -36,9 +37,10 @@ pub mod skills;
 pub mod tool_stream;
 pub mod workers;
 
+pub use allocation::{Account, AllocationReport, Demand, OutputPlan, PlannedShare, ShareReport};
 pub use config::{
-    AgentConfig, AllowedWorkflow, ApprovalPolicy, Config, ConfigError, ConfigStore,
-    DUCKDUCKGO_SEARCH_ENDPOINT, ExtensionsConfig, GenerationConfig, GenerationOverride,
+    AdaptiveAllocation, AgentConfig, AllowedWorkflow, ApprovalPolicy, Config, ConfigError,
+    ConfigStore, DUCKDUCKGO_SEARCH_ENDPOINT, ExtensionsConfig, GenerationConfig, GenerationOverride,
     GithubActionsConfig, InferenceConfig, InfinityConfig, JevClassificationConfig,
     JevClassificationMode, JevConfig, JevRoutingGrant, JevRoutingInput, JevRoutingPermission,
     McpConfig, McpServerEntry, OpenTerminalConfig, PlatformConfig, PlatformEndpointConfig,
@@ -51,7 +53,7 @@ pub use event::{
 };
 pub use generation::{
     ContextWindow, GenerationBudget, GenerationReport, HistorySource, HistoryWindow, OutputPool,
-    Reasoning, WindowSource,
+    Reasoning, ShareClaim, WindowSource,
 };
 pub use ids::RunId;
 pub use invoker::{

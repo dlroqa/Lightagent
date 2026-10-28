@@ -437,9 +437,10 @@ was changed.
 
 ## Deferred and limitations
 
-- **Jev-assisted task-budget selection is deferred.** Using Jev
-  classification to choose budgets would be a new Jev influence path. That
-  needs its own permission decision, and none is added here.
+- **Jev-assisted task-budget selection** is a separate opt-in,
+  `generation.adaptive_allocation` (default `off`), stacked on this work:
+  see `docs/architecture/adaptive-allocation.md`. With it off, nothing here
+  changes.
 - Token figures before the first measured turn are estimates.
 - Pool contention among concurrent workers is resolved by refusal, not
   waiting. A turn with no ceiling reserves a bounded amount (its remaining

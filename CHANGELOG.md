@@ -6,6 +6,26 @@ All notable Lightagent changes are documented here.
 
 ### Added
 
+- Opt-in adaptive output allocation (`generation.adaptive_allocation`,
+  default `off`).
+  - **What it does.** It divides `max_run_output_tokens` into a lead
+    reserve (25%, at least one lead turn), a follow-up reserve for
+    continuations and repairs (10%), and a share per role of an applied
+    specialist plan, weighted by fixed demand classes.
+  - **`jev` mode.** A confident `complex` classification from the same Jev
+    request may raise the researcher's and coder's class. Jev is asked
+    nothing new and supplies no numbers.
+  - **Enforcement.** Each account is enforced inside the same atomic pool,
+    so workers can never reserve the lead's reserve. A worker's share is
+    capped by what its own model can be granted, and the excess goes to
+    roles not yet started. Its remainder is released when it ends.
+  - **Unchanged.** Per-request policy, the 2048 unknown-capacity default,
+    ceilings, limits and permissions are unchanged. With `off`, or without a
+    pool, runs are exactly as before.
+  - **Diagnostics.** `generation.report` gains an `allocation` object only
+    when a plan is installed.
+  - See `docs/architecture/adaptive-allocation.md`.
+
 - Bounded output-pool reservations. A pool-backed turn with no output
   ceiling no longer reserves everything the run-wide pool has left:
   - with a known window it reserves the room that window leaves;

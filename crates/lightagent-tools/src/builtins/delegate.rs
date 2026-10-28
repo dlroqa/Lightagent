@@ -29,8 +29,8 @@ use async_trait::async_trait;
 use lightagent_core::identity::{AuthorizedProvider, Denial, RunAuthorization};
 use lightagent_core::{
     AgentError, AgentEvent, AgentLoop, AgentProvider, ApprovalDecision, ApprovalRequest,
-    PolicyEngine, ProfileId, RiskClass, RunConfig, RunLimits, RunOutcome, Scope, StopReason,
-    Suspended, ToolOutcome, ToolProgress,
+    GenerationBudget, PolicyEngine, ProfileId, RiskClass, RunConfig, RunLimits, RunOutcome, Scope,
+    ShareClaim, StopReason, Suspended, ToolOutcome, ToolProgress,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -70,6 +70,10 @@ struct WorkerRun {
     offered: Vec<String>,
     grant: Option<Grant>,
     cancel: CancellationToken,
+    /// The worker's hold on its role's planned output share, released when
+    /// the run is dropped: finished, failed, cancelled or expired while
+    /// parked.
+    _share: Option<ShareClaim>,
 }
 
 /// A worker paused on one exact action that needs approval.
@@ -658,6 +662,7 @@ pub async fn run_worker(
         () = cancel.cancelled() => delegation.generation.for_worker(&spec.routing),
         budget = delegation.generation.for_worker_on(&spec.routing, &provider) => budget,
     };
+    let share = claim_share(delegation, &spec, &mut config.generation, limits.max_turns);
 
     ctx.report(progress("worker.started", None));
     let (sink, events) = tokio::sync::mpsc::unbounded_channel();
@@ -669,6 +674,7 @@ pub async fn run_worker(
         offered,
         grant,
         cancel,
+        _share: share,
     };
     let result = {
         let future = run
@@ -677,6 +683,28 @@ pub async fn run_worker(
         observe(future, &mut run.events, &mut run.tracker, ctx).await
     };
     conclude(delegation, run, result, ctx)
+}
+
+/// With an adaptive allocation installed in the run's output pool, the lead's
+/// worker of a planned role holds that role's share while it runs, capped at
+/// what its own model can be granted per turn times the turns it was granted
+/// (the excess goes to the roles not started yet). A repeat start of the role
+/// reserves from the follow-up reserve, and any other worker only from what
+/// no account holds. Without an allocation nothing changes.
+fn claim_share(
+    delegation: &Delegation,
+    spec: &WorkerSpec,
+    budget: &mut GenerationBudget,
+    turns: u32,
+) -> Option<ShareClaim> {
+    let pool = budget.output_pool.clone()?;
+    let role = spec.role.filter(|_| delegation.depth == 0)?;
+    let cap = budget
+        .turn_capacity()
+        .map(|turn| turn.saturating_mul(turns.max(1)));
+    let (handle, claim) = pool.claim(role.as_str(), cap);
+    budget.output_pool = Some(handle);
+    claim
 }
 
 /// Drive `future` while recording the worker's events and reporting them.

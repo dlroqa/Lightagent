@@ -764,9 +764,53 @@ pub struct GenerationConfig {
     /// window that still has room; each continuation spends one of the run's
     /// turns.
     pub continuations: Option<u32>,
+    /// Whether `max_run_output_tokens` is divided by the run's specialist
+    /// plan (see `lightagent_core::allocation`). `off`, the default, leaves
+    /// the pool undivided. Inert without `max_run_output_tokens`.
+    pub adaptive_allocation: AdaptiveAllocation,
     /// Overrides for one model id, exactly as the provider names it. A field
     /// left unset falls back to the setting above.
     pub models: BTreeMap<String, GenerationOverride>,
+}
+
+/// How a run's output pool is divided between the lead and its workers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AdaptiveAllocation {
+    /// One undivided pool, as before. The default.
+    #[default]
+    Off,
+    /// A reserve for the lead, a follow-up reserve, and a share for each
+    /// role of an applied specialist plan by Lightagent's fixed role
+    /// classes. No classification signal changes the classes.
+    Plan,
+    /// As `plan`, and the task complexity from the same classification that
+    /// chose the plan may raise the classes. The explicit opt-in for Jev to
+    /// influence budgets; it asks Jev nothing more.
+    Jev,
+}
+
+impl AdaptiveAllocation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Plan => "plan",
+            Self::Jev => "jev",
+        }
+    }
+}
+
+impl std::str::FromStr for AdaptiveAllocation {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "off" => Ok(Self::Off),
+            "plan" => Ok(Self::Plan),
+            "jev" => Ok(Self::Jev),
+            _ => Err("adaptive allocation must be off, plan or jev".to_owned()),
+        }
+    }
 }
 
 /// One model's overrides of [`GenerationConfig`].
