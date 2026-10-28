@@ -534,6 +534,7 @@ impl LightweightRunFactory {
         // Classification only advises. The workflow policy inspects the
         // registry, the approval policy and the limits without changing them;
         // the executor below is built exactly as without Jev.
+        let mut planned = None;
         if let Some(report) = preflight.classification.as_ref() {
             let selection = std::time::Instant::now();
             let inspection = PolicyEngine::new(profile.approval_policy.into());
@@ -581,6 +582,7 @@ impl LightweightRunFactory {
                 profile.persona.push_str(&format!("\n\n{instruction}"));
                 delegation.plan.set(Some(order.clone()));
             }
+            planned.clone_from(&specialists);
             if let Some(mut diagnostics) =
                 crate::coordinator::diagnostics(&preflight, decision.applied)
             {
@@ -598,6 +600,16 @@ impl LightweightRunFactory {
                     diagnostics: Box::new(diagnostics),
                 });
             }
+        }
+        // Opted in, the run's output pool is divided by its plan before the
+        // lead or any worker reserves from it.
+        if let Some(line) = crate::coordinator::allocation::install(
+            &config,
+            preflight.classification.as_ref(),
+            planned.as_ref(),
+            &generation.budget,
+        ) {
+            eprintln!("{line}");
         }
         let mut executor = BoundedExecutor::new(
             registry,

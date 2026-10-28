@@ -1423,6 +1423,7 @@ pub async fn run(
         // earlier turn never carries over.
         plan_slot.set(None);
         let mut turn_plan = None;
+        let mut turn_selection = None;
         if let Some(report) = &preflight.classification
             && crate::coordinator::selection::requested(&config)
         {
@@ -1453,6 +1454,7 @@ pub async fn run(
                     "{}",
                     crate::coordinator::selection::terminal_summary(&chosen.record)
                 );
+                turn_selection = Some(chosen.clone());
                 plan_slot.set(chosen.order);
                 turn_plan = chosen.instruction;
             }
@@ -1491,6 +1493,15 @@ pub async fn run(
         // it is loaded with may have changed since the last one. History,
         // the run and its workers all use this one resolution.
         let resolved = crate::generation::resolve(&config, &provider).await;
+        // Opted in, this turn's fresh output pool is divided by its plan.
+        if let Some(line) = crate::coordinator::allocation::install(
+            &config,
+            preflight.classification.as_ref(),
+            turn_selection.as_ref(),
+            &resolved.lead.budget,
+        ) {
+            println!("{line}");
+        }
         context_limit = resolved.history.known();
         let mut history = model_history(&session, &line, resolved.history.tokens);
         match crate::memory::relevant_catalog(&profile_dir, &config, &line).await {

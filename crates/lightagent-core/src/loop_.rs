@@ -328,6 +328,8 @@ struct Driver {
     sent_max_tokens: Option<u32>,
     /// What bounded the latest turn's reservation from the output pool.
     reservation_basis: Option<&'static str>,
+    /// What the latest pool-backed turn asked to reserve and was granted.
+    grant: Option<(u32, u32)>,
     /// Continuations taken so far.
     continuations: u32,
     /// Set when the next turn continues an answer cut off at its length
@@ -546,6 +548,7 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             shortened_results: 0,
             sent_max_tokens: None,
             reservation_basis: None,
+            grant: None,
             continuations: 0,
             continuing: None,
         };
@@ -780,7 +783,10 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
         // leaves after the estimated prompt, else (the window unknown) the
         // pool's per-turn default. Never the whole pool merely because
         // nothing else bounded the turn, so concurrent workers are not
-        // starved. With nothing left to grant, no turn is taken.
+        // starved. With nothing left to grant, no turn is taken. With an
+        // allocation installed, the turn reserves from its own account (a
+        // continuation may also use the follow-up reserve), never from what
+        // another account holds.
         let ceiling = budget.requested_max_tokens();
         let reservation = match &budget.output_pool {
             Some(pool) => {
@@ -796,8 +802,11 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
                     (None, None) => (pool.turn_tokens(), "unknown_capacity"),
                 };
                 driver.reservation_basis = Some(basis);
-                match pool.reserve(Some(ask)) {
-                    Some(reservation) => Some(reservation),
+                match pool.reserve_for(Some(ask), driver.continuing.is_some()) {
+                    Some(reservation) => {
+                        driver.grant = Some((ask, reservation.tokens()));
+                        Some(reservation)
+                    }
                     None => return Ok(driver.end(StopReason::OutputBudget)),
                 }
             }
@@ -1147,7 +1156,7 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             || budget
                 .output_pool
                 .as_ref()
-                .is_some_and(|pool| pool.available() < generation::CONTINUE_MIN_TOKENS)
+                .is_some_and(|pool| pool.available_for(true) < generation::CONTINUE_MIN_TOKENS)
             || driver
                 .limits
                 .wall_clock()
@@ -1209,6 +1218,7 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             continuations: driver.continuations,
             reservation_basis: driver.reservation_basis.map(str::to_owned),
             output_overrun: pool.map_or(0, generation::OutputPool::overrun),
+            allocation: pool.and_then(|pool| pool.allocation_report(driver.grant)),
         }
     }
 }

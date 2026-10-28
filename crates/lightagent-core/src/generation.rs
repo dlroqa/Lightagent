@@ -34,7 +34,10 @@
 //!
 //! An optional [`OutputPool`] bounds what a whole run may generate: the lead,
 //! every worker it delegates to and every continuation draw on one pool, each
-//! turn reserving its `max_tokens` before it starts.
+//! turn reserving its `max_tokens` before it starts. An operator may opt in to
+//! dividing it by the run's specialist plan (see [`crate::allocation`]): the
+//! lead's reserve, each planned role's share and a follow-up reserve are then
+//! accounts inside the same pool.
 //!
 //! Session history is packed against a [`HistoryWindow`], resolved the same
 //! way for every entry point.
@@ -52,6 +55,9 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::allocation::{
+    self, Account, Allocation, AllocationReport, Demand, OutputPlan, ShareReport,
+};
 use crate::invoker::ToolSchema;
 use crate::provider::{ProviderMessage, Usage};
 
@@ -204,9 +210,19 @@ pub const DEFAULT_UNKNOWN_CAPACITY_TURN_TOKENS: u32 = 2_048;
 /// honoured it: the excess is charged and recorded as an
 /// [`overrun`](OutputPool::overrun), and the pool grants nothing more, so
 /// the overspend is bounded by the turns already in flight.
+///
+/// Once an [`OutputPlan`] is [installed](OutputPool::install), each handle
+/// reserves for its [`Account`]: the lead from its reserve, a planned
+/// role's first worker from that role's share, a repeat start from the
+/// follow-up reserve, and each of them from what is unallocated. No account
+/// can reach what another holds, so a worker can never take the lead's
+/// reserve, and the accounts together never hold more than the pool had
+/// when the plan was installed. Without a plan every handle draws on the
+/// whole pool alike, exactly as before.
 #[derive(Clone, Debug)]
 pub struct OutputPool {
     inner: Arc<Mutex<PoolState>>,
+    account: Account,
 }
 
 #[derive(Debug)]
@@ -217,6 +233,149 @@ struct PoolState {
     estimated: bool,
     turn_tokens: u32,
     overrun: u32,
+    plan: Option<PlanState>,
+}
+
+impl PoolState {
+    /// What no account holds and no turn has reserved or been charged.
+    fn free(&self) -> u32 {
+        self.total
+            .saturating_sub(self.spent)
+            .saturating_sub(self.reserved)
+            .saturating_sub(self.plan.as_ref().map_or(0, PlanState::held))
+    }
+
+    /// What `account` may reserve: its own tokens, the follow-up reserve
+    /// when it may use it, and the free rest.
+    fn reachable(&self, account: &Account, continuation: bool) -> (u32, u32, u32) {
+        let Some(plan) = &self.plan else {
+            return (0, 0, self.free());
+        };
+        let follow_up = if continuation || *account == Account::FollowUp {
+            plan.follow_up_left
+        } else {
+            0
+        };
+        (plan.own(account), follow_up, self.free())
+    }
+}
+
+/// An installed plan's accounts. Every amount here is held back from the
+/// free rest of the pool, and none ever grows beyond what was installed.
+#[derive(Debug)]
+struct PlanState {
+    plan: OutputPlan,
+    lead: u32,
+    lead_left: u32,
+    follow_up: u32,
+    follow_up_left: u32,
+    shares: Vec<ShareState>,
+}
+
+#[derive(Debug)]
+struct ShareState {
+    role: String,
+    demand: Demand,
+    planned: u32,
+    cap: Option<u32>,
+    left: u32,
+    stage: Stage,
+}
+
+/// Where a planned share is: held for a role that has not started, held
+/// for its running worker, or released when that worker ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    Planned,
+    Running,
+    Released,
+}
+
+impl Stage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::Running => "running",
+            Self::Released => "released",
+        }
+    }
+}
+
+impl PlanState {
+    /// Everything the accounts hold.
+    fn held(&self) -> u32 {
+        self.shares.iter().fold(
+            self.lead_left.saturating_add(self.follow_up_left),
+            |held, share| held.saturating_add(share.left),
+        )
+    }
+
+    fn share_mut(&mut self, role: &str) -> Option<&mut ShareState> {
+        self.shares.iter_mut().find(|share| share.role == role)
+    }
+
+    /// What `account` holds of its own: the lead's reserve, or the share of
+    /// a running worker.
+    fn own(&self, account: &Account) -> u32 {
+        match account {
+            Account::Lead => self.lead_left,
+            Account::Share(role) => self
+                .shares
+                .iter()
+                .find(|share| share.role == *role && share.stage == Stage::Running)
+                .map_or(0, |share| share.left),
+            Account::FollowUp | Account::Unplanned => 0,
+        }
+    }
+
+    fn take(&mut self, account: &Account, own: u32, follow_up: u32) {
+        match account {
+            Account::Lead => self.lead_left = self.lead_left.saturating_sub(own),
+            Account::Share(role) => {
+                if let Some(share) = self.share_mut(role) {
+                    share.left = share.left.saturating_sub(own);
+                }
+            }
+            Account::FollowUp | Account::Unplanned => {}
+        }
+        self.follow_up_left = self.follow_up_left.saturating_sub(follow_up);
+    }
+
+    /// Return what a turn reserved and did not use to the account it came
+    /// from. A share released meanwhile gets nothing back: its tokens stay
+    /// free.
+    fn give_back(&mut self, account: &Account, own: u32, follow_up: u32) {
+        match account {
+            Account::Lead => self.lead_left = self.lead_left.saturating_add(own),
+            Account::Share(role) => {
+                if let Some(share) = self.share_mut(role)
+                    && share.stage == Stage::Running
+                {
+                    share.left = share.left.saturating_add(own);
+                }
+            }
+            Account::FollowUp | Account::Unplanned => {}
+        }
+        self.follow_up_left = self.follow_up_left.saturating_add(follow_up);
+    }
+
+    /// Split `tokens` a started worker could not use between the planned
+    /// roles that have not started yet, by their weights. Rounding stays
+    /// free.
+    fn redistribute(&mut self, tokens: u32) {
+        let waiting: Vec<usize> = (0..self.shares.len())
+            .filter(|index| self.shares[*index].stage == Stage::Planned)
+            .collect();
+        let parts: Vec<(u32, Option<u32>)> = waiting
+            .iter()
+            .map(|index| (self.shares[*index].demand.weight(), None))
+            .collect();
+        for (index, extra) in waiting.iter().zip(allocation::split(tokens, &parts)) {
+            let share = &mut self.shares[*index];
+            share.planned = share.planned.saturating_add(extra);
+            share.left = share.left.saturating_add(extra);
+        }
+    }
 }
 
 /// Two handles are the same pool only if they share it.
@@ -238,8 +397,23 @@ impl OutputPool {
                 estimated: false,
                 turn_tokens: DEFAULT_UNKNOWN_CAPACITY_TURN_TOKENS,
                 overrun: 0,
+                plan: None,
             })),
+            account: Account::Lead,
         }
+    }
+
+    /// Another handle on the same pool, reserving for `account`.
+    pub fn with_account(&self, account: Account) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            account,
+        }
+    }
+
+    /// The account this handle reserves for.
+    pub fn account(&self) -> &Account {
+        &self.account
     }
 
     /// Set what a turn with nothing else to bound it reserves (at least
@@ -276,14 +450,20 @@ impl OutputPool {
         self.read(|state| state.spent, u32::MAX)
     }
 
-    /// Tokens neither charged nor reserved by a turn in flight.
+    /// Tokens this handle's turn could reserve now: neither charged nor
+    /// reserved by a turn in flight and, with a plan installed, held by no
+    /// other account.
     pub fn available(&self) -> u32 {
+        self.available_for(false)
+    }
+
+    /// As [`Self::available`], for a continuation when `continuation` (which
+    /// may also use the follow-up reserve).
+    pub fn available_for(&self, continuation: bool) -> u32 {
         self.read(
             |state| {
-                state
-                    .total
-                    .saturating_sub(state.spent)
-                    .saturating_sub(state.reserved)
+                let (own, follow_up, free) = state.reachable(&self.account, continuation);
+                own.saturating_add(follow_up).saturating_add(free)
             },
             0,
         )
@@ -298,35 +478,199 @@ impl OutputPool {
     /// `None`), or `None` when less than [`MIN_GRANT`] is available or a
     /// provider has overrun an earlier grant.
     pub fn reserve(&self, ask: Option<u32>) -> Option<Reservation> {
+        self.reserve_for(ask, false)
+    }
+
+    /// As [`Self::reserve`], for a continuation when `continuation`. With a
+    /// plan installed, the turn takes from its account's own tokens first,
+    /// then the follow-up reserve when it may use it, then the free rest.
+    pub fn reserve_for(&self, ask: Option<u32>, continuation: bool) -> Option<Reservation> {
         let mut state = self.inner.lock().ok()?;
         if state.overrun > 0 {
             return None;
         }
-        let available = state
-            .total
-            .saturating_sub(state.spent)
-            .saturating_sub(state.reserved);
+        let (own, follow_up, free) = state.reachable(&self.account, continuation);
+        let available = own.saturating_add(follow_up).saturating_add(free);
         if available < MIN_GRANT {
             return None;
         }
         let tokens = ask.map_or(available, |ask| ask.min(available)).max(1);
+        let from_own = tokens.min(own);
+        let from_follow_up = tokens.saturating_sub(from_own).min(follow_up);
+        if let Some(plan) = state.plan.as_mut() {
+            plan.take(&self.account, from_own, from_follow_up);
+        }
         state.reserved = state.reserved.saturating_add(tokens);
         Some(Reservation {
             pool: self.clone(),
             tokens,
+            own: from_own,
+            follow_up: from_follow_up,
             settled: false,
         })
     }
 
-    fn charge(&self, reserved: u32, used: Option<u32>) {
+    fn charge(&self, reservation: &Reservation, used: Option<u32>) {
         if let Ok(mut state) = self.inner.lock() {
+            let reserved = reservation.tokens;
             state.reserved = state.reserved.saturating_sub(reserved);
             state.spent = state.spent.saturating_add(used.unwrap_or(reserved));
             state.estimated |= used.is_none();
             if let Some(used) = used {
                 state.overrun = state.overrun.saturating_add(used.saturating_sub(reserved));
+                // What was used counts against the account's own tokens
+                // first; what was not goes back to where it came from.
+                let used_own = used.min(reservation.own);
+                let used_follow_up = (used - used_own).min(reservation.follow_up);
+                if let Some(plan) = state.plan.as_mut() {
+                    plan.give_back(
+                        &self.account,
+                        reservation.own - used_own,
+                        reservation.follow_up - used_follow_up,
+                    );
+                }
             }
         }
+    }
+
+    /// Divide what the pool has available by `plan` (see
+    /// [`crate::allocation`]). Refused, leaving the pool undivided, when the
+    /// plan is invalid, a plan is already installed or a provider has
+    /// overrun a grant.
+    pub fn install(&self, plan: OutputPlan) -> Result<Allocation, &'static str> {
+        plan.validate()?;
+        let mut state = self.inner.lock().map_err(|_| "pool_unavailable")?;
+        if state.plan.is_some() {
+            return Err("already_installed");
+        }
+        if state.overrun > 0 {
+            return Err("overrun");
+        }
+        let allocation = allocation::allocate(state.free(), &plan);
+        let shares = plan
+            .shares
+            .iter()
+            .zip(&allocation.shares)
+            .map(|(share, tokens)| ShareState {
+                role: share.role.clone(),
+                demand: share.demand,
+                planned: *tokens,
+                cap: None,
+                left: *tokens,
+                stage: Stage::Planned,
+            })
+            .collect();
+        state.plan = Some(PlanState {
+            lead: allocation.lead,
+            lead_left: allocation.lead,
+            follow_up: allocation.follow_up,
+            follow_up_left: allocation.follow_up,
+            shares,
+            plan,
+        });
+        Ok(allocation)
+    }
+
+    /// Start a worker of `role`: a handle that reserves for it, and for the
+    /// first worker of a planned role a claim on that role's share, released
+    /// when the claim is dropped. `cap` is the most the worker can be
+    /// granted in all, when its capacity is known; a share above it is cut to
+    /// it, and the difference split between the roles not started yet. A
+    /// repeat start of a planned role reserves from the follow-up reserve;
+    /// any other worker only from what is free.
+    pub fn claim(&self, role: &str, cap: Option<u32>) -> (Self, Option<ShareClaim>) {
+        let account = {
+            let Ok(mut state) = self.inner.lock() else {
+                return (self.with_account(Account::Unplanned), None);
+            };
+            let Some(plan) = state.plan.as_mut() else {
+                return (self.with_account(Account::Unplanned), None);
+            };
+            let Some(share) = plan.share_mut(role) else {
+                return (self.with_account(Account::Unplanned), None);
+            };
+            if share.stage != Stage::Planned {
+                return (self.with_account(Account::FollowUp), None);
+            }
+            share.stage = Stage::Running;
+            share.cap = cap;
+            let excess = cap.map_or(0, |cap| share.left.saturating_sub(cap));
+            share.left = share.left.saturating_sub(excess);
+            share.planned = share.planned.saturating_sub(excess);
+            plan.redistribute(excess);
+            Account::Share(role.to_owned())
+        };
+        let claim = ShareClaim {
+            pool: self.clone(),
+            role: role.to_owned(),
+        };
+        (self.with_account(account), Some(claim))
+    }
+
+    fn release(&self, role: &str) {
+        if let Ok(mut state) = self.inner.lock()
+            && let Some(plan) = state.plan.as_mut()
+            && let Some(share) = plan.share_mut(role)
+            && share.stage == Stage::Running
+        {
+            share.stage = Stage::Released;
+            share.left = 0;
+        }
+    }
+
+    /// The installed plan's state for this handle's turn, with what the turn
+    /// asked for and was granted; `None` without a plan.
+    pub fn allocation_report(&self, grant: Option<(u32, u32)>) -> Option<AllocationReport> {
+        let state = self.inner.lock().ok()?;
+        let free = state.free();
+        let plan = state.plan.as_ref()?;
+        Some(AllocationReport {
+            version: allocation::PLAN_VERSION.to_owned(),
+            source: plan.plan.source.clone(),
+            fallback_reason: plan.plan.fallback_reason.clone(),
+            account: self.account.as_str().to_owned(),
+            role: self.account.role().map(str::to_owned),
+            lead_reserve: plan.lead,
+            lead_reserve_left: plan.lead_left,
+            follow_up_reserve: plan.follow_up,
+            follow_up_left: plan.follow_up_left,
+            shares: plan
+                .shares
+                .iter()
+                .map(|share| ShareReport {
+                    role: share.role.clone(),
+                    demand: share.demand.as_str().to_owned(),
+                    weight: share.demand.weight(),
+                    planned: share.planned,
+                    capacity_cap: share.cap,
+                    left: share.left,
+                    state: share.stage.as_str().to_owned(),
+                })
+                .collect(),
+            unallocated_available: free,
+            asked: grant.map(|(asked, _)| asked),
+            granted: grant.map(|(_, granted)| granted),
+        })
+    }
+}
+
+/// A started worker's hold on its role's planned share. Dropping it, however
+/// the worker ended, releases what is left of the share to later work.
+#[derive(Debug)]
+pub struct ShareClaim {
+    pool: OutputPool,
+    role: String,
+}
+
+impl ShareClaim {
+    pub fn role(&self) -> &str {
+        &self.role
+    }
+}
+
+impl Drop for ShareClaim {
+    fn drop(&mut self) {
+        self.pool.release(&self.role);
     }
 }
 
@@ -336,6 +680,10 @@ impl OutputPool {
 pub struct Reservation {
     pool: OutputPool,
     tokens: u32,
+    /// What came from the account's own tokens and from the follow-up
+    /// reserve; the rest came from the free part of the pool.
+    own: u32,
+    follow_up: u32,
     settled: bool,
 }
 
@@ -348,7 +696,7 @@ impl Reservation {
     /// Charge what the turn generated: the provider's count, or the whole
     /// reservation when it reported none.
     pub fn settle(mut self, used: Option<u32>) {
-        self.pool.charge(self.tokens, used);
+        self.pool.charge(&self, used);
         self.settled = true;
     }
 }
@@ -356,7 +704,7 @@ impl Reservation {
 impl Drop for Reservation {
     fn drop(&mut self) {
         if !self.settled {
-            self.pool.charge(self.tokens, None);
+            self.pool.charge(self, None);
         }
     }
 }
@@ -525,9 +873,29 @@ impl GenerationBudget {
             } else {
                 Reasoning::Default
             },
-            output_pool: self.output_pool.clone(),
+            output_pool: self.worker_pool(),
             max_continuations: self.max_continuations,
         }
+    }
+
+    /// A worker's handle on this run's pool: never the lead's account, so a
+    /// worker can never reach the lead's reserve.
+    fn worker_pool(&self) -> Option<OutputPool> {
+        self.output_pool
+            .as_ref()
+            .map(|pool| pool.with_account(Account::Unplanned))
+    }
+
+    /// The most one turn under this budget can be granted: its output
+    /// ceiling, else the room its known window holds, else the pool's
+    /// per-turn default. `None` when nothing bounds a turn.
+    pub fn turn_capacity(&self) -> Option<u32> {
+        self.requested_max_tokens()
+            .or_else(|| {
+                self.context_window
+                    .map(|window| window.tokens.saturating_sub(margin(window.tokens)))
+            })
+            .or_else(|| self.output_pool.as_ref().map(OutputPool::turn_tokens))
     }
 
     /// The budget a worker routed to another model runs under. `own` is that
@@ -547,7 +915,7 @@ impl GenerationBudget {
             max_output_tokens,
             reserve_answer_tokens: own.reserve_answer_tokens,
             reasoning: own.reasoning,
-            output_pool: self.output_pool.clone(),
+            output_pool: self.worker_pool(),
             max_continuations: own.max_continuations.min(self.max_continuations),
         }
     }
@@ -791,6 +1159,9 @@ pub struct GenerationReport {
     pub reservation_basis: Option<String>,
     /// Tokens the provider reported beyond what turns were granted, so far.
     pub output_overrun: u32,
+    /// The adaptive allocation this turn reserved under, when the run's pool
+    /// has one installed. `None` otherwise: the pool is undivided.
+    pub allocation: Option<AllocationReport>,
 }
 
 #[cfg(test)]
