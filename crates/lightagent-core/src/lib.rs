@@ -73,7 +73,7 @@ pub use profile::{
 };
 pub use provider::{
     AgentProvider, FinishReason, ProviderError, ProviderEvent, ProviderFactory, ProviderMessage,
-    ProviderRequest, ProviderStream, ProviderToolCall, Role, Usage,
+    ProviderRequest, ProviderStream, ProviderToolCall, Role, ServedModel, Usage,
 };
 pub use skills::{Skill, SkillStore, skill_dirs};
 pub use tool_stream::ToolCallAccumulator;

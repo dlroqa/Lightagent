@@ -6,6 +6,11 @@ All notable Lightagent changes are documented here.
 
 ### Added
 
+- A worker routed to another model or endpoint is budgeted for that model:
+  its own served window (asked through its authorized provider, never
+  cached), its own per-model settings and reasoning declaration, with an
+  output ceiling never above the lead's and the lead's run-wide pool and
+  tree budget. A window it cannot report stays unknown.
 - Output and context budgeting per model turn (`generation` settings).
   - **Context window.** The window the model is served with is read from
     Lightweight (`/v1/capabilities`, or the `/v1/models` row on older
