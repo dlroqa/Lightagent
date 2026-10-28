@@ -326,6 +326,8 @@ struct Driver {
     shortened_results: u32,
     /// The `max_tokens` the latest turn was sent with.
     sent_max_tokens: Option<u32>,
+    /// What bounded the latest turn's reservation from the output pool.
+    reservation_basis: Option<&'static str>,
     /// Continuations taken so far.
     continuations: u32,
     /// Set when the next turn continues an answer cut off at its length
@@ -543,6 +545,7 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             measured: None,
             shortened_results: 0,
             sent_max_tokens: None,
+            reservation_basis: None,
             continuations: 0,
             continuing: None,
         };
@@ -772,15 +775,32 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
         }
 
         // Every turn reserves what it may generate from the run's output
-        // pool before it starts, and is sent no more than it was granted.
-        // With nothing left to grant, no turn is taken.
+        // pool before it starts, and is sent no more than it was granted:
+        // its output ceiling when it has one, else the room its known window
+        // leaves after the estimated prompt, else (the window unknown) the
+        // pool's per-turn default. Never the whole pool merely because
+        // nothing else bounded the turn, so concurrent workers are not
+        // starved. With nothing left to grant, no turn is taken.
         let ceiling = budget.requested_max_tokens();
-        let ask = ceiling.or_else(|| budget.context_window.map(|window| window.tokens));
         let reservation = match &budget.output_pool {
-            Some(pool) => match pool.reserve(ask) {
-                Some(reservation) => Some(reservation),
-                None => return Ok(driver.end(StopReason::OutputBudget)),
-            },
+            Some(pool) => {
+                let (ask, basis) = match (ceiling, budget.context_window) {
+                    (Some(ceiling), _) => (ceiling, "ceiling"),
+                    (None, Some(_)) => {
+                        let schemas = self.invoker.schemas();
+                        let (prompt, _) =
+                            generation::prompt_tokens(driver.measured, &driver.messages, &schemas);
+                        let room = budget.room(prompt).unwrap_or(0);
+                        (room.max(generation::MIN_GRANT), "remaining_context")
+                    }
+                    (None, None) => (pool.turn_tokens(), "unknown_capacity"),
+                };
+                driver.reservation_basis = Some(basis);
+                match pool.reserve(Some(ask)) {
+                    Some(reservation) => Some(reservation),
+                    None => return Ok(driver.end(StopReason::OutputBudget)),
+                }
+            }
             None => None,
         };
         driver.sent_max_tokens = reservation
@@ -1187,6 +1207,8 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             output_spent: pool.map(generation::OutputPool::spent),
             output_estimated: pool.is_some_and(generation::OutputPool::estimated),
             continuations: driver.continuations,
+            reservation_basis: driver.reservation_basis.map(str::to_owned),
+            output_overrun: pool.map_or(0, generation::OutputPool::overrun),
         }
     }
 }

@@ -6,6 +6,18 @@ All notable Lightagent changes are documented here.
 
 ### Added
 
+- Bounded output-pool reservations. A pool-backed turn with no output
+  ceiling no longer reserves everything the run-wide pool has left:
+  - with a known window it reserves the room that window leaves;
+  - with an unknown window it reserves `generation.unknown_capacity_turn_tokens`
+    (default 2048).
+
+  Either way the amount is sent as `max_tokens`, so concurrent workers are
+  not starved. Usage reported beyond a grant is charged as
+  `output_overrun`, and the pool then grants nothing more. A routed worker's
+  window discovery is bounded at 15 s. Runs without `max_run_output_tokens`
+  are unchanged.
+
 - A worker routed to another model or endpoint is budgeted for that model:
   its own served window (asked through its authorized provider, never
   cached), its own per-model settings and reasoning declaration, with an

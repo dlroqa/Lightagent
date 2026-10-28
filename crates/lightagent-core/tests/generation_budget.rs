@@ -806,6 +806,255 @@ async fn continuations_obey_the_per_request_ceiling_and_the_run_pool() {
     assert_eq!(content(&events), "chunk chunk ");
 }
 
+/// A pool-backed budget with no output ceiling and no known window: only
+/// the pool and its per-turn default bound a turn.
+fn unbounded(pool: &OutputPool) -> GenerationBudget {
+    GenerationBudget {
+        output_pool: Some(pool.clone()),
+        ..GenerationBudget::default()
+    }
+}
+
+#[tokio::test]
+async fn concurrent_workers_of_unknown_capacity_share_the_pool() {
+    // Before: a turn with nothing to bound it asked for everything left, so
+    // the first worker held the whole pool and its siblings stopped with
+    // OutputBudget. Now each holds the per-turn default.
+    let pool = OutputPool::new(10_000);
+    let mocks: Vec<MockProvider> = (0..4)
+        .map(|_| MockProvider::new(vec![answer("report", FinishReason::Stop, usage(50, 120))]))
+        .collect();
+    let runs = mocks
+        .iter()
+        .map(|mock| run(mock.clone(), small(), unbounded(&pool), Vec::new()));
+    let outcomes = futures_util::future::join_all(runs).await;
+    for (mock, events) in mocks.iter().zip(&outcomes) {
+        assert_eq!(
+            mock.requests()[0].max_tokens,
+            Some(2_048),
+            "sent as the ceiling"
+        );
+        assert_eq!(stop_reason(events), Some(StopReason::EndTurn));
+        let report = &reports(events)[0];
+        assert_eq!(
+            report.reservation_basis.as_deref(),
+            Some("unknown_capacity")
+        );
+        assert_eq!(report.context_window, None, "capacity stays unknown");
+    }
+    assert_eq!(pool.spent(), 480, "settled against reported usage");
+    assert!(!pool.estimated());
+}
+
+#[tokio::test]
+async fn the_per_turn_default_is_configurable_and_bounded_by_what_is_left() {
+    for (pool, expected) in [
+        (OutputPool::new(10_000).with_turn_tokens(512), 512),
+        (OutputPool::new(300), 300),
+    ] {
+        let mock = MockProvider::new(vec![answer("a", FinishReason::Stop, usage(10, 5))]);
+        let inspector = mock.clone();
+        run(mock, small(), unbounded(&pool), Vec::new()).await;
+        assert_eq!(inspector.requests()[0].max_tokens, Some(expected));
+    }
+}
+
+#[tokio::test]
+async fn a_known_window_reserves_only_the_room_the_prompt_leaves() {
+    let budget = GenerationBudget {
+        context_window: window(8_192),
+        output_pool: Some(OutputPool::new(100_000)),
+        ..GenerationBudget::default()
+    };
+    let history = vec![
+        ProviderMessage::user("q"),
+        ProviderMessage::assistant("x".repeat(3_000)),
+    ];
+    let mock = MockProvider::new(vec![answer("a", FinishReason::Stop, usage(10, 5))]);
+    let inspector = mock.clone();
+    let events = run(mock, small(), budget, history).await;
+    let sent = inspector.requests()[0].max_tokens.expect("a ceiling");
+    let report = &reports(&events)[0];
+    assert_eq!(
+        report.reservation_basis.as_deref(),
+        Some("remaining_context")
+    );
+    // The window less the estimated prompt and the 2% margin, not the window.
+    assert_eq!(sent, 8_192 - report.prompt_estimate - 163);
+}
+
+#[tokio::test]
+async fn an_explicit_or_inherited_ceiling_bounds_the_reservation() {
+    let lead = GenerationBudget {
+        max_output_tokens: Some(700),
+        output_pool: Some(OutputPool::new(10_000)),
+        ..GenerationBudget::default()
+    };
+    // A worker on another model of unknown capacity inherits the ceiling.
+    let worker = lead.for_routed_worker(GenerationBudget::default());
+    for budget in [lead, worker] {
+        let mock = MockProvider::new(vec![answer("a", FinishReason::Stop, usage(10, 5))]);
+        let inspector = mock.clone();
+        let events = run(mock, small(), budget, Vec::new()).await;
+        assert_eq!(inspector.requests()[0].max_tokens, Some(700));
+        assert_eq!(
+            reports(&events)[0].reservation_basis.as_deref(),
+            Some("ceiling")
+        );
+    }
+}
+
+#[tokio::test]
+async fn usage_beyond_the_grant_is_recorded_and_stops_further_grants() {
+    let pool = OutputPool::new(10_000).with_turn_tokens(256);
+    // A provider that did not honour its max_tokens.
+    let mock = MockProvider::new(vec![
+        search("call_1", usage(100, 900)),
+        answer("never", FinishReason::Stop, None),
+    ]);
+    let inspector = mock.clone();
+    let events = run(mock, small(), unbounded(&pool), Vec::new()).await;
+    assert_eq!(inspector.requests().len(), 1, "no turn after the overrun");
+    assert_eq!((pool.spent(), pool.overrun()), (900, 644));
+    assert_eq!(reports(&events)[0].output_overrun, 644);
+    assert_eq!(stop_reason(&events), Some(StopReason::OutputBudget));
+}
+
+/// A provider whose stream fails after it starts.
+struct FailsMidTurn;
+
+#[async_trait]
+impl AgentProvider for FailsMidTurn {
+    async fn stream(
+        &self,
+        _: lightagent_core::ProviderRequest,
+        _: CancellationToken,
+    ) -> Result<lightagent_core::ProviderStream, lightagent_core::ProviderError> {
+        Ok(Box::pin(futures_util::stream::iter(vec![
+            Ok(ProviderEvent::RoleStarted),
+            Err(lightagent_core::ProviderError::Transport(
+                "connection reset".into(),
+            )),
+        ])))
+    }
+}
+
+#[tokio::test]
+async fn reasoning_is_charged_once_and_unaccounted_turns_in_full() {
+    // completion_tokens already covers reasoning; the streamed reasoning
+    // text is not charged again.
+    let pool = OutputPool::new(10_000);
+    let thinking = MockProvider::new(vec![vec![
+        ProviderEvent::RoleStarted,
+        ProviderEvent::Reasoning("r".repeat(3_000)),
+        ProviderEvent::Content("answer".into()),
+        ProviderEvent::Finished {
+            reason: FinishReason::Stop,
+            usage: usage(50, 400),
+        },
+    ]]);
+    run(thinking, small(), unbounded(&pool), Vec::new()).await;
+    assert_eq!(pool.spent(), 400);
+    assert!(!pool.estimated());
+
+    // Missing usage: the whole reservation, labelled estimated.
+    let pool = OutputPool::new(10_000);
+    let silent = MockProvider::new(vec![answer("a", FinishReason::Stop, None)]);
+    run(silent, small(), unbounded(&pool), Vec::new()).await;
+    assert_eq!(pool.spent(), 2_048);
+    assert!(pool.estimated());
+
+    // A provider error mid-turn: the same.
+    let pool = OutputPool::new(10_000);
+    let events = AgentLoop::new(FailsMidTurn, small(), config(unbounded(&pool)))
+        .run("go", CancellationToken::new())
+        .await
+        .expect("run")
+        .into_events();
+    assert_eq!(stop_reason(&events), Some(StopReason::Error));
+    assert_eq!(pool.spent(), 2_048);
+    assert!(pool.estimated());
+
+    // Cancelled as the turn starts: the same.
+    let cancel = CancellationToken::new();
+    let pool = OutputPool::new(10_000);
+    let provider = CancelOnSecondTurn {
+        inner: MockProvider::looping(vec![answer("x", FinishReason::Stop, None)]),
+        cancel: cancel.clone(),
+        turns: std::sync::atomic::AtomicUsize::new(1),
+    };
+    let events = AgentLoop::new(provider, small(), config(unbounded(&pool)))
+        .run("go", cancel)
+        .await
+        .expect("run")
+        .into_events();
+    assert_eq!(stop_reason(&events), Some(StopReason::Cancelled));
+    assert_eq!(pool.spent(), 2_048);
+}
+
+#[tokio::test]
+async fn a_continuation_reserves_from_the_same_pool_by_the_same_policy() {
+    let pool = OutputPool::new(50_000);
+    let mut budget = continuing(1);
+    budget.output_pool = Some(pool.clone());
+    let mock = MockProvider::new(vec![
+        answer(
+            "The bridge opened in",
+            FinishReason::Length,
+            usage(100, 300),
+        ),
+        answer(" 1932.", FinishReason::Stop, usage(150, 4)),
+    ]);
+    let inspector = mock.clone();
+    let events = run(mock, small(), budget, Vec::new()).await;
+    let reports = reports(&events);
+    assert_eq!(reports[1].purpose, "continuation");
+    assert_eq!(
+        reports[1].reservation_basis.as_deref(),
+        Some("remaining_context")
+    );
+    assert!(
+        inspector
+            .requests()
+            .iter()
+            .all(|request| request.max_tokens.is_some_and(|tokens| tokens < 8_192))
+    );
+    assert_eq!(pool.spent(), 304);
+    assert_eq!(stop_reason(&events), Some(StopReason::EndTurn));
+}
+
+#[tokio::test]
+async fn unknown_capacity_enables_no_context_protection_or_continuation() {
+    let pool = OutputPool::new(10_000);
+    let mut budget = unbounded(&pool);
+    budget.max_continuations = 1;
+    budget.reserve_answer_tokens = 1_024;
+    let mock = MockProvider::new(vec![
+        search("call_1", None),
+        answer("half", FinishReason::Length, usage(10, 2_048)),
+    ]);
+    let inspector = mock.clone();
+    let invoker = Retrieval {
+        result: "passage ".repeat(4_000),
+    };
+    let events = run(mock, invoker, budget, Vec::new()).await;
+    let requests = inspector.requests();
+    assert_eq!(requests.len(), 2, "no continuation without a known window");
+    assert!(!requests[1].tools.is_empty(), "no context guard either");
+    let result = requests[1]
+        .messages
+        .iter()
+        .find(|message| message.role == Role::Tool)
+        .expect("the result");
+    assert_eq!(result.content.len(), 32_000, "nothing shortened");
+    assert!(
+        reports(&events)
+            .iter()
+            .all(|report| report.context_window.is_none())
+    );
+    assert_eq!(stop_reason(&events), Some(StopReason::MaxTokens));
+}
+
 #[tokio::test]
 async fn legitimate_repetition_at_the_seam_is_kept() {
     let mock = MockProvider::new(vec![
