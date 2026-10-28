@@ -33,6 +33,12 @@ name: jev specialist selection (pinned PR commit)
 # missing, duplicate or malformed response, or a stopped or partial run, is
 # INCOMPLETE and fails, with its ratios kept apart as diagnostics.
 #
+# The prompt set is one of a fixed list (the `set` input), each pinned in the
+# guard to the git blob id of its frozen file. The export, the manifest, the
+# harness report and the verdict must all name the same set, and prepare
+# refuses an export that is not exactly that set's prompts before anyone is
+# asked to approve sending it.
+#
 # On pull requests `prepare` runs with no secret, to keep the export path
 # tested, with the guard's own tests; a commit without the export harness
 # (master before the stack merges) has nothing to export.
@@ -43,6 +49,7 @@ on:
       - .github/workflows/jev-selection-pinned.yml
       - crates/lightagent/src/coordinator/**
       - evaluation/subagents/selection.v1.json
+      - evaluation/subagents/selection-heldout.v1.json
       - scripts/jev-selection-guard.py
       - scripts/test-jev-selection-guard.py
   workflow_dispatch:
@@ -54,6 +61,14 @@ on:
         description: Maximum Jev requests (1-24; one pass over the 24 prompts)
         required: true
         default: '24'
+      set:
+        description: The frozen prompt set to evaluate
+        type: choice
+        required: true
+        default: selection.v1
+        options:
+          - selection.v1
+          - selection-heldout.v1
 
 concurrency:
   group: ${{ github.event_name == 'workflow_dispatch' && 'jev-live' || format('jev-selection-pinned-{0}', github.ref) }}
@@ -64,6 +79,8 @@ permissions:
 
 env:
   CARGO_INCREMENTAL: '0'
+  # Pull requests export the first set; a dispatch names one from the list.
+  SELECTION_SET: ${{ inputs.set || 'selection.v1' }}
 
 jobs:
   prepare:
@@ -130,9 +147,27 @@ jobs:
         env:
           LIGHTAGENT_SELECTION_EXPORT: ${{ runner.temp }}/selection-requests
           LIGHTAGENT_JEV_LIVE_COMMIT: ${{ steps.pin.outputs.sha }}
+          LIGHTAGENT_SELECTION_SET: ${{ env.SELECTION_SET }}
         run: >-
           cargo test -p lightagent --lib --
           --ignored --exact --nocapture coordinator::evaluation::specialists::export_selection_requests
+      - name: Check out the guard (workflow source)
+        if: steps.harness.outputs.present == 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: .jev-guard
+          sparse-checkout: scripts/jev-selection-guard.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Check the export is the frozen set
+        if: steps.harness.outputs.present == 'true'
+        env:
+          CODE_SHA: ${{ steps.pin.outputs.sha }}
+        run: >-
+          python3 .jev-guard/scripts/jev-selection-guard.py check-export
+          --set-name "$SELECTION_SET" --code-root . --requests "$RUNNER_TEMP/selection-requests"
+          --code-sha "$CODE_SHA" --summary "$GITHUB_STEP_SUMMARY"
       - name: Record the requests' digest
         id: digest
         if: steps.harness.outputs.present == 'true'
@@ -291,6 +326,7 @@ jobs:
           LIGHTAGENT_SELECTION_LIVE_MAX_REQUESTS: ${{ inputs.max_requests }}
           LIGHTAGENT_JEV_LIVE_COMMIT: ${{ needs.prepare.outputs.sha }}
           LIGHTAGENT_JEV_EVAL_OUT: ${{ runner.temp }}/harness
+          LIGHTAGENT_SELECTION_SET: ${{ env.SELECTION_SET }}
         run: >-
           cargo test -p lightagent --lib replay_specialist_selection_evaluation
           -- --ignored --nocapture --test-threads=1
@@ -303,7 +339,7 @@ jobs:
           WORKFLOW_SHA: ${{ needs.prepare.outputs.workflow_sha }}
         run: >-
           python3 .jev-guard/scripts/jev-selection-guard.py verdict
-          --set evaluation/subagents/selection.v1.json
+          --set-name "$SELECTION_SET" --code-root .
           --requests "$RUNNER_TEMP/selection-requests"
           --responses "$RUNNER_TEMP/selection-responses"
           --reports "$RUNNER_TEMP/harness"
@@ -337,12 +373,14 @@ jobs:
           sparse-checkout: scripts/jev-selection-guard.py
           sparse-checkout-cone-mode: false
           persist-credentials: false
-      - name: Check out the prompt set (code under test)
+      - name: Check out the prompt sets (code under test)
         uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.sha }}
           path: .jev-code
-          sparse-checkout: evaluation/subagents/selection.v1.json
+          sparse-checkout: |
+            evaluation/subagents/selection.v1.json
+            evaluation/subagents/selection-heldout.v1.json
           sparse-checkout-cone-mode: false
           persist-credentials: false
       - uses: actions/download-artifact@v8
@@ -362,7 +400,7 @@ jobs:
           WORKFLOW_SHA: ${{ needs.prepare.outputs.workflow_sha }}
         run: >-
           python3 .jev-guard/scripts/jev-selection-guard.py verdict
-          --set .jev-code/evaluation/subagents/selection.v1.json
+          --set-name "$SELECTION_SET" --code-root .jev-code
           --requests "$RUNNER_TEMP/selection-requests"
           --responses "$RUNNER_TEMP/selection-responses"
           --reports "$RUNNER_TEMP/harness"

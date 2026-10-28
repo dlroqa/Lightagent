@@ -143,7 +143,7 @@ Under both rule sets, all 12 lead cases stay with the lead because the task is s
 
 Proposal, each step needing its own authorization:
 1. **Review and merge** this correction. Selection stays `off` by default, and active selection is not enabled.
-2. **Prepare a small PR** that lets `jev-selection-pinned.yml` and its guard take the prompt set as an input, `selection.v1.json` or `selection-heldout.v1.json`, defaulting to v1. The input must be from a fixed list. Today both read `selection.v1.json`.
+2. **Held-out evaluation support** (a separate draft PR stacked on this one): `jev-selection-pinned.yml` takes the prompt set from a fixed list, the guard pins each set to its frozen file's git blob id, and the verdict reports precision, recall and role selection over every delegation case.
 3. **Run one pinned live pass** over the held-out set, on the merged master commit:
    - 24 requests, no retries, and the same stop conditions;
    - the reviewed export, checksum and owner approval of `send`;

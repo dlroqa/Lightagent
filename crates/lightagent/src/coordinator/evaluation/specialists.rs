@@ -53,6 +53,33 @@ fn set() -> SelectionSet {
     serde_json::from_str(SET).expect("the selection set parses")
 }
 
+/// The prompt sets a run may use, by the name the pinned workflow passes. A
+/// fixed list: a dispatch can name a set, never supply one.
+const SETS: [(&str, &str); 2] = [("selection.v1", SET), ("selection-heldout.v1", HELD_OUT)];
+
+/// A set from [`SETS`]: its name, text and parsed cases.
+struct Named {
+    name: &'static str,
+    text: &'static str,
+    set: SelectionSet,
+}
+
+fn named_set(name: &str) -> Option<Named> {
+    let (name, text) = SETS.iter().find(|(known, _)| *known == name)?;
+    Some(Named {
+        name,
+        text,
+        set: serde_json::from_str(text).expect("a recorded set parses"),
+    })
+}
+
+/// The set a run uses: `LIGHTAGENT_SELECTION_SET`, or the first set when it
+/// is unset. An unknown name is refused, never replaced by another set.
+fn chosen_set() -> Named {
+    let name = env("LIGHTAGENT_SELECTION_SET").unwrap_or_else(|| SETS[0].0.to_owned());
+    named_set(&name).unwrap_or_else(|| panic!("{name} is not a known selection set"))
+}
+
 /// How one case scored.
 #[derive(Clone, Debug, PartialEq)]
 struct Scored {
@@ -464,8 +491,8 @@ async fn run_set(set: &SelectionSet, config: &Config, limit: u32) -> SetRun {
 }
 
 /// Write the run's report and summary; whether it meets the pass rule.
-fn finish(set: &SelectionSet, run: &SetRun, measurement: &str, limit: u32) -> bool {
-    let (totals, passed) = totals(set, &run.scored);
+fn finish(named: &Named, run: &SetRun, measurement: &str, limit: u32) -> bool {
+    let (totals, passed) = totals(&named.set, &run.scored);
     let status = if run.stopped == Some("endpoint_failures") {
         "FAILED"
     } else if passed {
@@ -481,6 +508,8 @@ fn finish(set: &SelectionSet, run: &SetRun, measurement: &str, limit: u32) -> bo
         "counts_as_competence_evidence": false,
         "measurement": measurement,
         "commit": env("LIGHTAGENT_JEV_LIVE_COMMIT"),
+        "set": named.name,
+        "set_fingerprint": format!("{:#018x}", fingerprint(named.text)),
         "requests": run.requests,
         "request_ceiling": limit,
         "retries": 0,
@@ -532,21 +561,22 @@ async fn live_specialist_selection_evaluation() {
         env("LIGHTAGENT_JEV_LIVE_URL").unwrap_or_else(|| DEFAULT_URL.to_owned()),
         Some(lightagent_core::SecretRef::env(KEY_VARIABLE)),
     );
-    let set = set();
-    let run = run_set(&set, &config, limit).await;
+    let named = chosen_set();
+    let run = run_set(&named.set, &config, limit).await;
     assert!(
-        finish(&set, &run, "live_jev", limit),
+        finish(&named, &run, "live_jev", limit),
         "below the recorded pass rule"
     );
 }
 
-/// Write each case's exact request body to `dir`, as `<id>.json`, with a
-/// manifest. Nothing is sent and no credential is read.
-fn export_requests(dir: &std::path::Path) -> Vec<String> {
+/// Write each case of `named` as its exact request body to `dir`, as
+/// `<id>.json`, with a manifest naming the set and its fingerprint. Nothing
+/// is sent and no credential is read.
+fn export_requests(dir: &std::path::Path, named: &Named) -> Vec<String> {
     let config = selection_config(DEFAULT_URL.to_owned(), None);
     std::fs::create_dir_all(dir).expect("the export directory can be created");
     let mut ids = Vec::new();
-    for case in &set().cases {
+    for case in &named.set.cases {
         let request = crate::coordinator::classify::request_for(&config, &case.prompt)
             .expect("every recorded prompt is sendable");
         let body = serde_json::to_string(&request).expect("a request serializes");
@@ -556,6 +586,8 @@ fn export_requests(dir: &std::path::Path) -> Vec<String> {
     let manifest = json!({
         "schema": "lightagent.specialist_selection_requests.v1",
         "commit": env("LIGHTAGENT_JEV_LIVE_COMMIT"),
+        "set": named.name,
+        "set_fingerprint": format!("{:#018x}", fingerprint(named.text)),
         "endpoint_path": "/v1/systemone",
         "cases": ids,
     });
@@ -565,10 +597,14 @@ fn export_requests(dir: &std::path::Path) -> Vec<String> {
 
 /// A loopback Jev that answers each request with the recorded response to
 /// the exported request of the same state, and 404 to anything else.
-async fn replay_server(requests: &std::path::Path, responses: &std::path::Path) -> String {
+async fn replay_server(
+    requests: &std::path::Path,
+    responses: &std::path::Path,
+    set: &SelectionSet,
+) -> String {
     use tokio::io::AsyncWriteExt;
     let mut answers: BTreeMap<String, String> = BTreeMap::new();
-    for case in &set().cases {
+    for case in &set.cases {
         let Ok(request) = std::fs::read_to_string(requests.join(format!("{}.json", case.id)))
         else {
             continue;
@@ -615,8 +651,13 @@ async fn replay_server(requests: &std::path::Path, responses: &std::path::Path) 
 fn export_selection_requests() {
     let dir =
         env("LIGHTAGENT_SELECTION_EXPORT").expect("LIGHTAGENT_SELECTION_EXPORT names a directory");
-    let ids = export_requests(std::path::Path::new(&dir));
-    println!("EVIDENCE exported {} requests", ids.len());
+    let named = chosen_set();
+    let ids = export_requests(std::path::Path::new(&dir), &named);
+    println!(
+        "EVIDENCE exported {} requests from {}",
+        ids.len(),
+        named.name
+    );
 }
 
 #[tokio::test]
@@ -624,16 +665,17 @@ fn export_selection_requests() {
 async fn replay_specialist_selection_evaluation() {
     let requests = env("LIGHTAGENT_SELECTION_EXPORT").expect("the exported requests");
     let responses = env("LIGHTAGENT_SELECTION_RESPONSES").expect("the recorded responses");
+    let named = chosen_set();
     let url = replay_server(
         std::path::Path::new(&requests),
         std::path::Path::new(&responses),
+        &named.set,
     )
     .await;
     let limit = ceiling();
-    let set = set();
-    let run = run_set(&set, &selection_config(url, None), limit).await;
+    let run = run_set(&named.set, &selection_config(url, None), limit).await;
     assert!(
-        finish(&set, &run, "replayed_live_jev", limit),
+        finish(&named, &run, "replayed_live_jev", limit),
         "below the recorded pass rule"
     );
 }
@@ -645,7 +687,7 @@ async fn exported_requests_replay_exactly_and_unknown_requests_are_not_answered(
         lightagent_core::RunId::new().as_str()
     ));
     let (requests, responses) = (root.join("requests"), root.join("responses"));
-    let ids = export_requests(&requests);
+    let ids = export_requests(&requests, &named_set("selection.v1").unwrap());
     assert_eq!(ids.len(), set().cases.len());
     // Every export is one typed request: no free-form generation, nothing
     // beyond the recorded synthetic prompt in its state.
@@ -677,9 +719,9 @@ async fn exported_requests_replay_exactly_and_unknown_requests_are_not_answered(
     );
     std::fs::create_dir_all(&responses).unwrap();
     std::fs::write(responses.join("sel-016.json"), body.to_string()).unwrap();
-    let url = replay_server(&requests, &responses).await;
-    let config = selection_config(url, None);
     let set = set();
+    let url = replay_server(&requests, &responses, &set).await;
+    let config = selection_config(url, None);
     let recorded = set.cases.iter().find(|case| case.id == "sel-016").unwrap();
     let report = crate::coordinator::classify::classify(
         &config,
@@ -764,7 +806,7 @@ fn the_recorded_requests_are_what_this_code_exports() {
         "lightagent-selection-export-{}",
         lightagent_core::RunId::new().as_str()
     ));
-    let ids = export_requests(&dir);
+    let ids = export_requests(&dir, &named_set("selection.v1").unwrap());
     let recorded = recorded_run().join("requests");
     for id in &ids {
         let exported = std::fs::read_to_string(dir.join(format!("{id}.json"))).unwrap();
@@ -841,8 +883,8 @@ const CORRECTED_REPLAY: [(&str, &str, &[&str]); 24] = [
 #[tokio::test]
 async fn the_corrected_rules_on_the_recorded_answers() {
     let dir = recorded_run();
-    let url = replay_server(&dir.join("requests"), &dir.join("responses")).await;
     let set = set();
+    let url = replay_server(&dir.join("requests"), &dir.join("responses"), &set).await;
     let run = run_set(&set, &selection_config(url, None), DEFAULT_REQUESTS).await;
     assert_eq!((run.requests, run.failures.len()), (24, 0));
     let ended: Vec<(&str, &str, Vec<&str>)> = run
@@ -944,10 +986,10 @@ const RUNTIME_CODES: [&str; 3] = [
 #[tokio::test]
 async fn diagnose_the_recorded_run() {
     let dir = recorded_run();
-    let url = replay_server(&dir.join("requests"), &dir.join("responses")).await;
+    let set = set();
+    let url = replay_server(&dir.join("requests"), &dir.join("responses"), &set).await;
     let config = selection_config(url, None);
     let selection_threshold = f64::from(config.subagents.selection_threshold_percent) / 100.0;
-    let set = set();
     let mut rows = Vec::new();
     let mut table = String::from(
         "| Case | Expected | Category (conf) | Complexity | specialists | researcher / coder / reviewer / tester | Structure | Recorded run (baseline rules) | This code's rules | Next rule if confidence passed | Plan from roles alone |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
@@ -1194,4 +1236,71 @@ fn the_held_out_set_is_frozen() {
         "the held-out set changed: fingerprint {:#018x}",
         fingerprint(HELD_OUT)
     );
+}
+
+#[test]
+fn a_run_takes_its_set_from_the_fixed_list_only() {
+    let first = named_set("selection.v1").unwrap();
+    let held = named_set("selection-heldout.v1").unwrap();
+    assert_eq!(first.set.cases.len(), 24);
+    assert_eq!(held.set.cases.len(), 24);
+    assert_eq!(fingerprint(held.text), HELD_OUT_FINGERPRINT);
+    for unknown in [
+        "",
+        "selection.v2",
+        "../selection.v1",
+        "selection-heldout.v1.json",
+    ] {
+        assert!(named_set(unknown).is_none(), "{unknown}");
+    }
+}
+
+#[test]
+fn a_held_out_export_names_its_set_and_holds_only_its_prompts() {
+    let dir = std::env::temp_dir().join(format!(
+        "lightagent-selection-heldout-{}",
+        lightagent_core::RunId::new().as_str()
+    ));
+    let held = named_set("selection-heldout.v1").unwrap();
+    let ids = export_requests(&dir, &held);
+    let expected: Vec<&str> = held.set.cases.iter().map(|case| case.id.as_str()).collect();
+    assert_eq!(ids, expected);
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["set"], "selection-heldout.v1");
+    assert_eq!(
+        manifest["set_fingerprint"],
+        format!("{HELD_OUT_FINGERPRINT:#018x}")
+    );
+    assert_eq!(manifest["cases"], json!(expected));
+    let mut files: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    files.sort();
+    let mut want: Vec<String> = expected.iter().map(|id| format!("{id}.json")).collect();
+    want.push("manifest.json".to_owned());
+    want.sort();
+    assert_eq!(files, want);
+    // Each body holds the held-out prompt, never one from the first set.
+    let first = set();
+    for case in &held.set.cases {
+        let body: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join(format!("{}.json", case.id))).unwrap(),
+        )
+        .unwrap();
+        let state = body["state"].as_str().unwrap();
+        let limit = selection_config(DEFAULT_URL.to_owned(), None)
+            .platform
+            .jev
+            .classification
+            .max_input_chars;
+        let Ok(expected) = sanitize::summarize(&case.prompt, limit) else {
+            panic!("{} would not be sent", case.id);
+        };
+        let expected = expected.text;
+        assert_eq!(state, expected, "{}", case.id);
+        assert!(first.cases.iter().all(|other| other.prompt != state));
+    }
+    let _ = std::fs::remove_dir_all(dir);
 }

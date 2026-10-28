@@ -201,9 +201,25 @@ class PinCommandTests(unittest.TestCase):
         self.assertEqual(code, 1)
 
 
-IDS = [f"sel-{n:03d}" for n in range(1, 25)]
-# Twelve kept with the lead, twelve that should be delegated.
-LABELS = {case_id: n > 12 for n, case_id in enumerate(IDS, start=1)}
+# The frozen sets themselves, as the guard pins them: fixtures score against
+# their real ids, delegation labels and role labels.
+REPO_ROOT = HERE.parent
+
+
+def real_set(name):
+    relative, _ = guard.SETS[name]
+    return json.loads((REPO_ROOT / relative).read_text(encoding="utf-8"))
+
+
+def labels_of(selection):
+    return (
+        [case["id"] for case in selection["cases"]],
+        {case["id"]: case["delegate"] for case in selection["cases"]},
+        {case["id"]: case.get("roles", []) for case in selection["cases"]},
+    )
+
+
+IDS, LABELS, ROLES = labels_of(real_set("selection.v1"))
 DIGEST_OF = lambda directory, names: hashlib.sha256(
     "".join(
         f"{hashlib.sha256((directory / name).read_bytes()).hexdigest()}  {name}\n"
@@ -212,12 +228,15 @@ DIGEST_OF = lambda directory, names: hashlib.sha256(
 ).hexdigest()
 
 
-def harness_report(cases, failures=None, stopped=None, requests=24, commit=CODE):
+def harness_report(
+    cases, failures=None, stopped=None, requests=24, commit=CODE, labels=None, set_name="selection.v1"
+):
     """What the harness at the code under test writes, by its own formulas."""
-    lead = sum(1 for delegate in LABELS.values() if not delegate)
+    labels = labels or LABELS
+    lead = sum(1 for delegate in labels.values() if not delegate)
     decisions = sum(1 for case in cases if case["decision_ok"])
-    unnecessary = sum(1 for case in cases if case["planned"] and not LABELS[case["id"]])
-    missed = sum(1 for case in cases if not case["planned"] and LABELS[case["id"]])
+    unnecessary = sum(1 for case in cases if case["planned"] and not labels[case["id"]])
+    missed = sum(1 for case in cases if not case["planned"] and labels[case["id"]])
     roles = [case["roles_ok"] for case in cases if case["roles_ok"] is not None]
     passed = (
         len(cases) == 24
@@ -229,6 +248,7 @@ def harness_report(cases, failures=None, stopped=None, requests=24, commit=CODE)
         "status": "FAILED" if stopped == "endpoint_failures" else ("PASSED" if passed else "BELOW_THRESHOLD"),
         "evaluated": True,
         "commit": commit,
+        "set": set_name,
         "requests": requests,
         "request_ceiling": 24,
         "retries": 0,
@@ -249,46 +269,85 @@ def harness_report(cases, failures=None, stopped=None, requests=24, commit=CODE)
     }
 
 
-def scored(planned):
+def planned_roles(case_id, planned, labels, roles):
+    """A delegation case plans its first labeled role set; a lead case, a researcher."""
+    if case_id not in planned:
+        return []
+    return sorted(roles[case_id][0]) if labels[case_id] else ["researcher"]
+
+
+def scored(planned, ids=None, labels=None, roles=None):
     """Scored cases for the given set of planned ids."""
+    ids, labels, roles = ids or IDS, labels or LABELS, roles or ROLES
     return [
         {
             "id": case_id,
             "planned": case_id in planned,
-            "decision_ok": (case_id in planned) == LABELS[case_id],
-            "roles_ok": True if case_id in planned and LABELS[case_id] else None,
+            "decision_ok": (case_id in planned) == labels[case_id],
+            "roles_ok": True if case_id in planned and labels[case_id] else None,
             "fallback": None,
+            "roles": planned_roles(case_id, planned, labels, roles),
         }
-        for case_id in IDS
+        for case_id in ids
     ]
 
 
 class Run:
     """A dispatched run's records on disk: complete and passing until changed."""
 
-    def __init__(self, root, ids=IDS):
+    def __init__(self, root, ids=None, set_name="selection.v1"):
         self.root = root
-        self.set = root / "selection.v1.json"
+        self.code_root = root / "code"
         self.requests = root / "requests"
         self.responses = root / "responses"
         self.reports = root / "reports"
         for directory in (self.requests, self.responses, self.reports):
             directory.mkdir()
-        cases = [{"id": case_id, "delegate": LABELS.get(case_id, False), "prompt": "p"} for case_id in ids]
-        self.set.write_text(json.dumps(
-            {"pass": {"decision_accuracy_min": 0.8, "unnecessary_delegation_max": 0.1}, "cases": cases}
-        ))
-        for case_id in IDS:
+        self.set_name = set_name
+        if ids is None:
+            # A frozen set, copied byte for byte to where the guard reads it.
+            relative, _ = guard.SETS[set_name]
+            self.set_file = self.code_root / relative
+            self.set_file.parent.mkdir(parents=True)
+            self.set_file.write_bytes((REPO_ROOT / relative).read_bytes())
+            self.ids, self.labels, self.roles = labels_of(real_set(set_name))
+        else:
+            # A deliberately malformed set, listed for this test only.
+            cases = [
+                {"id": case_id, "delegate": LABELS.get(case_id, False), "roles": ROLES.get(case_id, []), "prompt": "p"}
+                for case_id in ids
+            ]
+            data = json.dumps(
+                {"pass": {"decision_accuracy_min": 0.8, "unnecessary_delegation_max": 0.1}, "cases": cases}
+            ).encode()
+            self.set_name = f"fixture-{id(self)}"
+            relative = f"evaluation/subagents/{self.set_name}.json"
+            guard.SETS[self.set_name] = (relative, guard.git_blob(data))
+            self.set_file = self.code_root / relative
+            self.set_file.parent.mkdir(parents=True)
+            self.set_file.write_bytes(data)
+            self.ids, self.labels, self.roles = IDS, LABELS, ROLES
+        for case_id in self.ids:
             (self.requests / f"{case_id}.json").write_text(
                 json.dumps({"model": "jev", "questions": {}, "state": case_id})
             )
             (self.responses / f"{case_id}.json").write_text(
                 json.dumps({"answers": {}, "model": "jev-2026-10"})
             )
-        (self.requests / "manifest.json").write_text(json.dumps({"cases": IDS, "commit": CODE}))
-        self.digest = DIGEST_OF(self.requests, [f"{case_id}.json" for case_id in IDS])
+        (self.requests / "manifest.json").write_text(
+            json.dumps({"cases": self.ids, "commit": CODE, "set": self.set_name})
+        )
+        self.digest = DIGEST_OF(self.requests, [f"{case_id}.json" for case_id in self.ids])
         self.send({"sent": 24, "ceiling": 24, "retries": 0, "stopped": "no"})
-        self.report(harness_report(scored({i for i in IDS if LABELS[i]})))
+        self.report(self.harness(self.perfect()))
+
+    def perfect(self):
+        """Every case labeled for delegation planned with its first role set."""
+        return {case_id for case_id in self.ids if self.labels[case_id]}
+
+    def harness(self, planned, **kwargs):
+        cases = scored(planned, self.ids, self.labels, self.roles)
+        return harness_report(cases, labels=self.labels, set_name=self.set_name, **kwargs)
 
     def send(self, record):
         (self.responses / "send.json").write_text(json.dumps(record))
@@ -297,7 +356,9 @@ class Run:
         (self.reports / "specialist-selection.json").write_text(json.dumps(report))
 
     def verdict(self):
-        return guard.verdict(self.set, self.requests, self.responses, self.reports, self.digest, CODE, MASTER)
+        return guard.verdict(
+            self.set_name, self.code_root, self.requests, self.responses, self.reports, self.digest, CODE, MASTER
+        )
 
 
 class VerdictTests(unittest.TestCase):
@@ -326,6 +387,11 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(metrics["missed_delegation"]["denominator"], 12)
         self.assertEqual(metrics["role_match"], {"numerator": 12, "denominator": 12, "value": 1.0})
         self.assertEqual(result["model_identifiers"], ["model=jev-2026-10"])
+        self.assertEqual(metrics["delegation_precision"]["value"], 1.0)
+        self.assertEqual(metrics["delegation_recall"]["value"], 1.0)
+        self.assertEqual(metrics["role_match_over_all_delegation_cases"]["numerator"], 12)
+        self.assertEqual(metrics["mean_expected_role_coverage"], 1.0)
+        self.assertEqual(result["set"], "selection.v1")
         self.assertEqual(result["usage"]["requests"], 24)
 
     def test_a_complete_run_below_the_rule_is_below_threshold(self):
@@ -424,7 +490,9 @@ class VerdictTests(unittest.TestCase):
 
     def test_nothing_downloaded_is_incomplete(self):
         temp = pathlib.Path(self.run_.root) / "empty"
-        result = guard.verdict(self.run_.set, temp / "q", temp / "r", temp / "s", "", CODE, MASTER)
+        result = guard.verdict(
+            self.run_.set_name, self.run_.code_root, temp / "q", temp / "r", temp / "s", "", CODE, MASTER
+        )
         self.assertEqual(result["status"], "INCOMPLETE")
         self.assertIn("the exported requests are missing", result["problems"])
 
@@ -445,11 +513,165 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(guard.request_digest(self.run_.requests, names), done.stdout.strip())
 
 
+class SetIdentityTests(unittest.TestCase):
+    """The prompt set is named from a fixed list and bound to its frozen file."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.temp = pathlib.Path(temp.name)
+
+    def run_in(self, name, set_name="selection.v1"):
+        root = self.temp / name
+        root.mkdir()
+        return Run(root, set_name=set_name)
+
+    def test_the_pinned_blobs_are_this_repositorys_frozen_files(self):
+        for name in ("selection.v1", "selection-heldout.v1"):
+            relative, blob = guard.SETS[name]
+            data = (REPO_ROOT / relative).read_bytes()
+            self.assertEqual(guard.git_blob(data), blob, name)
+            # The same id git itself computes for the file.
+            done = subprocess.run(
+                ["git", "hash-object", str(REPO_ROOT / relative)],
+                capture_output=True, text=True, check=True,
+            )
+            self.assertEqual(done.stdout.strip(), blob, name)
+
+    def test_a_complete_held_out_run_is_scored_against_the_held_out_labels(self):
+        run = self.run_in("held", "selection-heldout.v1")
+        self.assertEqual(run.ids[0], "sel-101")
+        result = run.verdict()
+        self.assertEqual((result["status"], result["problems"]), ("PASSED", []))
+        self.assertEqual(result["set"], "selection-heldout.v1")
+        self.assertEqual(result["set_blob"], guard.SETS["selection-heldout.v1"][1])
+        metrics = result["metrics"]
+        self.assertEqual(metrics["delegation_precision"]["value"], 1.0)
+        self.assertEqual(metrics["delegation_recall"]["numerator"], 12)
+        self.assertEqual(metrics["role_match_over_all_delegation_cases"]["numerator"], 12)
+        self.assertEqual(metrics["mean_expected_role_coverage"], 1.0)
+
+    def test_precision_recall_and_role_selection_over_every_delegation_case(self):
+        run = self.run_in("partial")
+        # Ten of twelve planned, two lead cases planned too: 2/12 unnecessary
+        # is over the 0.1 limit.
+        planned = (run.perfect() - {"sel-016", "sel-019"}) | {"sel-001", "sel-002"}
+        cases = scored(planned, run.ids, run.labels, run.roles)
+        # One planned delegation names a role set no label allows.
+        for case in cases:
+            if case["id"] == "sel-013":
+                case["roles"], case["roles_ok"] = ["reviewer"], False
+        run.report(harness_report(cases, labels=run.labels))
+        result = run.verdict()
+        self.assertEqual(result["status"], "BELOW_THRESHOLD", result["problems"])
+        metrics = result["metrics"]
+        self.assertEqual(metrics["delegation_precision"], {"numerator": 10, "denominator": 12, "value": 10 / 12})
+        self.assertEqual(metrics["delegation_recall"]["numerator"], 10)
+        self.assertEqual(metrics["role_match_over_all_delegation_cases"]["numerator"], 9)
+        self.assertEqual(metrics["role_match_over_all_delegation_cases"]["denominator"], 12)
+        self.assertAlmostEqual(metrics["mean_expected_role_coverage"], 9 / 12)
+
+    def test_nothing_planned_cannot_hide_behind_a_role_match_of_zero_of_zero(self):
+        run = self.run_in("none")
+        run.report(run.harness(set()))
+        metrics = run.verdict()["metrics"]
+        self.assertEqual(metrics["role_match"]["denominator"], 0)
+        self.assertEqual(metrics["role_match_over_all_delegation_cases"], {"numerator": 0, "denominator": 12, "value": 0.0})
+        self.assertEqual(metrics["mean_expected_role_coverage"], 0.0)
+        self.assertEqual(metrics["delegation_recall"]["value"], 0.0)
+
+    def test_a_set_not_on_the_list_or_not_frozen_is_refused(self):
+        run = self.run_in("unknown")
+        result = guard.verdict(
+            "selection.v2", run.code_root, run.requests, run.responses, run.reports, run.digest, CODE, MASTER
+        )
+        self.assertEqual(result["status"], "INCOMPLETE")
+        self.assertIn("'selection.v2' is not a known prompt set", result["problems"])
+        changed = self.run_in("changed")
+        changed.set_file.write_bytes(changed.set_file.read_bytes() + b" ")
+        result = changed.verdict()
+        self.assertEqual(result["status"], "INCOMPLETE")
+        self.assertTrue(any("is not the frozen selection.v1" in problem for problem in result["problems"]))
+
+    def test_records_that_name_another_set_are_refused(self):
+        manifest = self.run_in("manifest")
+        path = manifest.requests / "manifest.json"
+        record = json.loads(path.read_text())
+        record["set"] = "selection-heldout.v1"
+        path.write_text(json.dumps(record))
+        manifest.digest = DIGEST_OF(manifest.requests, [f"{i}.json" for i in manifest.ids])
+        problems = manifest.verdict()["problems"]
+        self.assertTrue(any("request manifest names set 'selection-heldout.v1'" in p for p in problems), problems)
+        report = self.run_in("report")
+        report.report(harness_report(scored(report.perfect()), set_name="selection-heldout.v1"))
+        problems = report.verdict()["problems"]
+        self.assertTrue(any("harness report names set 'selection-heldout.v1'" in p for p in problems), problems)
+
+    def test_only_the_first_set_may_come_from_a_harness_that_names_no_set(self):
+        legacy = self.run_in("legacy")
+        path = legacy.requests / "manifest.json"
+        record = json.loads(path.read_text())
+        del record["set"]
+        path.write_text(json.dumps(record))
+        report = legacy.harness(legacy.perfect())
+        del report["set"]
+        for case in report["cases"]:
+            del case["roles"]
+        legacy.report(report)
+        result = legacy.verdict()
+        self.assertEqual((result["status"], result["problems"]), ("PASSED", []))
+        # Without planned roles, role selection over every case is not claimed.
+        self.assertIsNone(result["metrics"]["role_match_over_all_delegation_cases"])
+        self.assertIsNone(result["metrics"]["mean_expected_role_coverage"])
+        problems = []
+        guard.check_names_set({}, "selection-heldout.v1", "the request manifest", problems)
+        self.assertEqual(problems, ["the request manifest names set None, expected 'selection-heldout.v1'"])
+
+    def test_planned_roles_must_agree_with_the_role_match(self):
+        run = self.run_in("roles")
+        report = run.harness(run.perfect())
+        for case in report["cases"]:
+            if case["id"] == "sel-013":
+                case["roles"] = ["reviewer"]
+            if case["id"] == "sel-001":
+                case["roles"] = ["coder"]
+        run.report(report)
+        problems = run.verdict()["problems"]
+        self.assertIn("sel-013's role match disagrees with its planned roles", problems)
+        self.assertIn("sel-001 lists planned roles but planned nothing", problems)
+
+    def test_harness_measures_that_disagree_with_the_recomputed_ones_are_incomplete(self):
+        run = self.run_in("totals")
+        report = run.harness(run.perfect())
+        report["totals"]["delegation_recall"] = {"numerator": 11, "denominator": 12, "value": 11 / 12}
+        run.report(report)
+        self.assertIn("harness delegation_recall numerator disagrees with the recomputed value", run.verdict()["problems"])
+
+    def test_the_export_check_refuses_another_set_before_any_approval(self):
+        run = self.run_in("export")
+        self.assertEqual(guard.check_export("selection.v1", run.code_root, run.requests, CODE), [])
+        problems = guard.check_export("selection-heldout.v1", run.code_root, run.requests, CODE)
+        self.assertTrue(any("not readable" in p for p in problems), problems)
+        held = self.run_in("export-held", "selection-heldout.v1")
+        # The first set's export offered as the held-out one.
+        problems = guard.check_export("selection-heldout.v1", held.code_root, run.requests, CODE)
+        self.assertIn("unexpected exported file sel-001.json", problems)
+        self.assertIn("no exported request sel-101.json", problems)
+        done = subprocess.run(
+            [sys.executable, str(SCRIPT), "check-export", "--set-name", "selection-heldout.v1",
+             "--code-root", str(held.code_root), "--requests", str(held.requests), "--code-sha", CODE],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(done.returncode, 0, done.stdout)
+        self.assertIn("selection-heldout.v1", done.stdout)
+
+
 class VerdictCommandTests(unittest.TestCase):
     def run_verdict(self, run, out):
         output = run.root / "output"
         done = subprocess.run(
-            [sys.executable, str(SCRIPT), "verdict", "--set", str(run.set), "--requests", str(run.requests),
+            [sys.executable, str(SCRIPT), "verdict", "--set-name", run.set_name, "--code-root", str(run.code_root),
+             "--requests", str(run.requests),
              "--responses", str(run.responses), "--reports", str(run.reports), "--digest", run.digest,
              "--code-sha", CODE, "--workflow-sha", MASTER, "--out", str(out), "--output", str(output)],
             capture_output=True, text=True,
