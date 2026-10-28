@@ -1,0 +1,80 @@
+{
+  "authoritative": true,
+  "code_sha": "b1ffd79c33bc39a13cf26ddf94126b6cb83bfd1c",
+  "complete": true,
+  "counts_as_competence_evidence": false,
+  "evaluation": "jev_specialist_selection",
+  "expected_prompts": 24,
+  "metrics": {
+    "cases": 24,
+    "decision_accuracy": {
+      "denominator": 24,
+      "numerator": 12,
+      "value": 0.5
+    },
+    "meets_pass_rule": false,
+    "missed_delegation": {
+      "denominator": 12,
+      "numerator": 12,
+      "value": 1.0
+    },
+    "role_match": {
+      "denominator": 0,
+      "numerator": 0,
+      "value": null
+    },
+    "unnecessary_delegation": {
+      "denominator": 12,
+      "numerator": 0,
+      "value": 0.0
+    }
+  },
+  "model_identifiers": [
+    "model=jev-1.14.0"
+  ],
+  "passed": false,
+  "problems": [],
+  "request_digest": "57cbfbd3921120e12f3e6f4b144c265a885033fec90f6c0092ab5a271c6d1e3a",
+  "schema": "lightagent.specialist_selection_verdict.v1",
+  "send": {
+    "ceiling": 24,
+    "retries": 0,
+    "sent": 24,
+    "stopped": "no"
+  },
+  "status": "BELOW_THRESHOLD",
+  "usage": {
+    "failures": {},
+    "input_tokens": 24126,
+    "latency_ms": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "output_tokens": 6264,
+    "requests": 24,
+    "stopped": null
+  },
+  "workflow_sha": "0a07e74a343a34ea56a1373e6c740f5912c7f76e"
+}

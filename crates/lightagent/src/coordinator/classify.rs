@@ -326,7 +326,9 @@ fn classification(
     specialists: bool,
 ) -> Option<TaskClassification> {
     let Some(Answer::Choice {
-        choice, confidence, ..
+        choice,
+        confidence,
+        probabilities,
     }) = evaluation.answers.remove(TASK)
     else {
         return None;
@@ -350,7 +352,7 @@ fn classification(
     // A malformed specialist answer invalidates the whole classification:
     // the answers were asked together and are trusted only together.
     let selection = if specialists {
-        Some(selection::answers(&mut evaluation.answers)?)
+        Some(selection::answers(&mut evaluation.answers, &probabilities)?)
     } else {
         None
     };
