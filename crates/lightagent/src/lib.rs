@@ -1570,6 +1570,10 @@ fn get_key(config: &Config, key: &str) -> Option<String> {
             .map(|v| v.to_string()),
         "generation.context_window" => config.generation.context_window.map(|v| v.to_string()),
         "generation.reasoning_effort" => config.generation.reasoning_effort.clone(),
+        "generation.unknown_capacity_turn_tokens" => config
+            .generation
+            .unknown_capacity_turn_tokens
+            .map(|v| v.to_string()),
         "generation.max_run_output_tokens" => config
             .generation
             .max_run_output_tokens
@@ -1807,6 +1811,9 @@ fn set_key(config: &mut Config, key: &str, value: &str) -> Result<(), String> {
         }
         "generation.max_run_output_tokens" => {
             config.generation.max_run_output_tokens = parse_opt_u32(value)?
+        }
+        "generation.unknown_capacity_turn_tokens" => {
+            config.generation.unknown_capacity_turn_tokens = parse_opt_u32(value)?
         }
         "generation.continuations" => config.generation.continuations = parse_opt_u32(value)?,
         _ => return Err(format!("unknown or read-only config key '{key}'")),
@@ -2216,6 +2223,7 @@ mod tests {
             "generation.reserve_answer_tokens",
             "generation.context_window",
             "generation.max_run_output_tokens",
+            "generation.unknown_capacity_turn_tokens",
             "generation.continuations",
         ] {
             assert!(get_key(&config, key).is_none());
