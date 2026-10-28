@@ -108,30 +108,7 @@ pub fn data(event: &AgentEvent) -> serde_json::Value {
             "tool_call_id": tool_call_id,
             "name": name,
         }),
-        AgentEvent::GenerationReport { report: r } => json!({
-            "turn": r.turn,
-            "purpose": r.purpose,
-            "context_window": r.context_window,
-            "context_source": r.context_source,
-            "prompt_estimate": r.prompt_estimate,
-            "prompt_basis": r.prompt_basis,
-            "configured_max_tokens": r.configured_max_tokens,
-            "requested_max_tokens": r.requested_max_tokens,
-            "reasoning": r.reasoning,
-            "reasoning_effort": r.reasoning_effort,
-            "tools_offered": r.tools_offered,
-            "shortened_results": r.shortened_results,
-            "finish": r.finish,
-            "prompt_tokens": r.prompt_tokens,
-            "completion_tokens": r.completion_tokens,
-            "length_cause": r.length_cause,
-            "output_budget": r.output_budget,
-            "output_spent": r.output_spent,
-            "output_estimated": r.output_estimated,
-            "continuations": r.continuations,
-            "reservation_basis": r.reservation_basis,
-            "output_overrun": r.output_overrun,
-        }),
+        AgentEvent::GenerationReport { report } => generation_payload(report),
         AgentEvent::TurnCompleted { usage: Some(usage) } => json!({
             "prompt_tokens": usage.prompt_tokens,
             "completion_tokens": usage.completion_tokens,
@@ -150,6 +127,68 @@ pub fn data(event: &AgentEvent) -> serde_json::Value {
 }
 
 /// The classification record's fields, unchanged since schema 2.
+/// A turn's budget record. An installed adaptive allocation adds one
+/// `allocation` object; without one the payload is exactly as before.
+fn generation_payload(r: &lightagent_core::GenerationReport) -> serde_json::Value {
+    let mut payload = json!({
+        "turn": r.turn,
+        "purpose": r.purpose,
+        "context_window": r.context_window,
+        "context_source": r.context_source,
+        "prompt_estimate": r.prompt_estimate,
+        "prompt_basis": r.prompt_basis,
+        "configured_max_tokens": r.configured_max_tokens,
+        "requested_max_tokens": r.requested_max_tokens,
+        "reasoning": r.reasoning,
+        "reasoning_effort": r.reasoning_effort,
+        "tools_offered": r.tools_offered,
+        "shortened_results": r.shortened_results,
+        "finish": r.finish,
+        "prompt_tokens": r.prompt_tokens,
+        "completion_tokens": r.completion_tokens,
+        "length_cause": r.length_cause,
+        "output_budget": r.output_budget,
+        "output_spent": r.output_spent,
+        "output_estimated": r.output_estimated,
+        "continuations": r.continuations,
+        "reservation_basis": r.reservation_basis,
+        "output_overrun": r.output_overrun,
+    });
+    if let Some(a) = &r.allocation {
+        let shares: Vec<serde_json::Value> = a
+            .shares
+            .iter()
+            .map(|share| {
+                json!({
+                    "role": share.role,
+                    "demand": share.demand,
+                    "weight": share.weight,
+                    "planned": share.planned,
+                    "capacity_cap": share.capacity_cap,
+                    "left": share.left,
+                    "state": share.state,
+                })
+            })
+            .collect();
+        payload["allocation"] = json!({
+            "version": a.version,
+            "source": a.source,
+            "fallback_reason": a.fallback_reason,
+            "account": a.account,
+            "role": a.role,
+            "lead_reserve": a.lead_reserve,
+            "lead_reserve_left": a.lead_reserve_left,
+            "follow_up_reserve": a.follow_up_reserve,
+            "follow_up_left": a.follow_up_left,
+            "shares": shares,
+            "unallocated_available": a.unallocated_available,
+            "asked": a.asked,
+            "granted": a.granted,
+        });
+    }
+    payload
+}
+
 fn classification_payload(d: &lightagent_core::ClassificationDiagnostics) -> serde_json::Value {
     json!({
         "schema": d.schema,
@@ -386,6 +425,7 @@ mod tests {
                 continuations: 0,
                 reservation_basis: None,
                 output_overrun: 0,
+                allocation: None,
             }),
         };
         assert_eq!(name(&event), "generation.report");
@@ -398,6 +438,52 @@ mod tests {
         );
         assert_eq!(payload["length_cause"], "context_window");
         assert_eq!(payload.as_object().map(|object| object.len()), Some(22));
+    }
+
+    #[test]
+    fn an_installed_allocation_adds_only_counts_codes_and_role_names() {
+        let allocation = lightagent_core::AllocationReport {
+            version: "output-plan.v1".into(),
+            source: "role_defaults".into(),
+            fallback_reason: None,
+            account: "share".into(),
+            role: Some("coder".into()),
+            lead_reserve: 8_000,
+            lead_reserve_left: 8_000,
+            follow_up_reserve: 3_200,
+            follow_up_left: 3_200,
+            shares: vec![lightagent_core::ShareReport {
+                role: "coder".into(),
+                demand: "heavy".into(),
+                weight: 3,
+                planned: 20_800,
+                capacity_cap: Some(16_384),
+                left: 15_000,
+                state: "running".into(),
+            }],
+            unallocated_available: 4_416,
+            asked: Some(2_048),
+            granted: Some(2_048),
+        };
+        let event = AgentEvent::GenerationReport {
+            report: Box::new(lightagent_core::GenerationReport {
+                turn: 1,
+                purpose: "turn".into(),
+                finish: "stop".into(),
+                output_budget: Some(32_000),
+                allocation: Some(allocation),
+                ..lightagent_core::GenerationReport::default()
+            }),
+        };
+        let payload = data(&event);
+        assert_eq!(payload.as_object().map(|object| object.len()), Some(23));
+        let allocation = &payload["allocation"];
+        assert_eq!(allocation["account"], "share");
+        assert_eq!(allocation["role"], "coder");
+        assert_eq!(allocation["lead_reserve"], 8_000);
+        assert_eq!(allocation["shares"][0]["capacity_cap"], 16_384);
+        assert_eq!(allocation["shares"][0]["state"], "running");
+        assert_eq!(allocation["granted"], 2_048);
     }
 
     #[test]

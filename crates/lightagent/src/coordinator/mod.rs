@@ -29,6 +29,7 @@
 
 #[cfg(test)]
 mod adversarial;
+pub(crate) mod allocation;
 mod classify;
 #[cfg(test)]
 pub(crate) mod evaluation;
