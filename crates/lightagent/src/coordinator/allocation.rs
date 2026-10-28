@@ -443,7 +443,13 @@ mod tests {
         let classified = complexity.map(|complexity| report(complexity, 0.95));
         let chosen = selection(roles, true);
         let budget = lead(Some(32_000));
-        let plan = plan(&config(mode, 0), classified.as_ref(), Some(&chosen), &budget).unwrap();
+        let plan = plan(
+            &config(mode, 0),
+            classified.as_ref(),
+            Some(&chosen),
+            &budget,
+        )
+        .unwrap();
         let allocation = lightagent_core::allocation::allocate(32_000, &plan);
         assert_eq!((allocation.lead, allocation.follow_up), (8_000, 3_200));
         (plan.source, plan.fallback_reason, allocation.shares)
@@ -454,7 +460,10 @@ mod tests {
         use AdaptiveAllocation::{Jev, Plan};
         let research = ["researcher", "reviewer"];
         let as_plan = outcome(Plan, Some(Complexity::Complex), &research);
-        assert_eq!(as_plan, ("role_defaults".into(), None, vec![10_400, 10_400]));
+        assert_eq!(
+            as_plan,
+            ("role_defaults".into(), None, vec![10_400, 10_400])
+        );
         // Complex: the researcher is raised to heavy, 3 : 2.
         assert_eq!(
             outcome(Jev, Some(Complexity::Complex), &research),

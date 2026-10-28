@@ -340,7 +340,10 @@ fn accounts_reach_only_their_own_tokens_and_the_free_rest() {
     let grant = coder.reserve(Some(50_000)).expect("granted");
     assert_eq!(grant.tokens(), 15_600, "never the tester's or the lead's");
     let report = pool.allocation_report(None).expect("plan");
-    assert_eq!(report.lead_reserve_left, 8_000, "the lead reserve is untouched");
+    assert_eq!(
+        report.lead_reserve_left, 8_000,
+        "the lead reserve is untouched"
+    );
     // The lead never reaches a running worker's share.
     assert_eq!(pool.available(), 8_000 + 3_200 + 5_200);
     assert_eq!(accounted(&pool, 15_600), 32_000);
@@ -717,12 +720,21 @@ fn the_lead_borrows_last_and_never_from_a_running_worker() {
     // the shares of roles not started.
     let grant = pool.reserve(Some(10_000)).expect("granted");
     let report = pool.allocation_report(None).expect("plan");
-    assert_eq!((report.lead_reserve_left, report.follow_up_left), (0, 1_200));
-    assert_eq!((report.shares[0].left, report.shares[1].left), (15_600, 5_200));
+    assert_eq!(
+        (report.lead_reserve_left, report.follow_up_left),
+        (0, 1_200)
+    );
+    assert_eq!(
+        (report.shares[0].left, report.shares[1].left),
+        (15_600, 5_200)
+    );
     // Usage counts against its reserve first; the unused part goes back.
     grant.settle(Some(9_000));
     let report = pool.allocation_report(None).expect("plan");
-    assert_eq!((report.lead_reserve_left, report.follow_up_left), (0, 2_200));
+    assert_eq!(
+        (report.lead_reserve_left, report.follow_up_left),
+        (0, 2_200)
+    );
     assert_eq!(accounted(&pool, 0), 32_000);
 
     // The coder starts: its share is never lent.
@@ -827,7 +839,10 @@ async fn the_final_answer_may_use_what_workers_and_follow_ups_left() {
     // Lead 2,500, follow-up 1,000, the researcher 6,500. It used 500 of a
     // 2,048 reservation and ended.
     let (worker, claim) = pool.claim("researcher", None);
-    worker.reserve(Some(2_048)).expect("granted").settle(Some(500));
+    worker
+        .reserve(Some(2_048))
+        .expect("granted")
+        .settle(Some(500));
     drop(claim);
     // The lead's answer, under an operator ceiling of 9,000 per request,
     // gets more than its own reserve and never more than the ceiling.
@@ -874,11 +889,17 @@ async fn each_turn_is_bounded_by_the_room_left_now_not_by_the_share() {
         .iter()
         .map(|report| {
             let allocation = report.allocation.as_ref().expect("reported");
-            assert_eq!(allocation.asked, allocation.granted, "the room, not the share, bounds it");
+            assert_eq!(
+                allocation.asked, allocation.granted,
+                "the room, not the share, bounds it"
+            );
             allocation.granted.expect("granted")
         })
         .collect();
-    assert_eq!(sent(&mock), asked.iter().map(|tokens| Some(*tokens)).collect::<Vec<_>>());
+    assert_eq!(
+        sent(&mock),
+        asked.iter().map(|tokens| Some(*tokens)).collect::<Vec<_>>()
+    );
     // The room shrinks as each result lands, and every request fits it.
     assert_eq!(asked.len(), 3);
     assert!(asked[0] < 4_096 && asked[0] > asked[1] + 1_000, "{asked:?}");
