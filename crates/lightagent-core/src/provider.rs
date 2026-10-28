@@ -118,6 +118,9 @@ pub struct ProviderRequest {
     pub tools: Vec<ToolSchema>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
+    /// The reasoning effort label to send, only when the operator declared the
+    /// model supports it. `None` sends nothing.
+    pub reasoning_effort: Option<String>,
 }
 
 impl ProviderRequest {
@@ -128,6 +131,7 @@ impl ProviderRequest {
             tools: Vec::new(),
             temperature: None,
             max_tokens: None,
+            reasoning_effort: None,
         }
     }
 }
@@ -155,6 +159,19 @@ pub enum FinishReason {
     /// terminator): the turn's text or tool arguments may be cut short. Never
     /// treated as a final answer.
     Incomplete,
+}
+
+impl FinishReason {
+    /// The stable code for this finish reason.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::ToolCalls => "tool_calls",
+            Self::Length => "length",
+            Self::Error => "error",
+            Self::Incomplete => "incomplete",
+        }
+    }
 }
 
 /// One decoded event from a provider stream.

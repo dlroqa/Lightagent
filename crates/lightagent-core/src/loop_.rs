@@ -23,6 +23,13 @@
 //! last turn the budget allows is reserved, once tools have run, for that
 //! tool-less answer, so a run never ends on tool results nobody read.
 //!
+//! A run's [`GenerationBudget`] sets each turn's output allowance and
+//! reasoning label, and with a known context window keeps room for the
+//! answer: a tool result that would crowd it out is shortened in the
+//! conversation the model sees, and once the room left is too small the next
+//! turn is that same tool-less answer, ending with
+//! [`StopReason::ContextLimit`]. The default budget changes none of this.
+//!
 //! A turn the provider did not finish is never mistaken for an answer: a
 //! token-limited turn ends with [`StopReason::MaxTokens`] and a stream that
 //! stopped without a completion signal with [`StopReason::Incomplete`]. Either
@@ -38,6 +45,7 @@ use futures_util::stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::event::{AgentEvent, StopReason};
+use crate::generation::{self, GenerationBudget, GenerationReport, Measured};
 use crate::ids::RunId;
 use crate::invoker::{ToolCall, ToolInvoker, ToolOutcome};
 use crate::limits::RunLimits;
@@ -70,6 +78,18 @@ const TOOL_CALL_BUDGET_INSTRUCTION: &str = "The tool-call budget for this reques
     so no more tools can be called. Answer the original request now from the tool results \
     above, cite the sources you used, and say briefly what is missing or could not be checked.";
 
+/// The instruction for the turn after the conversation left too little of the
+/// context window for more tool results.
+const CONTEXT_BUDGET_INSTRUCTION: &str = "The conversation has nearly filled the model's \
+    context window, so no more tools can be called. Answer the original request now from the \
+    tool results above, cite the sources you used, and say briefly what is missing or could not \
+    be checked.";
+
+/// The instruction for the turn after the run's output-token budget ran low.
+const OUTPUT_BUDGET_INSTRUCTION: &str = "The output budget for this request is nearly used up, \
+    so no more tools can be called. Answer the original request now, briefly, from the tool \
+    results above, and say what is missing or could not be checked.";
+
 /// The most progress reports forwarded for one tool call, so a chatty tool
 /// cannot flood the event log.
 const MAX_PROGRESS_PER_CALL: usize = 64;
@@ -83,6 +103,10 @@ enum WrapUp {
     TurnBudget,
     /// The tool-call budget ran out inside a batch.
     ToolCallBudget,
+    /// The room left in the context window is less than the answer needs.
+    ContextBudget,
+    /// The run's output pool has less left than the answer needs.
+    OutputBudget,
 }
 
 impl WrapUp {
@@ -91,6 +115,8 @@ impl WrapUp {
             Self::WallClock => WRAP_UP_INSTRUCTION,
             Self::TurnBudget => TURN_BUDGET_INSTRUCTION,
             Self::ToolCallBudget => TOOL_CALL_BUDGET_INSTRUCTION,
+            Self::ContextBudget => CONTEXT_BUDGET_INSTRUCTION,
+            Self::OutputBudget => OUTPUT_BUDGET_INSTRUCTION,
         }
     }
 
@@ -101,6 +127,8 @@ impl WrapUp {
             Self::WallClock => StopReason::WallClockExceeded,
             Self::TurnBudget => StopReason::MaxTurns,
             Self::ToolCallBudget => StopReason::MaxToolCalls,
+            Self::ContextBudget => StopReason::ContextLimit,
+            Self::OutputBudget => StopReason::OutputBudget,
         }
     }
 }
@@ -150,6 +178,9 @@ pub struct RunConfig {
     /// What happens when the wall-clock budget runs out with unread tool
     /// results.
     pub on_wall_clock: WallClockPolicy,
+    /// Each turn's output allowance, reasoning label and context guard. The
+    /// default changes nothing.
+    pub generation: GenerationBudget,
 }
 
 impl RunConfig {
@@ -160,6 +191,7 @@ impl RunConfig {
             limits: RunLimits::default(),
             parent: None,
             on_wall_clock: WallClockPolicy::default(),
+            generation: GenerationBudget::default(),
         }
     }
 }
@@ -280,6 +312,12 @@ struct Driver {
     /// Set once a budget has run out and the run owes its final, tool-less
     /// answer turn.
     wrap_up: Option<WrapUp>,
+    /// The provider's prompt count for the latest turn that reported one.
+    measured: Option<Measured>,
+    /// Tool results shortened to fit the context window so far.
+    shortened_results: u32,
+    /// The `max_tokens` the latest turn was sent with.
+    sent_max_tokens: Option<u32>,
 }
 
 impl Driver {
@@ -360,6 +398,7 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             limits: profile.limits,
             parent: None,
             on_wall_clock: WallClockPolicy::default(),
+            generation: GenerationBudget::default(),
         };
         Self::new(provider, invoker, config)
     }
@@ -370,6 +409,18 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
     pub fn with_wall_clock_policy(mut self, policy: WallClockPolicy) -> Self {
         self.config.on_wall_clock = policy;
         self
+    }
+
+    /// Set the run's output and context budget.
+    pub fn with_generation(mut self, generation: GenerationBudget) -> Self {
+        self.config.generation = generation;
+        self
+    }
+
+    /// Replace the output and context budget before a fresh run, as the
+    /// terminal does when the model it reaches may have changed.
+    pub fn set_generation(&mut self, generation: GenerationBudget) {
+        self.config.generation = generation;
     }
 
     /// The run's configuration.
@@ -473,6 +524,9 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             pending: None,
             sink,
             wrap_up: None,
+            measured: None,
+            shortened_results: 0,
+            sent_max_tokens: None,
         };
         driver.emit(AgentEvent::RunStarted {
             run,
@@ -665,6 +719,45 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
             driver.wrap_up = Some(WrapUp::TurnBudget);
         }
 
+        // With a known window, a conversation that leaves less room than the
+        // answer needs is answered now: offered tools, the model would add
+        // results the window cannot hold, and the answer would be cut off.
+        let budget = &self.config.generation;
+        if driver.wrap_up.is_none() && budget.guards_context() && driver.has_tool_results() {
+            let schemas = self.invoker.schemas();
+            let (prompt, _) =
+                generation::prompt_tokens(driver.measured, &driver.messages, &schemas);
+            if budget.needs_answer_now(prompt) {
+                driver.wrap_up = Some(WrapUp::ContextBudget);
+            }
+        }
+
+        // A run-wide output budget too low for more research is answered
+        // now, from what the tools returned, with what is left.
+        if driver.wrap_up.is_none()
+            && driver.has_tool_results()
+            && let Some(pool) = &budget.output_pool
+            && pool.available() < budget.reserve_answer_tokens.max(generation::MIN_GRANT)
+        {
+            driver.wrap_up = Some(WrapUp::OutputBudget);
+        }
+
+        // Every turn reserves what it may generate from the run's output
+        // pool before it starts, and is sent no more than it was granted.
+        // With nothing left to grant, no turn is taken.
+        let ceiling = budget.requested_max_tokens();
+        let ask = ceiling.or_else(|| budget.context_window.map(|window| window.tokens));
+        let reservation = match &budget.output_pool {
+            Some(pool) => match pool.reserve(ask) {
+                Some(reservation) => Some(reservation),
+                None => return Ok(driver.end(StopReason::OutputBudget)),
+            },
+            None => None,
+        };
+        driver.sent_max_tokens = reservation
+            .as_ref()
+            .map_or(ceiling, |reservation| Some(reservation.tokens()));
+
         driver.turn += 1;
 
         // The final turn after a budget ran out offers no tools and says why,
@@ -677,12 +770,23 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
         } else {
             (driver.messages.clone(), self.invoker.schemas())
         };
+        // Measured against the request actually sent, before it is moved.
+        let planned = budget.is_active().then(|| {
+            let (prompt, basis) = generation::prompt_tokens(driver.measured, &messages, &tools);
+            (
+                prompt,
+                basis,
+                u32::try_from(tools.len()).unwrap_or(u32::MAX),
+            )
+        });
+        let measured_from = driver.messages.len();
         let request = ProviderRequest {
             model: driver.model.clone(),
             messages,
             tools,
             temperature: None,
-            max_tokens: None,
+            max_tokens: driver.sent_max_tokens,
+            reasoning_effort: budget.reasoning.effort().map(str::to_owned),
         };
 
         let mut stream = self.provider.stream(request, cancel.clone()).await?;
@@ -739,6 +843,21 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
         // A stream that ended without its terminal event did not say the turn
         // was finished.
         let (reason, usage) = finish.unwrap_or((FinishReason::Incomplete, None));
+        if let Some(reservation) = reservation {
+            reservation.settle(usage.map(|usage| usage.completion_tokens));
+        }
+        if let Some(usage) = usage.filter(|usage| usage.prompt_tokens > 0) {
+            driver.measured = Some(Measured {
+                messages: measured_from,
+                prompt_tokens: usage.prompt_tokens,
+            });
+        }
+        if let Some((prompt, basis, tools_offered)) = planned {
+            let report = self.report(driver, reason, usage, prompt, basis, tools_offered);
+            driver.emit(AgentEvent::GenerationReport {
+                report: Box::new(report),
+            });
+        }
         driver.emit(AgentEvent::TurnCompleted { usage });
 
         match reason {
@@ -882,14 +1001,84 @@ impl<P: AgentProvider, I: ToolInvoker> AgentLoop<P, I> {
         while let Ok(report) = reports.try_recv() {
             forward(driver, report);
         }
-        driver.messages.push(ProviderMessage::tool_result(
-            call.id.clone(),
-            outcome.content.clone(),
-        ));
+        let content = self.fit_to_context(driver, &outcome.content);
+        driver
+            .messages
+            .push(ProviderMessage::tool_result(call.id.clone(), content));
         driver.emit(AgentEvent::ToolCallCompleted {
             id: call.id.clone(),
             outcome,
         });
+    }
+
+    /// A tool result as the model will see it: whole, unless the context
+    /// guard is on and the result would leave less room than the answer
+    /// needs, in which case it is shortened with a note saying so and the
+    /// next turn is the answer, since the window is now at its reserve. The
+    /// run's events keep the whole result either way.
+    fn fit_to_context(&self, driver: &mut Driver, content: &str) -> String {
+        let budget = &self.config.generation;
+        if !budget.guards_context() {
+            return content.to_owned();
+        }
+        let schemas = self.invoker.schemas();
+        let (prompt, _) = generation::prompt_tokens(driver.measured, &driver.messages, &schemas);
+        let fitted = budget
+            .result_allowance(prompt)
+            .and_then(|allowance| generation::fit_result(content, allowance));
+        match fitted {
+            Some(fitted) => {
+                driver.shortened_results = driver.shortened_results.saturating_add(1);
+                driver.wrap_up.get_or_insert(WrapUp::ContextBudget);
+                fitted
+            }
+            None => content.to_owned(),
+        }
+    }
+
+    /// The diagnostics record for a finished turn.
+    fn report(
+        &self,
+        driver: &Driver,
+        reason: FinishReason,
+        usage: Option<Usage>,
+        prompt: u32,
+        basis: generation::PromptBasis,
+        tools_offered: u32,
+    ) -> GenerationReport {
+        let budget = &self.config.generation;
+        let window = budget.context_window;
+        let tokens = window.map(|window| window.tokens);
+        let requested = driver.sent_max_tokens;
+        let pool = budget.output_pool.as_ref();
+        let purpose = if driver.wrap_up.is_some() {
+            "answer"
+        } else {
+            "turn"
+        };
+        let length_cause = (reason == FinishReason::Length)
+            .then(|| generation::length_cause(requested, tokens, usage).to_owned());
+        GenerationReport {
+            turn: driver.turn,
+            purpose: purpose.to_owned(),
+            context_window: tokens,
+            context_source: window.map(|window| window.source.as_str().to_owned()),
+            prompt_estimate: prompt,
+            prompt_basis: basis.as_str().to_owned(),
+            configured_max_tokens: budget.max_output_tokens,
+            requested_max_tokens: requested,
+            reasoning: budget.reasoning.as_str().to_owned(),
+            reasoning_effort: budget.reasoning.label().map(str::to_owned),
+            tools_offered,
+            shortened_results: driver.shortened_results,
+            finish: reason.as_str().to_owned(),
+            prompt_tokens: usage.map(|usage| usage.prompt_tokens),
+            completion_tokens: usage.map(|usage| usage.completion_tokens),
+            length_cause,
+            output_budget: pool.map(generation::OutputPool::total),
+            output_spent: pool.map(generation::OutputPool::spent),
+            output_estimated: pool.is_some_and(generation::OutputPool::estimated),
+        }
     }
 }
 
@@ -924,8 +1113,10 @@ fn out_of_tool_calls(driver: &mut Driver, index: usize) -> BatchResult {
     if let Some(batch) = driver.pending.as_mut() {
         batch.next = batch.calls.len();
     }
-    if driver.turn < driver.limits.max_turns && driver.wrap_up.is_none() {
-        driver.wrap_up = Some(WrapUp::ToolCallBudget);
+    // An answer turn the batch already owes (a result filled the context
+    // window) stays the one taken.
+    if driver.turn < driver.limits.max_turns {
+        driver.wrap_up.get_or_insert(WrapUp::ToolCallBudget);
         return BatchResult::Done;
     }
     driver.emit(AgentEvent::RunCompleted {

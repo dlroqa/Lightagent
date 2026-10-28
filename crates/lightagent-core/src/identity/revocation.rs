@@ -352,6 +352,7 @@ mod tests {
             tools: Vec::new(),
             temperature: None,
             max_tokens: None,
+            reasoning_effort: None,
         };
         let mut stream = provider
             .stream(request.clone(), cancel.clone())

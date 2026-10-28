@@ -28,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 use crate::names::ToolNameMap;
 use crate::sse::{SseDecodeError, SseDecoder, SseEvent};
 use crate::tls;
-use crate::wire::{ChatChunk, ModelsResponse};
+use crate::wire::{CAPABILITIES_PROTOCOL, CapabilitiesResponse, ChatChunk, ModelsResponse};
 
 /// How to reach the gateway.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,9 +122,44 @@ impl LightweightProvider {
 
     /// List the model IDs currently advertised by the gateway.
     pub async fn models(&self) -> Result<Vec<String>, ProviderError> {
+        let body = self.get("/v1/models").await?;
+        let parsed: ModelsResponse =
+            serde_json::from_str(&body).map_err(|err| ProviderError::Upstream(err.to_string()))?;
+        Ok(parsed.data.into_iter().map(|entry| entry.id).collect())
+    }
+
+    /// The context window, in tokens, that the gateway serves `model` with:
+    /// Lightweight's versioned `/v1/capabilities` contract first, then its
+    /// `/v1/models` row, for gateways older than that contract. `None` when
+    /// neither reports a window for exactly this model — another provider, a
+    /// different resident model, or an unreachable gateway — and never a
+    /// guess from the model's name.
+    pub async fn context_window(&self, model: &str) -> Option<u32> {
+        if let Ok(body) = self.get("/v1/capabilities").await
+            && let Ok(parsed) = serde_json::from_str::<CapabilitiesResponse>(&body)
+            && parsed.protocol.name == CAPABILITIES_PROTOCOL
+            && let Some(resident) = parsed.state.model
+            && resident.id == model
+            && let Some(tokens) = resident.context_length.filter(|tokens| *tokens > 0)
+        {
+            return Some(tokens);
+        }
+        let body = self.get("/v1/models").await.ok()?;
+        let parsed: ModelsResponse = serde_json::from_str(&body).ok()?;
+        parsed
+            .data
+            .into_iter()
+            .find(|entry| entry.id == model && entry.hermes.is_some())
+            .and_then(|entry| entry.n_ctx)
+            .filter(|tokens| *tokens > 0)
+    }
+
+    /// `GET` a gateway path with the bearer key, returning a successful
+    /// body.
+    async fn get(&self, path: &str) -> Result<String, ProviderError> {
         let mut request = self
             .client
-            .get(format!("{}/v1/models", self.base()))
+            .get(format!("{}{path}", self.base()))
             .timeout(std::time::Duration::from_secs(10));
         if let Some(key) = &self.config.api_key {
             request = request.bearer_auth(key);
@@ -140,12 +175,10 @@ impl LightweightProvider {
             .map_err(|err| ProviderError::Transport(err.to_string()))?;
         if !status.is_success() {
             return Err(ProviderError::Upstream(format!(
-                "the provider answered {status} to GET /v1/models"
+                "the provider answered {status} to GET {path}"
             )));
         }
-        let parsed: ModelsResponse =
-            serde_json::from_str(&body).map_err(|err| ProviderError::Upstream(err.to_string()))?;
-        Ok(parsed.data.into_iter().map(|entry| entry.id).collect())
+        Ok(body)
     }
 }
 
@@ -199,6 +232,9 @@ pub(crate) fn body_with(
     }
     if let Some(max_tokens) = request.max_tokens {
         body.insert("max_tokens".into(), json!(max_tokens));
+    }
+    if let Some(effort) = &request.reasoning_effort {
+        body.insert("reasoning_effort".into(), json!(effort));
     }
     Value::Object(body)
 }
@@ -563,6 +599,23 @@ mod tests {
         assert_eq!(body["messages"][1]["content"], "hi");
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["name"], "datetime.now");
+    }
+
+    #[test]
+    fn token_and_reasoning_settings_are_sent_only_when_set() {
+        let config = ProviderConfig::new("http://127.0.0.1:11434", "m");
+        let mut request = ProviderRequest::new("m", vec![ProviderMessage::user("hi")]);
+        let plain = build_body(&config, &request);
+        assert!(plain.get("max_tokens").is_none());
+        assert!(plain.get("max_completion_tokens").is_none());
+        assert!(plain.get("reasoning_effort").is_none());
+        request.max_tokens = Some(1_024);
+        request.reasoning_effort = Some("low".into());
+        let set = build_body(&config, &request);
+        assert_eq!(set["max_tokens"], json!(1_024));
+        assert_eq!(set["reasoning_effort"], json!("low"));
+        // One spelling only: a server that reads both takes the smaller.
+        assert!(set.get("max_completion_tokens").is_none());
     }
 
     #[test]

@@ -43,7 +43,7 @@ mod test_dir;
 pub mod worker;
 pub mod workspace;
 
-pub use budget::{Admission, Grant, TreeBudget};
+pub use budget::{Admission, GenerationSlot, Grant, LeadGeneration, TreeBudget};
 pub use context::{
     ActionsContext, ActionsPolicy, BranchWrite, Clock, Delegation, OpenTerminalContext,
     OpenTerminalPolicy, RefReconcile, SkillContext, SubagentPolicy, SubagentRole, ToolCtx,

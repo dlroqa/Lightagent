@@ -98,7 +98,7 @@ pub fn stop_reason(reason: &StopReason) -> &'static str {
     match reason {
         StopReason::Cancelled => "cancelled",
         StopReason::MaxTurns => "max_turn_requests",
-        StopReason::MaxTokens => "max_tokens",
+        StopReason::MaxTokens | StopReason::OutputBudget => "max_tokens",
         // ACP has no early-end reason; a stream that stopped before the turn
         // finished is reported like a failure, never as `end_turn`.
         StopReason::Error | StopReason::Incomplete => "refusal",

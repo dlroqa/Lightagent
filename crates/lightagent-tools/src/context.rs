@@ -111,6 +111,9 @@ pub struct Delegation {
     /// The run's specialist plan, if one was given to the lead: the order
     /// its planned roles may start in. Empty by default.
     pub plan: crate::plan::PlanSlot,
+    /// The lead's output and context budget, which every worker in the tree
+    /// runs under. Empty by default: workers keep the default budget.
+    pub generation: crate::budget::GenerationSlot,
 }
 
 /// A server-provided role preset. The model supplies only a role id; the
@@ -194,6 +197,7 @@ impl Delegation {
             parked: Default::default(),
             approval_ttl: crate::builtins::delegate::APPROVAL_TTL,
             plan: Default::default(),
+            generation: Default::default(),
         }
     }
 
@@ -286,6 +290,8 @@ impl Delegation {
             approval_ttl: self.approval_ttl,
             // A plan orders the lead's workers only.
             plan: Default::default(),
+            // The budget is the lead's for the whole tree.
+            generation: self.generation.clone(),
         }
     }
 }
