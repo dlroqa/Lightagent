@@ -221,6 +221,26 @@ pub fn split(tokens: u32, parts: &[(u32, Option<u32>)]) -> Vec<u32> {
     shares
 }
 
+/// What a turn is for, as far as the pool's accounts are concerned.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TurnPurpose {
+    /// An ordinary turn, which may still call tools and delegate.
+    #[default]
+    Turn,
+    /// A tool-less final answer the run owes once a budget ran low.
+    Answer,
+    /// A tool-less continuation of an answer cut off at its length limit.
+    Continuation,
+}
+
+impl TurnPurpose {
+    /// Whether the turn can no longer call tools or delegate: the run is
+    /// answering.
+    pub fn is_final(self) -> bool {
+        self != Self::Turn
+    }
+}
+
 /// Which part of a run's output pool a handle reserves from once a plan is
 /// installed. Without one, every handle draws on the whole pool alike.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
