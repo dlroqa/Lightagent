@@ -210,11 +210,11 @@ for its own model, by the same settings:
   conservative case. There is no context guard and no continuation, and the
   ceiling and the pool still apply. The worker's `generation.report` shows
   `context_window: null`.
-- **Pool contention.** With no `max_output_tokens` and an unknown window, a
-  routed worker's turn asks the pool for everything it has left, as a turn
-  on the lead's model does. A sibling running at the same time may then
-  find the pool fully reserved and stop with `OutputBudget` (see
-  *Contention* above). Setting `max_output_tokens` bounds each reservation.
+- **Pool reservation.** With no `max_output_tokens` and an unknown window,
+  a routed worker's turn reserves the pool's per-turn default
+  (`unknown_capacity_turn_tokens`, 2048), not everything the pool has left,
+  and is sent that as its `max_tokens`. Its window stays unknown. See
+  *Reservation policy* below.
 
 Before #61 there was **no** aggregate token bound. The table's limits only
 implied one, of (lead turns + tree turns) × window, which is not a token
@@ -223,9 +223,9 @@ allowance.
 `max_run_output_tokens` creates an `OutputPool` per run. Workers share it
 through `GenerationSlot`.
 
-- **Before a turn.** The turn reserves up to its ceiling, or the window
-  when no ceiling is set, and is sent no more than it was granted.
-  Concurrent workers therefore can never together be granted more than
+- **Before a turn.** The turn reserves according to the *Reservation
+  policy* below and is sent no more than it was granted. Reservation is
+  atomic, so concurrent workers can never together be granted more than
   remains.
 - **After a turn.** The reservation is settled against reported
   `completion_tokens`.
@@ -235,9 +235,54 @@ through `GenerationSlot`.
 - **When the pool runs low.** Once less is left than the headroom, the
   next turn is a tool-less answer with what remains, and the run ends
   `OutputBudget`. With less than 16 tokens left, no turn is taken.
-- **Contention.** A worker that finds the pool fully reserved by siblings
-  stops with `OutputBudget`. Size the pool above
-  `max_active_workers` × ceiling.
+- **Contention.** A turn never waits for tokens. A worker that finds less
+  than 16 left unreserved stops with `OutputBudget`. With bounded per-turn
+  reservations this happens only when the pool is genuinely near its end,
+  or when siblings hold large ceilings at once. Size the pool above
+  `max_active_workers` × the largest per-turn reservation.
+- **Overrun.** A provider that reports more completion tokens than the
+  `max_tokens` it was sent did not honour it. The excess is charged and
+  reported as `output_overrun`, and the pool grants nothing more, so the
+  run ends `OutputBudget`. The overspend is bounded by the turns already in
+  flight. No hard guarantee is claimed for a provider that ignores
+  `max_tokens`.
+
+#### Reservation policy
+
+Each pool-backed turn (lead, worker, continuation or repair round alike)
+reserves the first of these that applies, bounded by what the pool has left
+unreserved:
+
+| Basis (`reservation_basis`) | Amount |
+|---|---|
+| `ceiling` | The explicit or inherited `max_output_tokens`. A routed worker's is the smaller of its model's and the lead's. |
+| `remaining_context` | The worker's own known window, less its estimated prompt and the 2% margin. This is the most the server could generate anyway. |
+| `unknown_capacity` | `generation.unknown_capacity_turn_tokens`, 2048 by default. |
+
+Notes on this policy:
+
+- **The reservation is the ceiling.** It is sent as the turn's
+  `max_tokens`, so on a provider that honours `max_tokens` (Lightweight
+  clamps by it) the turn cannot generate more than it reserved.
+- **Why 2048.** It is room for a full worker report (about 1,500 English
+  words). It is small enough that the default four concurrent workers hold
+  at most 8,192 tokens of a pool at once. It is deliberately not taken from
+  the lead's window, which describes a different model.
+- **What it does not establish.** It limits consumption only. The worker's
+  context capacity stays unknown, so there is no context guard and no
+  continuation, and nothing shows the worker's input fits.
+- **Reconciliation.** Reported `completion_tokens`, which already include
+  any reasoning the backend counts, are charged once. Streamed reasoning
+  text is never charged again. Missing usage, cancellation and provider
+  errors are charged the whole reservation, labelled `output_estimated`.
+- **Behaviour change.** Before this, a turn with no ceiling asked for the
+  whole remaining pool when the window was unknown, and for the full window
+  when it was known. Both now reserve less, so siblings are not starved.
+  Runs without `max_run_output_tokens` are unchanged: no pool, no
+  reservation, no `max_tokens` added. No configuration migration is needed.
+- **Discovery.** A routed worker's window discovery is bounded at 15 s. It
+  is preceded by the run's authorization check, and the run's cancellation
+  ends the wait. A provider that does not answer leaves the window unknown.
 
 Unset means no pool, and runs behave exactly as before. Cancellation,
 ownership, permissions and worker isolation are untouched: the pool only
@@ -397,7 +442,10 @@ was changed.
   needs its own permission decision, and none is added here.
 - Token figures before the first measured turn are estimates.
 - Pool contention among concurrent workers is resolved by refusal, not
-  waiting.
+  waiting. A turn with no ceiling reserves a bounded amount (its remaining
+  context, or 2048 when the window is unknown), never the whole pool.
+- A provider that ignores `max_tokens` can overspend by at most the turns
+  already in flight. The pool then refuses further turns.
 - A model can still be cut off. Then continuation (#62) or an honest
   `MaxTokens` applies.
 - Reasoning support is whatever the operator declares. Lightweight does
