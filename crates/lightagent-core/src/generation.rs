@@ -1021,11 +1021,17 @@ mod tests {
     fn an_overrun_stops_further_grants_even_with_tokens_left() {
         let pool = OutputPool::new(10_000);
         assert_eq!(pool.turn_tokens(), DEFAULT_UNKNOWN_CAPACITY_TURN_TOKENS);
-        assert_eq!(OutputPool::new(10).with_turn_tokens(4).turn_tokens(), MIN_GRANT);
+        assert_eq!(
+            OutputPool::new(10).with_turn_tokens(4).turn_tokens(),
+            MIN_GRANT
+        );
         pool.reserve(Some(100)).unwrap().settle(Some(150));
         assert_eq!((pool.spent(), pool.overrun()), (150, 50));
         assert!(pool.available() > 9_000);
-        assert!(pool.reserve(Some(100)).is_none(), "the ceiling was not honoured");
+        assert!(
+            pool.reserve(Some(100)).is_none(),
+            "the ceiling was not honoured"
+        );
     }
 
     #[test]

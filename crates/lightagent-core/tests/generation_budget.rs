@@ -829,10 +829,17 @@ async fn concurrent_workers_of_unknown_capacity_share_the_pool() {
         .map(|mock| run(mock.clone(), small(), unbounded(&pool), Vec::new()));
     let outcomes = futures_util::future::join_all(runs).await;
     for (mock, events) in mocks.iter().zip(&outcomes) {
-        assert_eq!(mock.requests()[0].max_tokens, Some(2_048), "sent as the ceiling");
+        assert_eq!(
+            mock.requests()[0].max_tokens,
+            Some(2_048),
+            "sent as the ceiling"
+        );
         assert_eq!(stop_reason(events), Some(StopReason::EndTurn));
         let report = &reports(events)[0];
-        assert_eq!(report.reservation_basis.as_deref(), Some("unknown_capacity"));
+        assert_eq!(
+            report.reservation_basis.as_deref(),
+            Some("unknown_capacity")
+        );
         assert_eq!(report.context_window, None, "capacity stays unknown");
     }
     assert_eq!(pool.spent(), 480, "settled against reported usage");
@@ -868,7 +875,10 @@ async fn a_known_window_reserves_only_the_room_the_prompt_leaves() {
     let events = run(mock, small(), budget, history).await;
     let sent = inspector.requests()[0].max_tokens.expect("a ceiling");
     let report = &reports(&events)[0];
-    assert_eq!(report.reservation_basis.as_deref(), Some("remaining_context"));
+    assert_eq!(
+        report.reservation_basis.as_deref(),
+        Some("remaining_context")
+    );
     // The window less the estimated prompt and the 2% margin, not the window.
     assert_eq!(sent, 8_192 - report.prompt_estimate - 163);
 }
@@ -887,7 +897,10 @@ async fn an_explicit_or_inherited_ceiling_bounds_the_reservation() {
         let inspector = mock.clone();
         let events = run(mock, small(), budget, Vec::new()).await;
         assert_eq!(inspector.requests()[0].max_tokens, Some(700));
-        assert_eq!(reports(&events)[0].reservation_basis.as_deref(), Some("ceiling"));
+        assert_eq!(
+            reports(&events)[0].reservation_basis.as_deref(),
+            Some("ceiling")
+        );
     }
 }
 
@@ -985,14 +998,21 @@ async fn a_continuation_reserves_from_the_same_pool_by_the_same_policy() {
     let mut budget = continuing(1);
     budget.output_pool = Some(pool.clone());
     let mock = MockProvider::new(vec![
-        answer("The bridge opened in", FinishReason::Length, usage(100, 300)),
+        answer(
+            "The bridge opened in",
+            FinishReason::Length,
+            usage(100, 300),
+        ),
         answer(" 1932.", FinishReason::Stop, usage(150, 4)),
     ]);
     let inspector = mock.clone();
     let events = run(mock, small(), budget, Vec::new()).await;
     let reports = reports(&events);
     assert_eq!(reports[1].purpose, "continuation");
-    assert_eq!(reports[1].reservation_basis.as_deref(), Some("remaining_context"));
+    assert_eq!(
+        reports[1].reservation_basis.as_deref(),
+        Some("remaining_context")
+    );
     assert!(
         inspector
             .requests()
@@ -1027,7 +1047,11 @@ async fn unknown_capacity_enables_no_context_protection_or_continuation() {
         .find(|message| message.role == Role::Tool)
         .expect("the result");
     assert_eq!(result.content.len(), 32_000, "nothing shortened");
-    assert!(reports(&events).iter().all(|report| report.context_window.is_none()));
+    assert!(
+        reports(&events)
+            .iter()
+            .all(|report| report.context_window.is_none())
+    );
     assert_eq!(stop_reason(&events), Some(StopReason::MaxTokens));
 }
 
