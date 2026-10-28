@@ -40,12 +40,13 @@ pub mod workers;
 pub use allocation::{Account, AllocationReport, Demand, OutputPlan, PlannedShare, ShareReport};
 pub use config::{
     AdaptiveAllocation, AgentConfig, AllowedWorkflow, ApprovalPolicy, Config, ConfigError,
-    ConfigStore, DUCKDUCKGO_SEARCH_ENDPOINT, ExtensionsConfig, GenerationConfig, GenerationOverride,
-    GithubActionsConfig, InferenceConfig, InfinityConfig, JevClassificationConfig,
-    JevClassificationMode, JevConfig, JevRoutingGrant, JevRoutingInput, JevRoutingPermission,
-    McpConfig, McpServerEntry, OpenTerminalConfig, PlatformConfig, PlatformEndpointConfig,
-    QdrantConfig, SavedProvider, SecretRef, SecurityConfig, SubagentsConfig, ToolNameMode,
-    ToolPolicyMode, ToolsConfig, WebConfig, WebSearchConfig, WorkerResolution,
+    ConfigStore, DUCKDUCKGO_SEARCH_ENDPOINT, ExtensionsConfig, GenerationConfig,
+    GenerationOverride, GithubActionsConfig, InferenceConfig, InfinityConfig,
+    JevClassificationConfig, JevClassificationMode, JevConfig, JevRoutingGrant, JevRoutingInput,
+    JevRoutingPermission, McpConfig, McpServerEntry, OpenTerminalConfig, PlatformConfig,
+    PlatformEndpointConfig, QdrantConfig, SavedProvider, SecretRef, SecurityConfig,
+    SubagentsConfig, ToolNameMode, ToolPolicyMode, ToolsConfig, WebConfig, WebSearchConfig,
+    WorkerResolution,
 };
 pub use event::{
     AgentEvent, ClassificationDiagnostics, SpecialistRestriction, SpecialistSelection,

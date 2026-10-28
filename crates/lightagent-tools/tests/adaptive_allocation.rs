@@ -14,8 +14,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use lightagent_core::{
     AgentProvider, ApprovalPolicy, Demand, FinishReason, GenerationConfig, MockProvider,
-    ModelRouting, OutputPlan, OutputPool, PlannedShare, ProfileStore, ProviderError,
-    ProviderEvent, ProviderRequest, ProviderStream, RunId, ServedModel, ShareReport, ToolOutcome,
+    ModelRouting, OutputPlan, OutputPool, PlannedShare, ProfileStore, ProviderError, ProviderEvent,
+    ProviderRequest, ProviderStream, RunId, ServedModel, ShareReport, ToolOutcome,
 };
 use lightagent_tools::builtins::AgentDelegate;
 use lightagent_tools::plan::RolePlan;
@@ -273,8 +273,15 @@ async fn a_known_window_worker_is_bounded_by_its_share_not_the_unknown_default()
     assert_eq!(reviewer.state, "released", "its worker ended");
     assert_eq!(reviewer.left, 0);
     let after = pool.allocation_report(None).unwrap();
-    assert_eq!(after.lead_reserve_left, 8_000, "the lead's reserve is whole");
-    assert_eq!(share(&pool, "researcher").left, 5_200, "and the researcher's share");
+    assert_eq!(
+        after.lead_reserve_left, 8_000,
+        "the lead's reserve is whole"
+    );
+    assert_eq!(
+        share(&pool, "researcher").left,
+        5_200,
+        "and the researcher's share"
+    );
     // Charged in full (no usage was reported); what it did not reserve is
     // free for later work.
     assert_eq!(pool.spent(), first);
@@ -303,7 +310,11 @@ async fn an_unknown_capacity_worker_keeps_the_default_and_passes_on_its_excess()
     // the reviewer's 15,600 goes to the researcher, which has not started.
     let (outcome, _) = delegate(&ctx, "reviewer", json!({ "max_turns": 3 })).await;
     assert!(!outcome.is_error, "{}", outcome.content);
-    assert_eq!(sent(&worker), [Some(2_048)], "never raised to fill the share");
+    assert_eq!(
+        sent(&worker),
+        [Some(2_048)],
+        "never raised to fill the share"
+    );
     let reviewer = share(&pool, "reviewer");
     assert_eq!(
         (reviewer.planned, reviewer.capacity_cap),

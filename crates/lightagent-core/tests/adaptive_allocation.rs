@@ -179,7 +179,11 @@ fn a_capped_part_takes_its_cap_and_the_rest_is_split_again() {
 fn allocate_reserves_the_lead_and_follow_up_before_any_worker() {
     let one = allocate(32_000, &plan(vec![share("coder", Demand::Heavy)], true));
     assert_eq!((one.lead, one.follow_up), (8_000, 3_200));
-    assert_eq!(one.shares, [20_800], "a sole worker gets the whole worker part");
+    assert_eq!(
+        one.shares,
+        [20_800],
+        "a sole worker gets the whole worker part"
+    );
     assert_eq!(one.unallocated, 0);
 
     let equal = allocate(
@@ -200,7 +204,10 @@ fn allocate_reserves_the_lead_and_follow_up_before_any_worker() {
 
     // A small pool still keeps one lead turn, but never more than half.
     let small = allocate(3_000, &plan(vec![share("coder", Demand::Heavy)], true));
-    assert_eq!((small.lead, small.follow_up, small.shares[0]), (1_500, 300, 1_200));
+    assert_eq!(
+        (small.lead, small.follow_up, small.shares[0]),
+        (1_500, 300, 1_200)
+    );
     let ceiling = OutputPlan {
         lead_floor: 9_000,
         ..plan(Vec::new(), false)
@@ -253,7 +260,10 @@ fn allocations_always_add_up_to_what_was_available() {
 fn an_invalid_plan_is_refused_and_the_pool_stays_undivided() {
     let pool = OutputPool::new(32_000);
     for bad in [
-        plan(vec![share("coder", Demand::Heavy), share("coder", Demand::Light)], false),
+        plan(
+            vec![share("coder", Demand::Heavy), share("coder", Demand::Light)],
+            false,
+        ),
         plan(vec![share("Coder", Demand::Heavy)], false),
         plan(vec![share("", Demand::Heavy)], false),
         plan(vec![share("rm -rf", Demand::Heavy)], false),
@@ -276,7 +286,10 @@ fn an_invalid_plan_is_refused_and_the_pool_stays_undivided() {
 fn accounts_reach_only_their_own_tokens_and_the_free_rest() {
     let pool = OutputPool::new(32_000);
     let plan = plan(
-        vec![share("coder", Demand::Heavy), share("tester", Demand::Light)],
+        vec![
+            share("coder", Demand::Heavy),
+            share("tester", Demand::Light),
+        ],
         true,
     );
     pool.install(plan.clone()).expect("installed");
@@ -306,7 +319,11 @@ fn accounts_reach_only_their_own_tokens_and_the_free_rest() {
 
     // Its share is released when its worker ends; later work can use it.
     drop(claim);
-    assert_eq!(coder.available(), 15_000, "now only as part of the free rest");
+    assert_eq!(
+        coder.available(),
+        15_000,
+        "now only as part of the free rest"
+    );
     assert_eq!(unplanned.available(), 15_000);
     assert_eq!(pool.available(), 23_000);
     assert_eq!(accounted(&pool, 0), 32_000);
@@ -328,7 +345,10 @@ fn accounts_reach_only_their_own_tokens_and_the_free_rest() {
 fn a_worker_capped_by_its_capacity_passes_the_rest_to_roles_not_started() {
     let pool = OutputPool::new(32_000);
     pool.install(plan(
-        vec![share("coder", Demand::Heavy), share("tester", Demand::Light)],
+        vec![
+            share("coder", Demand::Heavy),
+            share("tester", Demand::Light),
+        ],
         true,
     ))
     .expect("installed");
@@ -372,7 +392,9 @@ fn unsettled_or_overrun_turns_are_charged_and_stop_further_grants() {
     assert!(worker.reserve(Some(10)).is_none());
     assert!(pool.reserve(Some(10)).is_none());
     assert_eq!(
-        OutputPool::new(100).install(plan(Vec::new(), false)).map(|a| a.lead),
+        OutputPool::new(100)
+            .install(plan(Vec::new(), false))
+            .map(|a| a.lead),
         Ok(50)
     );
 }
@@ -401,9 +423,15 @@ fn random_interleavings_never_create_tokens_or_reach_the_lead_reserve() {
         let count = random.next(5) as usize;
         let shares = roles[..count]
             .iter()
-            .map(|role| share(role, [Demand::Light, Demand::Standard, Demand::Heavy][random.next(3) as usize]))
+            .map(|role| {
+                share(
+                    role,
+                    [Demand::Light, Demand::Standard, Demand::Heavy][random.next(3) as usize],
+                )
+            })
             .collect();
-        pool.install(plan(shares, random.next(2) == 0)).expect("installed");
+        pool.install(plan(shares, random.next(2) == 0))
+            .expect("installed");
         let lead_reserve = pool.allocation_report(None).expect("plan").lead_reserve;
         let mut handles = vec![pool.with_account(Account::Unplanned)];
         let mut claims = Vec::new();
@@ -454,9 +482,15 @@ fn random_interleavings_never_create_tokens_or_reach_the_lead_reserve() {
             assert!(report.lead_reserve_left <= lead_reserve, "seed {seed}");
         }
         // The lead can still reserve what is left of its reserve.
-        let left = pool.allocation_report(None).expect("plan").lead_reserve_left;
+        let left = pool
+            .allocation_report(None)
+            .expect("plan")
+            .lead_reserve_left;
         if left >= 16 {
-            assert!(pool.reserve(Some(left)).is_some_and(|grant| grant.tokens() >= left));
+            assert!(
+                pool.reserve(Some(left))
+                    .is_some_and(|grant| grant.tokens() >= left)
+            );
         }
     }
 }
@@ -481,15 +515,25 @@ async fn workers_cannot_starve_the_leads_answer_with_a_plan_and_could_without() 
     let events = run(worker.clone(), on(handle)).await;
     drop(claim);
     assert_eq!(stop_reason(&events), Some(StopReason::OutputBudget));
-    assert_eq!(sent(&worker), [Some(2_048), Some(2_048), Some(2_048), Some(1_356)]);
+    assert_eq!(
+        sent(&worker),
+        [Some(2_048), Some(2_048), Some(2_048), Some(1_356)]
+    );
     let report = &reports(&events)[0];
     let allocation = report.allocation.as_ref().expect("reported");
     assert_eq!(allocation.account, "share");
     assert_eq!(allocation.role.as_deref(), Some("researcher"));
-    assert_eq!((allocation.asked, allocation.granted), (Some(2_048), Some(2_048)));
+    assert_eq!(
+        (allocation.asked, allocation.granted),
+        (Some(2_048), Some(2_048))
+    );
     assert_eq!(allocation.lead_reserve_left, 2_500);
 
-    let lead = MockProvider::new(vec![answer("the answer", FinishReason::Stop, usage(10, 300))]);
+    let lead = MockProvider::new(vec![answer(
+        "the answer",
+        FinishReason::Stop,
+        usage(10, 300),
+    )]);
     let events = run(lead.clone(), on(pool.clone())).await;
     assert_eq!(stop_reason(&events), Some(StopReason::EndTurn));
     assert_eq!(sent(&lead), [Some(2_048)], "the lead's reserve answered");
@@ -514,10 +558,7 @@ async fn equal_workers_running_together_get_equal_shares_and_no_more() {
         MockProvider::looping(vec![search(None)]),
         MockProvider::looping(vec![search(None)]),
     ];
-    let runs = [
-        run(mocks[0].clone(), on(a)),
-        run(mocks[1].clone(), on(b)),
-    ];
+    let runs = [run(mocks[0].clone(), on(a)), run(mocks[1].clone(), on(b))];
     let outcomes = futures_util::future::join_all(runs).await;
     drop((claim_a, claim_b));
     for (mock, events) in mocks.iter().zip(&outcomes) {
@@ -547,14 +588,21 @@ async fn a_continuation_may_use_the_follow_up_reserve_its_share_does_not_hold() 
         ..GenerationBudget::default()
     };
     let mock = MockProvider::new(vec![
-        answer("the first part of the change", FinishReason::Length, usage(100, 6_500)),
+        answer(
+            "the first part of the change",
+            FinishReason::Length,
+            usage(100, 6_500),
+        ),
         answer("and the rest of it", FinishReason::Stop, usage(200, 300)),
     ]);
     let events = run(mock.clone(), budget).await;
     assert_eq!(sent(&mock), [Some(6_500), Some(1_000)]);
     assert_eq!(stop_reason(&events), Some(StopReason::EndTurn));
     let report = pool.allocation_report(None).expect("plan");
-    assert_eq!(report.lead_reserve_left, 2_500, "the lead's reserve is whole");
+    assert_eq!(
+        report.lead_reserve_left, 2_500,
+        "the lead's reserve is whole"
+    );
     assert_eq!(report.follow_up_left, 700);
 }
 
@@ -564,7 +612,11 @@ async fn without_a_plan_nothing_is_reported_and_nothing_changes() {
     let mock = MockProvider::new(vec![answer("done", FinishReason::Stop, usage(10, 20))]);
     let events = run(mock.clone(), on(pool.clone()).for_worker(true)).await;
     assert_eq!(sent(&mock), [Some(2_048)]);
-    assert!(reports(&events).iter().all(|report| report.allocation.is_none()));
+    assert!(
+        reports(&events)
+            .iter()
+            .all(|report| report.allocation.is_none())
+    );
     // A worker's handle is never the lead's, and is still the same pool.
     let worker = on(pool.clone()).for_worker(false);
     let handle = worker.output_pool.expect("pool");

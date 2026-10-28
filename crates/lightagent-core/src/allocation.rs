@@ -173,7 +173,9 @@ pub fn allocate(available: u32, plan: &OutputPlan) -> Allocation {
         .map(|share| (share.demand.weight(), None))
         .collect();
     let shares = split(workers, &parts);
-    let given = shares.iter().fold(0u32, |sum, share| sum.saturating_add(*share));
+    let given = shares
+        .iter()
+        .fold(0u32, |sum, share| sum.saturating_add(*share));
     Allocation {
         lead,
         follow_up,

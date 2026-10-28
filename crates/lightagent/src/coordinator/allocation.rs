@@ -168,8 +168,8 @@ pub(crate) fn install(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::coordinator::classify::TaskClassification;
     use crate::coordinator::classify::TaskCategory;
+    use crate::coordinator::classify::TaskClassification;
     use lightagent_core::{
         GenerationConfig, JevClassificationMode, OutputPool, SpecialistSelection, SpecialistStep,
     };
@@ -265,7 +265,10 @@ mod tests {
             let plan = plan(&on, None, chosen.as_ref(), &budget).unwrap();
             assert_eq!(plan.source, "no_plan");
             assert_eq!(plan.fallback_reason.as_deref(), Some(reason));
-            assert!(plan.shares.is_empty(), "no role gets a share it was not planned");
+            assert!(
+                plan.shares.is_empty(),
+                "no role gets a share it was not planned"
+            );
         }
         let mut kept = selection(&[], true);
         kept.record.outcome = "lead".to_owned();
@@ -301,16 +304,25 @@ mod tests {
         assert_eq!(raised.source, "jev_complexity");
         assert_eq!(
             demands(&raised),
-            [("researcher", Demand::Heavy), ("reviewer", Demand::Standard)]
+            [
+                ("researcher", Demand::Heavy),
+                ("reviewer", Demand::Standard)
+            ]
         );
         // Below the classification's own threshold: the fixed classes.
         let unsure = report(Complexity::Complex, 0.5);
         let kept = plan(&on, Some(&unsure), Some(&chosen), &budget).unwrap();
         assert_eq!(kept.source, "role_defaults");
-        assert_eq!(kept.fallback_reason.as_deref(), Some("complexity_low_confidence"));
+        assert_eq!(
+            kept.fallback_reason.as_deref(),
+            Some("complexity_low_confidence")
+        );
         assert_eq!(
             demands(&kept),
-            [("researcher", Demand::Standard), ("reviewer", Demand::Standard)]
+            [
+                ("researcher", Demand::Standard),
+                ("reviewer", Demand::Standard)
+            ]
         );
         // A failed or missing classification: the fixed classes, labelled.
         let failed = ClassificationReport {
@@ -334,12 +346,27 @@ mod tests {
             ..lead(Some(32_000))
         };
         let chosen = selection(&["coder", "tester"], true);
-        let without = plan(&config(AdaptiveAllocation::Plan, 0), None, Some(&chosen), &budget);
+        let without = plan(
+            &config(AdaptiveAllocation::Plan, 0),
+            None,
+            Some(&chosen),
+            &budget,
+        );
         assert!(!without.unwrap().follow_up);
-        let repairs = plan(&config(AdaptiveAllocation::Plan, 1), None, Some(&chosen), &budget);
+        let repairs = plan(
+            &config(AdaptiveAllocation::Plan, 1),
+            None,
+            Some(&chosen),
+            &budget,
+        );
         assert!(repairs.unwrap().follow_up);
         let research = selection(&["researcher"], true);
-        let alone = plan(&config(AdaptiveAllocation::Plan, 1), None, Some(&research), &budget);
+        let alone = plan(
+            &config(AdaptiveAllocation::Plan, 1),
+            None,
+            Some(&research),
+            &budget,
+        );
         assert!(!alone.unwrap().follow_up, "no change to repair");
     }
 
@@ -351,7 +378,12 @@ mod tests {
             ..lead(Some(32_000))
         };
         assert_eq!(plan(&on, None, None, &ceiling).unwrap().lead_floor, 4_096);
-        assert_eq!(plan(&on, None, None, &lead(Some(32_000))).unwrap().lead_floor, 2_048);
+        assert_eq!(
+            plan(&on, None, None, &lead(Some(32_000)))
+                .unwrap()
+                .lead_floor,
+            2_048
+        );
     }
 
     #[test]
