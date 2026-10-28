@@ -650,8 +650,14 @@ pub async fn run_worker(
     config.limits = limits;
     config.parent = ctx.run.clone();
     // Never a larger allowance than the lead's; a continuation or an answer
-    // turn still spends the turns the tree granted above.
-    config.generation = delegation.generation.for_worker(&spec.routing);
+    // turn still spends the turns the tree granted above. A worker on another
+    // model is budgeted against that model's own window, asked through its
+    // authorized provider; a cancelled run does not wait for the answer.
+    config.generation = tokio::select! {
+        biased;
+        () = cancel.cancelled() => delegation.generation.for_worker(&spec.routing),
+        budget = delegation.generation.for_worker_on(&spec.routing, &provider) => budget,
+    };
 
     ctx.report(progress("worker.started", None));
     let (sink, events) = tokio::sync::mpsc::unbounded_channel();

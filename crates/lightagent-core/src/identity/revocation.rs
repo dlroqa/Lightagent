@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{Denial, PrincipalId};
 use crate::profile::ProfileId;
-use crate::provider::{AgentProvider, ProviderError, ProviderRequest, ProviderStream};
+use crate::provider::{AgentProvider, ProviderError, ProviderRequest, ProviderStream, ServedModel};
 
 /// Reads the current identity state and answers whether the run's initiator
 /// is still authorized for it. Called at every enforcement point, so it must
@@ -219,6 +219,15 @@ impl<P> AuthorizedProvider<P> {
 
 #[async_trait]
 impl<P: AgentProvider> AgentProvider for AuthorizedProvider<P> {
+    /// Discovery is a request made with the run's credentials: a revoked run
+    /// makes none, and is budgeted as having an unknown window.
+    async fn served_model(&self) -> ServedModel {
+        if self.authorization.verify().is_err() {
+            return ServedModel::default();
+        }
+        self.inner.served_model().await
+    }
+
     async fn stream(
         &self,
         request: ProviderRequest,
@@ -367,5 +376,47 @@ mod tests {
         assert!(cancel.is_cancelled());
         // Never yields: the loop's cancellation arm ends the turn.
         assert!(stream.next().now_or_never().is_none());
+    }
+
+    struct Serves(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait]
+    impl AgentProvider for Serves {
+        async fn served_model(&self) -> ServedModel {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            ServedModel {
+                model: Some("qwen@32k".into()),
+                context_window: Some(32_768),
+            }
+        }
+
+        async fn stream(
+            &self,
+            _: ProviderRequest,
+            _: CancellationToken,
+        ) -> Result<ProviderStream, ProviderError> {
+            Ok(Box::pin(futures_util::stream::empty()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_revoked_run_makes_no_discovery_request() {
+        let (allowed, check) = switch();
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = AuthorizedProvider::new(
+            Serves(asked.clone()),
+            RunAuthorization::revocable(check, CancellationToken::new(), None),
+        );
+        assert_eq!(provider.served_model().await.context_window, Some(32_768));
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        allowed.store(false, Ordering::SeqCst);
+        assert_eq!(provider.served_model().await, ServedModel::default());
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "nothing was asked");
+        // The default answer of a provider that cannot say is unknown.
+        let plain = AuthorizedProvider::new(
+            crate::mock::MockProvider::looping(Vec::new()),
+            RunAuthorization::unconditional(CancellationToken::new()),
+        );
+        assert_eq!(plain.served_model().await, ServedModel::default());
     }
 }

@@ -20,7 +20,7 @@ use bytes::Bytes;
 use futures_util::stream::{self, BoxStream, StreamExt};
 use lightagent_core::provider::{
     AgentProvider, FinishReason, ProviderError, ProviderEvent, ProviderMessage, ProviderRequest,
-    ProviderStream, Role, Usage,
+    ProviderStream, Role, ServedModel, Usage,
 };
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
@@ -321,6 +321,20 @@ fn tools_to_json(tools: &[lightagent_core::ToolSchema], names: Option<&ToolNameM
 
 #[async_trait]
 impl AgentProvider for LightweightProvider {
+    /// The model this provider resolves its configured model to, and the
+    /// window it reports serving it with: the same two questions the lead's
+    /// budget is resolved from.
+    async fn served_model(&self) -> ServedModel {
+        let Ok(model) = self.resolve_model().await else {
+            return ServedModel::default();
+        };
+        let context_window = self.context_window(&model).await;
+        ServedModel {
+            model: Some(model),
+            context_window,
+        }
+    }
+
     async fn stream(
         &self,
         request: ProviderRequest,
