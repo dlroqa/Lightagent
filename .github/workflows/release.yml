@@ -1,16 +1,47 @@
 name: release
 
+# A pushed tag `v<version>` builds, smoke-tests and checksums every package,
+# then drafts a GitHub release. A manual run is a dry run unless `dry_run` is
+# turned off: it builds the same packages and uploads them with SHA256SUMS as
+# run artifacts, and creates no release or tag. Turning `dry_run` off is only
+# accepted on the tag itself. scripts/release-gate.sh makes the decision and
+# scripts/test-release-gate.py tests it, and the shape of this file, in check.
+
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build, smoke-test and checksum only; create no release
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
 jobs:
+  gate:
+    name: release gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      publish: ${{ steps.decide.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: decide
+        # `shell: bash` adds pipefail, so a refusal fails the step through tee.
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DRY_RUN: ${{ toJSON(inputs.dry_run) }}
+        run: bash ./scripts/release-gate.sh | tee -a "$GITHUB_OUTPUT"
+
   build:
     name: build (${{ matrix.label }})
+    needs: gate
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -46,9 +77,34 @@ jobs:
           if-no-files-found: error
           path: dist-cli/lightagent-*
 
+  # Runs for dry runs and releases alike, so a dry run's SHA256SUMS is the
+  # file a release would attach.
+  checksums:
+    name: checksums
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: lightagent-*
+          path: release-assets
+          merge-multiple: true
+      - name: Checksums
+        working-directory: release-assets
+        run: |
+          sha256sum lightagent-* > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-SHA256SUMS
+          if-no-files-found: error
+          path: release-assets/SHA256SUMS
+
   publish:
     name: draft GitHub release
-    needs: build
+    needs: [gate, build, checksums]
+    if: needs.gate.outputs.publish == 'true' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -58,9 +114,10 @@ jobs:
           pattern: lightagent-*
           path: release-assets
           merge-multiple: true
-      - name: Checksums
-        working-directory: release-assets
-        run: sha256sum lightagent-* > SHA256SUMS
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-SHA256SUMS
+          path: release-assets
       - uses: softprops/action-gh-release@v2
         with:
           draft: true

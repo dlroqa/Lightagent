@@ -323,3 +323,18 @@ jobs:
       - run: npm run build --prefix frontend
       - run: cargo build --release -p lightagent
       - run: bash ./scripts/smoke-lightagent-package.sh
+
+  release-gate:
+    # Whether release.yml may write a release: every dispatch, tag and event
+    # case through scripts/release-gate.sh, and the workflow's permissions and
+    # release-writing steps. Runs no build and contacts nothing.
+    name: release gate tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'pyyaml==6.0.2'
+      - run: python scripts/test-release-gate.py -v
