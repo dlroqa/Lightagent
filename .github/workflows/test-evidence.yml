@@ -30,9 +30,9 @@ jobs:
             curl -sSfL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
               "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/jobs/$id/logs" -o "$RUNNER_TEMP/logs/$label.log"
           done < evidence-jobs.txt
-      - name: Report
+      - name: Write the report script
         run: |
-          python3 -I - evidence-jobs.txt "$RUNNER_TEMP/logs" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          cat > "$RUNNER_TEMP/report.py" <<'PY'
           import re, sys
           tests = [
               "installed_mcp_tool_is_listed_callable_and_removed",
@@ -54,6 +54,8 @@ jobs:
               if len(parts) != 3:
                   continue
               label, kind, job = parts
+              if kind != sys.argv[3]:
+                  continue
               lines = [stamp.sub("", l.rstrip("\n")) for l in open(f"{sys.argv[2]}/{label}.log", errors="replace")]
               facts = []
               if kind == "check":
@@ -85,3 +87,9 @@ jobs:
               print(f"- **{label}** (job {job}): {message}")
               print(f"::notice title={label}::{message}", file=sys.stderr)
           PY
+      - name: Report check jobs
+        run: python3 -I "$RUNNER_TEMP/report.py" evidence-jobs.txt "$RUNNER_TEMP/logs" check | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Report diag jobs
+        run: python3 -I "$RUNNER_TEMP/report.py" evidence-jobs.txt "$RUNNER_TEMP/logs" diag | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Report broker jobs
+        run: python3 -I "$RUNNER_TEMP/report.py" evidence-jobs.txt "$RUNNER_TEMP/logs" broker | tee -a "$GITHUB_STEP_SUMMARY"
