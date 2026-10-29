@@ -74,6 +74,26 @@ impl SecretRef {
         }
     }
 
+    /// Look the secret up now, saying why it cannot be used when it cannot.
+    ///
+    /// A usable value is exactly what [`Self::resolve`] returns, which stays
+    /// as it is for every caller that treats "no value" alike. A value of
+    /// nothing but whitespace is [`SecretLookup::Empty`].
+    pub fn lookup(&self) -> SecretLookup {
+        match self {
+            Self::Env { var } => match std::env::var(var) {
+                Ok(value) if value.trim().is_empty() => SecretLookup::Empty,
+                Ok(value) => SecretLookup::Value(value),
+                Err(_) => SecretLookup::Unresolved,
+            },
+            Self::File { path } => match std::fs::read_to_string(path) {
+                Ok(value) if value.trim().is_empty() => SecretLookup::Empty,
+                Ok(value) => SecretLookup::Value(value.trim().to_owned()),
+                Err(_) => SecretLookup::Unreadable,
+            },
+        }
+    }
+
     /// A display form safe for logs and `config show`: the reference, never the
     /// value.
     pub fn redacted(&self) -> String {
@@ -81,6 +101,34 @@ impl SecretRef {
             Self::Env { var } => format!("${{env:{var}}}"),
             Self::File { path } => format!("${{file:{}}}", path.display()),
         }
+    }
+}
+
+/// What a [`SecretRef`] holds right now, for a caller that must tell a
+/// reference that cannot be used from a usable value. No variant carries the
+/// reference's path or variable name, or an error's text, and `Debug` never
+/// shows the value.
+#[derive(Clone, PartialEq, Eq)]
+pub enum SecretLookup {
+    /// A non-empty value, exactly as [`SecretRef::resolve`] returns it.
+    Value(String),
+    /// The environment variable is unset, or not valid Unicode.
+    Unresolved,
+    /// The file could not be read: missing, not permitted, a directory, or
+    /// not UTF-8.
+    Unreadable,
+    /// Nothing but whitespace.
+    Empty,
+}
+
+impl std::fmt::Debug for SecretLookup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Value(_) => "Value([redacted])",
+            Self::Unresolved => "Unresolved",
+            Self::Unreadable => "Unreadable",
+            Self::Empty => "Empty",
+        })
     }
 }
 
@@ -3094,6 +3142,43 @@ mod tests {
         assert!(!secret.redacted().contains(value));
 
         std::fs::remove_dir_all(path.parent().expect("temporary parent")).ok();
+    }
+
+    #[test]
+    fn a_lookup_says_why_a_secret_cannot_be_used_and_never_shows_it() {
+        let dir =
+            std::env::temp_dir().join(format!("lightagent-secret-lookup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temporary directory");
+        let value = dir.join("value");
+        std::fs::write(&value, "  synthetic-lookup-value-q1  \n").expect("write");
+        let blank = dir.join("blank");
+        std::fs::write(&blank, " \n\t\n").expect("write");
+
+        let usable = SecretRef::file(&value);
+        assert_eq!(
+            usable.lookup(),
+            SecretLookup::Value("synthetic-lookup-value-q1".to_owned())
+        );
+        assert_eq!(
+            usable.resolve().as_deref(),
+            Some("synthetic-lookup-value-q1")
+        );
+        assert!(!format!("{:?}", usable.lookup()).contains("synthetic-lookup-value-q1"));
+        assert_eq!(SecretRef::file(&blank).lookup(), SecretLookup::Empty);
+        assert_eq!(
+            SecretRef::file(dir.join("missing")).lookup(),
+            SecretLookup::Unreadable
+        );
+        assert_eq!(SecretRef::file(&dir).lookup(), SecretLookup::Unreadable);
+        assert_eq!(
+            SecretRef::env("LIGHTAGENT_TEST_UNSET_LOOKUP_VAR_8N").lookup(),
+            SecretLookup::Unresolved
+        );
+        // `resolve` is unchanged: anything that is not a value is `None`.
+        assert_eq!(SecretRef::file(&blank).resolve(), None);
+        assert_eq!(SecretRef::file(dir.join("missing")).resolve(), None);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -46,7 +46,7 @@ pub use config::{
     GenerationOverride, GithubActionsConfig, InferenceConfig, InfinityConfig,
     JevClassificationConfig, JevClassificationMode, JevConfig, JevRoutingGrant, JevRoutingInput,
     JevRoutingPermission, McpConfig, McpServerEntry, OpenTerminalConfig, PlatformConfig,
-    PlatformEndpointConfig, QdrantConfig, SavedProvider, SecretRef, SecurityConfig,
+    PlatformEndpointConfig, QdrantConfig, SavedProvider, SecretLookup, SecretRef, SecurityConfig,
     SubagentsConfig, ToolNameMode, ToolPolicyMode, ToolsConfig, WebConfig, WebSearchConfig,
     WorkerResolution,
 };
