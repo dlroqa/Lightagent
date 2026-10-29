@@ -148,16 +148,26 @@ derived from the run's `RunTrust` in `serve.rs` `run_as`.
 - An HTTP MCP server not granted to the profile is **never contacted**.
 - A server granted without its credentials is contacted **without** `auth`
   **and without** custom headers, since headers can carry secrets.
-- A configured `auth` that would be sent (an operator run, or a profile in
-  `credential_profiles`) but cannot be used keeps that server **unreached**:
-  no request, so neither a bearer nor its custom headers, and never an
-  unauthenticated connection in their place. This covers an unset variable,
-  an unreadable file, an empty value, and a value that cannot be sent as an
-  `Authorization` header. The run reports `mcp_auth_unusable` with a fixed
-  category (`credential_unresolved`, `credential_unreadable`,
-  `credential_empty`, `credential_invalid_header`) and the server's name
-  only: never the value, the path or variable, or an error's text. Other
-  servers connect as before.
+- For an HTTP MCP server the run may use, its installation `auth`:
+
+  | `auth` | The run may use it (an operator run, or a profile in `credential_profiles`) | Result |
+  | --- | --- | --- |
+  | Not configured | — | Contacted without a bearer; custom headers only if the run may use them |
+  | Configured | No | **Never looked up**, so a broken one changes nothing: contacted without `auth` and without custom headers, as above |
+  | Configured, cannot be used | Yes | **Not contacted**: no request, so neither a bearer nor its custom headers, and never an unauthenticated connection in their place |
+  | Configured, usable | Yes | Contacted with the bearer and the custom headers |
+
+  "Cannot be used" covers an unset variable, an unreadable file, an empty
+  value, and a value that cannot be sent as an `Authorization` header. The
+  run reports `mcp_auth_unusable` with a fixed category
+  (`credential_unresolved`, `credential_unreadable`, `credential_empty`,
+  `credential_invalid_header`) and the server's name only: never the value,
+  the path or variable, or an error's text. Other servers connect as before.
+- That check only withholds credentials; it grants no access. Whether the
+  run may use the server at all is decided first, by `untrusted_profiles`,
+  and a profile not granted the server never reaches it, nor is told
+  anything about its `auth`. A profile's own vault grant is resolved as
+  before.
 - Untrusted runs never start stdio MCP servers.
 - Every MCP tool in an untrusted run requires approval, whatever its
   annotations say.

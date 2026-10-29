@@ -4724,6 +4724,19 @@ for line in sys.stdin:
         let tools = mcp_tools(&config, &none, RemoteAccess::Untrusted(&research)).await;
         assert_eq!(tools.len(), 3);
         assert_eq!(broken_log.lock().unwrap().len(), contacted);
+
+        // Ops is granted neither server. Refusing broken credentials grants
+        // no access: neither server is reached, and nothing is reported
+        // about the broken one's `auth`.
+        let ops = ProfileId::new("ops").unwrap();
+        let (specs, refused) = plan_mcp_servers(&config, &none, RemoteAccess::Untrusted(&ops));
+        assert!(specs.is_empty());
+        assert!(refused.is_empty());
+        let opened = open_log.lock().unwrap().len();
+        let tools = mcp_tools(&config, &none, RemoteAccess::Untrusted(&ops)).await;
+        assert!(tools.is_empty());
+        assert_eq!(broken_log.lock().unwrap().len(), contacted);
+        assert_eq!(open_log.lock().unwrap().len(), opened);
         std::fs::remove_dir_all(dir).ok();
     }
 
