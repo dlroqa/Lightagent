@@ -1,0 +1,214 @@
+=== base 0287bb75d78835d838fa916529328e28ffc50aca
+=== message
+Bound the MCP test fixture's readiness probe
+
+The python3 probe in installed_mcp_tool_is_listed_callable_and_removed
+had no limit, and took 163 s under injected disk contention (#82). It
+now runs through run_helper, which gives it 120 s, discards its output
+so nothing blocks on a pipe, and kills and reaps it at the deadline or
+on cancellation (kill_on_drop covers a dropped future). A probe that
+does not finish in time fails the test as a precondition failure; a
+missing python3, or one that cannot run the fixture, still skips it.
+
+Deterministic tests run this test binary as the helper (exit 0, exit 3,
+never exit) to cover readiness, a nonzero exit, a spawn failure, the
+deadline and cancellation, each with reaping. The production MCP
+timeout and the test's assertions are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent/src/chat.rs
+--- find
+    #[tokio::test]
+    async fn installed_mcp_tool_is_listed_callable_and_removed() {
+        // The fixture's interpreter is started once here, outside the MCP
+        // handshake that the per-request timeout bounds; this also skips the
+        // test where `python3` cannot run the fixture. A cold start reads the
+        // interpreter and its standard library from disk, which another
+        // process saturating the runner's disk can delay past that timeout
+        // (#82); started once here, the fixture's own start reads them from
+        // the file cache. `--version` loads too little to do this.
+        if !std::process::Command::new("python3")
+            .args(["-c", "import json, sys"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+        {
+            return;
+        }
+--- with
+    /// How long the MCP fixture's interpreter may take to start before
+    /// `installed_mcp_tool_is_listed_callable_and_removed` fails. A quiet
+    /// cold start took under a second on every Windows runner measured, and
+    /// the slowest whole lib suite seen without injected load took 77 s
+    /// (#82); this exceeds both with room, and leaves most of the 60-minute
+    /// check job to report a start that is stuck rather than slow.
+    const FIXTURE_READY_WITHIN: Duration = Duration::from_secs(120);
+    /// How long a killed helper may take to exit and be reaped.
+    const HELPER_REAP_WITHIN: Duration = Duration::from_secs(10);
+
+    /// What running a test helper to completion found. It holds no paths,
+    /// arguments or error text: only what a test acts on.
+    #[derive(Debug)]
+    enum Readiness {
+        /// It exited successfully.
+        Ready,
+        /// It could not be started, as when it is not installed.
+        NotStarted(std::io::ErrorKind),
+        /// It exited unsuccessfully, with this code where there is one.
+        Exited(Option<i32>),
+        /// It was killed before it exited; `reaped` says whether it was then
+        /// waited for within `HELPER_REAP_WITHIN`.
+        Stopped { why: Stop, reaped: bool },
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Stop {
+        /// It had not exited by the deadline.
+        Deadline,
+        /// The caller cancelled first.
+        Cancelled,
+        /// Its exit could not be observed.
+        WaitFailed,
+    }
+
+    /// Runs `command` to completion within `within`, with no input and its
+    /// output discarded, so neither side can block on a pipe. A helper still
+    /// running at the deadline or on `cancel` is killed and waited for, so it
+    /// is reaped rather than left running; if this future is dropped instead,
+    /// `kill_on_drop` kills it. Starting the process is a blocking system call
+    /// that the deadline counts but cannot interrupt.
+    async fn run_helper(
+        mut command: tokio::process::Command,
+        within: Duration,
+        cancel: &CancellationToken,
+    ) -> Readiness {
+        let started = Instant::now();
+        let mut child = match command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => return Readiness::NotStarted(error.kind()),
+        };
+        let remaining = within.saturating_sub(started.elapsed());
+        let why = tokio::select! {
+            waited = tokio::time::timeout(remaining, child.wait()) => match waited {
+                Ok(Ok(status)) if status.success() => return Readiness::Ready,
+                Ok(Ok(status)) => return Readiness::Exited(status.code()),
+                Ok(Err(_)) => Stop::WaitFailed,
+                Err(_) => Stop::Deadline,
+            },
+            () = cancel.cancelled() => Stop::Cancelled,
+        };
+        // Killing a helper that exited meanwhile fails harmlessly, and the
+        // wait then reaps it either way.
+        child.start_kill().ok();
+        let reaped = matches!(
+            tokio::time::timeout(HELPER_REAP_WITHIN, child.wait()).await,
+            Ok(Ok(_))
+        );
+        Readiness::Stopped { why, reaped }
+    }
+
+    /// The helper process of the `run_helper` tests: this test binary, run
+    /// again with `LIGHTAGENT_TEST_HELPER` set, exits with code 3 for `exit`
+    /// and never exits for `hold`. Run any other way it does nothing.
+    #[test]
+    #[ignore = "run only as the helper process of the run_helper tests"]
+    fn run_helper_process() {
+        match std::env::var("LIGHTAGENT_TEST_HELPER").as_deref() {
+            Ok("exit") => std::process::exit(3),
+            Ok("hold") => loop {
+                std::thread::park();
+            },
+            _ => {}
+        }
+    }
+
+    fn helper(behaviour: &str) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "chat::model_tests::run_helper_process", "--ignored"])
+            .env("LIGHTAGENT_TEST_HELPER", behaviour);
+        command
+    }
+
+    #[tokio::test]
+    async fn a_helper_that_exits_successfully_is_ready() {
+        let ready = run_helper(
+            helper("ready"),
+            FIXTURE_READY_WITHIN,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(ready, Readiness::Ready), "{ready:?}");
+    }
+
+    #[tokio::test]
+    async fn a_helper_that_fails_is_told_from_one_that_cannot_start() {
+        let cancel = CancellationToken::new();
+        let Readiness::Exited(code) =
+            run_helper(helper("exit"), FIXTURE_READY_WITHIN, &cancel).await
+        else {
+            panic!("a failing helper is reported as exited");
+        };
+        assert_eq!(code, Some(3));
+        let missing = tokio::process::Command::new("lightagent-test-helper-that-does-not-exist");
+        let Readiness::NotStarted(kind) = run_helper(missing, FIXTURE_READY_WITHIN, &cancel).await
+        else {
+            panic!("a missing helper is reported as not started");
+        };
+        assert_eq!(kind, std::io::ErrorKind::NotFound);
+    }
+
+    #[tokio::test]
+    async fn a_helper_still_running_at_the_deadline_is_killed_and_reaped() {
+        let within = Duration::from_secs(2);
+        let started = Instant::now();
+        let Readiness::Stopped { why, reaped } =
+            run_helper(helper("hold"), within, &CancellationToken::new()).await
+        else {
+            panic!("a helper that never exits is stopped");
+        };
+        assert_eq!(why, Stop::Deadline);
+        assert!(reaped, "the killed helper was waited for");
+        assert!(started.elapsed() < within + HELPER_REAP_WITHIN);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_helper_is_killed_and_reaped() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let Readiness::Stopped { why, reaped } =
+            run_helper(helper("hold"), FIXTURE_READY_WITHIN, &cancel).await
+        else {
+            panic!("a cancelled helper is stopped");
+        };
+        assert_eq!(why, Stop::Cancelled);
+        assert!(reaped, "the killed helper was waited for");
+    }
+
+    #[tokio::test]
+    async fn installed_mcp_tool_is_listed_callable_and_removed() {
+        // The fixture's interpreter is started once here, outside the MCP
+        // handshake that the per-request timeout bounds. A cold start reads
+        // the interpreter and its standard library from disk, which another
+        // process saturating the runner's disk can delay past that timeout
+        // (#82); started once here, the fixture's own start reads them from
+        // the file cache. `--version` loads too little to do this. The test
+        // is skipped where `python3` is missing or cannot run the fixture, as
+        // before, and fails where it does not finish starting in time.
+        let mut probe = tokio::process::Command::new("python3");
+        probe.args(["-c", "import json, sys"]);
+        match run_helper(probe, FIXTURE_READY_WITHIN, &CancellationToken::new()).await {
+            Readiness::Ready => {}
+            Readiness::NotStarted(_) | Readiness::Exited(_) => return,
+            Readiness::Stopped { why, reaped } => panic!(
+                "test precondition failed: python3 did not finish starting ({why:?}, limit {} s); it was killed (reaped: {reaped})",
+                FIXTURE_READY_WITHIN.as_secs()
+            ),
+        }
+=== end
