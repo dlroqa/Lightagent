@@ -1,0 +1,44 @@
+=== base 52771bbf1c58f5e3616a728b94f56b8979de63ec
+=== message
+diag: fetch job logs with curl, and report the broker's evidence (never merged)
+
+gh api refuses to print a log that holds terminal escape sequences.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace .github/workflows/test-evidence.yml
+--- find
+            gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$id/logs" > "$RUNNER_TEMP/logs/$label.log"
+--- with
+            curl -sSfL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/jobs/$id/logs" -o "$RUNNER_TEMP/logs/$label.log"
+=== replace .github/workflows/test-evidence.yml
+--- find
+              else:
+                  start = next((i for i, l in enumerate(lines) if "Summarise on the runner" in l), None)
+--- with
+              elif kind == "broker":
+                  seen = []
+                  for l in lines:
+                      m = re.match(r"(EVIDENCE|BLOCKED)\b.*", l)
+                      if m and m.group(0) not in seen:
+                          seen.append(m.group(0))
+                  facts += seen or ["no evidence lines"]
+              else:
+                  start = next((i for i, l in enumerate(lines) if "Summarise on the runner" in l), None)
+=== write evidence-jobs.txt
+pr84-9ccc22c-linux check 123259581469
+pr84-9ccc22c-macos check 123259579896
+pr84-9ccc22c-windows check 123259580197
+pr83-238b921-linux check 123260407502
+pr83-238b921-macos check 123260407430
+pr83-238b921-windows check 123260407566
+candidate-4bfea7d-linux check 123263241763
+candidate-4bfea7d-macos check 123263241910
+candidate-4bfea7d-windows check 123263241814
+readiness-quiet-1 diag 123260768502
+readiness-contended-1 diag 123260768199
+readiness-contended-2 diag 123260768636
+broker-pr84-9ccc22c broker 123259580354
+broker-pr83-238b921 broker 123260406684
+broker-candidate-4bfea7d broker 123263241693
+=== end
