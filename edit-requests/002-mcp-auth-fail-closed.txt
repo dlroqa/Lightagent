@@ -1,0 +1,519 @@
+=== base 6b52bca7129ff0aa8eb1ccc7433ebf0a8ad826ce
+=== message
+Keep an MCP server unreached when its configured auth cannot be used
+
+An HTTP MCP server's installation `auth` that resolved to nothing (an
+unset variable, an unreadable or empty file) used to connect without a
+bearer while still sending the custom headers. When that `auth` is used
+for the run (an operator run, or a profile granted the server's
+credentials) and cannot be, the server is now not contacted at all, and
+the run reports `mcp_auth_unusable` with a fixed category:
+credential_unresolved, credential_unreadable, credential_empty or
+credential_invalid_header. A value is invalid when the HTTP client could
+not send it in an Authorization header. Reports carry the server's name
+and the category only, never the value, the path or variable, or an
+error's text.
+
+Servers without `auth`, runs not granted the credentials, profile grants
+and other servers are unchanged. `SecretRef::lookup` is new and
+additive; `SecretRef::resolve` is unchanged for every other caller.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-core/src/lib.rs
+--- find
+    PlatformEndpointConfig, QdrantConfig, SavedProvider, SecretRef, SecurityConfig,
+--- with
+    PlatformEndpointConfig, QdrantConfig, SavedProvider, SecretLookup, SecretRef, SecurityConfig,
+=== replace crates/lightagent-core/src/config.rs
+--- find
+    /// A display form safe for logs and `config show`: the reference, never the
+    /// value.
+    pub fn redacted(&self) -> String {
+--- with
+    /// Look the secret up now, saying why it cannot be used when it cannot.
+    ///
+    /// A usable value is exactly what [`Self::resolve`] returns, which stays
+    /// as it is for every caller that treats "no value" alike. A value of
+    /// nothing but whitespace is [`SecretLookup::Empty`].
+    pub fn lookup(&self) -> SecretLookup {
+        match self {
+            Self::Env { var } => match std::env::var(var) {
+                Ok(value) if value.trim().is_empty() => SecretLookup::Empty,
+                Ok(value) => SecretLookup::Value(value),
+                Err(_) => SecretLookup::Unresolved,
+            },
+            Self::File { path } => match std::fs::read_to_string(path) {
+                Ok(value) if value.trim().is_empty() => SecretLookup::Empty,
+                Ok(value) => SecretLookup::Value(value.trim().to_owned()),
+                Err(_) => SecretLookup::Unreadable,
+            },
+        }
+    }
+
+    /// A display form safe for logs and `config show`: the reference, never the
+    /// value.
+    pub fn redacted(&self) -> String {
+=== replace crates/lightagent-core/src/config.rs
+--- find
+/// Which provider backend answers, and where.
+--- with
+/// What a [`SecretRef`] holds right now, for a caller that must tell a
+/// reference that cannot be used from a usable value. No variant carries the
+/// reference's path or variable name, or an error's text, and `Debug` never
+/// shows the value.
+#[derive(Clone, PartialEq, Eq)]
+pub enum SecretLookup {
+    /// A non-empty value, exactly as [`SecretRef::resolve`] returns it.
+    Value(String),
+    /// The environment variable is unset, or not valid Unicode.
+    Unresolved,
+    /// The file could not be read: missing, not permitted, a directory, or
+    /// not UTF-8.
+    Unreadable,
+    /// Nothing but whitespace.
+    Empty,
+}
+
+impl std::fmt::Debug for SecretLookup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Value(_) => "Value([redacted])",
+            Self::Unresolved => "Unresolved",
+            Self::Unreadable => "Unreadable",
+            Self::Empty => "Empty",
+        })
+    }
+}
+
+/// Which provider backend answers, and where.
+=== replace crates/lightagent-core/src/config.rs
+--- find
+        let secret = SecretRef::file(&path);
+        assert_eq!(secret.resolve().as_deref(), Some(value));
+        assert!(!secret.redacted().contains(value));
+
+        std::fs::remove_dir_all(path.parent().expect("temporary parent")).ok();
+    }
+--- with
+        let secret = SecretRef::file(&path);
+        assert_eq!(secret.resolve().as_deref(), Some(value));
+        assert!(!secret.redacted().contains(value));
+
+        std::fs::remove_dir_all(path.parent().expect("temporary parent")).ok();
+    }
+
+    #[test]
+    fn a_lookup_says_why_a_secret_cannot_be_used_and_never_shows_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "lightagent-secret-lookup-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temporary directory");
+        let value = dir.join("value");
+        std::fs::write(&value, "  synthetic-lookup-value-q1  \n").expect("write");
+        let blank = dir.join("blank");
+        std::fs::write(&blank, " \n\t\n").expect("write");
+
+        let usable = SecretRef::file(&value);
+        assert_eq!(
+            usable.lookup(),
+            SecretLookup::Value("synthetic-lookup-value-q1".to_owned())
+        );
+        assert_eq!(usable.resolve().as_deref(), Some("synthetic-lookup-value-q1"));
+        assert!(!format!("{:?}", usable.lookup()).contains("synthetic-lookup-value-q1"));
+        assert_eq!(SecretRef::file(&blank).lookup(), SecretLookup::Empty);
+        assert_eq!(SecretRef::file(dir.join("missing")).lookup(), SecretLookup::Unreadable);
+        assert_eq!(SecretRef::file(&dir).lookup(), SecretLookup::Unreadable);
+        assert_eq!(
+            SecretRef::env("LIGHTAGENT_TEST_UNSET_LOOKUP_VAR_8N").lookup(),
+            SecretLookup::Unresolved
+        );
+        // `resolve` is unchanged: anything that is not a value is `None`.
+        assert_eq!(SecretRef::file(&blank).resolve(), None);
+        assert_eq!(SecretRef::file(dir.join("missing")).resolve(), None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+=== replace crates/lightagent/src/chat.rs
+--- find
+    let specs: Vec<McpServerSpec> = config
+        .mcp
+        .servers
+        .iter()
+        .filter_map(|entry| to_mcp_spec(entry, None, access))
+        .chain(extensions.active(&config.extensions).flat_map(|ext| {
+            ext.mcp_servers
+                .iter()
+                .filter_map(move |entry| to_mcp_spec(entry, Some(&ext.dir), access))
+        }))
+        .collect();
+    if specs.is_empty() {
+        return Vec::new();
+    }
+--- with
+    let (specs, refused) = plan_mcp_servers(config, extensions, access);
+    for refusal in &refused {
+        eprintln!("· MCP server '{}' unavailable: {refusal}", refusal.server);
+    }
+    if specs.is_empty() {
+        return Vec::new();
+    }
+=== replace crates/lightagent/src/chat.rs
+--- find
+fn to_mcp_spec(
+    entry: &McpServerEntry,
+    cwd: Option<&Path>,
+    access: RemoteAccess<'_>,
+) -> Option<McpServerSpec> {
+    Some(match entry {
+        // A local process as the server's OS account: never started for an
+        // untrusted run (its tools are withheld by the tool policy too).
+        McpServerEntry::Stdio { .. } if !access.is_operator() => return None,
+--- with
+/// Why a configured MCP `auth` cannot be used. Each is a fixed category, safe
+/// to show: none carries the value, the reference's path or variable, or an
+/// underlying error's text, any of which could hold a secret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CredentialProblem {
+    /// The environment variable is unset (or not Unicode).
+    Unresolved,
+    /// The file could not be read.
+    Unreadable,
+    /// The value is empty or only whitespace.
+    Empty,
+    /// The value cannot be sent in an `Authorization` header.
+    InvalidHeader,
+}
+
+impl CredentialProblem {
+    /// The category's fixed code.
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::Unresolved => "credential_unresolved",
+            Self::Unreadable => "credential_unreadable",
+            Self::Empty => "credential_empty",
+            Self::InvalidHeader => "credential_invalid_header",
+        }
+    }
+}
+
+/// An HTTP MCP server whose configured `auth` cannot be used for this run. It
+/// is not contacted at all: no bearer, none of its custom headers, and never
+/// an unauthenticated request in their place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct McpAuthRefusal {
+    pub(crate) server: String,
+    pub(crate) problem: CredentialProblem,
+}
+
+impl std::fmt::Display for McpAuthRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "mcp_auth_unusable ({}): its configured auth cannot be used, so it was not contacted",
+            self.problem.code()
+        )
+    }
+}
+
+/// The servers to connect for a run, and those refused because their
+/// configured `auth` cannot be used. A server the run may not use is in
+/// neither.
+fn plan_mcp_servers(
+    config: &Config,
+    extensions: &ExtensionStore,
+    access: RemoteAccess<'_>,
+) -> (Vec<McpServerSpec>, Vec<McpAuthRefusal>) {
+    let configured = config
+        .mcp
+        .servers
+        .iter()
+        .map(|entry| (entry, None::<&Path>));
+    let installed = extensions.active(&config.extensions).flat_map(|ext| {
+        ext.mcp_servers
+            .iter()
+            .map(move |entry| (entry, Some(ext.dir.as_path())))
+    });
+    let mut specs = Vec::new();
+    let mut refused = Vec::new();
+    for (entry, cwd) in configured.chain(installed) {
+        match to_mcp_spec(entry, cwd, access) {
+            Ok(Some(spec)) => specs.push(spec),
+            Ok(None) => {}
+            Err(refusal) => refused.push(refusal),
+        }
+    }
+    (specs, refused)
+}
+
+/// The bearer a configured `auth` gives, or why it cannot be used. The value
+/// must make the `Authorization` header the HTTP client would send, so one it
+/// would refuse fails here, before any request.
+fn usable_bearer(secret: &lightagent_core::SecretRef) -> Result<String, CredentialProblem> {
+    use lightagent_core::SecretLookup;
+    match secret.lookup() {
+        SecretLookup::Value(value) => {
+            match reqwest::header::HeaderValue::from_bytes(format!("Bearer {value}").as_bytes()) {
+                Ok(_) => Ok(value),
+                Err(_) => Err(CredentialProblem::InvalidHeader),
+            }
+        }
+        SecretLookup::Unresolved => Err(CredentialProblem::Unresolved),
+        SecretLookup::Unreadable => Err(CredentialProblem::Unreadable),
+        SecretLookup::Empty => Err(CredentialProblem::Empty),
+    }
+}
+
+/// How to reach one configured server for this run: `Ok(None)` when the run
+/// may not use it, and an error when its configured `auth` would be sent but
+/// cannot be used.
+fn to_mcp_spec(
+    entry: &McpServerEntry,
+    cwd: Option<&Path>,
+    access: RemoteAccess<'_>,
+) -> Result<Option<McpServerSpec>, McpAuthRefusal> {
+    Ok(Some(match entry {
+        // A local process as the server's OS account: never started for an
+        // untrusted run (its tools are withheld by the tool policy too).
+        McpServerEntry::Stdio { .. } if !access.is_operator() => return Ok(None),
+=== replace crates/lightagent/src/chat.rs
+--- find
+        McpServerEntry::Http {
+            untrusted_profiles, ..
+        } if !access.may_use(untrusted_profiles) => return None,
+        McpServerEntry::Http { name, url, .. } if matches!(access, RemoteAccess::Granted(..)) => {
+            use lightagent_core::credentials::{RemoteService, Resolved};
+            let RemoteAccess::Granted(_, credentials) = access else {
+                return None;
+            };
+--- with
+        McpServerEntry::Http {
+            untrusted_profiles, ..
+        } if !access.may_use(untrusted_profiles) => return Ok(None),
+        McpServerEntry::Http { name, url, .. } if matches!(access, RemoteAccess::Granted(..)) => {
+            use lightagent_core::credentials::{RemoteService, Resolved};
+            let RemoteAccess::Granted(_, credentials) = access else {
+                return Ok(None);
+            };
+=== replace crates/lightagent/src/chat.rs
+--- find
+                // A grant that may not be used: the server is not reached.
+                Resolved::Denied(_) => return None,
+--- with
+                // A grant that may not be used: the server is not reached.
+                Resolved::Denied(_) => return Ok(None),
+=== replace crates/lightagent/src/chat.rs
+--- find
+            // Custom headers may carry secrets as much as `auth` does: both
+            // are the installation's, and both need the profile's grant.
+            let granted = access.may_use(credential_profiles);
+            McpServerSpec {
+--- with
+            // Custom headers may carry secrets as much as `auth` does: both
+            // are the installation's, and both need the profile's grant.
+            let granted = access.may_use(credential_profiles);
+            // A configured `auth` that is used for this run but cannot be
+            // keeps the server unreached: never a quiet fall back to an
+            // unauthenticated connection, and no custom headers either.
+            let bearer = auth
+                .as_ref()
+                .filter(|_| granted)
+                .map(usable_bearer)
+                .transpose()
+                .map_err(|problem| McpAuthRefusal {
+                    server: name.clone(),
+                    problem,
+                })?;
+            McpServerSpec {
+=== replace crates/lightagent/src/chat.rs
+--- find
+                    bearer: auth
+                        .as_ref()
+                        .filter(|_| granted)
+                        .and_then(|secret| secret.resolve()),
+                    credential: None,
+                },
+            }
+        }
+    })
+}
+--- with
+                    bearer,
+                    credential: None,
+                },
+            }
+        }
+    }))
+}
+=== replace crates/lightagent/src/chat.rs
+--- find
+        assert!(to_mcp_spec(&stdio, None, RemoteAccess::Operator).is_some());
+        assert!(to_mcp_spec(&stdio, None, RemoteAccess::Untrusted(&research)).is_none());
+    }
+--- with
+        assert!(matches!(
+            to_mcp_spec(&stdio, None, RemoteAccess::Operator),
+            Ok(Some(_))
+        ));
+        assert!(matches!(
+            to_mcp_spec(&stdio, None, RemoteAccess::Untrusted(&research)),
+            Ok(None)
+        ));
+    }
+
+    /// Synthetic sensitive names: none may appear in what a run reports.
+    const PRIVATE_DIR: &str = "private-ident-7q2x";
+    const PRIVATE_SECRET: &str = "synthetic-secret-k3v9";
+    const PRIVATE_LINE: &str = "second-line-z8";
+    const PRIVATE_VAR: &str = "LIGHTAGENT_TEST_UNSET_PRIVATE_VAR_5RW";
+
+    #[tokio::test]
+    async fn configured_auth_that_cannot_be_used_keeps_the_server_unreached() {
+        use lightagent_core::SecretRef;
+        lightagent_provider_lightweight::ensure_provider();
+        let none = ExtensionStore::load(&[]);
+        let pid = std::process::id();
+        let dir = exclusive_dir(&std::env::temp_dir(), || {
+            let n = MCP_DIRS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            format!("lightagent-mcp-auth-{pid}-{n}")
+        });
+        let private = dir.join(PRIVATE_DIR);
+        std::fs::create_dir_all(&private).unwrap();
+        let blank = private.join("blank-token");
+        std::fs::write(&blank, " \n\t\n").unwrap();
+        let invalid = private.join("invalid-token");
+        std::fs::write(&invalid, format!("{PRIVATE_SECRET}\n{PRIVATE_LINE}")).unwrap();
+        let cases = [
+            (
+                SecretRef::file(private.join("missing-token")),
+                CredentialProblem::Unreadable,
+            ),
+            (SecretRef::file(&private), CredentialProblem::Unreadable),
+            (SecretRef::env(PRIVATE_VAR), CredentialProblem::Unresolved),
+            (SecretRef::file(&blank), CredentialProblem::Empty),
+            (SecretRef::file(&invalid), CredentialProblem::InvalidHeader),
+        ];
+        let dir_text = dir.display().to_string();
+        for (auth, problem) in cases {
+            let (url, log) = mcp_http_stub(None).await;
+            let mut config = mcp_config_at(&dir, &url, &[], &[]);
+            if let McpServerEntry::Http { auth: slot, .. } = &mut config.mcp.servers[0] {
+                *slot = Some(auth);
+            }
+            let (specs, refused) = plan_mcp_servers(&config, &none, RemoteAccess::Operator);
+            assert!(specs.is_empty(), "{problem:?}");
+            assert_eq!(
+                refused,
+                vec![McpAuthRefusal {
+                    server: "docs".to_owned(),
+                    problem,
+                }]
+            );
+            let shown = format!("{} {:?}", refused[0], refused[0]);
+            assert!(shown.contains(problem.code()), "{shown}");
+            for sensitive in [
+                PRIVATE_DIR,
+                PRIVATE_SECRET,
+                PRIVATE_LINE,
+                PRIVATE_VAR,
+                MCP_HEADER,
+                "token",
+                dir_text.as_str(),
+            ] {
+                assert!(!shown.contains(sensitive), "{shown}");
+            }
+            assert!(
+                mcp_tools(&config, &none, RemoteAccess::Operator)
+                    .await
+                    .is_empty()
+            );
+            assert!(
+                log.lock().unwrap().is_empty(),
+                "{problem:?}: never contacted, so no bearer and no custom header was sent"
+            );
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_refused_server_leaves_others_and_ungranted_runs_unchanged() {
+        lightagent_provider_lightweight::ensure_provider();
+        let none = ExtensionStore::load(&[]);
+        let research = ProfileId::new("research").unwrap();
+        let billing = ProfileId::new("billing").unwrap();
+        let (broken_url, broken_log) = mcp_http_stub(None).await;
+        let (open_url, open_log) = mcp_http_stub(None).await;
+        let (mut config, dir) = mcp_config(&broken_url, &["research", "billing"], &["research"]);
+        let missing = dir.join("missing-token");
+        if let McpServerEntry::Http { auth, .. } = &mut config.mcp.servers[0] {
+            *auth = Some(lightagent_core::SecretRef::file(missing));
+        }
+        // A server with no `auth` at all connects as before.
+        config.mcp.servers.push(McpServerEntry::Http {
+            name: "open".to_owned(),
+            url: open_url,
+            headers: BTreeMap::from([("X-Api-Key".to_owned(), MCP_HEADER.to_owned())]),
+            auth: None,
+            untrusted_profiles: vec!["research".to_owned(), "billing".to_owned()],
+            credential_profiles: vec!["research".to_owned()],
+        });
+
+        // Operator: the broken server is refused; the other is unaffected.
+        let tools = mcp_tools(&config, &none, RemoteAccess::Operator).await;
+        assert_eq!(tools.len(), 3);
+        assert!(broken_log.lock().unwrap().is_empty());
+        assert_eq!(sent_credentials(&open_log.lock().unwrap()), (false, true));
+
+        // Billing is granted both servers but not their credentials: `auth`
+        // is never used, so both connect without credentials, as before.
+        let tools = mcp_tools(&config, &none, RemoteAccess::Untrusted(&billing)).await;
+        assert_eq!(tools.len(), 6);
+        assert!(!broken_log.lock().unwrap().is_empty());
+        assert_eq!(sent_credentials(&broken_log.lock().unwrap()), (false, false));
+
+        // Research is granted the credentials: the broken server is refused.
+        let contacted = broken_log.lock().unwrap().len();
+        let tools = mcp_tools(&config, &none, RemoteAccess::Untrusted(&research)).await;
+        assert_eq!(tools.len(), 3);
+        assert_eq!(broken_log.lock().unwrap().len(), contacted);
+        std::fs::remove_dir_all(dir).ok();
+    }
+=== replace docs/architecture/remote-tool-egress.md
+--- find
+- A server granted without its credentials is contacted **without** `auth`
+  **and without** custom headers, since headers can carry secrets.
+--- with
+- A server granted without its credentials is contacted **without** `auth`
+  **and without** custom headers, since headers can carry secrets.
+- A configured `auth` that would be sent (an operator run, or a profile in
+  `credential_profiles`) but cannot be used keeps that server **unreached**:
+  no request, so neither a bearer nor its custom headers, and never an
+  unauthenticated connection in their place. This covers an unset variable,
+  an unreadable file, an empty value, and a value that cannot be sent as an
+  `Authorization` header. The run reports `mcp_auth_unusable` with a fixed
+  category (`credential_unresolved`, `credential_unreadable`,
+  `credential_empty`, `credential_invalid_header`) and the server's name
+  only: never the value, the path or variable, or an error's text. Other
+  servers connect as before.
+=== replace CHANGELOG.md
+--- find
+  role-set match over every delegation case, and expected-role coverage.
+
+## [0.5.0] - Unreleased (prepared 2026-10-22; set the date when tagging)
+--- with
+  role-set match over every delegation case, and expected-role coverage.
+- An HTTP MCP server whose configured `auth` cannot be used is no longer
+  contacted without it. Before, an unset variable or an unreadable or empty
+  file silently connected without a bearer and still sent the custom
+  headers. When that `auth` is used for the run (an operator run, or a
+  profile in `credential_profiles`), the server is now unavailable for the
+  run and is not contacted. The run reports `mcp_auth_unusable` and a fixed
+  category: `credential_unresolved`, `credential_unreadable`,
+  `credential_empty`, or `credential_invalid_header` (a value the HTTP
+  client could not send). It never shows the value, the path or variable,
+  or an error's text. Other servers, servers without `auth`, and runs not
+  granted the credentials are unchanged. `SecretRef::lookup` is new;
+  `SecretRef::resolve` is unchanged.
+
+## [0.5.0] - Unreleased (prepared 2026-10-22; set the date when tagging)
+=== end
