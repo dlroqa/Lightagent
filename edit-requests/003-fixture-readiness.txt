@@ -1,0 +1,42 @@
+=== base 6b52bca7129ff0aa8eb1ccc7433ebf0a8ad826ce
+=== message
+Start the MCP test fixture's interpreter before its timed handshake
+
+installed_mcp_tool_is_listed_callable_and_removed probed python3 with
+--version, which loads almost nothing, so the fixture's first start read
+the interpreter and its standard library from disk inside the MCP
+handshake, bounded by the 30-second per-request timeout. The probe now
+imports what the fixture imports, so that cold load happens before the
+handshake, untimed, and the fixture starts from the file cache. The
+production timeout is unchanged. See #82 for the disk-contention evidence.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent/src/chat.rs
+--- find
+    async fn installed_mcp_tool_is_listed_callable_and_removed() {
+        if !std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+        {
+            return;
+        }
+--- with
+    async fn installed_mcp_tool_is_listed_callable_and_removed() {
+        // The fixture's interpreter is started once here, outside the MCP
+        // handshake that the per-request timeout bounds; this also skips the
+        // test where `python3` cannot run the fixture. A cold start reads the
+        // interpreter and its standard library from disk, which another
+        // process saturating the runner's disk can delay past that timeout
+        // (#82); started once here, the fixture's own start reads them from
+        // the file cache. `--version` loads too little to do this.
+        if !std::process::Command::new("python3")
+            .args(["-c", "import json, sys"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+        {
+            return;
+        }
+=== end
