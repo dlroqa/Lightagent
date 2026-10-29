@@ -7,3 +7,6 @@ pr83-238b921-windows check 123260407566
 readiness-quiet-1 diag 123260768502
 readiness-contended-1 diag 123260768199
 readiness-contended-2 diag 123260768636
+candidate-4bfea7d-linux check 123263241763
+candidate-4bfea7d-macos check 123263241910
+candidate-4bfea7d-windows check 123263241814
