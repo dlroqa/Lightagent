@@ -1,0 +1,35 @@
+=== base 02c343cf01eb52cb2ec027dea6e23745f86a6504
+=== message
+diag: one report step per job kind, under the annotation cap (never merged)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace .github/workflows/test-evidence.yml
+--- find
+      - name: Report
+        run: |
+          python3 -I - evidence-jobs.txt "$RUNNER_TEMP/logs" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+--- with
+      - name: Write the report script
+        run: |
+          cat > "$RUNNER_TEMP/report.py" <<'PY'
+=== replace .github/workflows/test-evidence.yml
+--- find
+              label, kind, job = parts
+--- with
+              label, kind, job = parts
+              if kind != sys.argv[3]:
+                  continue
+=== replace .github/workflows/test-evidence.yml
+--- find
+              print(f"::notice title={label}::{message}", file=sys.stderr)
+          PY
+--- with
+              print(f"::notice title={label}::{message}", file=sys.stderr)
+          PY
+      - name: Report check jobs
+        run: python3 -I "$RUNNER_TEMP/report.py" evidence-jobs.txt "$RUNNER_TEMP/logs" check | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Report diag jobs
+        run: python3 -I "$RUNNER_TEMP/report.py" evidence-jobs.txt "$RUNNER_TEMP/logs" diag | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Report broker jobs
+        run: python3 -I "$RUNNER_TEMP/report.py" evidence-jobs.txt "$RUNNER_TEMP/logs" broker | tee -a "$GITHUB_STEP_SUMMARY"
+=== end
