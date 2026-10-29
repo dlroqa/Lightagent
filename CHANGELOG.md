@@ -4,8 +4,73 @@ All notable Lightagent changes are documented here.
 
 ## [Unreleased]
 
+## [0.5.0] - Unreleased (prepared 2026-10-22; set the date when tagging)
+
+Release notes: `docs/releases/v0.5.0.md`.
+
 ### Added
 
+- Specialist workers. The roles researcher, coder, reviewer and tester are
+  now typed built-in definitions, each with a versioned role skill, a tool
+  ceiling, readiness requirements, an output contract and a resource
+  ceiling. They run under the requesting profile's authority, with only the
+  run contexts their tools need.
+  - A profile can assign a role to one of its own private worker profiles
+    (`lightagent workers assign`). The assignment is ownership-checked and
+    re-checked on every worker turn and tool call, and must use the lead's
+    endpoint, a model the installation knows, an approval policy no looser
+    than the lead's, and limits within the lead's. A refusal never falls
+    back to another worker.
+  - A role worker returns a typed result (`lightagent.worker_result.v1`):
+    status, answer, sources, citations no tool returned, tool use, skill and
+    model provenance, usage and limitations. It reports its lifecycle as
+    `tool.progress` stages.
+  - A worker that reaches an action needing approval waits under a one-time
+    handle. The lead asks the person through `agent.resume_worker`, which
+    always asks, or declines through `agent.decline_worker`.
+  - The coder proposes scoped patches tied to their base (`patch.propose`).
+    The lead applies them (`patch.apply`) or commits them to an allowlisted
+    branch as a fast-forward (`repo.commit`), each under its own approval.
+    A stale base or a concurrent edit is refused.
+  - The tester verifies through a GitHub Actions workflow broker
+    (`actions.dispatch`, `status`, `logs`, `cancel`). It accepts only
+    allowlisted workflows, branches and inputs, at the exact SHA, and the
+    token never leaves the harness.
+  - Readiness per role: `lightagent workers status`,
+    `GET /api/lightagent/v1/workers`, and the Tools screen.
+  - Untrusted runs can be offered only the read-only researcher
+    (`agent.research`, behind `subagents.remote_research`, off by default).
+  - Operator capability presets: `lightagent profile preset <id> research@1`.
+- The Web UI shows each worker's progress and its typed result.
+- Jev-assisted specialist selection (`subagents.selection`: `off` by
+  default, `shadow`, `active`). Typed questions added to the existing
+  classification request, with no extra Jev call, ask whether splitting a
+  task helps, which roles, and whether the parts depend on each other.
+  Lightagent builds the plan with fixed rules over the profile's own role
+  readiness, policy and limits:
+  - simple tasks and single searches stay with the lead;
+  - a plan names at most `selection_max_workers` roles (1 to 3, never all
+    four), and a refused role is reported, never replaced;
+  - testers and reviewers follow the coder whose change they check.
+
+  In `active` mode, for the profiles in `selection_profiles` only, the lead
+  gets the plan and `agent.delegate` enforces its order. The plan is
+  reported as an additive `specialists` object on `classification.completed`.
+  It grants no tool, role, approval or budget.
+- `inference.tool_names = "portable"` (default `native`) maps dotted tool
+  names reversibly to `^[a-zA-Z0-9_-]{1,64}$` for endpoints that require it,
+  such as OpenAI's API. Declarations, history, tool results and streamed
+  calls are mapped consistently, unknown returned names are refused, and
+  ambiguous mappings are refused before sending.
+- A labeled specialist-selection set (`evaluation/subagents/selection.v1.json`)
+  and a protected, manually dispatched live run (`jev-selection-live.yml`).
+  The role evaluation takes pilot bounds: a task subset, runs per task and a
+  hard request ceiling.
+- `jev-selection-pinned.yml`: evaluates Jev specialist selection for a
+  pinned, reviewed pull-request head before merging. The Jev key is used
+  only by a job that runs no repository code: the commit's requests are
+  exported without the secret, sent by `curl` after review, and the
+  responses are scored without the secret.
 - Opt-in adaptive output allocation (`generation.adaptive_allocation`,
   default `off`).
   - **What it does.** It divides `max_run_output_tokens` into a lead
@@ -87,111 +152,6 @@ All notable Lightagent changes are documented here.
 
 ### Changed
 
-- `jev-selection-pinned.yml` can evaluate an explicitly named commit already
-  on `master` (the dispatch commit or an ancestor) as well as an open
-  pull-request head, and reports a run as PASSED only when all 24 prompts
-  were answered and every record agrees; anything less is INCOMPLETE and
-  fails. Both checks live in `scripts/jev-selection-guard.py`, with tests.
-- Specialist selection no longer ends on the task category's confidence
-  (a role fits when the categories it serves hold the category threshold of
-  the distribution), and only a confident no on Jev's `specialists` answer
-  (at or below 30% by default) keeps the task with the lead. This changes
-  the decision policy: an answer above 30% may now lead to a plan when each
-  planned role is at least 70% and every other rule passes. The first live run (BELOW_THRESHOLD, every
-  task kept with the lead) is kept as baseline evidence, with a per-prompt
-  diagnosis and a held-out prompt set: `docs/subagents/selection-diagnosis.md`.
-  Selection stays `off` by default.
-- `jev-selection-pinned.yml` takes the prompt set as a `set` input from a fixed
-  list (`selection.v1`, `selection-heldout.v1`), each pinned to its frozen
-  file's git blob id. The export, manifest, harness report and verdict must
-  name the same set, and the verdict adds delegation precision and recall,
-  role-set match over every delegation case, and expected-role coverage.
-- An HTTP MCP server whose configured `auth` cannot be used is no longer
-  contacted without it. Before, an unset variable or an unreadable or empty
-  file silently connected without a bearer and still sent the custom
-  headers. When that `auth` is used for the run (an operator run, or a
-  profile in `credential_profiles`), the server is now unavailable for the
-  run and is not contacted. The run reports `mcp_auth_unusable` and a fixed
-  category: `credential_unresolved`, `credential_unreadable`,
-  `credential_empty`, or `credential_invalid_header` (a value the HTTP
-  client could not send). It never shows the value, the path or variable,
-  or an error's text. Other servers, servers without `auth`, and runs not
-  granted the credentials are unchanged: for those runs `auth` is never
-  looked up, and a server granted to them is contacted without credentials
-  as before. Refusing unusable credentials grants no access: a profile not
-  granted a server still never reaches it. `SecretRef::lookup` is new;
-  `SecretRef::resolve` is unchanged.
-
-## [0.5.0] - Unreleased (prepared 2026-10-22; set the date when tagging)
-
-Release notes: `docs/releases/v0.5.0.md`.
-
-### Added
-
-- Specialist workers. The roles researcher, coder, reviewer and tester are
-  now typed built-in definitions, each with a versioned role skill, a tool
-  ceiling, readiness requirements, an output contract and a resource
-  ceiling. They run under the requesting profile's authority, with only the
-  run contexts their tools need.
-  - A profile can assign a role to one of its own private worker profiles
-    (`lightagent workers assign`). The assignment is ownership-checked and
-    re-checked on every worker turn and tool call, and must use the lead's
-    endpoint, a model the installation knows, an approval policy no looser
-    than the lead's, and limits within the lead's. A refusal never falls
-    back to another worker.
-  - A role worker returns a typed result (`lightagent.worker_result.v1`):
-    status, answer, sources, citations no tool returned, tool use, skill and
-    model provenance, usage and limitations. It reports its lifecycle as
-    `tool.progress` stages.
-  - A worker that reaches an action needing approval waits under a one-time
-    handle. The lead asks the person through `agent.resume_worker`, which
-    always asks, or declines through `agent.decline_worker`.
-  - The coder proposes scoped patches tied to their base (`patch.propose`).
-    The lead applies them (`patch.apply`) or commits them to an allowlisted
-    branch as a fast-forward (`repo.commit`), each under its own approval.
-    A stale base or a concurrent edit is refused.
-  - The tester verifies through a GitHub Actions workflow broker
-    (`actions.dispatch`, `status`, `logs`, `cancel`). It accepts only
-    allowlisted workflows, branches and inputs, at the exact SHA, and the
-    token never leaves the harness.
-  - Readiness per role: `lightagent workers status`,
-    `GET /api/lightagent/v1/workers`, and the Tools screen.
-  - Untrusted runs can be offered only the read-only researcher
-    (`agent.research`, behind `subagents.remote_research`, off by default).
-  - Operator capability presets: `lightagent profile preset <id> research@1`.
-- The Web UI shows each worker's progress and its typed result.
-- Jev-assisted specialist selection (`subagents.selection`: `off` by
-  default, `shadow`, `active`). Typed questions added to the existing
-  classification request, with no extra Jev call, ask whether splitting a
-  task helps, which roles, and whether the parts depend on each other.
-  Lightagent builds the plan with fixed rules over the profile's own role
-  readiness, policy and limits:
-  - simple tasks and single searches stay with the lead;
-  - a plan names at most `selection_max_workers` roles (1 to 3, never all
-    four), and a refused role is reported, never replaced;
-  - testers and reviewers follow the coder whose change they check.
-
-  In `active` mode, for the profiles in `selection_profiles` only, the lead
-  gets the plan and `agent.delegate` enforces its order. The plan is
-  reported as an additive `specialists` object on `classification.completed`.
-  It grants no tool, role, approval or budget.
-- `inference.tool_names = "portable"` (default `native`) maps dotted tool
-  names reversibly to `^[a-zA-Z0-9_-]{1,64}$` for endpoints that require it,
-  such as OpenAI's API. Declarations, history, tool results and streamed
-  calls are mapped consistently, unknown returned names are refused, and
-  ambiguous mappings are refused before sending.
-- A labeled specialist-selection set (`evaluation/subagents/selection.v1.json`)
-  and a protected, manually dispatched live run (`jev-selection-live.yml`).
-  The role evaluation takes pilot bounds: a task subset, runs per task and a
-  hard request ceiling.
-- `jev-selection-pinned.yml`: evaluates Jev specialist selection for a
-  pinned, reviewed pull-request head before merging. The Jev key is used
-  only by a job that runs no repository code: the commit's requests are
-  exported without the secret, sent by `curl` after review, and the
-  responses are scored without the secret.
-
-### Changed
-
 - Repairs after checks are bounded separately from the child allowance.
   Previously, one coder → tester → reviewer cycle used all of
   `subagents.max_children_per_agent`, so a re-check after a fix was refused
@@ -228,6 +188,47 @@ Release notes: `docs/releases/v0.5.0.md`.
   for operator runs.
 - The subagent depth limit is enforced at the worker it would create, and a
   model-supplied `tool_scope` can no longer be widened by nested delegation.
+- `jev-selection-pinned.yml` can evaluate an explicitly named commit already
+  on `master` (the dispatch commit or an ancestor) as well as an open
+  pull-request head, and reports a run as PASSED only when all 24 prompts
+  were answered and every record agrees; anything less is INCOMPLETE and
+  fails. Both checks live in `scripts/jev-selection-guard.py`, with tests.
+- Specialist selection no longer ends on the task category's confidence
+  (a role fits when the categories it serves hold the category threshold of
+  the distribution), and only a confident no on Jev's `specialists` answer
+  (at or below 30% by default) keeps the task with the lead. This changes
+  the decision policy: an answer above 30% may now lead to a plan when each
+  planned role is at least 70% and every other rule passes. The first live run (BELOW_THRESHOLD, every
+  task kept with the lead) is kept as baseline evidence, with a per-prompt
+  diagnosis and a held-out prompt set: `docs/subagents/selection-diagnosis.md`.
+  Selection stays `off` by default.
+- `jev-selection-pinned.yml` takes the prompt set as a `set` input from a fixed
+  list (`selection.v1`, `selection-heldout.v1`), each pinned to its frozen
+  file's git blob id. The export, manifest, harness report and verdict must
+  name the same set, and the verdict adds delegation precision and recall,
+  role-set match over every delegation case, and expected-role coverage.
+- An HTTP MCP server whose configured `auth` cannot be used is no longer
+  contacted without it. Before, an unset variable or an unreadable or empty
+  file silently connected without a bearer and still sent the custom
+  headers. When that `auth` is used for the run (an operator run, or a
+  profile in `credential_profiles`), the server is now unavailable for the
+  run and is not contacted. The run reports `mcp_auth_unusable` and a fixed
+  category: `credential_unresolved`, `credential_unreadable`,
+  `credential_empty`, or `credential_invalid_header` (a value the HTTP
+  client could not send). It never shows the value, the path or variable,
+  or an error's text. Other servers, servers without `auth`, and runs not
+  granted the credentials are unchanged: for those runs `auth` is never
+  looked up, and a server granted to them is contacted without credentials
+  as before. Refusing unusable credentials grants no access: a profile not
+  granted a server still never reaches it. `SecretRef::lookup` is new;
+  `SecretRef::resolve` is unchanged.
+- A manual run of the release workflow is a dry run unless its typed
+  `dry_run` input (default `true`) is turned off, and turning it off is only
+  accepted on the tag `v<version>`. Every run builds, smoke-tests and
+  checksums the packages and uploads them with `SHA256SUMS` as run
+  artifacts. Only the gated `publish` job has write permission and drafts the
+  release, for a matching tag push as before. `scripts/release-gate.sh`
+  decides, and `scripts/test-release-gate.py` tests it in `check`.
 
 ### Fixed
 
