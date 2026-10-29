@@ -27,7 +27,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/logs"
           while read -r label kind id; do
             [ -n "$id" ] || continue
-            gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$id/logs" > "$RUNNER_TEMP/logs/$label.log"
+            curl -sSfL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/jobs/$id/logs" -o "$RUNNER_TEMP/logs/$label.log"
           done < evidence-jobs.txt
       - name: Report
         run: |
@@ -69,6 +70,13 @@ jobs:
                       ends = [l.split(" ... ", 1)[1].split(",")[0] for l in lines
                               if re.match(rf"test \S*::{t} \.\.\. ", l)]
                       facts.append(f"{t}: {'/'.join(ends) if ends else 'absent'}")
+              elif kind == "broker":
+                  seen = []
+                  for l in lines:
+                      m = re.match(r"(EVIDENCE|BLOCKED)\b.*", l)
+                      if m and m.group(0) not in seen:
+                          seen.append(m.group(0))
+                  facts += seen or ["no evidence lines"]
               else:
                   start = next((i for i, l in enumerate(lines) if "Summarise on the runner" in l), None)
                   if start is not None:
