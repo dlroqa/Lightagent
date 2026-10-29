@@ -106,6 +106,21 @@ All notable Lightagent changes are documented here.
   file's git blob id. The export, manifest, harness report and verdict must
   name the same set, and the verdict adds delegation precision and recall,
   role-set match over every delegation case, and expected-role coverage.
+- An HTTP MCP server whose configured `auth` cannot be used is no longer
+  contacted without it. Before, an unset variable or an unreadable or empty
+  file silently connected without a bearer and still sent the custom
+  headers. When that `auth` is used for the run (an operator run, or a
+  profile in `credential_profiles`), the server is now unavailable for the
+  run and is not contacted. The run reports `mcp_auth_unusable` and a fixed
+  category: `credential_unresolved`, `credential_unreadable`,
+  `credential_empty`, or `credential_invalid_header` (a value the HTTP
+  client could not send). It never shows the value, the path or variable,
+  or an error's text. Other servers, servers without `auth`, and runs not
+  granted the credentials are unchanged: for those runs `auth` is never
+  looked up, and a server granted to them is contacted without credentials
+  as before. Refusing unusable credentials grants no access: a profile not
+  granted a server still never reaches it. `SecretRef::lookup` is new;
+  `SecretRef::resolve` is unchanged.
 
 ## [0.5.0] - Unreleased (prepared 2026-10-22; set the date when tagging)
 
