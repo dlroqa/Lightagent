@@ -1,0 +1,41 @@
+=== base 305e004e06e03594de81598f32160dc28d9f0621
+=== message
+Show the replaced helper's shared token directory leaving the server unreached
+
+#81's frozen-clock regression asserted what a deleted token file used to
+do: the server was reached with the custom header and no bearer, the
+(false, true) of the failed macOS run. With configured `auth` that cannot
+be read now keeping the server unreached, the same collision leaves the
+stub with no request at all; exclusive directories still keep the bearer.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent/src/chat.rs
+--- find
+    /// The replaced helper, with the clock held still: two tests are handed
+    /// one directory, the other's cleanup deletes the token file, and the
+    /// server is reached with the custom header but no bearer, the
+    /// `(false, true)` of the failed macOS run. Under the same collision,
+    /// `exclusive_dir` gives the second test a directory of its own.
+--- with
+    /// The replaced helper, with the clock held still: two tests are handed
+    /// one directory, and the other's cleanup deletes the token file. That
+    /// used to reach the server with the custom header but no bearer, the
+    /// `(false, true)` of the failed macOS run; a configured `auth` that
+    /// cannot be read now keeps the server unreached instead. Under the same
+    /// collision, `exclusive_dir` gives the second test a directory of its
+    /// own, and the bearer is sent.
+=== replace crates/lightagent/src/chat.rs
+--- find
+        std::fs::remove_dir_all(&other).unwrap();
+        let tools = mcp_tools(&config, &none, RemoteAccess::Operator).await;
+        assert_eq!(tools.len(), 3);
+        assert_eq!(sent_credentials(&log.lock().unwrap()), (false, true));
+--- with
+        std::fs::remove_dir_all(&other).unwrap();
+        assert!(
+            mcp_tools(&config, &none, RemoteAccess::Operator)
+                .await
+                .is_empty()
+        );
+        assert!(log.lock().unwrap().is_empty(), "never contacted");
+=== end
