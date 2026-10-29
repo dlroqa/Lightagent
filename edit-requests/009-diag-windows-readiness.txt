@@ -1,0 +1,149 @@
+=== base 8857248
+=== message
+diag: bounded readiness follow-up for #82 (never merged)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== write .github/workflows/diag-windows-readiness.yml
+name: diag-windows-readiness
+
+# DIAGNOSTIC ONLY (branch diag/windows-readiness, never merged), for #82.
+# Pinned to 9ccc22c, the bounded fixture-readiness probe. On fresh Windows
+# runners: the deterministic run_helper tests, then
+# installed_mcp_tool_is_listed_callable_and_removed once, cold, quiet or
+# with the C: drive saturated as in diag-windows-contention. Bounded: 3 jobs.
+# All analysis runs here; the summary is published as annotations. The
+# sampler records counters and process names only.
+
+on:
+  push:
+    branches: [diag/windows-readiness]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  readiness:
+    name: ${{ matrix.arm }} ${{ matrix.replica }}
+    runs-on: windows-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arm: quiet, replica: 1 }
+          - { arm: contended, replica: 1 }
+          - { arm: contended, replica: 2 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 9ccc22c315f3aedcbdd811a47c16ce3ff9f06318
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-x64
+          save-if: false
+      - name: Build the lightagent lib tests (python3 has not run)
+        run: cargo test -p lightagent --lib --no-run
+      - name: The run_helper tests, then the affected test once, cold
+        env:
+          ARM: ${{ matrix.arm }}
+        run: |
+          out="$RUNNER_TEMP/diag"; mkdir -p "$out"
+          cat > "$RUNNER_TEMP/sampler.ps1" <<'PS'
+          param($csv, $stop)
+          "wall_ms,cpu_pct,disk_c_pct,python_procs" | Out-File $csv -Encoding utf8
+          while (-not (Test-Path $stop)) {
+            $c = Get-Counter '\Processor(_Total)\% Processor Time','\LogicalDisk(C:)\% Disk Time' -SampleInterval 1 -MaxSamples 1 -ErrorAction SilentlyContinue
+            $v = @($c.CounterSamples | ForEach-Object { [math]::Round($_.CookedValue, 1) })
+            while ($v.Count -lt 2) { $v += -1 }
+            $py = @(Get-Process -Name python* -ErrorAction SilentlyContinue).Count
+            "$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()),$($v -join ','),$py" | Add-Content $csv
+          }
+          PS
+          cat > "$RUNNER_TEMP/load.ps1" <<'PS'
+          param($dir, $stop, $n)
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $buf = New-Object byte[] (4MB)
+          (New-Object Random 7).NextBytes($buf)
+          $i = 0
+          while (-not (Test-Path $stop)) {
+            $path = Join-Path $dir "load-$n-$($i % 2).bin"
+            $fs = [System.IO.FileStream]::new($path, 'Create', 'Write', 'None', 4096, [System.IO.FileOptions]::WriteThrough)
+            for ($k = 0; $k -lt 32 -and -not (Test-Path $stop); $k++) { $fs.Write($buf, 0, $buf.Length) }
+            $fs.Dispose(); $i++
+          }
+          PS
+          s=$(date +%s%3N)
+          cargo test -p lightagent --lib run_helper 2>&1 | tee "$out/helper.log"; echo "${PIPESTATUS[0]}" > "$out/helper-exit.txt"
+          cargo test -p lightagent --lib a_helper_ 2>&1 | tee -a "$out/helper.log"; echo "${PIPESTATUS[0]}" >> "$out/helper-exit.txt"
+          echo "$(( $(date +%s%3N) - s ))" > "$out/helper-ms.txt"
+          pwsh -NoProfile -File "$RUNNER_TEMP/sampler.ps1" "$out/sampler.csv" "$RUNNER_TEMP/stop" &
+          if [ "$ARM" = contended ]; then
+            for n in 1 2 3 4; do pwsh -NoProfile -File "$RUNNER_TEMP/load.ps1" 'C:\lightagent-diag-load' "$RUNNER_TEMP/stop" $n & done
+          fi
+          sleep 15
+          b=$(date +%s%3N); echo "$b" > "$out/test-begin.txt"
+          cargo test -p lightagent --lib installed_mcp_tool_is_listed_callable_and_removed 2>&1 | tee "$out/test.log"; status=${PIPESTATUS[0]}
+          e=$(date +%s%3N); echo "$e" > "$out/test-end.txt"
+          sleep 3
+          touch "$RUNNER_TEMP/stop"; wait || true
+          rm -rf 'C:\lightagent-diag-load' 2>/dev/null || true
+          echo "$status" > "$out/exit.txt"
+      - name: Summarise on the runner
+        if: always()
+        run: |
+          python -I - "$RUNNER_TEMP/diag" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import sys
+          out = sys.argv[1]
+          def read(name):
+              try:
+                  return open(f"{out}/{name}", encoding="utf-8-sig", errors="replace").read().splitlines()
+              except FileNotFoundError:
+                  return []
+          label = "${{ matrix.arm }} ${{ matrix.replica }}"
+          notes = []
+          notes.append(f"helper tests exit {' '.join(read('helper-exit.txt'))} in {(read('helper-ms.txt') or ['?'])[0]} ms")
+          for l in read("helper.log"):
+              if l.startswith("test ") and (" ... " in l):
+                  notes.append(l.strip())
+          notes.append(f"affected test exit {(read('exit.txt') or ['?'])[0]}")
+          for l in read("test.log"):
+              if l.startswith("test result:") or "panicked" in l or "precondition" in l or "unavailable" in l or l.startswith("test chat::"):
+                  notes.append(l.strip())
+          b = int((read("test-begin.txt") or ["0"])[0]); e = int((read("test-end.txt") or ["0"])[0])
+          notes.append(f"affected test wall {e - b} ms")
+          rows = []
+          for l in read("sampler.csv")[1:]:
+              p = l.split(",")
+              try:
+                  rows.append((int(p[0]), float(p[1]), float(p[2]), int(p[3])))
+              except (ValueError, IndexError):
+                  pass
+          win = [r for r in rows if b <= r[0] <= e]
+          if win:
+              dc = sorted(r[2] for r in win)
+              notes.append(f"during the test: {len(win)} samples, C: disk time median {dc[len(dc)//2]} max {dc[-1]}, cpu max {max(r[1] for r in win)}, python processes max {max(r[3] for r in win)}")
+          after = [r for r in rows if r[0] > e]
+          notes.append("python processes after the test: " + (str(after[-1][3]) if after else "no sample"))
+          for n in notes:
+              print("- " + n)
+              print(f"::notice title={label}::{n}", file=sys.stderr)
+          PY
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: readiness-${{ matrix.arm }}-${{ matrix.replica }}
+          path: ${{ runner.temp }}/diag
+          retention-days: 30
+      - name: Fail when a test failed
+        if: always()
+        run: |
+          test "$(cat "$RUNNER_TEMP/diag/exit.txt" 2>/dev/null)" = 0
+          ! grep -qv '^0$' "$RUNNER_TEMP/diag/helper-exit.txt"
+=== end
