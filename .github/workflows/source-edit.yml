@@ -1,0 +1,179 @@
+name: source-edit
+
+# Tooling only (branch tools/source-edit, never merged). Prepares a source
+# change on a GitHub-hosted runner: each request pushed to edit-requests/
+# names a base commit and exact edits. The runner applies them to that
+# commit, formats the touched Rust files, and creates a commit through the
+# git data API without moving any branch. The commit is reported for
+# review; a branch is moved to it separately, never forced.
+#
+# Request format (whole lines; a block's text is its lines plus a newline):
+#   === base <40-hex commit>
+#   === message
+#   <commit message lines>
+#   === replace <path> [count=<n>]      (exactly n occurrences, default 1)
+#   --- find
+#   <lines>
+#   --- with
+#   <lines>
+#   === write <path>                    (create or replace the whole file)
+#   <lines>
+#   === end
+
+on:
+  push:
+    branches: [tools/source-edit]
+    paths: ['edit-requests/**']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: source-edit
+  cancel-in-progress: false
+
+jobs:
+  edit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: tools
+          fetch-depth: 2
+      - name: Find the request this push added
+        id: req
+        run: |
+          cd tools
+          f=$(git diff --name-only --diff-filter=A HEAD~1 HEAD -- edit-requests | head -1)
+          test -n "$f" || { echo "::error::no new request in this push"; exit 1; }
+          echo "file=$PWD/$f" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$f")" >> "$GITHUB_OUTPUT"
+          base=$(sed -n 's/^=== base \([0-9a-f]\{40\}\)$/\1/p' "$f" | head -1)
+          test -n "$base" || { echo "::error::request names no base commit"; exit 1; }
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.req.outputs.base }}
+          path: src
+          persist-credentials: false
+      - name: Apply the edits exactly
+        run: |
+          python3 - "${{ steps.req.outputs.file }}" src <<'PY'
+          import os, sys
+          req, root = sys.argv[1], os.path.realpath(sys.argv[2])
+          lines = open(req, encoding="utf-8").read().split("\n")
+          if lines and lines[-1] == "":
+              lines.pop()
+          ops, message, i = [], None, 0
+          def block(stop):
+              global i
+              out = []
+              while i < len(lines) and not any(lines[i].startswith(s) for s in stop):
+                  out.append(lines[i]); i += 1
+              return "".join(l + "\n" for l in out)
+          def safe(path):
+              full = os.path.realpath(os.path.join(root, path))
+              if os.path.isabs(path) or not full.startswith(root + os.sep):
+                  sys.exit(f"refused path {path!r}")
+              return full
+          while i < len(lines):
+              line = lines[i]; i += 1
+              if line.startswith("=== base ") or line == "":
+                  continue
+              if line == "=== message":
+                  message = block(["=== "]).rstrip("\n") + "\n"
+              elif line.startswith("=== replace "):
+                  parts = line[len("=== replace "):].split()
+                  path, count = parts[0], 1
+                  for p in parts[1:]:
+                      if p.startswith("count="):
+                          count = int(p[6:])
+                  if lines[i] != "--- find":
+                      sys.exit(f"replace {path}: expected '--- find'")
+                  i += 1
+                  find = block(["--- with"])
+                  i += 1
+                  repl = block(["=== "])
+                  ops.append(("replace", path, find, repl, count))
+              elif line.startswith("=== write "):
+                  ops.append(("write", line[len("=== write "):].strip(), block(["=== "]), None, None))
+              elif line == "=== end":
+                  break
+              else:
+                  sys.exit(f"unknown directive {line!r}")
+          if not message or not ops:
+              sys.exit("a request needs a message and at least one edit")
+          touched = []
+          for kind, path, a, b, count in ops:
+              full = safe(path)
+              if kind == "write":
+                  os.makedirs(os.path.dirname(full), exist_ok=True)
+                  open(full, "w", encoding="utf-8", newline="\n").write(a)
+              else:
+                  text = open(full, encoding="utf-8", newline="").read()
+                  found = text.count(a)
+                  if found != count:
+                      sys.exit(f"replace in {path}: expected {count} occurrence(s), found {found}")
+                  open(full, "w", encoding="utf-8", newline="").write(text.replace(a, b))
+              touched.append(path)
+          open(os.environ["RUNNER_TEMP"] + "/message", "w", encoding="utf-8").write(message)
+          open(os.environ["RUNNER_TEMP"] + "/touched", "w").write("\n".join(sorted(set(touched))) + "\n")
+          print("applied", len(ops), "edit(s) to", len(set(touched)), "file(s)")
+          PY
+      - name: Format the touched Rust files
+        working-directory: src
+        run: |
+          if grep -q '\.rs$' "$RUNNER_TEMP/touched"; then
+            rustup show >/dev/null
+            cargo fmt --all
+          fi
+          # Formatting must not reach any file the request did not touch.
+          git status --porcelain | cut -c4- | sort > "$RUNNER_TEMP/changed"
+          if ! comm -23 "$RUNNER_TEMP/changed" "$RUNNER_TEMP/touched" | grep -q .; then
+            echo "changed files are a subset of the touched files"
+          else
+            echo "::error::files outside the request changed:"; comm -23 "$RUNNER_TEMP/changed" "$RUNNER_TEMP/touched"; exit 1
+          fi
+      - name: Create the commit (no branch is moved)
+        working-directory: src
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ steps.req.outputs.base }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          repo=${{ github.repository }}
+          base_tree=$(gh api repos/$repo/git/commits/$BASE --jq .tree.sha)
+          entries='[]'
+          while read -r path; do
+            [ -n "$path" ] || continue
+            if [ -f "$path" ]; then
+              blob=$(base64 -w0 "$path" | jq -Rs '{content: ., encoding: "base64"}' | gh api repos/$repo/git/blobs --input - --jq .sha)
+              mode=$( [ -x "$path" ] && echo 100755 || echo 100644 )
+              entries=$(jq -c --arg p "$path" --arg s "$blob" --arg m "$mode" '. + [{path:$p,mode:$m,type:"blob",sha:$s}]' <<<"$entries")
+            else
+              entries=$(jq -c --arg p "$path" '. + [{path:$p,mode:"100644",type:"blob",sha:null}]' <<<"$entries")
+            fi
+          done < <(git status --porcelain | cut -c4-)
+          tree=$(jq -n --arg b "$base_tree" --argjson e "$entries" '{base_tree:$b, tree:$e}' | gh api repos/$repo/git/trees --input - --jq .sha)
+          commit=$(jq -n --rawfile m "$RUNNER_TEMP/message" --arg t "$tree" --arg p "$BASE" --arg a "$ACTOR" \
+            '{message:$m, tree:$t, parents:[$p], author:{name:$a, email:($a+"@users.noreply.github.com")}}' \
+            | gh api repos/$repo/git/commits --input - --jq .sha)
+          {
+            echo "## Prepared commit"
+            echo "request: ${{ steps.req.outputs.name }}"
+            echo "commit: $commit"
+            echo "tree: $tree"
+            echo "parent: $BASE"
+            echo '```'; git diff --stat; echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          git diff > "$RUNNER_TEMP/change.diff"
+          echo "$commit $tree" > "$RUNNER_TEMP/result.txt"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: prepared-${{ steps.req.outputs.name }}
+          path: |
+            ${{ runner.temp }}/result.txt
+            ${{ runner.temp }}/change.diff
+          retention-days: 30
