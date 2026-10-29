@@ -4,8 +4,10 @@ name: source-edit
 # change on a GitHub-hosted runner: each request pushed to edit-requests/
 # names a base commit and exact edits. The runner applies them to that
 # commit, formats the touched Rust files, and creates a commit through the
-# git data API without moving any branch. The commit is reported for
-# review; a branch is moved to it separately, never forced.
+# git data API without moving any branch. Workflow files cannot be committed
+# with this job's token, so the runner creates their blobs only and reports
+# each blob id; the final commit attaches those blobs by id, and a branch is
+# moved to it separately, never forced.
 #
 # Request format (whole lines; a block's text is its lines plus a newline):
 #   === base <40-hex commit>
@@ -129,7 +131,7 @@ jobs:
             cargo fmt --all
           fi
           # Formatting must not reach any file the request did not touch.
-          git status --porcelain | cut -c4- | sort > "$RUNNER_TEMP/changed"
+          git status --porcelain --untracked-files=all | cut -c4- | sort > "$RUNNER_TEMP/changed"
           if ! comm -23 "$RUNNER_TEMP/changed" "$RUNNER_TEMP/touched" | grep -q .; then
             echo "changed files are a subset of the touched files"
           else
@@ -146,17 +148,30 @@ jobs:
           repo=${{ github.repository }}
           base_tree=$(gh api repos/$repo/git/commits/$BASE --jq .tree.sha)
           entries='[]'
+          : > "$RUNNER_TEMP/workflow-blobs.txt"
           while read -r path; do
             [ -n "$path" ] || continue
             if [ -f "$path" ]; then
               blob=$(base64 -w0 "$path" | jq -Rs '{content: ., encoding: "base64"}' | gh api repos/$repo/git/blobs --input - --jq .sha)
               mode=$( [ -x "$path" ] && echo 100755 || echo 100644 )
+              if [[ $path == .github/workflows/* ]]; then
+                echo "$path $blob $mode" >> "$RUNNER_TEMP/workflow-blobs.txt"
+                continue
+              fi
               entries=$(jq -c --arg p "$path" --arg s "$blob" --arg m "$mode" '. + [{path:$p,mode:$m,type:"blob",sha:$s}]' <<<"$entries")
             else
+              if [[ $path == .github/workflows/* ]]; then
+                echo "$path - deleted" >> "$RUNNER_TEMP/workflow-blobs.txt"
+                continue
+              fi
               entries=$(jq -c --arg p "$path" '. + [{path:$p,mode:"100644",type:"blob",sha:null}]' <<<"$entries")
             fi
-          done < <(git status --porcelain | cut -c4-)
-          tree=$(jq -n --arg b "$base_tree" --argjson e "$entries" '{base_tree:$b, tree:$e}' | gh api repos/$repo/git/trees --input - --jq .sha)
+          done < <(git status --porcelain --untracked-files=all | cut -c4-)
+          if [ "$entries" = '[]' ]; then
+            tree=$base_tree
+          else
+            tree=$(jq -n --arg b "$base_tree" --argjson e "$entries" '{base_tree:$b, tree:$e}' | gh api repos/$repo/git/trees --input - --jq .sha)
+          fi
           commit=$(jq -n --rawfile m "$RUNNER_TEMP/message" --arg t "$tree" --arg p "$BASE" --arg a "$ACTOR" \
             '{message:$m, tree:$t, parents:[$p], author:{name:$a, email:($a+"@users.noreply.github.com")}}' \
             | gh api repos/$repo/git/commits --input - --jq .sha)
@@ -166,11 +181,16 @@ jobs:
             echo "commit: $commit"
             echo "tree: $tree"
             echo "parent: $BASE"
-            echo '```'; git diff --stat; echo '```'
+            echo "workflow blobs to attach (path blob mode):"
+            sed 's/^/    /' "$RUNNER_TEMP/workflow-blobs.txt"
+            echo '```'; git add -A; git diff --cached --stat; echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
-          git diff > "$RUNNER_TEMP/change.diff"
-          echo "$commit $tree" > "$RUNNER_TEMP/result.txt"
+          git diff --cached > "$RUNNER_TEMP/change.diff"
+          echo "commit $commit" > "$RUNNER_TEMP/result.txt"
+          echo "tree $tree" >> "$RUNNER_TEMP/result.txt"
+          sed 's/^/workflow /' "$RUNNER_TEMP/workflow-blobs.txt" >> "$RUNNER_TEMP/result.txt"
       - uses: actions/upload-artifact@v7
+        if: always()
         with:
           name: prepared-${{ steps.req.outputs.name }}
           path: |
