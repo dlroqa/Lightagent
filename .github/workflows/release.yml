@@ -1,31 +1,100 @@
 name: release
 
+# A pushed tag `v<version>` builds, smoke-tests and checksums every package,
+# then drafts a GitHub release. A manual run is a dry run unless `dry_run` is
+# turned off: it builds the same packages and uploads them with SHA256SUMS as
+# run artifacts, and creates no release or tag. Turning `dry_run` off is only
+# accepted on the tag itself. scripts/release-gate.sh makes the decision and
+# scripts/test-release-gate.py tests it, and the shape of this file, in check.
+
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build, smoke-test and checksum only; create no release
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
 jobs:
+  gate:
+    name: release gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      publish: ${{ steps.decide.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: decide
+        # `shell: bash` adds pipefail, so a refusal fails the step through tee.
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DRY_RUN: ${{ toJSON(inputs.dry_run) }}
+        run: bash ./scripts/release-gate.sh | tee -a "$GITHUB_OUTPUT"
+
   build:
     name: build (${{ matrix.label }})
+    needs: gate
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    # Every package is built and smoke-tested natively on its own architecture;
+    # `arch` is what the runner must report, checked below, not inferred from
+    # the label. `macos_min` is the package's minimum macOS (its deployment
+    # target): 11.0 is the floor for Apple silicon, and 10.14 for Intel is the
+    # floor of rustls-platform-verifier (Security.framework), above Rust's 10.12.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-15, label: macos-arm64, triple: aarch64-apple-darwin }
-          - { os: windows-latest, label: windows-x64, triple: x86_64-pc-windows-msvc }
-          - { os: ubuntu-22.04, label: linux-x64, triple: x86_64-unknown-linux-gnu }
+          - { os: macos-15, label: macos-arm64, triple: aarch64-apple-darwin, arch: arm64, macos_min: '11.0' }
+          - { os: macos-15-intel, label: macos-x64, triple: x86_64-apple-darwin, arch: x86_64, macos_min: '10.14' }
+          - { os: windows-latest, label: windows-x64, triple: x86_64-pc-windows-msvc, arch: x86_64 }
+          - { os: ubuntu-22.04, label: linux-x64, triple: x86_64-unknown-linux-gnu, arch: x86_64 }
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v7
       - run: rustup show
+      - name: Runner architecture
+        env:
+          WANT_ARCH: ${{ matrix.arch }}
+          WANT_TRIPLE: ${{ matrix.triple }}
+        run: |
+          arch="$(uname -m)"
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          {
+            echo "### ${{ matrix.label }} runner"
+            echo "- uname: $(uname -srm)"
+            echo "- rustc host: $host"
+            if [ "$(uname -s)" = Darwin ]; then
+              echo "- macOS: $(sw_vers -productVersion) ($(sw_vers -buildVersion))"
+              echo "- CPU: $(sysctl -n machdep.cpu.brand_string)"
+              echo "- hw.optional.arm64: $(sysctl -n hw.optional.arm64 2>/dev/null || echo absent)"
+              echo "- sysctl.proc_translated: $(sysctl -n sysctl.proc_translated 2>/dev/null || echo absent)"
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$arch" = "$WANT_ARCH" ] || { echo "runner is $arch, expected $WANT_ARCH" >&2; exit 1; }
+          [ "$host" = "$WANT_TRIPLE" ] || { echo "rustc host is $host, expected $WANT_TRIPLE" >&2; exit 1; }
+          if [ "$(uname -s)" = Darwin ]; then
+            # Rosetta reports x86_64 from uname on Apple silicon; neither may
+            # stand in for the real hardware.
+            [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 0 ] \
+              || { echo "running under Rosetta translation" >&2; exit 1; }
+            if [ "$WANT_ARCH" = x86_64 ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = 1 ]; then
+              echo "an Apple silicon machine, not an Intel Mac" >&2; exit 1
+            fi
+          fi
+      - name: macOS deployment target
+        if: matrix.macos_min
+        run: echo "MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos_min }}" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.label }}
@@ -46,9 +115,41 @@ jobs:
           if-no-files-found: error
           path: dist-cli/lightagent-*
 
+  # Runs for dry runs and releases alike, so a dry run's SHA256SUMS is the
+  # file a release would attach.
+  checksums:
+    name: checksums
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: lightagent-*
+          path: release-assets
+          merge-multiple: true
+      - name: Checksums
+        working-directory: release-assets
+        env:
+          # One archive per build matrix entry; test-release-gate.py keeps
+          # the two equal.
+          PACKAGES: 4
+        run: |
+          ls -l
+          count="$(ls lightagent-* | wc -l | tr -d ' ')"
+          [ "$count" = "$PACKAGES" ] || { echo "found $count packages, expected $PACKAGES" >&2; exit 1; }
+          sha256sum lightagent-* > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-SHA256SUMS
+          if-no-files-found: error
+          path: release-assets/SHA256SUMS
+
   publish:
     name: draft GitHub release
-    needs: build
+    needs: [gate, build, checksums]
+    if: needs.gate.outputs.publish == 'true' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -58,9 +159,10 @@ jobs:
           pattern: lightagent-*
           path: release-assets
           merge-multiple: true
-      - name: Checksums
-        working-directory: release-assets
-        run: sha256sum lightagent-* > SHA256SUMS
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-SHA256SUMS
+          path: release-assets
       - uses: softprops/action-gh-release@v2
         with:
           draft: true

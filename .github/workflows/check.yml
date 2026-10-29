@@ -26,20 +26,58 @@ jobs:
   check:
     name: check (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # The 4-core Intel runner builds the workspace from a cold cache in well
+    # over the others' time; it gets a longer limit, not fewer checks.
+    timeout-minutes: ${{ matrix.timeout || 60 }}
+    # One entry per released platform (release.yml's matrix), each run
+    # natively: `arch` and `host` are checked before anything is built, and
+    # `macos_min` is the deployment target its package is built with.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-15, label: macos-arm64 }
-          - { os: windows-latest, label: windows-x64 }
-          - { os: ubuntu-24.04, label: linux-x64 }
+          - { os: macos-15, label: macos-arm64, arch: arm64, host: aarch64-apple-darwin, macos_min: '11.0' }
+          - { os: macos-15-intel, label: macos-x64, arch: x86_64, host: x86_64-apple-darwin, macos_min: '10.14', timeout: 120 }
+          - { os: windows-latest, label: windows-x64, arch: x86_64, host: x86_64-pc-windows-msvc }
+          - { os: ubuntu-24.04, label: linux-x64, arch: x86_64, host: x86_64-unknown-linux-gnu }
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v7
       - run: rustup show
+      - name: Runner architecture
+        env:
+          WANT_ARCH: ${{ matrix.arch }}
+          WANT_HOST: ${{ matrix.host }}
+        run: |
+          arch="$(uname -m)"
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          {
+            echo "### check (${{ matrix.label }}) runner"
+            echo "- uname: $(uname -srm)"
+            echo "- rustc host: $host"
+            if [ "$(uname -s)" = Darwin ]; then
+              echo "- macOS: $(sw_vers -productVersion) ($(sw_vers -buildVersion))"
+              echo "- CPU: $(sysctl -n machdep.cpu.brand_string)"
+              echo "- hw.optional.arm64: $(sysctl -n hw.optional.arm64 2>/dev/null || echo absent)"
+              echo "- sysctl.proc_translated: $(sysctl -n sysctl.proc_translated 2>/dev/null || echo absent)"
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$arch" = "$WANT_ARCH" ] || { echo "runner is $arch, expected $WANT_ARCH" >&2; exit 1; }
+          [ "$host" = "$WANT_HOST" ] || { echo "rustc host is $host, expected $WANT_HOST" >&2; exit 1; }
+          if [ "$(uname -s)" = Darwin ]; then
+            # Rosetta reports x86_64 from uname on Apple silicon; neither may
+            # stand in for the real hardware.
+            [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 0 ] \
+              || { echo "running under Rosetta translation" >&2; exit 1; }
+            if [ "$WANT_ARCH" = x86_64 ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = 1 ]; then
+              echo "an Apple silicon machine, not an Intel Mac" >&2; exit 1
+            fi
+          fi
+      - name: macOS deployment target
+        if: matrix.macos_min
+        run: echo "MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos_min }}" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.label }}
@@ -323,3 +361,18 @@ jobs:
       - run: npm run build --prefix frontend
       - run: cargo build --release -p lightagent
       - run: bash ./scripts/smoke-lightagent-package.sh
+
+  release-gate:
+    # Whether release.yml may write a release: every dispatch, tag and event
+    # case through scripts/release-gate.sh, and the workflow's permissions and
+    # release-writing steps. Runs no build and contacts nothing.
+    name: release gate tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'pyyaml==6.0.2'
+      - run: python scripts/test-release-gate.py -v

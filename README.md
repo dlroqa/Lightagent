@@ -19,8 +19,23 @@ is one supported local provider, not a library or workspace dependency.
 ### Install a prebuilt release
 
 Download and extract the archive for your platform from
-[Lightagent Releases](https://github.com/dlroqa/Lightagent/releases), then run
-these commands from the extracted directory:
+[Lightagent Releases](https://github.com/dlroqa/Lightagent/releases), and check
+it against the release's `SHA256SUMS` (nothing is code-signed):
+
+| Platform | Archive | Tested (full CI) and smoke-tested on |
+| --- | --- | --- |
+| macOS, Apple silicon (11.0 or later) | `lightagent-<version>-aarch64-apple-darwin.tar.gz` | GitHub-hosted `macos-15` (arm64) |
+| macOS, Intel (10.14 or later declared; see below) | `lightagent-<version>-x86_64-apple-darwin.tar.gz` | GitHub-hosted `macos-15-intel` (x86_64) |
+| Windows x64 | `lightagent-<version>-x86_64-pc-windows-msvc.zip` | GitHub-hosted `windows-latest` |
+| Linux x64 | `lightagent-<version>-x86_64-unknown-linux-gnu.tar.gz` | GitHub-hosted `ubuntu-22.04` |
+
+The macOS minimums are the deployment targets recorded in each binary. The
+Intel floor of 10.14 comes from the TLS certificate verifier
+(`rustls-platform-verifier`, which uses `Security.framework`). Each release
+runs only on the macOS versions in the table, so older versions are declared
+but untested.
+
+Then run these commands from the extracted directory:
 
 ```sh
 ./lightagent init

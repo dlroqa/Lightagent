@@ -58,7 +58,32 @@ done
 echo "== run =="
 bin="$root/lightagent$EXE"
 chmod +x "$bin" 2>/dev/null || true
-"$bin" --version >/dev/null 2>&1 && pass "--version runs" || fail "--version failed"
+
+# On macOS the packaged binary must be exactly this machine's architecture
+# (not a universal or translated binary), and must declare the minimum macOS
+# the build asked for. What it declares is a floor the linker recorded; only
+# the macOS this runs on is actually exercised.
+case "$TRIPLE" in
+  *apple-darwin)
+    want="${TRIPLE%%-*}"
+    [ "$want" = aarch64 ] && want=arm64
+    archs="$(lipo -archs "$bin" 2>/dev/null || true)"
+    [ "$archs" = "$want" ] && pass "binary architecture is $want" || fail "binary architecture is '$archs', expected $want"
+    minos="$(vtool -show-build "$bin" 2>/dev/null | awk '$1 == "minos" { print $2; exit }')"
+    echo "  info  minimum macOS recorded in the binary: ${minos:-unknown}; running on macOS $(sw_vers -productVersion)"
+    if [ -n "${MACOSX_DEPLOYMENT_TARGET:-}" ]; then
+      [ "$minos" = "$MACOSX_DEPLOYMENT_TARGET" ] && pass "minimum macOS is $minos" \
+        || fail "minimum macOS is '${minos:-unknown}', expected $MACOSX_DEPLOYMENT_TARGET"
+    fi
+    otool -L "$bin" | sed 's/^/  info  /'
+    ;;
+esac
+
+if version_line="$("$bin" --version 2>&1)"; then
+  pass "--version runs: $version_line"
+else
+  fail "--version failed"
+fi
 "$bin" banner --preview 2>&1 | grep -q $'▀' && pass "banner renders" || fail "banner did not render"
 
 # `doctor` in a throwaway home, pointed at reserved port zero so a developer's
