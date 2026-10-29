@@ -116,7 +116,10 @@ All notable Lightagent changes are documented here.
   `credential_empty`, or `credential_invalid_header` (a value the HTTP
   client could not send). It never shows the value, the path or variable,
   or an error's text. Other servers, servers without `auth`, and runs not
-  granted the credentials are unchanged. `SecretRef::lookup` is new;
+  granted the credentials are unchanged: for those runs `auth` is never
+  looked up, and a server granted to them is contacted without credentials
+  as before. Refusing unusable credentials grants no access: a profile not
+  granted a server still never reaches it. `SecretRef::lookup` is new;
   `SecretRef::resolve` is unchanged.
 
 ## [0.5.0] - Unreleased (prepared 2026-10-22; set the date when tagging)
