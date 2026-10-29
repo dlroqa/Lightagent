@@ -4,12 +4,19 @@ All notable Lightagent changes are documented here.
 
 ## [Unreleased]
 
-## [0.5.0] - Unreleased (prepared 2026-10-22; set the date when tagging)
+## [0.5.0] - 2026-10-29
 
 Release notes: `docs/releases/v0.5.0.md`.
 
 ### Added
 
+- An Intel Mac package, `lightagent-<version>-x86_64-apple-darwin.tar.gz`,
+  built and smoke-tested natively on GitHub's Intel `macos-15-intel` runner.
+  It declares macOS 10.14 as its minimum (the floor of
+  `rustls-platform-verifier`); only macOS 15 is exercised. The Apple silicon
+  package now states its 11.0 minimum explicitly. Each build checks the
+  runner's real architecture first, and the macOS smoke test checks the
+  binary's architecture and recorded minimum.
 - Specialist workers. The roles researcher, coder, reviewer and tester are
   now typed built-in definitions, each with a versioned role skill, a tool
   ceiling, readiness requirements, an output contract and a resource
@@ -225,10 +232,11 @@ Release notes: `docs/releases/v0.5.0.md`.
 - A manual run of the release workflow is a dry run unless its typed
   `dry_run` input (default `true`) is turned off, and turning it off is only
   accepted on the tag `v<version>`. Every run builds, smoke-tests and
-  checksums the packages and uploads them with `SHA256SUMS` as run
-  artifacts. Only the gated `publish` job has write permission and drafts the
-  release, for a matching tag push as before. `scripts/release-gate.sh`
-  decides, and `scripts/test-release-gate.py` tests it in `check`.
+  checksums the four packages and uploads them with `SHA256SUMS` as run
+  artifacts; checksums fail unless every package is present. Only the gated
+  `publish` job has write permission and drafts the release, for a matching
+  tag push as before. `scripts/release-gate.sh` decides, and
+  `scripts/test-release-gate.py` tests it in `check`.
 
 ### Fixed
 

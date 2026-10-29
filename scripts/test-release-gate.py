@@ -200,13 +200,65 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertNotIn("sha256sum", self.steps_text("publish"))
         self.assertIn("release-SHA256SUMS", self.steps_text("publish"))
 
+    def matrix(self):
+        return self.jobs["build"]["strategy"]["matrix"]["include"]
+
     def test_every_platform_is_still_built(self):
-        triples = {e["triple"] for e in self.jobs["build"]["strategy"]["matrix"]["include"]}
+        triples = {e["triple"] for e in self.matrix()}
         self.assertEqual(
             triples,
-            {"aarch64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"},
+            {
+                "aarch64-apple-darwin",
+                "x86_64-apple-darwin",
+                "x86_64-pc-windows-msvc",
+                "x86_64-unknown-linux-gnu",
+            },
         )
         self.assertIs(self.jobs["build"]["strategy"]["fail-fast"], False)
+
+    def test_package_and_artifact_names_are_distinct(self):
+        for key in ("triple", "label"):
+            values = [e[key] for e in self.matrix()]
+            self.assertEqual(len(values), len(set(values)), key)
+
+    def test_each_package_is_built_natively_on_a_checked_architecture(self):
+        expected = {
+            # triple: (runner label from GitHub's documented hosted runners, uname -m)
+            "aarch64-apple-darwin": ("macos-15", "arm64"),
+            "x86_64-apple-darwin": ("macos-15-intel", "x86_64"),
+            "x86_64-pc-windows-msvc": ("windows-latest", "x86_64"),
+            "x86_64-unknown-linux-gnu": ("ubuntu-22.04", "x86_64"),
+        }
+        for entry in self.matrix():
+            self.assertEqual((entry["os"], entry["arch"]), expected[entry["triple"]], entry)
+        (step,) = [s for s in self.jobs["build"]["steps"] if s.get("name") == "Runner architecture"]
+        self.assertEqual(step["env"], {"WANT_ARCH": "${{ matrix.arch }}", "WANT_TRIPLE": "${{ matrix.triple }}"})
+        for check in ('"$arch" = "$WANT_ARCH"', '"$host" = "$WANT_TRIPLE"', "sysctl.proc_translated", "hw.optional.arm64"):
+            self.assertIn(check, step["run"])
+        # The check runs before anything is built.
+        names = [s.get("name") or s.get("run") or s.get("uses") for s in self.jobs["build"]["steps"]]
+        self.assertLess(names.index("Runner architecture"), names.index("cargo build --release -p lightagent --target ${{ matrix.triple }}"))
+
+    def test_macos_packages_declare_their_minimum(self):
+        floors = {e["triple"]: e.get("macos_min") for e in self.matrix()}
+        self.assertEqual(floors["aarch64-apple-darwin"], "11.0")
+        self.assertEqual(floors["x86_64-apple-darwin"], "10.14")
+        self.assertIsNone(floors["x86_64-pc-windows-msvc"])
+        self.assertIsNone(floors["x86_64-unknown-linux-gnu"])
+        (step,) = [s for s in self.jobs["build"]["steps"] if s.get("name") == "macOS deployment target"]
+        self.assertEqual(step["if"], "matrix.macos_min")
+        self.assertIn("MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos_min }}", step["run"])
+        self.assertIn('"$GITHUB_ENV"', step["run"])
+
+    def test_checksums_require_every_package(self):
+        (step,) = [s for s in self.jobs["checksums"]["steps"] if s.get("name") == "Checksums"]
+        self.assertEqual(int(step["env"]["PACKAGES"]), len(self.matrix()))
+        self.assertIn('"$count" = "$PACKAGES"', step["run"])
+
+    def test_smoke_checks_macos_architecture_and_minimum(self):
+        smoke = (ROOT / "scripts" / "smoke-lightagent-package.sh").read_text(encoding="utf-8")
+        for check in ("lipo -archs", "vtool -show-build", "MACOSX_DEPLOYMENT_TARGET"):
+            self.assertIn(check, smoke)
 
 
 if __name__ == "__main__":
