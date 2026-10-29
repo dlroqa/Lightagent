@@ -1,0 +1,13 @@
+=== base 76b43c308686b25190b3a6eb28c4ef426cddb90b
+=== message
+diag: find a diag job's summary by its command, not its step name (never merged)
+
+Job logs do not carry step names.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace .github/workflows/test-evidence.yml
+--- find
+                  start = next((i for i, l in enumerate(lines) if "Summarise on the runner" in l), None)
+--- with
+                  start = next((i for i, l in enumerate(lines) if "Run python -I - " in l), None)
+=== end
