@@ -1,0 +1,28 @@
+=== base 52771bbf1c58f5e3616a728b94f56b8979de63ec
+=== message
+diag: report the tester broker's evidence lines too (never merged)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace .github/workflows/test-evidence.yml
+--- find
+              else:
+                  start = next((i for i, l in enumerate(lines) if "Summarise on the runner" in l), None)
+--- with
+              elif kind == "broker":
+                  seen = []
+                  for l in lines:
+                      m = re.match(r"(EVIDENCE|BLOCKED)\b.*", l)
+                      if m and m.group(0) not in seen:
+                          seen.append(m.group(0))
+                  facts += seen or ["no evidence lines"]
+              else:
+                  start = next((i for i, l in enumerate(lines) if "Summarise on the runner" in l), None)
+=== replace evidence-jobs.txt
+--- find
+candidate-4bfea7d-windows check 123263241814
+--- with
+candidate-4bfea7d-windows check 123263241814
+broker-pr84-9ccc22c broker 123259580354
+broker-pr83-238b921 broker 123260406684
+broker-candidate-4bfea7d broker 123263241693
+=== end
