@@ -80,7 +80,7 @@ jobs:
                           seen.append(m.group(0))
                   facts += seen or ["no evidence lines"]
               else:
-                  start = next((i for i, l in enumerate(lines) if "Summarise on the runner" in l), None)
+                  start = next((i for i, l in enumerate(lines) if "Run python -I - " in l), None)
                   if start is not None:
                       facts += [l[2:] for l in lines[start:] if l.startswith("- ")]
               message = " | ".join(facts)
