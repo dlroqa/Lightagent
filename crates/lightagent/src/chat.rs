@@ -3462,6 +3462,7 @@ mod model_tests {
 
     #[tokio::test]
     async fn installed_mcp_tool_is_listed_callable_and_removed() {
+        lightagent_mcp::diag::event("test.installed_mcp.start");
         if !std::process::Command::new("python3")
             .arg("--version")
             .output()
@@ -3508,7 +3509,9 @@ for line in sys.stdin:
         let mut config = Config::default();
         config.mcp.enabled = true;
         let extensions = ExtensionStore::load(std::slice::from_ref(&root));
+        lightagent_mcp::diag::event("test.installed_mcp.registry.begin");
         let registry = configured_registry(&config, &scratch, &extensions, false).await;
+        lightagent_mcp::diag::event("test.installed_mcp.registry.end");
         let tool = registry
             .get("mcp.fixture.where")
             .expect("MCP tool in live registry");

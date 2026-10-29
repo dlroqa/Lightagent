@@ -38,6 +38,8 @@ pub const PROTOCOL_VERSION: &str = "2025-06-18";
 // --- stdio -----------------------------------------------------------------
 
 struct StdioInner {
+    /// DIAGNOSTIC ONLY: the child's id, for the timeline.
+    pid: u32,
     pending: StdMutex<HashMap<i64, oneshot::Sender<Value>>>,
     stdin: AsyncMutex<ChildStdin>,
     next_id: AtomicI64,
@@ -176,13 +178,17 @@ impl Drop for StdioConnection {
         let Some(mut child) = self.child.get_mut().take() else {
             return;
         };
+        let pid = child.id().unwrap_or(0);
         if matches!(child.try_wait(), Ok(Some(_))) {
+            crate::diag::event(&format!("stdio.drop.already_exited pid={pid}"));
             return;
         }
         // Stop it now; it would be killed on drop in any case.
         let _ = child.start_kill();
+        crate::diag::event(&format!("stdio.drop.killed pid={pid}"));
         let (Some(cwd), Ok(runtime)) = (self.cwd.clone(), tokio::runtime::Handle::try_current())
         else {
+            crate::diag::event(&format!("stdio.drop.not_awaited pid={pid}"));
             return;
         };
         let id = NEXT_STOPPING.fetch_add(1, Ordering::Relaxed);
@@ -191,6 +197,7 @@ impl Drop for StdioConnection {
         }
         runtime.spawn(async move {
             let _ = child.wait().await;
+            crate::diag::event(&format!("stdio.reaped pid={pid}"));
             if let Ok(mut stopping) = STOPPING.lock() {
                 stopping.remove(&id);
             }
@@ -228,9 +235,13 @@ impl StdioConnection {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        crate::diag::event("stdio.spawn.begin");
         let mut child = cmd.spawn().map_err(|error| {
+            crate::diag::event("stdio.spawn.failed");
             McpError::Transport(format!("could not start {command:?}: {error}"))
         })?;
+        let pid = child.id().unwrap_or(0);
+        crate::diag::event(&format!("stdio.spawned pid={pid}"));
         let stdin = child
             .stdin
             .take()
@@ -243,6 +254,7 @@ impl StdioConnection {
         let (stderr_finished, stderr_done) = watch::channel(false);
 
         let inner = std::sync::Arc::new(StdioInner {
+            pid,
             pending: StdMutex::new(HashMap::new()),
             stdin: AsyncMutex::new(stdin),
             next_id: AtomicI64::new(1),
@@ -320,6 +332,7 @@ impl StdioConnection {
                 // Server-initiated requests and notifications are ignored: this
                 // client exposes tools and needs no server-driven callbacks.
             }
+            crate::diag::event(&format!("stdio.stdout.ended pid={}", reader_inner.pid));
             // The output ended: nothing waiting will be answered, so fail every
             // pending request now rather than at its deadline.
             reader_inner.closed.store(true, Ordering::SeqCst);
@@ -409,10 +422,31 @@ impl Connection for StdioConnection {
             }
             return Err(self.write_failed(error).await);
         }
+        let pid = self.inner.pid;
+        crate::diag::event(&format!(
+            "stdio.request.sent pid={pid} id={id} method={method}"
+        ));
+        let sent = std::time::Instant::now();
         match tokio::time::timeout(self.inner.timeout, receiver).await {
-            Ok(Ok(message)) => jsonrpc::read_result(message),
-            Ok(Err(_)) => Err(self.closed().await),
+            Ok(Ok(message)) => {
+                let after = sent.elapsed().as_millis();
+                crate::diag::event(&format!(
+                    "stdio.request.answered pid={pid} id={id} after_ms={after}"
+                ));
+                jsonrpc::read_result(message)
+            }
+            Ok(Err(_)) => {
+                let after = sent.elapsed().as_millis();
+                crate::diag::event(&format!(
+                    "stdio.request.closed pid={pid} id={id} after_ms={after}"
+                ));
+                Err(self.closed().await)
+            }
             Err(_) => {
+                let after = sent.elapsed().as_millis();
+                crate::diag::event(&format!(
+                    "stdio.request.timeout pid={pid} id={id} after_ms={after}"
+                ));
                 if let Ok(mut pending) = self.inner.pending.lock() {
                     pending.remove(&id);
                 }

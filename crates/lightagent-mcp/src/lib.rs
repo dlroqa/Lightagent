@@ -23,6 +23,7 @@
 
 pub mod client;
 pub mod connection;
+pub mod diag;
 pub mod hub;
 pub mod jsonrpc;
 pub mod tool;
