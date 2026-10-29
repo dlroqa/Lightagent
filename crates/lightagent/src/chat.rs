@@ -4290,10 +4290,12 @@ for line in sys.stdin:
     }
 
     /// The replaced helper, with the clock held still: two tests are handed
-    /// one directory, the other's cleanup deletes the token file, and the
-    /// server is reached with the custom header but no bearer, the
-    /// `(false, true)` of the failed macOS run. Under the same collision,
-    /// `exclusive_dir` gives the second test a directory of its own.
+    /// one directory, and the other's cleanup deletes the token file. That
+    /// used to reach the server with the custom header but no bearer, the
+    /// `(false, true)` of the failed macOS run; a configured `auth` that
+    /// cannot be read now keeps the server unreached instead. Under the same
+    /// collision, `exclusive_dir` gives the second test a directory of its
+    /// own, and the bearer is sent.
     #[tokio::test]
     async fn a_shared_token_directory_dropped_the_bearer_under_the_replaced_helper() {
         lightagent_provider_lightweight::ensure_provider();
@@ -4314,9 +4316,12 @@ for line in sys.stdin:
         let other = replaced(1_000);
         assert_eq!(mine, other, "both tests were handed one directory");
         std::fs::remove_dir_all(&other).unwrap();
-        let tools = mcp_tools(&config, &none, RemoteAccess::Operator).await;
-        assert_eq!(tools.len(), 3);
-        assert_eq!(sent_credentials(&log.lock().unwrap()), (false, true));
+        assert!(
+            mcp_tools(&config, &none, RemoteAccess::Operator)
+                .await
+                .is_empty()
+        );
+        assert!(log.lock().unwrap().is_empty(), "never contacted");
 
         let tick = || format!("lightagent-mcp-grant-{pid}-1000");
         let (url, log) = mcp_http_stub(None).await;
