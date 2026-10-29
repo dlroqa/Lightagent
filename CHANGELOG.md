@@ -16,7 +16,10 @@ Release notes: `docs/releases/v0.5.0.md`.
   `rustls-platform-verifier`); only macOS 15 is exercised. The Apple silicon
   package now states its 11.0 minimum explicitly. Each build checks the
   runner's real architecture first, and the macOS smoke test checks the
-  binary's architecture and recorded minimum.
+  binary's architecture and recorded minimum. The full `check` job (fmt,
+  clippy, workspace tests, web build, provisioning contract, CLI smoke) runs
+  natively on Intel macOS as `check (macos-x64)`, as on every other released
+  platform.
 - Specialist workers. The roles researcher, coder, reviewer and tester are
   now typed built-in definitions, each with a versioned role skill, a tool
   ceiling, readiness requirements, an output contract and a resource

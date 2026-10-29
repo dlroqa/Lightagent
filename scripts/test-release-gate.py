@@ -255,6 +255,30 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertEqual(int(step["env"]["PACKAGES"]), len(self.matrix()))
         self.assertIn('"$count" = "$PACKAGES"', step["run"])
 
+    def test_every_released_platform_runs_the_full_check(self):
+        # check.yml's `check` job (fmt, clippy, workspace tests, web build,
+        # provisioning contract, CLI smoke) runs natively on every platform a
+        # release ships, on the same runner and with the same macOS floor.
+        check = yaml.safe_load((ROOT / ".github" / "workflows" / "check.yml").read_text(encoding="utf-8"))
+        job = check["jobs"]["check"]
+        tested = {e["label"]: e for e in job["strategy"]["matrix"]["include"]}
+        for entry in self.matrix():
+            ran = tested.get(entry["label"])
+            self.assertIsNotNone(ran, entry["label"])
+            self.assertEqual(
+                (ran["arch"], ran["host"], ran.get("macos_min")),
+                (entry["arch"], entry["triple"], entry.get("macos_min")),
+                entry["label"],
+            )
+            if entry["os"].startswith("macos"):
+                self.assertEqual(ran["os"], entry["os"], entry["label"])
+        self.assertEqual(set(tested), {e["label"] for e in self.matrix()})
+        self.assertIs(job["strategy"]["fail-fast"], False)
+        (step,) = [s for s in job["steps"] if s.get("name") == "Runner architecture"]
+        for needed in ('"$arch" = "$WANT_ARCH"', '"$host" = "$WANT_HOST"', "sysctl.proc_translated", "hw.optional.arm64"):
+            self.assertIn(needed, step["run"])
+        self.assertIn("bash ./scripts/check.sh", [s.get("run") for s in job["steps"]])
+
     def test_smoke_checks_macos_architecture_and_minimum(self):
         smoke = (ROOT / "scripts" / "smoke-lightagent-package.sh").read_text(encoding="utf-8")
         for check in ("lipo -archs", "vtool -show-build", "MACOSX_DEPLOYMENT_TARGET"):

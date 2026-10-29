@@ -22,7 +22,7 @@ Download and extract the archive for your platform from
 [Lightagent Releases](https://github.com/dlroqa/Lightagent/releases), and check
 it against the release's `SHA256SUMS` (nothing is code-signed):
 
-| Platform | Archive | Built and smoke-tested on |
+| Platform | Archive | Tested (full CI) and smoke-tested on |
 | --- | --- | --- |
 | macOS, Apple silicon (11.0 or later) | `lightagent-<version>-aarch64-apple-darwin.tar.gz` | GitHub-hosted `macos-15` (arm64) |
 | macOS, Intel (10.14 or later declared; see below) | `lightagent-<version>-x86_64-apple-darwin.tar.gz` | GitHub-hosted `macos-15-intel` (x86_64) |
