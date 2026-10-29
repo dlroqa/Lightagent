@@ -3463,14 +3463,22 @@ mod model_tests {
     #[tokio::test]
     async fn installed_mcp_tool_is_listed_callable_and_removed() {
         lightagent_mcp::diag::event("test.installed_mcp.start");
+        // The fixture's interpreter is started once here, outside the MCP
+        // handshake that the per-request timeout bounds; this also skips the
+        // test where `python3` cannot run the fixture. A cold start reads the
+        // interpreter and its standard library from disk, which another
+        // process saturating the runner's disk can delay past that timeout
+        // (#82); started once here, the fixture's own start reads them from
+        // the file cache. `--version` loads too little to do this.
         if !std::process::Command::new("python3")
-            .arg("--version")
+            .args(["-c", "import json, sys"])
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)
         {
             return;
         }
+        lightagent_mcp::diag::event("test.installed_mcp.python_ready");
         let scratch = std::env::temp_dir().join(format!(
             "lightagent-extension-tool-{}-{}",
             std::process::id(),
