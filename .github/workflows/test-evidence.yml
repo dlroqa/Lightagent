@@ -1,0 +1,79 @@
+name: test-evidence
+
+# DIAGNOSTIC ONLY (branch diag/test-evidence, never merged). Reads the logs
+# of the jobs listed in evidence-jobs.txt and reports, per job, one
+# annotation: the lightagent lib suite's result line and how each named
+# test ended (ok, FAILED, ignored, or absent), or a diag job's summary lines.
+# All analysis runs here, on the runner.
+
+on:
+  push:
+    branches: [diag/test-evidence]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  evidence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Fetch the listed job logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/logs"
+          while read -r label kind id; do
+            [ -n "$id" ] || continue
+            gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$id/logs" > "$RUNNER_TEMP/logs/$label.log"
+          done < evidence-jobs.txt
+      - name: Report
+        run: |
+          python3 -I - evidence-jobs.txt "$RUNNER_TEMP/logs" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import re, sys
+          tests = [
+              "installed_mcp_tool_is_listed_callable_and_removed",
+              "a_helper_that_exits_successfully_is_ready",
+              "a_helper_that_fails_is_told_from_one_that_cannot_start",
+              "a_helper_still_running_at_the_deadline_is_killed_and_reaped",
+              "a_cancelled_helper_is_killed_and_reaped",
+              "run_helper_process",
+              "configured_auth_that_cannot_be_used_keeps_the_server_unreached",
+              "a_refused_server_leaves_others_and_ungranted_runs_unchanged",
+              "a_lookup_says_why_a_secret_cannot_be_used_and_never_shows_it",
+              "http_mcp_servers_and_credentials_follow_profile_grants",
+              "a_shared_token_directory_dropped_the_bearer_under_the_replaced_helper",
+          ]
+          stamp = re.compile(r"^\S+Z ")
+          lib = re.compile(r"Running unittests src[/\\]lib\.rs \(target[/\\]debug[/\\]deps[/\\]lightagent-[0-9a-f]+(\.exe)?\)")
+          for row in open(sys.argv[1]):
+              parts = row.split()
+              if len(parts) != 3:
+                  continue
+              label, kind, job = parts
+              lines = [stamp.sub("", l.rstrip("\n")) for l in open(f"{sys.argv[2]}/{label}.log", errors="replace")]
+              facts = []
+              if kind == "check":
+                  suite = None
+                  for i, l in enumerate(lines):
+                      if lib.search(l):
+                          for m in lines[i:]:
+                              if m.startswith("test result:"):
+                                  suite = m
+                                  break
+                          break
+                  facts.append("lightagent lib: " + (suite or "not found"))
+                  for t in tests:
+                      ends = [l.split(" ... ", 1)[1].split(",")[0] for l in lines
+                              if re.match(rf"test \S*::{t} \.\.\. ", l)]
+                      facts.append(f"{t}: {'/'.join(ends) if ends else 'absent'}")
+              else:
+                  start = next((i for i, l in enumerate(lines) if "Summarise on the runner" in l), None)
+                  if start is not None:
+                      facts += [l[2:] for l in lines[start:] if l.startswith("- ")]
+              message = " | ".join(facts)
+              print(f"- **{label}** (job {job}): {message}")
+              print(f"::notice title={label}::{message}", file=sys.stderr)
+          PY
