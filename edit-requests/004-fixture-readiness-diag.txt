@@ -1,0 +1,36 @@
+=== base fbfc362d66743d5a177481c470a206f0535a75b9
+=== message
+DIAGNOSTIC ONLY: the fixture-readiness candidate on the instrumented build
+
+Never to be merged. The same change as edit request 003, plus a timeline
+event once the interpreter is ready.
+=== replace crates/lightagent/src/chat.rs
+--- find
+        lightagent_mcp::diag::event("test.installed_mcp.start");
+        if !std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+        {
+            return;
+        }
+--- with
+        lightagent_mcp::diag::event("test.installed_mcp.start");
+        // The fixture's interpreter is started once here, outside the MCP
+        // handshake that the per-request timeout bounds; this also skips the
+        // test where `python3` cannot run the fixture. A cold start reads the
+        // interpreter and its standard library from disk, which another
+        // process saturating the runner's disk can delay past that timeout
+        // (#82); started once here, the fixture's own start reads them from
+        // the file cache. `--version` loads too little to do this.
+        if !std::process::Command::new("python3")
+            .args(["-c", "import json, sys"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+        {
+            return;
+        }
+        lightagent_mcp::diag::event("test.installed_mcp.python_ready");
+=== end
