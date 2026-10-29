@@ -1,0 +1,185 @@
+=== base fbfc362d66743d5a177481c470a206f0535a75b9
+=== message
+DIAGNOSTIC ONLY: the affected test cold, under injected disk contention (#82)
+
+Never to be merged. Pins the instrumented baseline fbfc362 and the
+fixture-readiness candidate d78b871.
+=== write .github/workflows/diag-windows-contention.yml
+name: diag-windows-contention
+
+# DIAGNOSTIC ONLY (branch diag/windows-contention, never merged), for #82.
+# On fresh Windows runners, builds a pinned commit (so python3 has not run
+# yet), then runs installed_mcp_tool_is_listed_callable_and_removed once,
+# cold, with the MCP stdio timeline. The contended arm first saturates the
+# C: drive (where the Python toolcache is) with four write-through writers.
+# Pinned: fbfc362 (instrumented baseline, `python3 --version` probe) and
+# d78b871 (the same plus the fixture-readiness probe). Bounded: 8 jobs.
+# The sampler records process and service names and counters only.
+
+on:
+  push:
+    branches: [diag/windows-contention]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  check:
+    name: ${{ matrix.label }} ${{ matrix.arm }} ${{ matrix.replica }}
+    runs-on: windows-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: baseline, commit: fbfc362d66743d5a177481c470a206f0535a75b9, arm: quiet, replica: 1 }
+          - { label: baseline, commit: fbfc362d66743d5a177481c470a206f0535a75b9, arm: contended, replica: 1 }
+          - { label: baseline, commit: fbfc362d66743d5a177481c470a206f0535a75b9, arm: contended, replica: 2 }
+          - { label: baseline, commit: fbfc362d66743d5a177481c470a206f0535a75b9, arm: contended, replica: 3 }
+          - { label: candidate, commit: d78b8719af87dc44bd185803ead6d368634d3c3a, arm: quiet, replica: 1 }
+          - { label: candidate, commit: d78b8719af87dc44bd185803ead6d368634d3c3a, arm: contended, replica: 1 }
+          - { label: candidate, commit: d78b8719af87dc44bd185803ead6d368634d3c3a, arm: contended, replica: 2 }
+          - { label: candidate, commit: d78b8719af87dc44bd185803ead6d368634d3c3a, arm: contended, replica: 3 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.commit }}
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-x64
+          save-if: false
+      - name: Build the lightagent lib tests (python3 has not run)
+        run: cargo test -p lightagent --lib --no-run
+      - name: Python location (drive only)
+        shell: pwsh
+        run: |
+          $py = (Get-Command python3 -ErrorAction SilentlyContinue).Source
+          if ($py) { "python3 drive: $($py.Substring(0, 2))" } else { "python3 not found" }
+          "runner temp drive: $($env:RUNNER_TEMP.Substring(0, 2))"
+      - name: The affected test, once, cold
+        env:
+          LIGHTAGENT_DIAG_TIMELINE: ${{ runner.temp }}/timeline.txt
+          ARM: ${{ matrix.arm }}
+        run: |
+          out="$RUNNER_TEMP/diag"; mkdir -p "$out"
+          cat > "$RUNNER_TEMP/sampler.ps1" <<'PS'
+          param($csv, $stop)
+          "wall_ms,cpu_pct,disk_c_pct,disk_total_pct,avail_mb,top_cpu_s,svchost_services" | Out-File $csv -Encoding utf8
+          $prev = @{}
+          while (-not (Test-Path $stop)) {
+            $c = Get-Counter '\Processor(_Total)\% Processor Time','\LogicalDisk(C:)\% Disk Time','\PhysicalDisk(_Total)\% Disk Time','\Memory\Available MBytes' -SampleInterval 1 -MaxSamples 1 -ErrorAction SilentlyContinue
+            $v = @($c.CounterSamples | ForEach-Object { [math]::Round($_.CookedValue, 1) })
+            while ($v.Count -lt 4) { $v += -1 }
+            $procs = @(Get-Process | Select-Object Id, ProcessName, CPU)
+            $deltas = foreach ($p in $procs) {
+              $cpu = [double]$p.CPU
+              $was = $prev[$p.Id]
+              if ($null -eq $was) { $was = $cpu }
+              $prev[$p.Id] = $cpu
+              [pscustomobject]@{ id = $p.Id; n = $p.ProcessName; d = $cpu - $was }
+            }
+            $sorted = @($deltas | Sort-Object d -Descending)
+            $top = ($sorted | Select-Object -First 5 | ForEach-Object { "$($_.n):$([math]::Round($_.d, 2))" }) -join ' '
+            $svc = ''
+            $busy = $sorted | Where-Object { $_.n -eq 'svchost' -and $_.d -ge 0.2 } | Select-Object -First 1
+            if ($busy) { $svc = (@(Get-CimInstance Win32_Service -Filter "ProcessId=$($busy.id)" -ErrorAction SilentlyContinue | ForEach-Object Name) -join '+') }
+            "$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()),$($v -join ','),$top,$svc" | Add-Content $csv
+          }
+          PS
+          cat > "$RUNNER_TEMP/load.ps1" <<'PS'
+          param($dir, $stop, $n)
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $buf = New-Object byte[] (4MB)
+          (New-Object Random 7).NextBytes($buf)
+          $i = 0
+          while (-not (Test-Path $stop)) {
+            $path = Join-Path $dir "load-$n-$($i % 2).bin"
+            $fs = [System.IO.FileStream]::new($path, 'Create', 'Write', 'None', 4096, [System.IO.FileOptions]::WriteThrough)
+            for ($k = 0; $k -lt 32 -and -not (Test-Path $stop); $k++) { $fs.Write($buf, 0, $buf.Length) }
+            $fs.Dispose(); $i++
+          }
+          PS
+          pwsh -NoProfile -File "$RUNNER_TEMP/sampler.ps1" "$out/sampler.csv" "$RUNNER_TEMP/stop" &
+          mark() { echo "$(date +%s%3N) phase $1" | tee -a "$LIGHTAGENT_DIAG_TIMELINE" >> "$out/phases.txt"; }
+          if [ "$ARM" = contended ]; then
+            for n in 1 2 3 4; do pwsh -NoProfile -File "$RUNNER_TEMP/load.ps1" 'C:\lightagent-diag-load' "$RUNNER_TEMP/stop" $n & done
+            mark load.started
+            sleep 15
+          else
+            sleep 15
+          fi
+          mark test.begin
+          cargo test -p lightagent --lib installed_mcp_tool_is_listed_callable_and_removed 2>&1 | tee "$out/test.log"; status=${PIPESTATUS[0]}
+          mark "test.end exit=$status"
+          for round in 1 2 3; do
+            s=$(date +%s%3N); python3 -c "import json, sys"; e=$(date +%s%3N)
+            echo "python warm import round $round: $((e - s)) ms" | tee -a "$out/python.txt"
+          done
+          touch "$RUNNER_TEMP/stop"; wait || true
+          rm -rf 'C:\lightagent-diag-load' 2>/dev/null || true
+          cp "$LIGHTAGENT_DIAG_TIMELINE" "$out/timeline.txt" 2>/dev/null || true
+          echo "$status" > "$out/exit.txt"
+      - name: Summarise on the runner
+        if: always()
+        run: |
+          python - "$RUNNER_TEMP/diag" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import re, sys, collections
+          out = sys.argv[1]
+          def read(name):
+              try:
+                  return open(f"{out}/{name}", encoding="utf-8-sig", errors="replace").read().splitlines()
+              except FileNotFoundError:
+                  return []
+          print("## ${{ matrix.label }} ${{ matrix.arm }} ${{ matrix.replica }} at ${{ matrix.commit }}")
+          print("test exit:", (read("exit.txt") or ["?"])[0])
+          for l in read("test.log"):
+              if l.startswith("test result:") or "FAILED" in l or "panicked" in l or "unavailable" in l:
+                  print("  ", l)
+          tl = read("timeline.txt")
+          t = {}
+          for l in tl:
+              m = re.match(r"(\d+) .*?(test\.installed_mcp\.[a-z_.]+|stdio\.request\.\w+ pid=\d+ id=1\b.*|phase \S+)", l)
+              if m:
+                  t.setdefault(m.group(2).split(" pid=")[0].split(" exit=")[0], int(m.group(1)))
+              m = re.search(r"stdio\.request\.(answered|timeout|closed) pid=\d+ id=1 after_ms=(\d+)", l)
+              if m:
+                  print(f"   initialize {m.group(1)} after {m.group(2)} ms")
+          if "test.installed_mcp.python_ready" in t and "test.installed_mcp.start" in t:
+              print(f"   readiness probe took {t['test.installed_mcp.python_ready'] - t['test.installed_mcp.start']} ms")
+          if "test.installed_mcp.registry.begin" in t and "test.installed_mcp.start" in t:
+              print(f"   start to registry.begin {t['test.installed_mcp.registry.begin'] - t['test.installed_mcp.start']} ms")
+          for l in read("python.txt"):
+              print("  ", l)
+          rows = []
+          for l in read("sampler.csv")[1:]:
+              p = l.split(",")
+              if len(p) >= 7:
+                  try:
+                      rows.append((int(p[0]), float(p[1]), float(p[2]), float(p[3]), p[5], p[6]))
+                  except ValueError:
+                      pass
+          b = t.get("phase test.begin"); e = t.get("phase test.end")
+          win = [r for r in rows if b and e and b <= r[0] <= e]
+          if win:
+              dc = sorted(r[2] for r in win)
+              print(f"   during the test: {len(win)} samples, C: disk time median {dc[len(dc)//2]} max {dc[-1]}, cpu max {max(r[1] for r in win)}")
+          svc = collections.Counter(r[5] for r in rows if r[5])
+          print("   busy svchost services (samples):", ", ".join(f"{k}:{v}" for k, v in svc.most_common(6)) or "none")
+          PY
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: contention-${{ matrix.label }}-${{ matrix.arm }}-${{ matrix.replica }}
+          path: ${{ runner.temp }}/diag
+          retention-days: 30
+      - name: Fail when the test failed
+        if: always()
+        run: test "$(cat "$RUNNER_TEMP/diag/exit.txt" 2>/dev/null)" = 0
+=== end
