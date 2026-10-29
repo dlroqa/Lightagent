@@ -1,0 +1,88 @@
+=== base b9ac4535f518d029b337c6450ea4e4d3edb2ba4d
+=== message
+State which runs an MCP server's unusable auth affects
+
+Documents the four cases separately: no auth; auth the run may not use
+(a profile outside credential_profiles, for which it is never looked up,
+so a broken one changes nothing and the server is contacted without
+credentials where it is granted); auth the run may use but cannot (the
+server is not contacted); and usable auth. The check withholds
+credentials only and grants no access: a profile not granted the server
+never reaches it, and is not told about its auth. A test now covers that
+last case. Behaviour is unchanged from b9ac453.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent/src/chat.rs
+--- find
+        // Research is granted the credentials: the broken server is refused.
+        let contacted = broken_log.lock().unwrap().len();
+        let tools = mcp_tools(&config, &none, RemoteAccess::Untrusted(&research)).await;
+        assert_eq!(tools.len(), 3);
+        assert_eq!(broken_log.lock().unwrap().len(), contacted);
+        std::fs::remove_dir_all(dir).ok();
+--- with
+        // Research is granted the credentials: the broken server is refused.
+        let contacted = broken_log.lock().unwrap().len();
+        let tools = mcp_tools(&config, &none, RemoteAccess::Untrusted(&research)).await;
+        assert_eq!(tools.len(), 3);
+        assert_eq!(broken_log.lock().unwrap().len(), contacted);
+
+        // Ops is granted neither server. Refusing broken credentials grants
+        // no access: neither server is reached, and nothing is reported
+        // about the broken one's `auth`.
+        let ops = ProfileId::new("ops").unwrap();
+        let (specs, refused) = plan_mcp_servers(&config, &none, RemoteAccess::Untrusted(&ops));
+        assert!(specs.is_empty());
+        assert!(refused.is_empty());
+        let opened = open_log.lock().unwrap().len();
+        let tools = mcp_tools(&config, &none, RemoteAccess::Untrusted(&ops)).await;
+        assert!(tools.is_empty());
+        assert_eq!(broken_log.lock().unwrap().len(), contacted);
+        assert_eq!(open_log.lock().unwrap().len(), opened);
+        std::fs::remove_dir_all(dir).ok();
+=== replace docs/architecture/remote-tool-egress.md
+--- find
+- A configured `auth` that would be sent (an operator run, or a profile in
+  `credential_profiles`) but cannot be used keeps that server **unreached**:
+  no request, so neither a bearer nor its custom headers, and never an
+  unauthenticated connection in their place. This covers an unset variable,
+  an unreadable file, an empty value, and a value that cannot be sent as an
+  `Authorization` header. The run reports `mcp_auth_unusable` with a fixed
+  category (`credential_unresolved`, `credential_unreadable`,
+  `credential_empty`, `credential_invalid_header`) and the server's name
+  only: never the value, the path or variable, or an error's text. Other
+  servers connect as before.
+--- with
+- For an HTTP MCP server the run may use, its installation `auth`:
+
+  | `auth` | The run may use it (an operator run, or a profile in `credential_profiles`) | Result |
+  | --- | --- | --- |
+  | Not configured | — | Contacted without a bearer; custom headers only if the run may use them |
+  | Configured | No | **Never looked up**, so a broken one changes nothing: contacted without `auth` and without custom headers, as above |
+  | Configured, cannot be used | Yes | **Not contacted**: no request, so neither a bearer nor its custom headers, and never an unauthenticated connection in their place |
+  | Configured, usable | Yes | Contacted with the bearer and the custom headers |
+
+  "Cannot be used" covers an unset variable, an unreadable file, an empty
+  value, and a value that cannot be sent as an `Authorization` header. The
+  run reports `mcp_auth_unusable` with a fixed category
+  (`credential_unresolved`, `credential_unreadable`, `credential_empty`,
+  `credential_invalid_header`) and the server's name only: never the value,
+  the path or variable, or an error's text. Other servers connect as before.
+- That check only withholds credentials; it grants no access. Whether the
+  run may use the server at all is decided first, by `untrusted_profiles`,
+  and a profile not granted the server never reaches it, nor is told
+  anything about its `auth`. A profile's own vault grant is resolved as
+  before.
+=== replace CHANGELOG.md
+--- find
+  or an error's text. Other servers, servers without `auth`, and runs not
+  granted the credentials are unchanged. `SecretRef::lookup` is new;
+  `SecretRef::resolve` is unchanged.
+--- with
+  or an error's text. Other servers, servers without `auth`, and runs not
+  granted the credentials are unchanged: for those runs `auth` is never
+  looked up, and a server granted to them is contacted without credentials
+  as before. Refusing unusable credentials grants no access: a profile not
+  granted a server still never reaches it. `SecretRef::lookup` is new;
+  `SecretRef::resolve` is unchanged.
+=== end
