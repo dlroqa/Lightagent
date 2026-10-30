@@ -129,6 +129,10 @@ jobs:
           if grep -q '\.rs$' "$RUNNER_TEMP/touched"; then
             rustup show >/dev/null
             cargo fmt --all
+            # desktop/ is a separate workspace; format its touched files directly.
+            { grep '^desktop/.*\.rs$' "$RUNNER_TEMP/touched" || true; } | while read -r file; do
+              if [ -f "$file" ]; then rustfmt --edition 2024 "$file"; fi
+            done
           fi
           # Formatting must not reach any file the request did not touch.
           git status --porcelain --untracked-files=all | cut -c4- | sort > "$RUNNER_TEMP/changed"
