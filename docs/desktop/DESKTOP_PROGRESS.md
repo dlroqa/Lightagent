@@ -20,8 +20,9 @@ next update names its run.
 | D1 Architecture and UI specification | **CI-validated** (gate passed) | `desktop/d1-architecture` (stacked on D0) | https://github.com/dlroqa/Lightagent/pull/92 | `350b48b3d0d072213e2028d8b5fb53022d61c340` | `350b48b` / tree `e43ab411568dda5c183963966d09131d21898581` |
 | D2 CI and desktop skeleton | **CI-validated** (gate passed) | `desktop/d2-shell` (stacked on D1) | https://github.com/dlroqa/Lightagent/pull/93 | `003a71c2473f3e18cb503f326ae3fc8a153dcc38` | `003a71c` / tree `d5fabeed9cb429f227689920ab03139c5d921f74` |
 | D3a Real runtime: `serve --desktop` | **CI-validated** (gate passed) | `desktop/d3a-runtime` (stacked on D2) | https://github.com/dlroqa/Lightagent/pull/94 | `130dde98e5cade253b00d69f8e1c499587128e3d` | `130dde9` / tree `ab98037ea76bd083da863dd88c112dc4c7a5f5fc` |
-| D3b Host lifecycle: crash, restart, single instance | implemented; `9dc6783` failed only in DMG packaging on macos-x64 (see the D3b log); the fix `1f0ed69` is being validated | `desktop/d3b-lifecycle` (stacked on D3a) | https://github.com/dlroqa/Lightagent/pull/95 | `1f0ed6900c166fc1dd32ed3ab38d546119929635` | `check` passed at `9dc6783`; `desktop` not yet green |
-| D4a Profiles: shared operations and API | implemented; validation pending | `desktop/d4a-profiles` (stacked on D3b) | recorded in the next update | this commit | none yet |
+| D3b Host lifecycle: crash, restart, single instance | **CI-validated** (gate passed) | `desktop/d3b-lifecycle` (stacked on D3a) | https://github.com/dlroqa/Lightagent/pull/95 | `1f0ed6900c166fc1dd32ed3ab38d546119929635` | `1f0ed69` / tree `4d70aaf397fc5d4f50f65906579e46b035a88063` |
+| D4a Profiles: shared operations and API | **CI-validated** (gate passed) | `desktop/d4a-profiles` (stacked on D3b) | https://github.com/dlroqa/Lightagent/pull/96 | `c544d7ae40f8962c287ae39a8234e1665aaf6796` | `c544d7a` / tree `78dcded80caee0555f30a7304d97f9a42a9813e7` |
+| D4b Profile switch, close with runs, Profiles screen | implemented; validation pending | `desktop/d4b-profile-ui` (stacked on D4a) | recorded in the next update | this commit | none yet |
 | D1 spike (evidence only, never merged) | runner evidence complete | `desktop/d1-spike` | https://github.com/dlroqa/Lightagent/pull/91 | `82896bcd63f3bd6786dcea12b603241e50a3a9ea` | `82896bc` / tree `d9cde26142a63a716a58f35dc33330be0e90d8b7` |
 | D3b–D10 | not started | — | — | — | — |
 
@@ -354,6 +355,8 @@ D3b e2e results at `9dc6783` on the three shells that ran (seconds from the even
 | Linux x64 (session bus) | 1.50 | 0.82 → 0.82 | 0.91 (UI 1.21) | yes | no |
 | Linux x64, no session bus (recorded only) | 30.65 | — | — | — | no |
 
+| 2026-10-30 | `desktop` and `check` on `1f0ed69`: **success**. The `hdiutil` retry did **not** fire (every DMG bundled on the first attempt). Crash, duplicate and ready modes passed on both macOS targets with no orphan and no key leak. **D3b gate passed** at `1f0ed69` | `1f0ed69` / `4d70aaf` | https://github.com/dlroqa/Lightagent/actions/runs/41005006873, https://github.com/dlroqa/Lightagent/actions/runs/41005006806 |
+
 ## D4a — Profiles: shared operations and API
 
 - **Shared operations** (`crates/lightagent/src/ops.rs`, `ops::Profiles`):
@@ -384,6 +387,46 @@ D3b e2e results at `9dc6783` on the three shells that ran (seconds from the even
   same home reports exactly that state (CLI–desktop equivalence). It also
   checks the five error categories and the hand-over to `default`.
 
+| When (UTC) | Event | Commit / tree | Evidence |
+|---|---|---|---|
+| 2026-10-30 | Edit request `025-desktop-d4a-profiles` on base `1f0ed69`; `cargo fmt` ran; branch created without force; draft PR #96 | `c544d7a` / `78dcded` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41005062603 |
+| 2026-10-30 | `check` on `c544d7a`: **success**. `api_profile_operations_are_the_cli_profile_operations` passed on all four platforms; the existing CLI tests pass with the refactored `profiles_cmd` | `c544d7a` | https://github.com/dlroqa/Lightagent/actions/runs/41005161337 |
+| 2026-10-30 | `desktop` on `c544d7a`: **success** (contract with 29 operations; inventory of 314 rows) | `c544d7a` | https://github.com/dlroqa/Lightagent/actions/runs/41005161216 |
+| 2026-10-30 | **D4a gate passed** at `c544d7a` | — | — |
+
+## D4b — Profile switch, close with active runs, Profiles screen
+
+- **Host profile switch** (`desktop/src-tauri/src/switch.rs`, command
+  `profile_switch`): start the new runtime, then commit (architecture §7).
+  - While runs are working, the switch is blocked and the UI lists them.
+  - If the person chooses to stop them, pending approvals are rejected
+    explicitly (recorded) and the runs cancelled, with a 10 s drain;
+    otherwise nothing changes.
+  - The new runtime starts on the profile with its own key. If it is not
+    ready, it is stopped and nothing has changed.
+  - Commit: the profile is made active through the new runtime (the CLI sees
+    it), the app is routed to the new runtime, old streams end with
+    `profile_switch`, and the old runtime is stopped off the UI thread.
+  - Only one switch runs at a time. The planning decision is unit-tested.
+- **Close with active runs:** the host holds the close and the UI asks
+  (**Keep working**, focused by default, or **Stop runs and quit**). With no
+  runs, the window closes as before.
+- **Profiles screen** (`#/profiles`, from the account menu):
+  - list, details, preset, create (labelled fields, the id rule shown, errors next to the form);
+  - **Use**: in the desktop this switches the runtime and reloads; in the browser it sets the CLI's active profile and says this server keeps serving its own until it restarts;
+  - **Delete** behind typed confirmation; `default` is protected.
+- **Evidence planned:** `e2e/profiles.mjs` (in the existing `standalone Web UI
+  render` job) drives create, invalid id, preset, use and delete through the
+  real UI against real `lightagent serve`, and checks the server's profile
+  store after each step.
+- **Gap, stated rather than claimed:** the desktop-only switch and
+  close-with-runs dialogs have **no hosted native-UI automation** yet. They
+  are covered by unit tests of the decision, by the API-level D4a test, and
+  by the host compile and clippy gates. Native WebView automation
+  (`tauri-driver` on Linux and Windows) is planned for D8; until then those
+  two flows are not claimed as end-to-end verified.
+- **Architecture §7 and §12** now describe the operations seam that was built.
+
 ## Artifacts and retention
 
 | Artifact | Run | Retention |
@@ -410,6 +453,6 @@ D3b e2e results at `9dc6783` on the three shells that ran (seconds from the even
 
 ## Next
 
-1. Validate D3b `1f0ed69` and D4a, and record both.
-2. D4b: the host's start-new-then-commit profile switch (DESKTOP_ARCHITECTURE.md §7), close with active runs, and the desktop Profiles screen. The `cli.profile.*` rows then count as implemented once tested.
-3. D4c–e: config (lock + ETag), provider/models/key entry/endpoint test, workspaces.
+1. Validate D4b, then mark the `cli.profile.*` rows implemented with that evidence.
+2. D4c: configuration (show, path, get, set) as typed operations, with a lock and an ETag (`409` on a stale write).
+3. D4d–e: provider, models, key entry and endpoint test; workspaces.

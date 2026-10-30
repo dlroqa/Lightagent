@@ -1,0 +1,90 @@
+/* Profiles screen: semantic tokens only (styles/tokens.css). */
+.profiles-page {
+  display: grid;
+  gap: var(--space-5);
+  max-width: 920px;
+}
+
+.profile-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.profile-row__actions,
+.profile-form__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.profile-row__actions .btn,
+.profile-form__row .btn {
+  min-height: 40px;
+}
+
+.profile-row__confirm {
+  flex-basis: 100%;
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+}
+
+.profile-row__confirm p,
+.profile-row__confirm label {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.profile-form {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.profile-form label {
+  font-weight: 500;
+}
+
+.profile-form .input {
+  width: 100%;
+  min-height: 40px;
+}
+
+.profile-form textarea.input {
+  min-height: 84px;
+  resize: vertical;
+  font: inherit;
+}
+
+.profile-form .input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.form-error {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--danger);
+  line-height: 1.5;
+}
+
+.profile-detail {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-1) var(--space-4);
+  margin: 0 0 var(--space-4);
+}
+
+.profile-detail dd {
+  margin: 0;
+}
+
+.profile-detail__persona {
+  white-space: pre-wrap;
+  color: var(--text-soft);
+}

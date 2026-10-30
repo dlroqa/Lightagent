@@ -9,11 +9,12 @@
 mod contract;
 mod sidecar;
 mod sse;
+mod switch;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -58,6 +59,10 @@ struct Host {
     last_logs: Mutex<Vec<String>>,
     /// The single-instance lock, held for the app's lifetime.
     instance: Mutex<Option<std::fs::File>>,
+    /// A profile switch is in progress (one at a time).
+    switching: AtomicBool,
+    /// The window was asked to close while runs were working; the UI asks.
+    close_requested: AtomicBool,
 }
 
 #[derive(Default)]
@@ -146,6 +151,7 @@ struct RuntimeStatus {
     runtime_version: Option<String>,
     profile: Option<String>,
     capabilities: Vec<String>,
+    close_requested: bool,
 }
 
 #[tauri::command]
@@ -157,6 +163,7 @@ fn runtime_status(host: tauri::State<'_, Arc<Host>>) -> RuntimeStatus {
         runtime_version: None,
         profile: None,
         capabilities: Vec::new(),
+        close_requested: host.close_requested.load(Ordering::Acquire),
     };
     match &*lock(&host.runtime) {
         Runtime::Starting => {}
@@ -186,6 +193,37 @@ fn runtime_status(host: tauri::State<'_, Arc<Host>>) -> RuntimeStatus {
         }
     }
     status
+}
+
+/// Switch the bundled runtime to another profile (see [`switch`]).
+#[tauri::command]
+async fn profile_switch(
+    host: tauri::State<'_, Arc<Host>>,
+    id: String,
+    cancel_runs: bool,
+) -> Result<switch::Outcome, String> {
+    switch::switch(host.inner(), id, cancel_runs).await
+}
+
+/// Quit after the person chose to, stopping working runs first if asked.
+#[tauri::command]
+async fn app_quit(
+    app: tauri::AppHandle,
+    host: tauri::State<'_, Arc<Host>>,
+    cancel_runs: bool,
+) -> Result<(), String> {
+    if cancel_runs {
+        switch::stop_runs(host.inner()).await?;
+    }
+    host.e2e.note_once("QUIT_CONFIRMED", "");
+    app.exit(0);
+    Ok(())
+}
+
+/// Keep the window open after a close request.
+#[tauri::command]
+fn app_close_cancel(host: tauri::State<'_, Arc<Host>>) {
+    host.close_requested.store(false, Ordering::Release);
 }
 
 /// Restart the runtime on request (a crashed or failed one, or a running one).
@@ -538,6 +576,8 @@ fn main() {
         last_auto_restart: Mutex::new(None),
         last_logs: Mutex::default(),
         instance: Mutex::new(None),
+        switching: AtomicBool::new(false),
+        close_requested: AtomicBool::new(false),
     });
     let app = tauri::Builder::default()
         .manage(Arc::clone(&host))
@@ -545,6 +585,9 @@ fn main() {
             runtime_status,
             runtime_logs,
             runtime_restart,
+            profile_switch,
+            app_quit,
+            app_close_cancel,
             api_fetch,
             api_subscribe,
             api_events_poll,
@@ -585,11 +628,38 @@ fn main() {
             std::process::exit(1);
         }
     };
-    app.run(|app, event| {
-        if let tauri::RunEvent::Exit = event
-            && let Some(host) = app.try_state::<Arc<Host>>()
-        {
-            host.stop_runtime();
+    app.run(|app, event| match event {
+        // Closing with runs at work: keep the window and let the UI ask
+        // (stop them and quit, or keep working). With none, close as usual.
+        tauri::RunEvent::WindowEvent {
+            event: tauri::WindowEvent::CloseRequested { api, .. },
+            ..
+        } => {
+            let Some(host) = app.try_state::<Arc<Host>>() else {
+                return;
+            };
+            let host = Arc::clone(host.inner());
+            if host.connection().is_err() {
+                return;
+            }
+            api.prevent_close();
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                match switch::active_runs(&host).await {
+                    Ok(runs) if !runs.is_empty() => {
+                        host.close_requested.store(true, Ordering::Release);
+                        host.e2e
+                            .note_once("CLOSE_HELD", &format!("runs={}", runs.len()));
+                    }
+                    _ => handle.exit(0),
+                }
+            });
         }
+        tauri::RunEvent::Exit => {
+            if let Some(host) = app.try_state::<Arc<Host>>() {
+                host.stop_runtime();
+            }
+        }
+        _ => {}
     });
 }
