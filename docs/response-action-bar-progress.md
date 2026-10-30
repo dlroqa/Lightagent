@@ -113,6 +113,7 @@ the new tests run inside its existing jobs:
 | --- | --- | --- |
 | [check 41144035801](https://github.com/dlroqa/Lightagent/actions/runs/41144035801) | `13f2ecc` | Failed: `cargo fmt --check` on all four platforms (see below). `standalone Web UI render` passed, including the response-action check. The other jobs in the run passed. |
 | [check 41144488593](https://github.com/dlroqa/Lightagent/actions/runs/41144488593) | `2241e56` | Failed: fmt passed; clippy `type_complexity` on the test factory's field (see below). `standalone Web UI render` passed again. |
+| [check 41144876654](https://github.com/dlroqa/Lightagent/actions/runs/41144876654) | `0da3370` | Failed: fmt and clippy passed; 20 of 21 `lightagent-api` API tests passed, and `regenerating_replaces_the_latest_answer_in_place` failed on a wrong assumption in the test (see below). `standalone Web UI render` passed. |
 | [jev evaluation 41144035777](https://github.com/dlroqa/Lightagent/actions/runs/41144035777) | `13f2ecc` | Passed |
 | [subagents 41144035939](https://github.com/dlroqa/Lightagent/actions/runs/41144035939) | `13f2ecc` | Passed. The `subagent fixture fail` and `verify` runs it dispatches failed, as they do on other branches. |
 
@@ -126,6 +127,16 @@ the new tests run inside its existing jobs:
 2. Run 41144488593 failed in clippy (`-D warnings`) with `type_complexity`
    on `PromptFactory.requests` in `tests/api.rs`. Fixed with a `Prompts` type
    alias. The tests had not run yet, because clippy comes first.
+3. Run 41144876654: `regenerating_replaces_the_latest_answer_in_place`
+   asserted that the saved run record's id equals the id `POST /regenerate`
+   returned. They never match, and this predates this work: the agent loop
+   mints its own `RunId` (`lightagent-core/src/loop_.rs`), and that is the id
+   `record_run_events` saves. The manager's API id is separate. The endpoint
+   itself was correct, because the UI sends the saved id and the server
+   compares it with the saved id. The test now asserts that the old record was
+   replaced. `e2e/actions.mjs` now also gives the regenerated record a saved
+   id different from the API id, so the UI is tested the way it runs in
+   production (its saved-answer match, not run-id equality).
 
 ## Limitations and follow-ups
 

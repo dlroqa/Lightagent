@@ -14,6 +14,9 @@ import { seededSession } from "./delivery.mjs";
 const FIRST_RUN = "run-00000000000000000000000000000a00";
 const OLD_RUN = "run-00000000000000000000000000000a01";
 const NEW_RUN = "run-00000000000000000000000000000a02";
+// As on a real server, a saved run record carries the agent loop's own run
+// id, which is not the id the API answered with.
+const SAVED_NEW_RUN = "run-00000000000000000000000000000a03";
 const FIRST_PROMPT = "What is the capital of France?";
 const FIRST_ANSWER = "Paris is the capital of France.";
 const PROMPT = "What is Lyon known for?";
@@ -32,7 +35,7 @@ function transcript(stage) {
   switch (stage) {
     case "answered": return { messages: [...earlier, message("assistant", OLD_ANSWER)], runs: [run(FIRST_RUN), run(OLD_RUN)] };
     case "regenerating": return { messages: earlier, runs: [run(FIRST_RUN)] };
-    default: return { messages: [...earlier, message("assistant", NEW_ANSWER)], runs: [run(FIRST_RUN), run(NEW_RUN)] };
+    default: return { messages: [...earlier, message("assistant", NEW_ANSWER)], runs: [run(FIRST_RUN), run(SAVED_NEW_RUN)] };
   }
 }
 

@@ -1445,8 +1445,6 @@ async fn regenerating_replaces_the_latest_answer_in_place() {
         assert_eq!(status, 202, "{body}");
         let run = serde_json::from_str::<serde_json::Value>(&body).unwrap();
         assert_eq!(run["session_id"], id);
-        let created = run["id"].as_str().unwrap().to_owned();
-        assert_ne!(created, replaced);
 
         let after = settled(&store, &busy, &parsed, 2).await;
         // The prompt is kept once; only its answer and run record change.
@@ -1454,8 +1452,9 @@ async fn regenerating_replaces_the_latest_answer_in_place() {
         assert_eq!(roles, ["user", "assistant", "user", "assistant"]);
         assert_eq!(after.messages[2].content, "follow up");
         assert_eq!(after.messages[3].content, "The time is now.");
+        // A run record holds the agent loop's own run id, not the API's.
         assert_eq!(after.runs[0].run_id, before.runs[0].run_id);
-        assert_eq!(after.runs[1].run_id, created);
+        assert_ne!(after.runs[1].run_id, replaced);
         assert_eq!(after.runs[1].stop_reason.as_deref(), Some("EndTurn"));
 
         // The prompt is run again with the history its first run had.
