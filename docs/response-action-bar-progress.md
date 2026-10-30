@@ -111,11 +111,17 @@ the new tests run inside its existing jobs:
 
 | Run | Commit | Result |
 | --- | --- | --- |
-| _pending_ | | |
+| [check 41144035801](https://github.com/dlroqa/Lightagent/actions/runs/41144035801) | `13f2ecc` | Failed: `cargo fmt --check` on all four platforms (see below). `standalone Web UI render` passed, including the response-action check. The other jobs in the run passed. |
+| [jev evaluation 41144035777](https://github.com/dlroqa/Lightagent/actions/runs/41144035777) | `13f2ecc` | Passed |
+| [subagents 41144035939](https://github.com/dlroqa/Lightagent/actions/runs/41144035939) | `13f2ecc` | Passed. The `subagent fixture fail` and `verify` runs it dispatches failed, as they do on other branches. |
 
 ## Failures and resolutions
 
-None yet.
+1. Run 41144035801 failed at `cargo fmt --check`, at two call sites
+   (`.route(…regenerate…)` in `lib.rs` and a `format!` in `tests/api.rs`).
+   rustfmt's call-width heuristic wraps them even though they fit within 100
+   columns. `check.sh` stops at fmt, so clippy and the Rust tests did not run
+   in that run. Fixed by applying CI's diff verbatim.
 
 ## Limitations and follow-ups
 

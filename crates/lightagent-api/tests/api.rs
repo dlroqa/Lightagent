@@ -1533,7 +1533,10 @@ async fn regenerating_anything_but_the_latest_answer_is_refused() {
         let (status, _) = http(
             &addr,
             "POST",
-            &format!("/api/lightagent/v1/sessions/{}/regenerate", missing.as_str()),
+            &format!(
+                "/api/lightagent/v1/sessions/{}/regenerate",
+                missing.as_str()
+            ),
             &[],
             Some(&payload),
         )

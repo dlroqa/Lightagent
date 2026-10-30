@@ -96,7 +96,10 @@ pub fn router(state: AppState) -> Router {
             get(list_sessions).post(create_session),
         )
         .route("/api/lightagent/v1/sessions/search", get(search_sessions))
-        .route("/api/lightagent/v1/sessions/{id}/regenerate", post(regenerate_run))
+        .route(
+            "/api/lightagent/v1/sessions/{id}/regenerate",
+            post(regenerate_run),
+        )
         .route(
             "/api/lightagent/v1/sessions/{id}",
             get(get_session)
