@@ -97,6 +97,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/lightagent/v1/sessions/search", get(search_sessions))
         .route(
+            "/api/lightagent/v1/sessions/{id}/regenerate",
+            post(regenerate_run),
+        )
+        .route(
             "/api/lightagent/v1/sessions/{id}",
             get(get_session)
                 .patch(update_session)
@@ -1127,10 +1131,83 @@ struct CreateRunBody {
     model: Option<String>,
 }
 
+/// Regenerating names the run whose answer it replaces, so a request made
+/// against a transcript that has since moved on is refused, not misapplied.
+#[derive(Deserialize)]
+struct RegenerateBody {
+    run_id: String,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// How a session run treats the transcript it continues.
+enum Turn {
+    /// A new user prompt, appended to the session.
+    Append,
+    /// The session's latest answer, from run `run_id`, is replaced: it is
+    /// removed and the prompt it answered is run again.
+    Regenerate { run_id: String },
+}
+
 async fn create_run(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(mut body): Json<CreateRunBody>,
+    Json(body): Json<CreateRunBody>,
+) -> Response {
+    start_run(state, headers, body, Turn::Append).await
+}
+
+/// Run the prompt behind session `id`'s latest answer again, in place of that
+/// answer. The new run is created, authorized, streamed and saved exactly as
+/// any session run is; only the transcript it continues differs.
+async fn regenerate_run(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<RegenerateBody>,
+) -> Response {
+    let run = CreateRunBody {
+        // Taken from the saved session once it is locked.
+        message: String::new(),
+        profile: body.profile,
+        session_id: Some(id),
+        model: body.model,
+    };
+    let turn = Turn::Regenerate {
+        run_id: body.run_id,
+    };
+    start_run(state, headers, run, turn).await
+}
+
+/// Remove the session's latest answer, and the record of the run that wrote
+/// it, and return the user prompt it answered. `None`, with the session
+/// untouched, unless run `run_id` is the session's latest finished run and the
+/// transcript ends with a user prompt and that run's answer.
+fn take_latest_answer(session: &mut Session, run_id: &str) -> Option<String> {
+    let latest = session.runs.last()?;
+    if latest.run_id != run_id || latest.stop_reason.is_none() {
+        return None;
+    }
+    let [.., prompt, answer] = session.messages.as_slice() else {
+        return None;
+    };
+    if prompt.role != "user" || answer.role != "assistant" {
+        return None;
+    }
+    let prompt = prompt.content.clone();
+    session.messages.pop();
+    session.runs.pop();
+    session.touch();
+    Some(prompt)
+}
+
+async fn start_run(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    mut body: CreateRunBody,
+    turn: Turn,
 ) -> Response {
     // Multi-user mode authorizes the caller for the profile, resolved on the
     // server, before anything profile-specific is built. `owner` records who
@@ -1203,6 +1280,9 @@ async fn create_run(
     let mut history = Vec::new();
     let mut profile = body.profile;
     let mut session_id = None;
+    // A regenerated session as it was before its answer was removed, put
+    // back if the new run is refused.
+    let mut replaced: Option<Session> = None;
     let session_store = match &session_scope {
         Some(user) => user.sessions(&state),
         None => state.sessions.clone(),
@@ -1257,12 +1337,35 @@ async fn create_run(
             busy.remove(&id);
             return bad_request("session profile does not match");
         }
-        history = model_history(&session, &body.message, history_limit);
-        profile = Some(session.profile.clone());
-        if session.messages.is_empty() && session.title == "agent session" {
-            session.title = session_title(&body.message);
+        match &turn {
+            Turn::Append => {
+                history = model_history(&session, &body.message, history_limit);
+                profile = Some(session.profile.clone());
+                if session.messages.is_empty() && session.title == "agent session" {
+                    session.title = session_title(&body.message);
+                }
+                session.push_message(StoredMessage::new("user", &body.message));
+            }
+            Turn::Regenerate { run_id } => {
+                let original = session.clone();
+                let Some(prompt) = take_latest_answer(&mut session, run_id) else {
+                    busy.remove(&id);
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(json!({"error": "only the latest answer can be regenerated"})),
+                    )
+                        .into_response();
+                };
+                // The prompt stays saved; the model sees what preceded it,
+                // as it did on the prompt's first run.
+                let mut earlier = session.clone();
+                earlier.messages.pop();
+                history = model_history(&earlier, &prompt, history_limit);
+                profile = Some(session.profile.clone());
+                body.message = prompt;
+                replaced = Some(original);
+            }
         }
-        session.push_message(StoredMessage::new("user", &body.message));
         if let Err(error) = session_store.save(&session) {
             busy.remove(&id);
             return internal(&error.to_string());
@@ -1299,6 +1402,11 @@ async fn create_run(
                     match started {
                         Ok(run) => run,
                         Err(denial) => {
+                            if let Some(original) = &replaced
+                                && let Err(error) = session_store.save(original)
+                            {
+                                eprintln!("could not restore agent session: {error}");
+                            }
                             if let Some(id) = &session_id {
                                 state.busy_sessions.lock().await.remove(id);
                             }

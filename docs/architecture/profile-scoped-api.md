@@ -57,6 +57,7 @@ ownership or grant. The default owner bundle is `runs_read`, `runs_write`,
 | `GET /provider` | `tools_read` | full capabilities | `tools_read` on P: the same keys, with provider, endpoint, catalogs and runtime models withheld. Only P's configured model is shown. |
 | `GET`/`PUT /settings` | admin | admin | **403** (operator-only) |
 | `POST /runs` | `runs_write` | any profile | `runs_write` on P (PR #16). With `session_id`: also `sessions_write` on P, and the session must be the user's own on P. |
+| `POST /sessions/{id}/regenerate` | `runs_write` | any profile | As `POST /runs` with `session_id`: `runs_write` and `sessions_write` on P, own session only. 409 unless the named run wrote the session's latest answer. |
 | `GET /runs/{id}`, `/events`, `POST /cancel` | scope | any run | own runs only (PR #16), re-checked (PR #22/#23) |
 | `GET /approvals`, `POST /approvals/{run}` | `approvals_write` | any run | own runs only; stale approvals refused |
 | `GET /sessions`, `/sessions/search` | `sessions_read` | default store | `sessions_read` on P: the user's own sessions of P only |

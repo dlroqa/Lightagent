@@ -354,6 +354,12 @@ export const agentApi = {
       method: "POST",
       body: JSON.stringify({ message, profile, session_id: sessionId, model }),
     }),
+  /** Replace the session's latest answer, written by `runId`, with a new run of its prompt. */
+  regenerate: (sessionId: string, runId: string, model?: string) =>
+    jsonRequest<{ id: string; status: string; session_id: string | null }>(
+      `/sessions/${encodeURIComponent(sessionId)}/regenerate`,
+      { method: "POST", body: JSON.stringify({ run_id: runId, model }) },
+    ),
   createSession: () => jsonRequest<{ id: string }>("/sessions", { method: "POST", body: "{}" }),
   uploadAttachment: async (sessionId: string, file: File): Promise<UploadedAttachment> => {
     const filename = file.name.replace(/[^A-Za-z0-9._ -]/g, "_").slice(0, 180) || "attachment";
