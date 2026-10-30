@@ -178,7 +178,13 @@ jobs:
       - run: python -m pip install psutil==7.1.0 pillow==11.3.0
       - name: Install Electron 42.11.14
         working-directory: desktop-spike/electron
-        run: npm install --no-audit --no-fund
+        run: |
+          npm install --no-audit --no-fund
+          # The binary arrives through the package's own install script; run it
+          # explicitly so an npm that skips lifecycle scripts cannot hide it.
+          [ -d node_modules/electron/dist ] || node node_modules/electron/install.js
+          ls node_modules/electron
+          cat node_modules/electron/path.txt; echo
       - name: Runtime size (proxy for package size)
         working-directory: desktop-spike/electron
         run: |
