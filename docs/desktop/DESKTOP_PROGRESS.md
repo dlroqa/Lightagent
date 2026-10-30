@@ -22,7 +22,7 @@ next update names its run.
 | D3a Real runtime: `serve --desktop` | **CI-validated** (gate passed) | `desktop/d3a-runtime` (stacked on D2) | https://github.com/dlroqa/Lightagent/pull/94 | `130dde98e5cade253b00d69f8e1c499587128e3d` | `130dde9` / tree `ab98037ea76bd083da863dd88c112dc4c7a5f5fc` |
 | D3b Host lifecycle: crash, restart, single instance | **CI-validated** (gate passed) | `desktop/d3b-lifecycle` (stacked on D3a) | https://github.com/dlroqa/Lightagent/pull/95 | `1f0ed6900c166fc1dd32ed3ab38d546119929635` | `1f0ed69` / tree `4d70aaf397fc5d4f50f65906579e46b035a88063` |
 | D4a Profiles: shared operations and API | **CI-validated** (gate passed) | `desktop/d4a-profiles` (stacked on D3b) | https://github.com/dlroqa/Lightagent/pull/96 | `c544d7ae40f8962c287ae39a8234e1665aaf6796` | `c544d7a` / tree `78dcded80caee0555f30a7304d97f9a42a9813e7` |
-| D4b Profile switch, close with runs, Profiles screen | **CI-validated** (gate passed at `cd799a4`); this commit records parity only | `desktop/d4b-profile-ui` (stacked on D4a) | https://github.com/dlroqa/Lightagent/pull/97 | this commit (child of `cd799a4`) | `cd799a4` / tree `0627bd89aae122de6f41add447b3047cfdde01d0` |
+| D4b Profile switch, close with runs, Profiles screen | `cd799a4` passed its first gate; an owner review then found the switch commit was not all or nothing. The correction (this commit) awaits validation; the gate is **reopened** until it passes | `desktop/d4b-profile-ui` (stacked on D4a) | https://github.com/dlroqa/Lightagent/pull/97 | this commit (child of `8c27f93`) | `cd799a4` / tree `0627bd89aae122de6f41add447b3047cfdde01d0` (before the correction) |
 | D1 spike (evidence only, never merged) | runner evidence complete | `desktop/d1-spike` | https://github.com/dlroqa/Lightagent/pull/91 | `82896bcd63f3bd6786dcea12b603241e50a3a9ea` | `82896bc` / tree `d9cde26142a63a716a58f35dc33330be0e90d8b7` |
 | D3b–D10 | not started | — | — | — | — |
 
@@ -441,6 +441,46 @@ D3b e2e results at `9dc6783` on the three shells that ran (seconds from the even
 | 2026-10-30 | `check` on `cd799a4`, attempt 2: **success**, all jobs, including the Profiles UI flow in `standalone Web UI render` | `cd799a4` | https://github.com/dlroqa/Lightagent/actions/runs/41057799814 |
 | 2026-10-30 | **D4b gate passed** at `cd799a4`. Parity: 15 of 226 rows implemented (the profile list, show, create, preset, use and delete capabilities with their inputs), each citing `cd799a4` and its runs. `cli.profile.use` records the desktop switch's native-automation gap | — | DESKTOP_CLI_PARITY.md, "Implemented rows and evidence" |
 
+## D4b review — the switch commit made all or nothing
+
+- **Concern (owner review of `8c27f93`):** `switch.rs` replaced the runtime
+  even when the active-profile write failed, and returned `persisted: false`,
+  which the UI ignored. The desktop could then serve one profile while the
+  CLI's active profile named another. That broke start-new-then-commit. The
+  architecture's §7 step 5 had even documented it.
+- **Two more problems found while reviewing:**
+  - a run could start between the active-run check and the replacement;
+  - crash recovery's automatic restart could install a runtime at the same
+    time as a switch's swap, so one silently replaced the other.
+- **Correction (this commit; architecture §7 revised):**
+  - One host lifecycle lock serialises start, restart, crash recovery and
+    switch. A second switch or restart during one is refused as `busy`; the
+    watcher skips its check while the lock is held.
+  - While a switch runs, the host refuses `runs.create` and
+    `approvals.respond`, and it checks the old runtime once more just
+    before committing.
+  - The commit persists the active profile **first**, through the new
+    runtime, and replaces the runtime only after that succeeds.
+  - Every failure (`start_failed`, `runs_appeared`, `persist_failed`,
+    `runs_not_stopped`, `busy`) stops the unused new runtime, keeps the old
+    runtime and the CLI's active profile, and returns an actionable error
+    saying nothing changed. `persisted` is gone from the outcome, so a
+    reported switch is always fully committed.
+- **Hosted coverage added:** job `desktop profile switch (linux, e2e
+  hooks)`. A Linux test build of the host with `--features e2e-hooks`
+  (never the bundled app) runs four real scenarios against the real
+  runtime, sharing one isolated home:
+  1. **ok:** switched, the CLI's active profile changes, and exactly one runtime remains.
+  2. **start failure:** switch to a missing profile; the new runtime cannot start, `work` stays in service, and the CLI is unchanged.
+  3. **commit failure:** a directory occupies `active_profile.tmp`, so the atomic write really fails; `work` stays in service, the CLI is unchanged, and the unused runtime is stopped.
+  4. **concurrent:** two switches at once; one switches and the other is refused as busy.
+
+  Each scenario requires exactly one runtime to remain. Unit tests cover
+  the run gate and the lifecycle lock; clippy covers the hook code.
+- **Still not claimed:** native UI automation of the switch and close
+  dialogs (D8). The scenarios above exercise the host's switch path for
+  real, but not by clicking the WebView.
+
 ## Artifacts and retention
 
 | Artifact | Run | Retention |
@@ -454,16 +494,27 @@ D3b e2e results at `9dc6783` on the three shells that ran (seconds from the even
 
 ## Local backup
 
-- Backup clone: `~/Repositories/LAcode/Lightagent` on the owner's machine
-  (origin `https://github.com/dlroqa/Lightagent.git`). It is synchronized with
-  `git fetch` only: no reset, no clean, no force.
-- Local progress copy: `~/Repositories/LAcode/desktop-progress/`.
-- Last synchronization: 2026-10-30T03:33:59Z, by fetch only. Backed up:
-  - `master` `12582a0`;
-  - `origin/desktop/d0-audit` `bc01426`;
-  - `origin/desktop/d1-spike` `82896bc`.
+- **What is backed up:** a full git clone at `~/Repositories/LAcode/Lightagent`
+  on the owner's machine (origin `https://github.com/dlroqa/Lightagent.git`).
+  Its checked-out working tree is `master` (`12582a0`). Every `desktop/*`
+  branch and `tools/source-edit` are kept as **fetched remote-tracking refs**
+  (`refs/remotes/origin/…`), with all their objects, but are **not** checked
+  out as files.
+- **How it is synchronized:** `git fetch` only, after every stage. No reset,
+  clean, checkout, or force; local work is never overwritten.
+- **Local progress copy:** `~/Repositories/LAcode/desktop-progress/DESKTOP_PROGRESS.md`,
+  refreshed from the authoritative GitHub version after each stage.
+- **Synchronization record:**
 
-  The working tree was clean.
+  | Time (UTC) | Backed-up `desktop/*` heads | Notes |
+  |---|---|---|
+  | 2026-10-30T03:33:59Z | `d0-audit` `bc01426`, `d1-spike` `82896bc` | first sync |
+  | 2026-10-30T13:01:04Z | through `d4b-profile-ui` `8c27f93` | D4b first gate |
+  | 2026-10-30T22:37:46Z | `d0-audit` `bc01426`, `d1-architecture` `350b48b`, `d2-shell` `003a71c`, `d3a-runtime` `130dde9`, `d3b-lifecycle` `1f0ed69`, `d4a-profiles` `c544d7a`, `d4b-profile-ui` `8c27f93` | baseline re-verified before the D4b review fix; working tree clean |
+
+  A documentation commit cannot record itself. Each row names the heads
+  that existed when the sync ran. The commit that carries a row is
+  backed up by the next sync.
 
 ## Next
 

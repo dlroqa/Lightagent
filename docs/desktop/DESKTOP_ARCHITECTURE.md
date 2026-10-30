@@ -212,15 +212,28 @@ sidecar using **start-new-then-commit**:
 3. **Failure before commit.** If the handshake fails or times out, the host
    kills the new owned process. The old sidecar, its key, and its streams are
    untouched, and the UI shows the redacted log excerpt. Nothing is persisted.
-4. **Commit.**
-   - The host switches IPC routing to the new sidecar.
-   - It ends every relayed stream of the old one with `stream_closed{reason:"profile_switch"}`.
-   - It persists the choice through the new sidecar's typed `profile use` operation (`ProfileStore::set_active`, already atomic: temp file plus rename, `paths.rs:173-185`). The CLI and WebUI then see the same active profile.
-   - It stops the old sidecar (§4 shutdown).
-5. **Failure after commit.** If persisting fails, the new sidecar stays in
-   use and the UI warns that the CLI's active profile was not updated, with a
-   retry. Old streams are not resumed across profiles. The UI reloads
-   sessions, approvals, tools, and skills from the new sidecar.
+4. **Commit, all or nothing** (revised in D4b review; the earlier "keep the
+   new sidecar and warn" rule broke the guarantee and was removed).
+   - The old sidecar is checked once more for runs. Any run that appeared
+     aborts the switch.
+   - The choice is persisted **first**, through the new sidecar's typed
+     `profile use` operation (`ProfileStore::set_active`: temporary file
+     plus rename, so a reader sees the old or the new value).
+   - Only after that write succeeds does the host route IPC to the new
+     sidecar, end every relayed stream of the old one with
+     `stream_closed{reason:"profile_switch"}`, and stop the old sidecar
+     (§4 shutdown).
+5. **Any failure changes nothing.** This covers runs that cannot be
+   stopped, a new sidecar that does not become ready, runs that appear late,
+   and a failed active-profile write. In every case the unused new sidecar is
+   stopped; the old sidecar, the CLI's active profile, and the app's routing
+   stay as they were; and the UI shows an actionable error that says so.
+   - Serialisation: one host lifecycle lock covers start, restart, crash
+     recovery, and switch, so an automatic restart cannot interleave with a
+     switch. A second switch or restart during one is refused as busy.
+   - While a switch holds the lock, the host refuses `runs.create` and
+     `approvals.respond`, so no work can start on the sidecar being
+     replaced.
 6. **Credentials.** Each sidecar has its own key, and the old key dies with
    its process. Provider and MCP secrets are resolved by the sidecar from the
    profile's `SecretRef`s; the host and the renderer never read them.

@@ -61,6 +61,9 @@ struct Host {
     instance: Mutex<Option<std::fs::File>>,
     /// A profile switch is in progress (one at a time).
     switching: AtomicBool,
+    /// Held for any change of runtime (start, restart, crash recovery,
+    /// switch), so two can never interleave.
+    lifecycle: Arc<tokio::sync::Mutex<()>>,
     /// The window was asked to close while runs were working; the UI asks.
     close_requested: AtomicBool,
 }
@@ -229,6 +232,9 @@ fn app_close_cancel(host: tauri::State<'_, Arc<Host>>) {
 /// Restart the runtime on request (a crashed or failed one, or a running one).
 #[tauri::command]
 fn runtime_restart(host: tauri::State<'_, Arc<Host>>) -> Result<(), String> {
+    let lifecycle = Arc::clone(&host.lifecycle)
+        .try_lock_owned()
+        .map_err(|_| "a profile switch or runtime restart is already in progress".to_owned())?;
     let previous = {
         let mut runtime = lock(&host.runtime);
         if matches!(*runtime, Runtime::Starting | Runtime::Duplicate) {
@@ -238,6 +244,7 @@ fn runtime_restart(host: tauri::State<'_, Arc<Host>>) -> Result<(), String> {
     };
     let host = Arc::clone(host.inner());
     std::thread::spawn(move || {
+        let _lifecycle = lifecycle;
         // Stopping the old runtime may take its grace period; not on the UI's thread.
         drop(previous);
         start_runtime(&host, true);
@@ -289,6 +296,9 @@ async fn api_fetch(
     filename: Option<String>,
 ) -> Result<FetchResult, String> {
     let operation = host.contract.resolve(&method, &target)?.clone();
+    if host.switching.load(Ordering::Acquire) && switch::blocked_while_switching(&operation.id) {
+        return Err("a profile switch is in progress; try again when it has finished".to_owned());
+    }
     if operation.stream {
         return Err(format!(
             "{} is a stream; subscribe to it instead",
@@ -498,6 +508,10 @@ fn start_runtime(host: &Host, restart: bool) {
 fn watch_runtime(host: &Host) {
     loop {
         std::thread::sleep(WATCH_INTERVAL);
+        // A switch or restart in progress owns the runtime; look again later.
+        let Ok(_lifecycle) = host.lifecycle.try_lock() else {
+            continue;
+        };
         let exited = match &mut *lock(&host.runtime) {
             Runtime::Ready(sidecar) => sidecar.exit_status().map(|status| {
                 let logs: Vec<String> = lock(&sidecar.logs).iter().cloned().collect();
@@ -577,6 +591,7 @@ fn main() {
         last_logs: Mutex::default(),
         instance: Mutex::new(None),
         switching: AtomicBool::new(false),
+        lifecycle: Arc::new(tokio::sync::Mutex::new(())),
         close_requested: AtomicBool::new(false),
     });
     let app = tauri::Builder::default()
@@ -615,7 +630,12 @@ fn main() {
                 Err(error) => eprintln!("single-instance lock unavailable: {error}"),
             }
             std::thread::spawn(move || {
-                start_runtime(&host, false);
+                {
+                    let _lifecycle = host.lifecycle.blocking_lock();
+                    start_runtime(&host, false);
+                }
+                #[cfg(feature = "e2e-hooks")]
+                switch::run_e2e_switches(&host);
                 watch_runtime(&host);
             });
             Ok(())

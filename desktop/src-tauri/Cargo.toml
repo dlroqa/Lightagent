@@ -7,6 +7,11 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# Unattended switch scenarios for hosted end-to-end tests only; the bundled
+# app is never built with it (see .github/workflows/desktop.yml).
+e2e-hooks = []
+
 [build-dependencies]
 tauri-build = { version = "=2.7.3", features = [] }
 

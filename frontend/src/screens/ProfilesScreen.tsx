@@ -6,11 +6,14 @@ import { Card } from "../components/Card";
 import { TopBar } from "../components/Shell";
 import "./profiles.css";
 
-/** What the desktop host answers when asked to switch profile. */
+/**
+ * What the desktop host answers when asked to switch profile. A switch is all
+ * or nothing: "switched" means the runtime and the CLI's active profile both
+ * changed; any failure is an error saying nothing was changed.
+ */
 interface SwitchOutcome {
   status: "switched" | "blocked";
   runs: { id: string; status: string }[];
-  persisted: boolean;
   profile: string;
 }
 
