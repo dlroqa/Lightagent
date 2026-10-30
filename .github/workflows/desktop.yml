@@ -7,6 +7,9 @@ name: desktop
 #   D2  contract, host and shell: the operation contract matches the server
 #       and the UI client; the desktop host builds, lints and tests; the
 #       packaged shell starts its runtime and renders on every target.
+#   D3  the shell bundles the real runtime (`lightagent serve --desktop`),
+#       which must exit when the host goes away; the mock remains only to
+#       prove a version mismatch is refused.
 
 on:
   pull_request:
@@ -102,6 +105,13 @@ jobs:
           mkdir -p desktop/src-tauri/binaries
           cp desktop/target/debug/lightagent-mock-sidecar "desktop/src-tauri/binaries/lightagent-sidecar-$triple"
           (cd desktop && npx --yes "$TAURI_CLI" icon ../icon/LightagentLogo.png -o src-tauri/icons)
+      - name: Desktop and runtime versions agree
+        run: |
+          root=$(sed -n '/^\[workspace\.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version *= *"\([^"]*\)".*/\1/p' | head -1)
+          desk=$(sed -n '/^\[workspace\.package\]/,/^\[/p' desktop/Cargo.toml | sed -n 's/^version *= *"\([^"]*\)".*/\1/p' | head -1)
+          conf=$(python3 -c "import json; print(json.load(open('desktop/src-tauri/tauri.conf.json'))['version'])")
+          echo "runtime $root, desktop $desk, bundle $conf"
+          [ "$root" = "$desk" ] && [ "$desk" = "$conf" ] || { echo "::error::desktop and runtime versions disagree"; exit 1; }
       - name: Format
         run: cargo fmt --manifest-path desktop/Cargo.toml --all --check
       - name: Clippy
@@ -176,7 +186,9 @@ jobs:
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: desktop
+          workspaces: |
+            . -> target
+            desktop -> target
           key: desktop-shell-${{ matrix.label }}
       - uses: actions/setup-node@v7
         with:
@@ -191,13 +203,13 @@ jobs:
         run: |
           npm ci --prefix frontend
           npm run build:desktop --prefix frontend
-      - name: Stage the runtime (D2 mock) and icons
+      - name: Stage the runtime (the real lightagent) and icons
         run: |
-          locked=$([ -f desktop/Cargo.lock ] && echo --locked || true)
-          cargo build $locked --release --manifest-path desktop/Cargo.toml -p lightagent-mock-sidecar
+          cargo build --locked --release -p lightagent
+          cargo build --locked --release --manifest-path desktop/Cargo.toml -p lightagent-mock-sidecar
           triple=$(rustc -vV | sed -n 's/^host: //p'); ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
           mkdir -p desktop/src-tauri/binaries
-          cp "desktop/target/release/lightagent-mock-sidecar$ext" "desktop/src-tauri/binaries/lightagent-sidecar-$triple$ext"
+          cp "target/release/lightagent$ext" "desktop/src-tauri/binaries/lightagent-sidecar-$triple$ext"
           (cd desktop && npx --yes "$TAURI_CLI" icon ../icon/LightagentLogo.png -o src-tauri/icons)
       - name: Build and bundle
         working-directory: desktop
@@ -225,18 +237,26 @@ jobs:
         run: |
           out="$RUNNER_TEMP/desktop-e2e"
           r=desktop/target/release
+          ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
           case "$(uname -s)" in
-            Darwin) app=("$(ls -d $r/bundle/macos/*.app)/Contents/MacOS/lightagent-desktop"); wrap=() ;;
-            Linux) app=("$r/lightagent-desktop"); wrap=(xvfb-run -a -s '-screen 0 1280x800x24') ;;
-            *) app=("$r/lightagent-desktop.exe"); wrap=() ;;
+            Darwin) dir="$(ls -d $r/bundle/macos/*.app)/Contents/MacOS"; wrap=() ;;
+            Linux) dir="$r"; wrap=(xvfb-run -a -s '-screen 0 1280x800x24') ;;
+            *) dir="$r"; wrap=() ;;
           esac
+          app=("$dir/lightagent-desktop$ext")
+          # An isolated home: the bundled runtime scaffolds it on first start.
+          export LIGHTAGENT_HOME="$RUNNER_TEMP/lightagent-home"
           status=0
-          "${wrap[@]}" python desktop/e2e/run.py "$out" ready -- "${app[@]}" || status=1
-          LIGHTAGENT_MOCK_REPORT_VERSION=0.0.0-mismatch "${wrap[@]}" python desktop/e2e/run.py "$out" mismatch -- "${app[@]}" || status=1
+          E2E_REQUIRE_NO_ORPHAN=1 "${wrap[@]}" python desktop/e2e/run.py "$out" ready -- "${app[@]}" || status=1
           if [ "$RUNNER_OS" = Linux ]; then
-            # D1 found a 30 s first load under Xvfb; measure the DMA-BUF renderer's share.
-            WEBKIT_DISABLE_DMABUF_RENDERER=1 "${wrap[@]}" python desktop/e2e/run.py "$out/no-dmabuf" ready -- "${app[@]}" || true
+            # D2 placed the 30 s delay before Tauri setup; test the D-Bus session bus hypothesis.
+            E2E_REQUIRE_NO_ORPHAN=1 "${wrap[@]}" dbus-run-session -- python desktop/e2e/run.py "$out/dbus-session" ready -- "${app[@]}" || true
           fi
+          # Version mismatch: swap in the mock runtime, which can report another version.
+          cp "$dir/lightagent-sidecar$ext" "$RUNNER_TEMP/real-sidecar$ext"
+          cp "desktop/target/release/lightagent-mock-sidecar$ext" "$dir/lightagent-sidecar$ext"
+          LIGHTAGENT_MOCK_REPORT_VERSION=0.0.0-mismatch "${wrap[@]}" python desktop/e2e/run.py "$out" mismatch -- "${app[@]}" || status=1
+          cp "$RUNNER_TEMP/real-sidecar$ext" "$dir/lightagent-sidecar$ext"
           python - "$out" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import glob, json, os, sys
           for path in sorted(glob.glob(os.path.join(sys.argv[1], "**", "e2e-*.json"), recursive=True)):

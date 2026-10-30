@@ -2,16 +2,17 @@
 //!
 //! The host starts exactly one binary: the `lightagent-sidecar` shipped next
 //! to its own executable (never one found on `PATH`). The per-launch key is a
-//! fresh 256-bit value from the OS generator, written once to the child's
-//! stdin and then the pipe is closed; it never appears in argv, the
-//! environment, a URL, a file, a log line, or the UI. The child answers with
-//! one JSON handshake line on stdout, and is refused unless its protocol and
-//! version match this build.
+//! fresh 256-bit value from the OS generator, written once as the first line
+//! of the child's stdin; it never appears in argv, the environment, a URL, a
+//! file, a log line, or the UI. The host then holds stdin open as the child's
+//! lifeline: however the host ends, even killed, the pipe closes and the
+//! runtime exits. The child answers with one JSON handshake line on stdout,
+//! and is refused unless its protocol and version match this build.
 
 use std::collections::VecDeque;
 use std::io::{BufRead as _, BufReader, Read, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,6 +21,8 @@ use serde::Deserialize;
 
 /// How long a starting runtime may take to report ready.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a stopping runtime may take after its lifeline closes.
+const STOP_GRACE: Duration = Duration::from_secs(5);
 /// Lines of runtime output kept in memory for diagnostics.
 const LOG_LINES: usize = 2_000;
 
@@ -46,6 +49,7 @@ pub enum LaunchError {
 /// A running, owned runtime.
 pub struct Sidecar {
     child: Child,
+    lifeline: Option<ChildStdin>,
     key: String,
     pub handshake: Handshake,
     pub logs: Arc<Mutex<VecDeque<String>>>,
@@ -62,6 +66,16 @@ impl Sidecar {
 
     /// Stop the runtime this host started, and nothing else.
     pub fn stop(&mut self) {
+        // Closing the lifeline asks the runtime to finish; kill only if it
+        // has not within the grace period.
+        drop(self.lifeline.take());
+        let deadline = std::time::Instant::now() + STOP_GRACE;
+        while std::time::Instant::now() < deadline {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -112,8 +126,6 @@ pub fn launch(
     let mut command = Command::new(binary);
     command
         .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
-        .arg("--parent-pid")
-        .arg(std::process::id().to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -130,18 +142,21 @@ pub fn launch(
         .spawn()
         .map_err(|error| LaunchError::Failed(format!("could not start the runtime: {error}")))?;
 
-    // Deliver the key and close stdin so the runtime sees end-of-input.
-    let delivered = child
-        .stdin
-        .take()
-        .map(|mut stdin| stdin.write_all(format!("{key}\n").as_bytes()))
-        .transpose();
-    if !matches!(delivered, Ok(Some(()))) {
+    // Deliver the key, then keep stdin open as the runtime's lifeline.
+    let lifeline = child.stdin.take().and_then(|mut stdin| {
+        stdin
+            .write_all(format!("{key}\n").as_bytes())
+            .and_then(|()| stdin.flush())
+            .ok()
+            .map(|()| stdin)
+    });
+    let Some(lifeline) = lifeline else {
         let _ = child.kill();
+        let _ = child.wait();
         return Err(LaunchError::Failed(
             "could not hand the runtime its credential".to_owned(),
         ));
-    }
+    };
 
     let logs = Arc::new(Mutex::new(VecDeque::with_capacity(LOG_LINES)));
     let (ready_tx, ready_rx) = mpsc::channel::<String>();
@@ -184,6 +199,7 @@ pub fn launch(
     };
     let mut sidecar = Sidecar {
         child,
+        lifeline: Some(lifeline),
         key,
         handshake,
         logs,

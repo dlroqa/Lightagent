@@ -7,7 +7,8 @@ the host's milestones, screenshots the window, and checks that no 256-bit
 hex value (the shape of the launch key) appears in any process command line
 or environment of the app's tree, or in the report. Then it stops the host
 the way a crash would (terminate) and records whether the runtime outlived
-it. Writes e2e.json; exits non-zero when an expectation is not met.
+it (with E2E_REQUIRE_NO_ORPHAN=1, a surviving runtime fails the check).
+Writes e2e.json; exits non-zero when an expectation is not met.
 """
 
 import json
@@ -101,7 +102,10 @@ def main():
         app.wait(timeout=15)
     except subprocess.TimeoutExpired:
         app.kill()
-    time.sleep(3)
+    # The runtime's lifeline closes with the host; give it time to finish.
+    deadline = time.time() + 10
+    while time.time() < deadline and any(p.is_running() for p in sidecars):
+        time.sleep(0.2)
     survivors = [p for p in sidecars if p.is_running()]
     result["runtime_survived_host_termination"] = bool(survivors)
     for process in survivors:
@@ -110,7 +114,8 @@ def main():
     with open(os.path.join(out, f"e2e-{mode}.json"), "w", encoding="utf-8") as handle:
         json.dump(result, handle, indent=1)
     print(json.dumps(result, indent=1))
-    return 1 if result["missing"] or leaks else 0
+    orphan = survivors and os.environ.get("E2E_REQUIRE_NO_ORPHAN") == "1"
+    return 1 if result["missing"] or leaks or orphan else 0
 
 
 if __name__ == "__main__":
