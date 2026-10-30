@@ -4,9 +4,9 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 
 ## Coverage
 
-- Denominator: 225
-- Implemented: 0 of 225
-- Pending D1 decision rows: 8
+- Denominator: 226
+- Implemented: 0 of 226
+- Pending D1 decision rows: 0
 - Total rows: 306
 
 | Kind | Rows |
@@ -29,21 +29,20 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 
 | Applicability | Rows |
 |---|---|
-| applicable | 271 |
-| decision-D1 | 8 |
+| applicable | 272 |
 | host-owned | 5 |
-| not-applicable | 22 |
+| not-applicable | 29 |
 
-## Open applicability decisions (resolved in D1)
+## Applicability decisions (resolved in D1)
 
-| Decision | Rows | Question |
-|---|---|---|
-| D1-Q1 | `cli.update`, `cli.update.opt.check`, `cli.update.opt.force` | Does the desktop expose CLI self-update (`lightagent update`)? The plan forbids automatic updates of installed apps. |
-| D1-Q2 | `slash.update` | Same as D1-Q1 for the /update slash command. |
-| D1-Q3 | `api.provisioning.put.profiles` | Is feature-gated profile provisioning a desktop capability? |
-| D1-Q4 | `api.provisioning.get.operations` | Provisioning operation status in desktop? |
-| D1-Q5 | `api.provisioning.post.operations` | Provisioning revoke in desktop? |
-| D1-Q6 | `env.LIGHTAGENT_INSTALL_ROOT` | Does the desktop honour or expose the update install root? |
+| Decision | Rows | Question | Resolution |
+|---|---|---|---|
+| D1-Q1 | `cli.update`, `cli.update.opt.check`, `cli.update.opt.force` | Does the desktop expose CLI self-update (`lightagent update`)? The plan forbids automatic updates of installed apps. | resolved: [docs/desktop/DESKTOP_ARCHITECTURE.md §11](DESKTOP_ARCHITECTURE.md#11-applicability-decisions-d0--resolved) |
+| D1-Q2 | `slash.update` | Same as D1-Q1 for the /update slash command. | resolved: [docs/desktop/DESKTOP_ARCHITECTURE.md §11](DESKTOP_ARCHITECTURE.md#11-applicability-decisions-d0--resolved) |
+| D1-Q3 | `api.provisioning.put.profiles` | Is feature-gated profile provisioning a desktop capability? | resolved: [docs/desktop/DESKTOP_ARCHITECTURE.md §11](DESKTOP_ARCHITECTURE.md#11-applicability-decisions-d0--resolved) |
+| D1-Q4 | `api.provisioning.get.operations` | Provisioning operation status in desktop? | resolved: [docs/desktop/DESKTOP_ARCHITECTURE.md §11](DESKTOP_ARCHITECTURE.md#11-applicability-decisions-d0--resolved) |
+| D1-Q5 | `api.provisioning.post.operations` | Provisioning revoke in desktop? | resolved: [docs/desktop/DESKTOP_ARCHITECTURE.md §11](DESKTOP_ARCHITECTURE.md#11-applicability-decisions-d0--resolved) |
+| D1-Q6 | `env.LIGHTAGENT_INSTALL_ROOT` | Does the desktop honour or expose the update install root? | resolved: [docs/desktop/DESKTOP_ARCHITECTURE.md §11](DESKTOP_ARCHITECTURE.md#11-applicability-decisions-d0--resolved) |
 
 ## What the drift check cannot detect automatically
 
@@ -142,7 +141,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.memory.forget` | `lightagent memory forget` | applicable | yes | Memory/Knowledge: forget (confirm) | extract: memory::forget() | not-started | `crates/lightagent/src/lib.rs:334` |
 | `cli.memory.clear` | `lightagent memory clear` | applicable | yes | Memory/Knowledge: clear (typed confirmation) | extract: memory::clear() | not-started | `crates/lightagent/src/lib.rs:336` |
 | `cli.banner` | `lightagent banner` | not-applicable | no | Terminal cosmetic |  | not-started | `crates/lightagent/src/lib.rs:176` |
-| `cli.update` | `lightagent update` | decision-D1 (D1-Q1) | no | (decision D1-Q1) | release_update::run() | not-started | `crates/lightagent/src/lib.rs:182` |
+| `cli.update` | `lightagent update` | not-applicable (D1-Q1) | no | (decision D1-Q1) | release_update::run() | not-started | `crates/lightagent/src/lib.rs:182` |
 
 ## option
 
@@ -202,8 +201,8 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.memory.promote.opt.kind` | `lightagent memory promote --kind` | applicable | yes | Conversations: message → remember — input 'kind' | extract: memory::promote() | not-started | `crates/lightagent/src/lib.rs:319` |
 | `cli.memory.promote.opt.tag` | `lightagent memory promote --tag` | applicable | yes | Conversations: message → remember — input 'tag' | extract: memory::promote() | not-started | `crates/lightagent/src/lib.rs:319` |
 | `cli.banner.opt.preview` | `lightagent banner --preview` | not-applicable | no | Option of lightagent banner: Terminal cosmetic |  | not-started | `crates/lightagent/src/lib.rs:176` |
-| `cli.update.opt.check` | `lightagent update --check` | decision-D1 (D1-Q1) | no | (decision D1-Q1) — input 'check' | release_update::run() | not-started | `crates/lightagent/src/lib.rs:182` |
-| `cli.update.opt.force` | `lightagent update --force` | decision-D1 (D1-Q1) | no | (decision D1-Q1) — input 'force' | release_update::run() | not-started | `crates/lightagent/src/lib.rs:182` |
+| `cli.update.opt.check` | `lightagent update --check` | applicable (D1-Q1) | yes | Settings/Diagnostics: Check for updates (read-only; installs nothing) | extract: release_update check-only operation | not-started | `crates/lightagent/src/lib.rs:182` |
+| `cli.update.opt.force` | `lightagent update --force` | not-applicable (D1-Q1) | no | (decision D1-Q1) — input 'force' | release_update::run() | not-started | `crates/lightagent/src/lib.rs:182` |
 
 ## argument
 
@@ -308,7 +307,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `slash.reject` | `/reject` | applicable | yes | Conversations: approval card | api: POST /approvals/{run} | not-started | `crates/lightagent/src/slash.rs:84` |
 | `slash.stop` | `/stop` | applicable | yes | Conversations: stop | api: POST /runs/{id}/cancel | not-started | `crates/lightagent/src/slash.rs:85` |
 | `slash.continue` | `/continue` | applicable | yes | Conversations: continue | MISSING in API: no continue operation (new backend operation required, D5) | not-started | `crates/lightagent/src/slash.rs:86` |
-| `slash.update` | `/update` | decision-D1 (D1-Q2) | no | (decision D1-Q2) |  | not-started | `crates/lightagent/src/slash.rs:87` |
+| `slash.update` | `/update` | not-applicable (D1-Q2) | no | (decision D1-Q2) |  | not-started | `crates/lightagent/src/slash.rs:87` |
 | `slash.exit` | `/exit` | not-applicable | no | Window/session close is native |  | not-started | `crates/lightagent/src/slash.rs:88` |
 
 ## keybinding
@@ -400,7 +399,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `env.LIGHTAGENT_OPEN_TERMINAL_URL` | `LIGHTAGENT_OPEN_TERMINAL_URL` | applicable | yes | Settings: platform endpoints | sidecar process environment | not-started | `crates (string literal)` |
 | `env.LIGHTAGENT_OPEN_TERMINAL_TOKEN` | `LIGHTAGENT_OPEN_TERMINAL_TOKEN` | applicable | yes | Settings: platform endpoints (redacted) | sidecar process environment | not-started | `crates (string literal)` |
 | `env.LIGHTAGENT_NO_BANNER` | `LIGHTAGENT_NO_BANNER` | not-applicable | no | Terminal cosmetic | sidecar process environment | not-started | `crates (string literal)` |
-| `env.LIGHTAGENT_INSTALL_ROOT` | `LIGHTAGENT_INSTALL_ROOT` | decision-D1 (D1-Q6) | no |  | sidecar process environment | not-started | `crates (string literal)` |
+| `env.LIGHTAGENT_INSTALL_ROOT` | `LIGHTAGENT_INSTALL_ROOT` | not-applicable (D1-Q6) | no | D1-Q6: read only by the update installer | sidecar process environment | not-started | `crates (string literal)` |
 | `env.HERMES_HOME` | `HERMES_HOME` | applicable | yes | Profiles/Workspaces: import default folder | sidecar process environment | not-started | `crates (string literal)` |
 
 ## api
@@ -430,6 +429,6 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `api.post.sessions.id.attachments` | `POST /api/lightagent/v1/sessions/{id}/attachments` | applicable | yes | Conversations: attach file (already in WebUI) | api: POST /sessions/{id}/attachments | not-started | `crates/lightagent-api/src/lib.rs:105` |
 | `api.get.approvals` | `GET /api/lightagent/v1/approvals` | applicable | no | (backend reuse) | api: GET /approvals | not-started | `crates/lightagent-api/src/lib.rs:109` |
 | `api.post.approvals.run` | `POST /api/lightagent/v1/approvals/{run}` | applicable | no | (backend reuse) | api: POST /approvals/{run} | not-started | `crates/lightagent-api/src/lib.rs:110` |
-| `api.provisioning.put.profiles` | `PUT /api/lightagent/v1/provisioning/profiles/{profile_id}` | decision-D1 (D1-Q3) | no |  | api (feature provisioning-api) | not-started | `crates/lightagent-api/src/provisioning.rs:53` |
-| `api.provisioning.get.operations` | `GET /api/lightagent/v1/provisioning/operations/{operation_id}` | decision-D1 (D1-Q4) | no |  | api (feature provisioning-api) | not-started | `crates/lightagent-api/src/provisioning.rs:57` |
-| `api.provisioning.post.operations` | `POST /api/lightagent/v1/provisioning/operations/{operation_id}/revoke` | decision-D1 (D1-Q5) | no |  | api (feature provisioning-api) | not-started | `crates/lightagent-api/src/provisioning.rs:61` |
+| `api.provisioning.put.profiles` | `PUT /api/lightagent/v1/provisioning/profiles/{profile_id}` | not-applicable (D1-Q3) | no | D1-Q3: compiled only with the provisioning-api feature, which no release build enables; remote capability listing deferred | api (feature provisioning-api) | not-started | `crates/lightagent-api/src/provisioning.rs:53` |
+| `api.provisioning.get.operations` | `GET /api/lightagent/v1/provisioning/operations/{operation_id}` | not-applicable (D1-Q4) | no | D1-Q4: as D1-Q3 | api (feature provisioning-api) | not-started | `crates/lightagent-api/src/provisioning.rs:57` |
+| `api.provisioning.post.operations` | `POST /api/lightagent/v1/provisioning/operations/{operation_id}/revoke` | not-applicable (D1-Q5) | no | D1-Q5: as D1-Q3 | api (feature provisioning-api) | not-started | `crates/lightagent-api/src/provisioning.rs:61` |

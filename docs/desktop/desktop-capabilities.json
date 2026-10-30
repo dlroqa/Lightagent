@@ -42,42 +42,54 @@
     "cli.update.opt.check",
     "cli.update.opt.force"
    ],
-   "question": "Does the desktop expose CLI self-update (`lightagent update`)? The plan forbids automatic updates of installed apps."
+   "question": "Does the desktop expose CLI self-update (`lightagent update`)? The plan forbids automatic updates of installed apps.",
+   "status": "resolved",
+   "resolution": "docs/desktop/DESKTOP_ARCHITECTURE.md §11"
   },
   {
    "id": "D1-Q2",
    "rows": [
     "slash.update"
    ],
-   "question": "Same as D1-Q1 for the /update slash command."
+   "question": "Same as D1-Q1 for the /update slash command.",
+   "status": "resolved",
+   "resolution": "docs/desktop/DESKTOP_ARCHITECTURE.md §11"
   },
   {
    "id": "D1-Q3",
    "rows": [
     "api.provisioning.put.profiles"
    ],
-   "question": "Is feature-gated profile provisioning a desktop capability?"
+   "question": "Is feature-gated profile provisioning a desktop capability?",
+   "status": "resolved",
+   "resolution": "docs/desktop/DESKTOP_ARCHITECTURE.md §11"
   },
   {
    "id": "D1-Q4",
    "rows": [
     "api.provisioning.get.operations"
    ],
-   "question": "Provisioning operation status in desktop?"
+   "question": "Provisioning operation status in desktop?",
+   "status": "resolved",
+   "resolution": "docs/desktop/DESKTOP_ARCHITECTURE.md §11"
   },
   {
    "id": "D1-Q5",
    "rows": [
     "api.provisioning.post.operations"
    ],
-   "question": "Provisioning revoke in desktop?"
+   "question": "Provisioning revoke in desktop?",
+   "status": "resolved",
+   "resolution": "docs/desktop/DESKTOP_ARCHITECTURE.md §11"
   },
   {
    "id": "D1-Q6",
    "rows": [
     "env.LIGHTAGENT_INSTALL_ROOT"
    ],
-   "question": "Does the desktop honour or expose the update install root?"
+   "question": "Does the desktop honour or expose the update install root?",
+   "status": "resolved",
+   "resolution": "docs/desktop/DESKTOP_ARCHITECTURE.md §11"
   }
  ],
  "summary": {
@@ -100,14 +112,13 @@
    "value": 6
   },
   "by_applicability": {
-   "applicable": 271,
-   "decision-D1": 8,
+   "applicable": 272,
    "host-owned": 5,
-   "not-applicable": 22
+   "not-applicable": 29
   },
-  "parity_denominator": 225,
+  "parity_denominator": 226,
   "parity_implemented": 0,
-  "pending_decision_rows": 8,
+  "pending_decision_rows": 0,
   "not_counted_duplicates": 26
  },
  "rows": [
@@ -4343,10 +4354,10 @@
    "behavior": "Self-update the CLI from releases",
    "tree_key": "cmd lightagent update",
    "tokens": null,
-   "applicability": "decision-D1",
+   "applicability": "not-applicable",
    "decision": "D1-Q1",
-   "reason": null,
-   "counts_toward_parity": true,
+   "reason": "D1-Q1: would replace a CLI installation the desktop does not own; installed apps are never auto-updated",
+   "counts_toward_parity": false,
    "duplicate_of": null,
    "ui": "(decision D1-Q1)",
    "backend": "release_update::run()",
@@ -4365,15 +4376,15 @@
    "behavior": "Report availability only",
    "tree_key": "arg lightagent update --check",
    "tokens": null,
-   "applicability": "decision-D1",
+   "applicability": "applicable",
    "decision": "D1-Q1",
    "reason": null,
    "counts_toward_parity": true,
    "duplicate_of": null,
-   "ui": "(decision D1-Q1) — input 'check'",
-   "backend": "release_update::run()",
+   "ui": "Settings/Diagnostics: Check for updates (read-only; installs nothing)",
+   "backend": "extract: release_update check-only operation",
    "permission": "local-operator",
-   "data_scope": "install",
+   "data_scope": "network (release feed)",
    "desktop_status": "not-started",
    "verification": null,
    "tested_sha": null,
@@ -4387,10 +4398,10 @@
    "behavior": "Reinstall",
    "tree_key": "arg lightagent update --force",
    "tokens": null,
-   "applicability": "decision-D1",
+   "applicability": "not-applicable",
    "decision": "D1-Q1",
-   "reason": null,
-   "counts_toward_parity": true,
+   "reason": "D1-Q1: reinstall is part of the not-applicable update action",
+   "counts_toward_parity": false,
    "duplicate_of": null,
    "ui": "(decision D1-Q1) — input 'force'",
    "backend": "release_update::run()",
@@ -5019,10 +5030,10 @@
    "tokens": [
     "update"
    ],
-   "applicability": "decision-D1",
+   "applicability": "not-applicable",
    "decision": "D1-Q2",
-   "reason": null,
-   "counts_toward_parity": true,
+   "reason": "D1-Q2: same as D1-Q1",
+   "counts_toward_parity": false,
    "duplicate_of": null,
    "ui": "(decision D1-Q2)",
    "backend": null,
@@ -6387,10 +6398,10 @@
    "tokens": [
     "LIGHTAGENT_INSTALL_ROOT"
    ],
-   "applicability": "decision-D1",
+   "applicability": "not-applicable",
    "decision": "D1-Q6",
-   "reason": null,
-   "counts_toward_parity": true,
+   "reason": "D1-Q6: read only by the update installer",
+   "counts_toward_parity": false,
    "duplicate_of": null,
    "ui": null,
    "backend": "sidecar process environment",
@@ -6987,10 +6998,10 @@
    "tokens": [
     "PUT /api/lightagent/v1/provisioning/profiles/{profile_id}"
    ],
-   "applicability": "decision-D1",
+   "applicability": "not-applicable",
    "decision": "D1-Q3",
-   "reason": null,
-   "counts_toward_parity": true,
+   "reason": "D1-Q3: compiled only with the provisioning-api feature, which no release build enables; remote capability listing deferred",
+   "counts_toward_parity": false,
    "duplicate_of": null,
    "ui": null,
    "backend": "api (feature provisioning-api)",
@@ -7011,10 +7022,10 @@
    "tokens": [
     "GET /api/lightagent/v1/provisioning/operations/{operation_id}"
    ],
-   "applicability": "decision-D1",
+   "applicability": "not-applicable",
    "decision": "D1-Q4",
-   "reason": null,
-   "counts_toward_parity": true,
+   "reason": "D1-Q4: as D1-Q3",
+   "counts_toward_parity": false,
    "duplicate_of": null,
    "ui": null,
    "backend": "api (feature provisioning-api)",
@@ -7035,10 +7046,10 @@
    "tokens": [
     "POST /api/lightagent/v1/provisioning/operations/{operation_id}/revoke"
    ],
-   "applicability": "decision-D1",
+   "applicability": "not-applicable",
    "decision": "D1-Q5",
-   "reason": null,
-   "counts_toward_parity": true,
+   "reason": "D1-Q5: as D1-Q3",
+   "counts_toward_parity": false,
    "duplicate_of": null,
    "ui": null,
    "backend": "api (feature provisioning-api)",
