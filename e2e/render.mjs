@@ -6,6 +6,7 @@ import { mkdir } from "node:fs/promises";
 import { chromium } from "playwright";
 import { checkDeliveryStates } from "./delivery.mjs";
 import { checkJevStates } from "./jev.mjs";
+import { checkProfileStates } from "./profiles.mjs";
 
 const BASE = (process.env.PANEL_BASE ?? "http://127.0.0.1:8735").replace(/\/+$/, "");
 const OUT_DIR = process.env.OUT_DIR ?? "screens";
@@ -33,6 +34,7 @@ const ROUTES = [
   { name: "agent-alias", hash: "#/agent", agentBacked: true, mustContain: "Where should we begin?" },
   { name: "agent-tools", hash: "#/tools", agentBacked: true, mustContain: "datetime.now" },
   { name: "settings", hash: "#/settings", agentBacked: true, mustContain: "Agent runtime" },
+  { name: "profiles", hash: "#/profiles", agentBacked: true, mustContain: "Saved profiles" },
 ];
 
 /** Wait until `mustContain` shows, or a fallback sign does, or time runs out. */
@@ -356,6 +358,12 @@ async function main() {
     failures.push(...(await checkJevStates(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`jev states: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Changes the profile store: after the routes above have rendered.
+  try {
+    failures.push(...(await checkProfileStates(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`profile states: ${err instanceof Error ? err.message : String(err)}`);
   }
   await browser.close();
 

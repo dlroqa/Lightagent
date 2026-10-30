@@ -136,6 +136,22 @@ export interface ProfileCatalog {
   active_profile: string;
   profiles: ProfileSummary[];
 }
+/** A saved profile as `lightagent profile show --json` prints it (the fields the UI reads). */
+export interface AgentProfileDetail {
+  id: string;
+  name: string;
+  persona: string;
+  routing?: { model?: string };
+}
+
+/** A new profile, as `lightagent profile create` takes it. */
+export interface NewProfile {
+  id: string;
+  name?: string;
+  model?: string;
+  persona?: string;
+}
+
 export interface AgentSession {
   id: string;
   profile: string;
@@ -351,6 +367,20 @@ export const agentApi = {
   jevStatus: () => jsonRequest<JevStatus>("/jev"),
   verifyJev: () => jsonRequest<JevVerification>("/jev/verify", { method: "POST", body: "{}" }),
   profiles: () => jsonRequest<ProfileCatalog>("/profiles"),
+  profile: (id: string) => jsonRequest<AgentProfileDetail>(`/profiles/${encodeURIComponent(id)}`),
+  createProfile: (profile: NewProfile) =>
+    jsonRequest<{ created: string }>("/profiles", { method: "POST", body: JSON.stringify(profile) }),
+  useProfile: (id: string) =>
+    jsonRequest<{ active: string }>(`/profiles/${encodeURIComponent(id)}/active`, { method: "PUT", body: "{}" }),
+  presetProfile: (id: string, preset: string) =>
+    jsonRequest<{ profile: string; preset: string }>(`/profiles/${encodeURIComponent(id)}/preset`, {
+      method: "POST",
+      body: JSON.stringify({ preset }),
+    }),
+  deleteProfile: (id: string) =>
+    jsonRequest<{ deleted: string }>(`/profiles/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  /** Runs that have not finished (operator view). */
+  activeRuns: () => jsonRequest<{ runs: { id: string; status: string }[] }>("/runs"),
   createRun: (message: string, profile?: string, sessionId?: string, model?: string) =>
     jsonRequest<{ id: string; status: string; session_id: string | null }>("/runs", {
       method: "POST",

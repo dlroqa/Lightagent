@@ -17,7 +17,7 @@ Every number below is a **GitHub-hosted runner measurement**, named by its run.
 | Runtime placement | **Owned sidecar process**: the bundled `lightagent` binary of the same version and commit, started as `lightagent serve --desktop …` |
 | Renderer ↔ runtime boundary | **Typed Tauri IPC to the host only.** The host is the sole HTTP client of the sidecar. The renderer never holds the launch credential and never opens a socket |
 | UI | The existing React WebUI (`frontend/`) behind a transport interface. One codebase, built in `web` and `desktop` modes |
-| Shared service layer | A new `lightagent-ops` crate of typed operations. The CLI, `lightagent-api`, and through the API the desktop all call it, extracted incrementally (D3–D7) |
+| Shared service layer | Typed operations in the CLI crate (`crates/lightagent/src/ops.rs`). The CLI prints their results, and `lightagent serve` performs them for the API through the `RunFactory` seam, so the CLI, Web UI and desktop change the same stores the same way. Extracted incrementally (D4a onwards; §12) |
 | Profile switching | **Start-new-then-commit** sidecar replacement (§7) |
 | Local-server security | Per-launch key over stdin, exact Host check, Origin refusal, and Bearer auth on every route including SSE. A key alone is not the design (§6) |
 | Updates | Manual only. The desktop never runs `lightagent update` (§11, D1-Q1) |
@@ -198,8 +198,8 @@ The sidecar serves one profile: `AppState.session_profile`
 sidecar using **start-new-then-commit**:
 
 1. **Preconditions.** The host asks the current sidecar for active runs
-   (`GET /runs?state=active`, added in D3) and pending approvals
-   (`GET /approvals`).
+   (`GET /runs`, which lists only unfinished runs; added in D4a) and pending
+   approvals (`GET /approvals`). Implemented in `desktop/src-tauri/src/switch.rs` (D4b).
    - If any exist, the switch is refused with a dialog listing them. The user may choose
      *Cancel these runs and switch*: the host rejects each pending approval
      explicitly (`approve:false`, so it is recorded, not lost) and cancels each
@@ -212,15 +212,28 @@ sidecar using **start-new-then-commit**:
 3. **Failure before commit.** If the handshake fails or times out, the host
    kills the new owned process. The old sidecar, its key, and its streams are
    untouched, and the UI shows the redacted log excerpt. Nothing is persisted.
-4. **Commit.**
-   - The host switches IPC routing to the new sidecar.
-   - It ends every relayed stream of the old one with `stream_closed{reason:"profile_switch"}`.
-   - It persists the choice through the new sidecar's typed `profile use` operation (`ProfileStore::set_active`, already atomic: temp file plus rename, `paths.rs:173-185`). The CLI and WebUI then see the same active profile.
-   - It stops the old sidecar (§4 shutdown).
-5. **Failure after commit.** If persisting fails, the new sidecar stays in
-   use and the UI warns that the CLI's active profile was not updated, with a
-   retry. Old streams are not resumed across profiles. The UI reloads
-   sessions, approvals, tools, and skills from the new sidecar.
+4. **Commit, all or nothing** (revised in D4b review; the earlier "keep the
+   new sidecar and warn" rule broke the guarantee and was removed).
+   - The old sidecar is checked once more for runs. Any run that appeared
+     aborts the switch.
+   - The choice is persisted **first**, through the new sidecar's typed
+     `profile use` operation (`ProfileStore::set_active`: temporary file
+     plus rename, so a reader sees the old or the new value).
+   - Only after that write succeeds does the host route IPC to the new
+     sidecar, end every relayed stream of the old one with
+     `stream_closed{reason:"profile_switch"}`, and stop the old sidecar
+     (§4 shutdown).
+5. **Any failure changes nothing.** This covers runs that cannot be
+   stopped, a new sidecar that does not become ready, runs that appear late,
+   and a failed active-profile write. In every case the unused new sidecar is
+   stopped; the old sidecar, the CLI's active profile, and the app's routing
+   stay as they were; and the UI shows an actionable error that says so.
+   - Serialisation: one host lifecycle lock covers start, restart, crash
+     recovery, and switch, so an automatic restart cannot interleave with a
+     switch. A second switch or restart during one is refused as busy.
+   - While a switch holds the lock, the host refuses `runs.create` and
+     `approvals.respond`, so no work can start on the sidecar being
+     replaced.
 6. **Credentials.** Each sidecar has its own key, and the old key dies with
    its process. Provider and MCP secrets are resolved by the sidecar from the
    profile's `SecretRef`s; the host and the renderer never read them.
@@ -312,22 +325,26 @@ contract).
 
 ## 12. Shared service extraction and refined slices
 
-- `lightagent-ops` (new crate, D3a) depends on `lightagent-core`, `-store`,
-  `-memory`, `-rag`, `-extensions`, and `-tools`. Operations are typed:
-  `fn(&OpsContext, Input) -> Result<Output, OpsError>`, where
-  `OpsError { category, message }` has stable categories (`not_found`,
-  `invalid`, `conflict`, `denied`, `unavailable`, `internal`).
-- CLI handlers become printers over these operations, keeping their exact
-  current output; the CLI regression tests compare it.
-- `lightagent-api` gains routes that call the same operations. No desktop
-  feature scrapes CLI output or builds shell strings.
+- **Shared operations (as built, D4a):** typed operations live in the CLI
+  crate (`crates/lightagent/src/ops.rs`), which already owns every store they
+  change. They return data, so CLI handlers only print it (with their output
+  unchanged) and `lightagent serve` performs the same operations for the API
+  through the existing `RunFactory` seam. `lightagent-api` defines the
+  request and error types (`lightagent_api::ops`), with stable categories
+  (`not_found`, `invalid`, `conflict`, `denied`, `unavailable`, `internal`).
+  This replaces the planned `lightagent-ops` crate, for three reasons:
+  - it needs no root `Cargo.lock` change, which cannot be regenerated under
+    the execution policy;
+  - it creates no dependency cycle;
+  - embedders and test fixtures keep the factory's `unavailable` defaults.
+- No desktop feature scrapes CLI output or builds shell strings.
 
 | PR | Slice | Contents | Depends on |
 |---|---|---|---|
 | #90 | D0 | Audit, inventory, drift check | — |
 | D1 | D1 | This document, DESKTOP_ACCEPTANCE.md, DESKTOP_MERGE_ORDER.md, inventory decisions | D0 |
 | D2 | D2 | `desktop/` Tauri shell, frontend transport + desktop build mode, operation contract + check, mock sidecar, render/screenshot CI | D1 |
-| D3a | D3 | `lightagent-ops` skeleton; `serve --desktop` (key over stdin, stdin lifeline, Host/Origin/Bearer guard, handshake, `--profile`); the real runtime bundled. `GET /runs?state=active` is needed for the profile switch and moves to D4a | D2 |
+| D3a | D3 | `serve --desktop` (key over stdin, stdin lifeline, Host/Origin/Bearer guard, handshake, `--profile`); the real runtime bundled. `GET /runs?state=active` is needed for the profile switch and moves to D4a | D2 |
 | D3b | D3 | Host sidecar lifecycle: spawn, readiness, crash and restart, shutdown, single instance, logs | D3a |
 | D4a–d | D4 | Profiles; config (lock + ETag); provider, models, key entry, endpoint test; workspaces | D3b |
 | D5a–b | D5 | `continue` and steering operations; conversation relay, approvals, reconciliation, session lock | D4 |
