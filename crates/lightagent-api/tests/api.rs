@@ -1352,9 +1352,12 @@ async fn session_history_is_packed_against_the_resolved_window() {
     .unwrap();
 }
 
+/// Each run's prompt and packed history, in the order the runs started.
+type Prompts = Arc<tokio::sync::Mutex<Vec<(String, Vec<ProviderMessage>)>>>;
+
 /// Records each run's prompt and packed history.
 struct PromptFactory {
-    requests: Arc<tokio::sync::Mutex<Vec<(String, Vec<ProviderMessage>)>>>,
+    requests: Prompts,
 }
 
 #[async_trait]
