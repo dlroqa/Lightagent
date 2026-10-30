@@ -64,6 +64,15 @@ impl Sidecar {
         format!("Bearer {}", self.key)
     }
 
+    /// How the runtime ended, if it has: the host's crash detection.
+    pub fn exit_status(&mut self) -> Option<String> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => Some(status.to_string()),
+            Ok(None) => None,
+            Err(error) => Some(format!("unknown ({error})")),
+        }
+    }
+
     /// Stop the runtime this host started, and nothing else.
     pub fn stop(&mut self) {
         // Closing the lifeline asks the runtime to finish; kill only if it

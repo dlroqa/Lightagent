@@ -18,8 +18,9 @@ next update names its run.
 |---|---|---|---|---|---|
 | D0 Baseline and feature audit | **CI-validated** (gate passed) | `desktop/d0-audit` | https://github.com/dlroqa/Lightagent/pull/90 | `bc01426ed6d55c1ceb951d886e1a58ea9ad4c008` | `bc01426` / tree `4b135f94d45dc7d5e1f3142cc1c5ed88ac30a868` |
 | D1 Architecture and UI specification | **CI-validated** (gate passed) | `desktop/d1-architecture` (stacked on D0) | https://github.com/dlroqa/Lightagent/pull/92 | `350b48b3d0d072213e2028d8b5fb53022d61c340` | `350b48b` / tree `e43ab411568dda5c183963966d09131d21898581` |
-| D2 CI and desktop skeleton | `735cffe` CI-validated; lockfile commit `003a71c` validation in progress (recorded next update) | `desktop/d2-shell` (stacked on D1) | https://github.com/dlroqa/Lightagent/pull/93 | `003a71c2473f3e18cb503f326ae3fc8a153dcc38` | `735cffe` / tree `099a477834334ce2dca8d2f621d9ef522348659c` |
-| D3a Real runtime: `serve --desktop` | implemented; validation pending | `desktop/d3a-runtime` (stacked on D2) | recorded in the next update | this commit | none yet |
+| D2 CI and desktop skeleton | **CI-validated** (gate passed) | `desktop/d2-shell` (stacked on D1) | https://github.com/dlroqa/Lightagent/pull/93 | `003a71c2473f3e18cb503f326ae3fc8a153dcc38` | `003a71c` / tree `d5fabeed9cb429f227689920ab03139c5d921f74` |
+| D3a Real runtime: `serve --desktop` | **CI-validated** (gate passed) | `desktop/d3a-runtime` (stacked on D2) | https://github.com/dlroqa/Lightagent/pull/94 | `130dde98e5cade253b00d69f8e1c499587128e3d` | `130dde9` / tree `ab98037ea76bd083da863dd88c112dc4c7a5f5fc` |
+| D3b Host lifecycle: crash, restart, single instance | implemented; validation pending | `desktop/d3b-lifecycle` (stacked on D3a) | recorded in the next update | this commit | none yet |
 | D1 spike (evidence only, never merged) | runner evidence complete | `desktop/d1-spike` | https://github.com/dlroqa/Lightagent/pull/91 | `82896bcd63f3bd6786dcea12b603241e50a3a9ea` | `82896bc` / tree `d9cde26142a63a716a58f35dc33330be0e90d8b7` |
 | D3b–D10 | not started | — | — | — | — |
 
@@ -287,6 +288,70 @@ D2 runner evidence at `735cffe` (runner measurements, mock runtime). Times are s
 - Inventory: two host-owned rows (`serve --desktop` and `--profile`); 308 rows; denominator unchanged at 226.
 - Architecture §4 and §6 were updated: the stdin lifeline replaces `--parent-pid`, with the reasons.
 
+| When (UTC) | Event | Commit / tree | Evidence |
+|---|---|---|---|
+| 2026-10-30 | D2 lockfile commit validated: `desktop` (all builds `--locked`) and `check` **success**. **D2 gate passed** at `003a71c` | `003a71c` / `d5fabee` | https://github.com/dlroqa/Lightagent/actions/runs/41000548478, https://github.com/dlroqa/Lightagent/actions/runs/41000548458 |
+| 2026-10-30 | Edit request `022-desktop-d3a-runtime` on base `003a71c`; workflow blob verified and attached; branch created without force; draft PR #94 | prepared `109be1e`; final `130dde9` / `ab98037` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41001162717 |
+| 2026-10-30 | `desktop` on `130dde9`: **success** (details below) | `130dde9` | https://github.com/dlroqa/Lightagent/actions/runs/41001259889 |
+| 2026-10-30 | `check` on `130dde9`: **success**. The guard unit tests and both real-binary `desktop_serve` tests pass on macos-arm64, macos-x64, windows-x64 and linux-x64 | `130dde9` | https://github.com/dlroqa/Lightagent/actions/runs/41001259987 |
+| 2026-10-30 | **D3a gate passed** at `130dde9` | — | — |
+
+D3a runner evidence with the **real runtime** bundled. Seconds from app spawn:
+
+| Target | Runtime ready | First API call | Runtime outlived the host | Package |
+|---|---|---|---|---|
+| macOS x86_64 | 2.32 | 4.42 | **no** | dmg 9.8 MB (runtime `minos 10.14`) |
+| macOS arm64 | 1.13 | 3.82 | **no** | dmg 9.2 MB (`minos 11.0`) |
+| Windows x64 | 4.86 | 5.06 | **no** | nsis 6.1 MB, msi 8.1 MB |
+| Linux x64, Xvfb without a session bus | 30.15 | 30.85 | **no** | deb 8.6 MB, AppImage 83.1 MB |
+| Linux x64, Xvfb under `dbus-run-session` | **0.20** | **0.40** | **no** | — |
+
+- **The D2 orphan gap is closed:** the lifeline makes the runtime exit with
+  its host on every target.
+- **The Linux 30 s delay is explained:** with a D-Bus session bus, as every
+  Linux desktop session has, the app is ready in 0.2 s. The delay was an
+  artifact of bare Xvfb. Linux e2e now runs under `dbus-run-session`, and the
+  no-bus case is recorded as a residual risk.
+- No key leaks in either mode, and the version mismatch is refused, on every target.
+
+## D3b — Host lifecycle
+
+- **Crash detection:**
+  - the host checks its runtime every 0.5 s;
+  - an unexpected exit is reported (`failed`, with the exit status), and its output is kept for diagnostics;
+  - the runtime is restarted automatically **at most once per 60 s**, so a runtime that keeps failing stays down and says so.
+- **`runtime_restart`** (user-initiated) and `runtime_logs`, which also shows the last crashed runtime's output.
+- **Single instance:**
+  - an exclusive lock (`std::fs::File::try_lock`, no new crates) on `instance.lock` in the app's local data directory, held for the app's lifetime;
+  - a second launch starts **no runtime** and explains itself;
+  - the OS releases the lock if the app dies.
+- **UI (`DesktopGate`):**
+  - keeps watching after start-up; a stopped runtime shows a modal notice over the kept, inert app;
+  - failures offer **Restart runtime** and a **Runtime log** disclosure;
+  - duplicate, mismatch and failure each state their cause and remedy.
+- **CI:** e2e modes `crash` (kill the runtime under a ready app; require the
+  exit to be reported and a restart) and `duplicate` (second launch; require
+  no second runtime and the first still running), both with
+  `E2E_REQUIRE_NO_ORPHAN=1`. Linux runs under a session bus by default.
+- **Deferred to D4a:** a close with active runs (warn, or cancel then quit),
+  which needs the active-runs operation.
+
+| When (UTC) | Event | Commit / tree | Evidence |
+|---|---|---|---|
+| 2026-10-30 | Edit request `023-desktop-d3b-lifecycle` on base `130dde9`; workflow blob verified and attached; branch created without force; draft PR #95 | prepared `abc1e9f`; final `9dc6783` / `4465812` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41002983519 |
+| 2026-10-30 | `check` on `9dc6783`: **success** | `9dc6783` | https://github.com/dlroqa/Lightagent/actions/runs/41003068075 |
+| 2026-10-30 | `desktop` on `9dc6783`: **failure**. Inventory, host (fmt, clippy, tests), and the macos-arm64, windows-x64 and linux-x64 shells passed every e2e mode. The **macos-x64 shell failed while packaging, before any test ran**: `hdiutil: create failed - Resource busy` from Tauri's `bundle_dmg.sh` | `9dc6783` | https://github.com/dlroqa/Lightagent/actions/runs/41003067980 (job 123891687408) |
+| 2026-10-30 | Investigation: the failing step is the OS disk-image tool, not desktop code; D3b changed no bundling input; the same step passed on that runner image in D2 and D3a. Mitigation (the next commit): retry **only** that exact `hdiutil` message, at most 3 attempts, with every attempt's log kept as an artifact and each retry reported in the job summary. Any other failure still fails at once | — | — |
+
+D3b e2e results at `9dc6783` on the three shells that ran (seconds from the event that started each check):
+
+| Target | Ready (first API call) | Crash: exit reported → restarted | Duplicate: second launch refused, no runtime | Mismatch refused | Runtime outlived the host |
+|---|---|---|---|---|---|
+| macOS arm64 | 5.23 | 2.98 → 2.98 | 4.36 (UI 5.10) | yes | no |
+| Windows x64 | 2.84 | 1.04 → 1.04 | 0.75 (UI 0.85) | yes | no |
+| Linux x64 (session bus) | 1.50 | 0.82 → 0.82 | 0.91 (UI 1.21) | yes | no |
+| Linux x64, no session bus (recorded only) | 30.65 | — | — | — | no |
+
 ## Artifacts and retention
 
 | Artifact | Run | Retention |
@@ -313,6 +378,6 @@ D2 runner evidence at `735cffe` (runner measurements, mock runtime). Times are s
 
 ## Next
 
-1. Record the D2 lockfile-commit validation, and validate the D3a head (`desktop` and `check`).
-2. D3b: host lifecycle hardening: crash detection and one restart, runtime log view, single instance, Windows job object, and shutdown with active runs.
-3. D4a: `lightagent-ops` typed operations for profiles (with `GET /runs?state=active`), then config, provider, and workspaces.
+1. Validate the D3b head (`desktop` and `check`) and record it.
+2. D4a: `lightagent-ops` typed operations for profiles (show/create/use/preset/delete, with `GET /runs?state=active`); the profile switch protocol (DESKTOP_ARCHITECTURE.md §7); close with active runs.
+3. D4b–d: config (lock + ETag), provider/models/key entry/endpoint test, workspaces.

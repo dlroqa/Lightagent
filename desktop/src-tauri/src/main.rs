@@ -26,12 +26,23 @@ use tokio::sync::Notify;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The longest a single events poll waits for something to arrive.
 const MAX_POLL: Duration = Duration::from_secs(25);
+/// At most one automatic restart of a crashed runtime in this window; a
+/// runtime that keeps failing stays down and says so.
+const AUTO_RESTART_WINDOW: Duration = Duration::from_secs(60);
+/// How often the host checks that its runtime is still alive.
+const WATCH_INTERVAL: Duration = Duration::from_millis(500);
 
 enum Runtime {
     Starting,
     Ready(sidecar::Sidecar),
     Failed(String),
-    Mismatch { expected: String, found: String },
+    Mismatch {
+        expected: String,
+        found: String,
+    },
+    /// Another Lightagent Desktop already owns this app's data; this window
+    /// starts no runtime of its own.
+    Duplicate,
 }
 
 struct Host {
@@ -41,6 +52,12 @@ struct Host {
     subscriptions: Mutex<HashMap<u64, Arc<Subscription>>>,
     next_subscription: AtomicU64,
     e2e: E2e,
+    /// When the runtime was last restarted automatically.
+    last_auto_restart: Mutex<Option<Instant>>,
+    /// The output of the last runtime that stopped, kept for diagnostics.
+    last_logs: Mutex<Vec<String>>,
+    /// The single-instance lock, held for the app's lifetime.
+    instance: Mutex<Option<std::fs::File>>,
 }
 
 #[derive(Default)]
@@ -72,6 +89,7 @@ impl Host {
             Runtime::Mismatch { .. } => {
                 Err("the runtime version does not match this app".to_owned())
             }
+            Runtime::Duplicate => Err("another Lightagent window owns this data".to_owned()),
         }
     }
 
@@ -159,8 +177,34 @@ fn runtime_status(host: tauri::State<'_, Arc<Host>>) -> RuntimeStatus {
             ));
             status.runtime_version = Some(found.clone());
         }
+        Runtime::Duplicate => {
+            status.state = "duplicate";
+            status.detail = Some(
+                "Lightagent Desktop is already open. Use that window; this one does not start a second runtime on the same data."
+                    .to_owned(),
+            );
+        }
     }
     status
+}
+
+/// Restart the runtime on request (a crashed or failed one, or a running one).
+#[tauri::command]
+fn runtime_restart(host: tauri::State<'_, Arc<Host>>) -> Result<(), String> {
+    let previous = {
+        let mut runtime = lock(&host.runtime);
+        if matches!(*runtime, Runtime::Starting | Runtime::Duplicate) {
+            return Err("the runtime cannot be restarted right now".to_owned());
+        }
+        std::mem::replace(&mut *runtime, Runtime::Starting)
+    };
+    let host = Arc::clone(host.inner());
+    std::thread::spawn(move || {
+        // Stopping the old runtime may take its grace period; not on the UI's thread.
+        drop(previous);
+        start_runtime(&host, true);
+    });
+    Ok(())
 }
 
 /// The runtime's most recent output lines (already redacted), for diagnostics.
@@ -172,7 +216,11 @@ fn runtime_logs(host: tauri::State<'_, Arc<Host>>, limit: usize) -> Vec<String> 
             let skip = logs.len().saturating_sub(limit.min(500));
             logs.iter().skip(skip).cloned().collect()
         }
-        _ => Vec::new(),
+        _ => {
+            let logs = lock(&host.last_logs);
+            let skip = logs.len().saturating_sub(limit.min(500));
+            logs.iter().skip(skip).cloned().collect()
+        }
     }
 }
 
@@ -375,14 +423,18 @@ fn e2e_note(host: tauri::State<'_, Arc<Host>>, note: String) -> Result<(), Strin
     Ok(())
 }
 
-fn start_runtime(host: &Host) {
+fn start_runtime(host: &Host, restart: bool) {
     let launched = sidecar::bundled_binary()
         .map_err(sidecar::LaunchError::Failed)
         .and_then(|binary| sidecar::launch(&binary, None, VERSION));
     let next = match launched {
         Ok(sidecar) => {
             host.e2e.note_once(
-                "RUNTIME_READY",
+                if restart {
+                    "RUNTIME_RESTARTED"
+                } else {
+                    "RUNTIME_READY"
+                },
                 &format!("version={}", sidecar.handshake.version),
             );
             Runtime::Ready(sidecar)
@@ -400,6 +452,58 @@ fn start_runtime(host: &Host) {
         }
     };
     *lock(&host.runtime) = next;
+}
+
+/// Crash detection: a runtime that exits while the host still wants it is
+/// reported, its output kept, and it is restarted at most once per
+/// [`AUTO_RESTART_WINDOW`].
+fn watch_runtime(host: &Host) {
+    loop {
+        std::thread::sleep(WATCH_INTERVAL);
+        let exited = match &mut *lock(&host.runtime) {
+            Runtime::Ready(sidecar) => sidecar.exit_status().map(|status| {
+                let logs: Vec<String> = lock(&sidecar.logs).iter().cloned().collect();
+                (status, logs)
+            }),
+            _ => None,
+        };
+        let Some((status, logs)) = exited else {
+            continue;
+        };
+        host.e2e.note_once("RUNTIME_EXITED", "");
+        *lock(&host.last_logs) = logs;
+        *lock(&host.runtime) =
+            Runtime::Failed(format!("the runtime stopped unexpectedly ({status})"));
+        let allowed = {
+            let mut last = lock(&host.last_auto_restart);
+            let allowed = last.is_none_or(|at| at.elapsed() >= AUTO_RESTART_WINDOW);
+            if allowed {
+                *last = Some(Instant::now());
+            }
+            allowed
+        };
+        if allowed {
+            *lock(&host.runtime) = Runtime::Starting;
+            start_runtime(host, true);
+        }
+    }
+}
+
+/// Claim this app's single-instance lock. `Ok(None)`: another instance holds it.
+fn claim_instance(dir: Option<PathBuf>) -> Result<Option<std::fs::File>, String> {
+    let dir = dir.ok_or("the app has no data directory")?;
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("instance.lock"))
+        .map_err(|error| error.to_string())?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.to_string()),
+    }
 }
 
 fn main() {
@@ -431,12 +535,16 @@ fn main() {
         subscriptions: Mutex::default(),
         next_subscription: AtomicU64::new(1),
         e2e: E2e::from_env(),
+        last_auto_restart: Mutex::new(None),
+        last_logs: Mutex::default(),
+        instance: Mutex::new(None),
     });
     let app = tauri::Builder::default()
         .manage(Arc::clone(&host))
         .invoke_handler(tauri::generate_handler![
             runtime_status,
             runtime_logs,
+            runtime_restart,
             api_fetch,
             api_subscribe,
             api_events_poll,
@@ -452,7 +560,21 @@ fn main() {
         })
         .setup(|app| {
             let host = Arc::clone(app.state::<Arc<Host>>().inner());
-            std::thread::spawn(move || start_runtime(&host));
+            match claim_instance(app.path().app_local_data_dir().ok()) {
+                Ok(Some(lock_file)) => *lock(&host.instance) = Some(lock_file),
+                Ok(None) => {
+                    host.e2e.note_once("DUPLICATE_INSTANCE", "");
+                    *lock(&host.runtime) = Runtime::Duplicate;
+                    return Ok(());
+                }
+                // Without a lock the app still runs; the runtime's own
+                // atomic writes remain the guard against a second writer.
+                Err(error) => eprintln!("single-instance lock unavailable: {error}"),
+            }
+            std::thread::spawn(move || {
+                start_runtime(&host, false);
+                watch_runtime(&host);
+            });
             Ok(())
         })
         .build(tauri::generate_context!());
