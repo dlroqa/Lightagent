@@ -179,14 +179,16 @@ jobs:
       - name: A fresh home has no profile, so serve asks for init
         working-directory: ${{ env.PKG_DIR }}
         run: |
-          set -uo pipefail
+          # The runner's bash has -e; serve is expected to exit non-zero here,
+          # so -e is turned off and the status is asserted instead.
+          set +e -uo pipefail
           bin=./lightagent; [ -f lightagent.exe ] && bin=./lightagent.exe
           [ ! -e "$LIGHTAGENT_HOME" ] || { echo "home is not fresh" >&2; exit 1; }
           "$bin" serve --web-root ./web > "$T/serve-noinit.log" 2>&1 &
           pid=$!
           for _ in $(seq 1 15); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
           if kill -0 "$pid" 2>/dev/null; then kill "$pid"; echo "serve started without a profile" >&2; exit 1; fi
-          wait "$pid"; status=$?
+          status=0; wait "$pid" || status=$?
           cat "$T/serve-noinit.log"
           echo "exit status: $status"
           [ "$status" != 0 ] && grep -q 'no active profile' "$T/serve-noinit.log"
