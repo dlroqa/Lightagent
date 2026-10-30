@@ -47,13 +47,6 @@ export function ProfilesScreen() {
     void load();
   }, [load]);
 
-  // A profile that no longer exists (deleted here or by the CLI) has no details to show.
-  useEffect(() => {
-    if (catalog && selected && !catalog.profiles.some((profile) => profile.id === selected)) {
-      setSelected(null);
-    }
-  }, [catalog, selected]);
-
   const active = catalog?.active_profile ?? null;
   return (
     <>
@@ -84,8 +77,10 @@ export function ProfilesScreen() {
                   model={profile.model}
                   active={profile.active}
                   onSelect={() => setSelected(profile.id)}
-                  onChanged={(text) => {
+                  onChanged={(text, deleted) => {
                     setNotice(text);
+                    // A deleted profile has no details left to show.
+                    if (deleted !== undefined) setSelected((current) => (current === deleted ? null : current));
                     void load();
                   }}
                 />
@@ -112,7 +107,7 @@ function ProfileRow(props: {
   model: string;
   active: boolean;
   onSelect: () => void;
-  onChanged: (notice: string) => void;
+  onChanged: (notice: string, deleted?: string) => void;
 }) {
   const { id, name, model, active } = props;
   const [busy, setBusy] = useState(false);
@@ -153,7 +148,7 @@ function ProfileRow(props: {
     setError(null);
     try {
       await agentApi.deleteProfile(id);
-      props.onChanged(`Deleted profile '${id}' and its local data.`);
+      props.onChanged(`Deleted profile '${id}' and its local data.`, id);
     } catch (cause) {
       setError(message(cause));
     } finally {
