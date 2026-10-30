@@ -13,6 +13,7 @@
 pub mod auth;
 pub mod desktop;
 pub mod manager;
+pub mod ops;
 #[cfg(feature = "provisioning-api")]
 pub mod provisioning;
 pub mod sse;
@@ -83,12 +84,27 @@ pub fn router(state: AppState) -> Router {
         .route("/api/lightagent/v1/jev", get(get_jev_status))
         .route("/api/lightagent/v1/jev/verify", post(verify_jev))
         .route("/api/lightagent/v1/skills", get(list_skills))
-        .route("/api/lightagent/v1/profiles", get(list_profiles))
+        .route(
+            "/api/lightagent/v1/profiles",
+            get(list_profiles).post(create_profile),
+        )
+        .route(
+            "/api/lightagent/v1/profiles/{id}",
+            get(show_profile).delete(delete_profile),
+        )
+        .route(
+            "/api/lightagent/v1/profiles/{id}/active",
+            axum::routing::put(use_profile),
+        )
+        .route(
+            "/api/lightagent/v1/profiles/{id}/preset",
+            post(preset_profile),
+        )
         .route(
             "/api/lightagent/v1/settings",
             get(get_settings).put(save_settings),
         )
-        .route("/api/lightagent/v1/runs", post(create_run))
+        .route("/api/lightagent/v1/runs", get(list_runs).post(create_run))
         .route("/api/lightagent/v1/runs/{id}", get(get_run))
         .route("/api/lightagent/v1/runs/{id}/events", get(run_events))
         .route("/api/lightagent/v1/runs/{id}/cancel", post(cancel_run))
@@ -393,6 +409,88 @@ fn operator_only() -> Response {
 struct ProfileQuery {
     #[serde(default)]
     profile: Option<String>,
+}
+
+/// `GET /runs`: the runs that have not finished, for the operator. The
+/// desktop app checks them before it switches profile or quits.
+async fn list_runs(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let mut runs = Vec::new();
+    for run in state.manager.active_runs().await {
+        runs.push(json!({ "id": run.id(), "status": run.status().await }));
+    }
+    Json(json!({ "runs": runs })).into_response()
+}
+
+/// Profile management is operator-only: it changes what every later run sees.
+async fn profile_operation(
+    state: &AppState,
+    headers: &HeaderMap,
+    request: ops::ProfileRequest,
+) -> Response {
+    if let Some(rejection) = deny(state, headers, Scope::Admin) {
+        return rejection;
+    }
+    match state.manager.profiles(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn create_profile(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ops::CreateProfile>,
+) -> Response {
+    profile_operation(&state, &headers, ops::ProfileRequest::Create(body)).await
+}
+
+async fn show_profile(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    profile_operation(&state, &headers, ops::ProfileRequest::Show(id)).await
+}
+
+async fn delete_profile(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    profile_operation(&state, &headers, ops::ProfileRequest::Delete(id)).await
+}
+
+async fn use_profile(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    profile_operation(&state, &headers, ops::ProfileRequest::Use(id)).await
+}
+
+#[derive(Deserialize)]
+struct PresetBody {
+    preset: String,
+}
+
+async fn preset_profile(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<PresetBody>,
+) -> Response {
+    profile_operation(
+        &state,
+        &headers,
+        ops::ProfileRequest::Preset {
+            id,
+            preset: body.preset,
+        },
+    )
+    .await
 }
 
 async fn health() -> Response {

@@ -21,6 +21,7 @@ mod import;
 mod jev;
 mod markdown;
 mod memory;
+mod ops;
 mod rag;
 mod remote_credentials;
 mod serve;
@@ -992,38 +993,34 @@ async fn workers_cmd(action: WorkersAction, json: bool) -> Result<(), String> {
 
 fn profiles_cmd(action: ProfilesAction, json: bool) -> Result<(), String> {
     let paths = paths()?;
-    let store = ProfileStore::new(paths.root());
-    let config = load_config(&paths)?;
-    let default = ensure_default_profile(&store, &config)?;
+    let profiles = ops::Profiles::open(&paths).map_err(|error| error.to_string())?;
     match action {
         ProfilesAction::List => {
-            let active = active_profile_id(&store)?;
-            let profiles = store.list().map_err(|error| error.to_string())?;
+            let list = profiles.list().map_err(|error| error.to_string())?;
             if json {
                 let value = serde_json::json!({
-                    "active": active.as_ref().map(|id| id.as_str().to_string()),
-                    "profiles": profiles.iter().map(|id| id.as_str().to_string()).collect::<Vec<_>>(),
+                    "active": list.active,
+                    "profiles": list.profiles,
                 });
                 println!("{value:#}");
                 return Ok(());
             }
-            if profiles.is_empty() {
+            if list.profiles.is_empty() {
                 println!("No profiles yet. Create one with `lightagent profile create <id>`.");
                 return Ok(());
             }
-            for id in profiles {
-                let marker = if active.as_ref() == Some(&id) {
+            for id in &list.profiles {
+                let marker = if list.active.as_deref() == Some(id.as_str()) {
                     "* "
                 } else {
                     "  "
                 };
-                println!("{marker}{}", id.as_str());
+                println!("{marker}{id}");
             }
             Ok(())
         }
         ProfilesAction::Show { id } => {
-            let id = ProfileId::new(&id).map_err(|error| error.to_string())?;
-            let profile = store.load(&id).map_err(|error| error.to_string())?;
+            let profile = profiles.show(&id).map_err(|error| error.to_string())?;
             if json {
                 println!(
                     "{}",
@@ -1043,14 +1040,14 @@ fn profiles_cmd(action: ProfilesAction, json: bool) -> Result<(), String> {
             persona,
             model,
         } => {
-            let id = ProfileId::new(&id).map_err(|error| error.to_string())?;
-            let profile = AgentProfile::new(
-                id.clone(),
-                name.unwrap_or_else(|| id.as_str().to_string()),
-                persona.unwrap_or_else(|| "You are a helpful local agent.".to_string()),
-                model.unwrap_or_else(|| "default".to_string()),
-            );
-            store.create(&profile).map_err(|error| error.to_string())?;
+            let id = profiles
+                .create(lightagent_api::ops::CreateProfile {
+                    id,
+                    name,
+                    persona,
+                    model,
+                })
+                .map_err(|error| error.to_string())?;
             if json {
                 println!("{}", serde_json::json!({ "created": id.as_str() }));
             } else {
@@ -1059,17 +1056,9 @@ fn profiles_cmd(action: ProfilesAction, json: bool) -> Result<(), String> {
             Ok(())
         }
         ProfilesAction::Preset { id, preset } => {
-            let id = ProfileId::new(&id).map_err(|error| error.to_string())?;
-            let mut profile = store.load(&id).map_err(|error| error.to_string())?;
-            lightagent_core::provisioning::apply_preset(&mut profile, &preset).map_err(
-                |error| {
-                    format!(
-                        "{error}: known presets are {:?}",
-                        lightagent_core::provisioning::PRESETS
-                    )
-                },
-            )?;
-            store.save(&profile).map_err(|error| error.to_string())?;
+            let id = profiles
+                .preset(&id, &preset)
+                .map_err(|error| error.to_string())?;
             if json {
                 println!(
                     "{}",
@@ -1081,8 +1070,9 @@ fn profiles_cmd(action: ProfilesAction, json: bool) -> Result<(), String> {
             Ok(())
         }
         ProfilesAction::Use { id } => {
-            let id = ProfileId::new(&id).map_err(|error| error.to_string())?;
-            store.set_active(&id).map_err(|error| error.to_string())?;
+            let id = profiles
+                .use_profile(&id)
+                .map_err(|error| error.to_string())?;
             if json {
                 println!("{}", serde_json::json!({ "active": id.as_str() }));
             } else {
@@ -1091,13 +1081,7 @@ fn profiles_cmd(action: ProfilesAction, json: bool) -> Result<(), String> {
             Ok(())
         }
         ProfilesAction::Delete { id } => {
-            let id = ProfileId::new(&id).map_err(|error| error.to_string())?;
-            if store.active().map_err(|error| error.to_string())?.as_ref() == Some(&id) {
-                store
-                    .set_active(&default)
-                    .map_err(|error| error.to_string())?;
-            }
-            store.delete(&id).map_err(|error| error.to_string())?;
+            let id = profiles.delete(&id).map_err(|error| error.to_string())?;
             if json {
                 println!("{}", serde_json::json!({ "deleted": id.as_str() }));
             } else {

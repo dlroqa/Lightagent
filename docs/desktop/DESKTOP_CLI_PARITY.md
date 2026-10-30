@@ -7,13 +7,13 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 - Denominator: 226
 - Implemented: 0 of 226
 - Pending D1 decision rows: 0
-- Total rows: 308
+- Total rows: 314
 
 | Kind | Rows |
 |---|---|
 | acp-method | 8 |
 | alias | 2 |
-| api | 26 |
+| api | 32 |
 | argument | 47 |
 | command | 86 |
 | config | 14 |
@@ -29,7 +29,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 
 | Applicability | Rows |
 |---|---|
-| applicable | 272 |
+| applicable | 278 |
 | host-owned | 7 |
 | not-applicable | 29 |
 
@@ -70,12 +70,12 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.tools` | `lightagent tools` | applicable | dup→`cli.tools.list` | Tools/MCP/Extensions | api: GET /tools | not-started | `crates/lightagent/src/lib.rs:101` |
 | `cli.tools.list` | `lightagent tools list` | applicable | yes | Tools/MCP/Extensions: tool catalog | api: GET /tools | not-started | `crates/lightagent/src/lib.rs:211` |
 | `cli.profile` | `lightagent profile` | applicable | dup→`cli.profile.list` | Profiles/Workspaces | extract: lib.rs profiles_cmd() | not-started | `crates/lightagent/src/lib.rs:106` |
-| `cli.profile.list` | `lightagent profile list` | applicable | yes | Profiles/Workspaces | api: GET /profiles | not-started | `crates/lightagent/src/lib.rs:248` |
-| `cli.profile.show` | `lightagent profile show` | applicable | yes | Profiles/Workspaces: detail | extract: profiles_cmd(Show) | not-started | `crates/lightagent/src/lib.rs:250` |
-| `cli.profile.create` | `lightagent profile create` | applicable | yes | Profiles/Workspaces: create form | extract: profiles_cmd(Create) | not-started | `crates/lightagent/src/lib.rs:253` |
-| `cli.profile.use` | `lightagent profile use` | applicable | yes | Profiles/Workspaces: switch (see D1 profile-switch protocol) | extract: profiles_cmd(Use) + host sidecar restart | not-started | `crates/lightagent/src/lib.rs:263` |
-| `cli.profile.preset` | `lightagent profile preset` | applicable | yes | Profiles/Workspaces: preset (admin) | extract: profiles_cmd(Preset) | not-started | `crates/lightagent/src/lib.rs:265` |
-| `cli.profile.delete` | `lightagent profile delete` | applicable | yes | Profiles/Workspaces: delete (typed confirmation) | extract: profiles_cmd(Delete) | not-started | `crates/lightagent/src/lib.rs:267` |
+| `cli.profile.list` | `lightagent profile list` | applicable | yes | Profiles/Workspaces | ops::Profiles::list; api: GET /profiles | not-started | `crates/lightagent/src/lib.rs:248` |
+| `cli.profile.show` | `lightagent profile show` | applicable | yes | Profiles/Workspaces: detail | ops::Profiles::show; api: GET /profiles/{id} | not-started | `crates/lightagent/src/lib.rs:250` |
+| `cli.profile.create` | `lightagent profile create` | applicable | yes | Profiles/Workspaces: create form | ops::Profiles::create; api: POST /profiles | not-started | `crates/lightagent/src/lib.rs:253` |
+| `cli.profile.use` | `lightagent profile use` | applicable | yes | Profiles/Workspaces: switch (see D1 profile-switch protocol) | ops::Profiles::use_profile; api: PUT /profiles/{id}/active (+ host sidecar switch, D4b) | not-started | `crates/lightagent/src/lib.rs:263` |
+| `cli.profile.preset` | `lightagent profile preset` | applicable | yes | Profiles/Workspaces: preset (admin) | ops::Profiles::preset; api: POST /profiles/{id}/preset | not-started | `crates/lightagent/src/lib.rs:265` |
+| `cli.profile.delete` | `lightagent profile delete` | applicable | yes | Profiles/Workspaces: delete (typed confirmation) | ops::Profiles::delete; api: DELETE /profiles/{id} | not-started | `crates/lightagent/src/lib.rs:267` |
 | `cli.extensions` | `lightagent extensions` | applicable | dup→`cli.extensions.list` | Tools/MCP/Extensions | extract: extensions.rs | not-started | `crates/lightagent/src/lib.rs:112` |
 | `cli.extensions.list` | `lightagent extensions list` | applicable | yes | Tools/MCP/Extensions: extensions | extract: extensions::list() | not-started | `crates/lightagent/src/lib.rs:273` |
 | `cli.extensions.show` | `lightagent extensions show` | applicable | yes | Tools/MCP/Extensions: detail | extract: extensions::show() | not-started | `crates/lightagent/src/lib.rs:275` |
@@ -154,9 +154,9 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.init.opt.profile` | `lightagent init --profile` | applicable | yes | First-run wizard — input 'profile' | extract: lib.rs init() | not-started | `crates/lightagent/src/lib.rs:73` |
 | `cli.init.opt.base-url` | `lightagent init --base-url` | applicable | yes | First-run wizard — input 'base-url' | extract: lib.rs init() | not-started | `crates/lightagent/src/lib.rs:73` |
 | `cli.init.opt.model` | `lightagent init --model` | applicable | yes | First-run wizard — input 'model' | extract: lib.rs init() | not-started | `crates/lightagent/src/lib.rs:73` |
-| `cli.profile.create.opt.name` | `lightagent profile create --name` | applicable | yes | Profiles/Workspaces: create form — input 'name' | extract: profiles_cmd(Create) | not-started | `crates/lightagent/src/lib.rs:253` |
-| `cli.profile.create.opt.persona` | `lightagent profile create --persona` | applicable | yes | Profiles/Workspaces: create form — input 'persona' | extract: profiles_cmd(Create) | not-started | `crates/lightagent/src/lib.rs:253` |
-| `cli.profile.create.opt.model` | `lightagent profile create --model` | applicable | yes | Profiles/Workspaces: create form — input 'model' | extract: profiles_cmd(Create) | not-started | `crates/lightagent/src/lib.rs:253` |
+| `cli.profile.create.opt.name` | `lightagent profile create --name` | applicable | yes | Profiles/Workspaces: create form — input 'name' | ops::Profiles::create; api: POST /profiles | not-started | `crates/lightagent/src/lib.rs:253` |
+| `cli.profile.create.opt.persona` | `lightagent profile create --persona` | applicable | yes | Profiles/Workspaces: create form — input 'persona' | ops::Profiles::create; api: POST /profiles | not-started | `crates/lightagent/src/lib.rs:253` |
+| `cli.profile.create.opt.model` | `lightagent profile create --model` | applicable | yes | Profiles/Workspaces: create form — input 'model' | ops::Profiles::create; api: POST /profiles | not-started | `crates/lightagent/src/lib.rs:253` |
 | `cli.extensions.install.opt.profile` | `lightagent extensions install --profile` | applicable | yes | Tools/MCP/Extensions: install (folder picker or HTTPS URL) — input 'profile' | extract: extensions::install() | not-started | `crates/lightagent/src/lib.rs:281` |
 | `cli.extensions.uninstall.opt.profile` | `lightagent extensions uninstall --profile` | applicable | yes | Tools/MCP/Extensions: uninstall (confirm) — input 'profile' | extract: extensions::uninstall() | not-started | `crates/lightagent/src/lib.rs:288` |
 | `cli.workers.status.opt.profile` | `lightagent workers status --profile` | applicable | yes | Runs/Agents: roles — input 'profile' | api: GET /workers | not-started | `crates/lightagent/src/lib.rs:217` |
@@ -214,12 +214,12 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.config.get.arg.key` | `lightagent config get <key>` | applicable | yes | Settings: advanced key editor (typed) — input 'key' | extract: config_cmd(Get) | not-started | `crates/lightagent/src/lib.rs:199` |
 | `cli.config.set.arg.key` | `lightagent config set <key>` | applicable | yes | Settings: advanced key editor (typed, validated) — input 'key' | api: PUT /settings (subset); extract: config_cmd(Set) | not-started | `crates/lightagent/src/lib.rs:201` |
 | `cli.config.set.arg.value` | `lightagent config set <value>` | applicable | yes | Settings: advanced key editor (typed, validated) — input 'value' | api: PUT /settings (subset); extract: config_cmd(Set) | not-started | `crates/lightagent/src/lib.rs:201` |
-| `cli.profile.show.arg.id` | `lightagent profile show <id>` | applicable | yes | Profiles/Workspaces: detail — input 'id' | extract: profiles_cmd(Show) | not-started | `crates/lightagent/src/lib.rs:250` |
-| `cli.profile.create.arg.id` | `lightagent profile create <id>` | applicable | yes | Profiles/Workspaces: create form — input 'id' | extract: profiles_cmd(Create) | not-started | `crates/lightagent/src/lib.rs:253` |
-| `cli.profile.use.arg.id` | `lightagent profile use <id>` | applicable | yes | Profiles/Workspaces: switch (see D1 profile-switch protocol) — input 'id' | extract: profiles_cmd(Use) + host sidecar restart | not-started | `crates/lightagent/src/lib.rs:263` |
-| `cli.profile.preset.arg.id` | `lightagent profile preset <id>` | applicable | yes | Profiles/Workspaces: preset (admin) — input 'id' | extract: profiles_cmd(Preset) | not-started | `crates/lightagent/src/lib.rs:265` |
-| `cli.profile.preset.arg.preset` | `lightagent profile preset <preset>` | applicable | yes | Profiles/Workspaces: preset (admin) — input 'preset' | extract: profiles_cmd(Preset) | not-started | `crates/lightagent/src/lib.rs:265` |
-| `cli.profile.delete.arg.id` | `lightagent profile delete <id>` | applicable | yes | Profiles/Workspaces: delete (typed confirmation) — input 'id' | extract: profiles_cmd(Delete) | not-started | `crates/lightagent/src/lib.rs:267` |
+| `cli.profile.show.arg.id` | `lightagent profile show <id>` | applicable | yes | Profiles/Workspaces: detail — input 'id' | ops::Profiles::show; api: GET /profiles/{id} | not-started | `crates/lightagent/src/lib.rs:250` |
+| `cli.profile.create.arg.id` | `lightagent profile create <id>` | applicable | yes | Profiles/Workspaces: create form — input 'id' | ops::Profiles::create; api: POST /profiles | not-started | `crates/lightagent/src/lib.rs:253` |
+| `cli.profile.use.arg.id` | `lightagent profile use <id>` | applicable | yes | Profiles/Workspaces: switch (see D1 profile-switch protocol) — input 'id' | ops::Profiles::use_profile; api: PUT /profiles/{id}/active (+ host sidecar switch, D4b) | not-started | `crates/lightagent/src/lib.rs:263` |
+| `cli.profile.preset.arg.id` | `lightagent profile preset <id>` | applicable | yes | Profiles/Workspaces: preset (admin) — input 'id' | ops::Profiles::preset; api: POST /profiles/{id}/preset | not-started | `crates/lightagent/src/lib.rs:265` |
+| `cli.profile.preset.arg.preset` | `lightagent profile preset <preset>` | applicable | yes | Profiles/Workspaces: preset (admin) — input 'preset' | ops::Profiles::preset; api: POST /profiles/{id}/preset | not-started | `crates/lightagent/src/lib.rs:265` |
+| `cli.profile.delete.arg.id` | `lightagent profile delete <id>` | applicable | yes | Profiles/Workspaces: delete (typed confirmation) — input 'id' | ops::Profiles::delete; api: DELETE /profiles/{id} | not-started | `crates/lightagent/src/lib.rs:267` |
 | `cli.extensions.show.arg.name` | `lightagent extensions show <name>` | applicable | yes | Tools/MCP/Extensions: detail — input 'name' | extract: extensions::show() | not-started | `crates/lightagent/src/lib.rs:275` |
 | `cli.extensions.enable.arg.name` | `lightagent extensions enable <name>` | applicable | yes | Tools/MCP/Extensions: toggle — input 'name' | extract: extensions::enable() | not-started | `crates/lightagent/src/lib.rs:277` |
 | `cli.extensions.disable.arg.name` | `lightagent extensions disable <name>` | applicable | yes | Tools/MCP/Extensions: toggle — input 'name' | extract: extensions::disable() | not-started | `crates/lightagent/src/lib.rs:279` |
@@ -424,6 +424,12 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `api.post.runs.id.cancel` | `POST /api/lightagent/v1/runs/{id}/cancel` | applicable | no | (backend reuse) | api: POST /runs/{id}/cancel | not-started | `crates/lightagent-api/src/lib.rs:93` |
 | `api.get.sessions` | `GET /api/lightagent/v1/sessions` | applicable | no | (backend reuse) | api: GET /sessions | not-started | `crates/lightagent-api/src/lib.rs:94` |
 | `api.post.sessions` | `POST /api/lightagent/v1/sessions` | applicable | no | (backend reuse) | api: POST /sessions | not-started | `crates/lightagent-api/src/lib.rs:94` |
+| `api.get.runs` | `GET /api/lightagent/v1/runs` | applicable | no | (backend reuse) | api: GET /runs | not-started | `crates/lightagent-api/src/lib.rs:90` |
+| `api.post.profiles` | `POST /api/lightagent/v1/profiles` | applicable | no | (backend reuse) | api: POST /profiles | not-started | `crates/lightagent-api/src/lib.rs:85` |
+| `api.get.profiles.id` | `GET /api/lightagent/v1/profiles/{id}` | applicable | no | (backend reuse) | api: GET /profiles/{id} | not-started | `crates/lightagent-api/src/lib.rs:85` |
+| `api.delete.profiles.id` | `DELETE /api/lightagent/v1/profiles/{id}` | applicable | no | (backend reuse) | api: DELETE /profiles/{id} | not-started | `crates/lightagent-api/src/lib.rs:85` |
+| `api.put.profiles.id.active` | `PUT /api/lightagent/v1/profiles/{id}/active` | applicable | no | (backend reuse) | api: PUT /profiles/{id}/active | not-started | `crates/lightagent-api/src/lib.rs:85` |
+| `api.post.profiles.id.preset` | `POST /api/lightagent/v1/profiles/{id}/preset` | applicable | no | (backend reuse) | api: POST /profiles/{id}/preset | not-started | `crates/lightagent-api/src/lib.rs:85` |
 | `api.get.sessions.search` | `GET /api/lightagent/v1/sessions/search` | applicable | yes | Conversations: search (already in WebUI) | api: GET /sessions/search | not-started | `crates/lightagent-api/src/lib.rs:98` |
 | `api.get.sessions.id` | `GET /api/lightagent/v1/sessions/{id}` | applicable | no | (backend reuse) | api: GET /sessions/{id} | not-started | `crates/lightagent-api/src/lib.rs:99` |
 | `api.patch.sessions.id` | `PATCH /api/lightagent/v1/sessions/{id}` | applicable | yes | Conversations: rename/pin (already in WebUI) | api: PATCH /sessions/{id} | not-started | `crates/lightagent-api/src/lib.rs:99` |
