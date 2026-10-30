@@ -4,8 +4,9 @@
 //! in docs/desktop/DESKTOP_ARCHITECTURE.md §4 and §6: the key arrives on
 //! stdin, the server binds 127.0.0.1 on an ephemeral port and prints one
 //! handshake line, and every request must carry the exact Host, no Origin,
-//! and the bearer key. Responses are fixed; the real runtime replaces this
-//! in D3.
+//! and the bearer key, and it exits when stdin (the host's lifeline) closes.
+//! Responses are fixed. Since D3 the real runtime is bundled; this mock
+//! remains only for the host's version-mismatch test.
 //!
 //! `LIGHTAGENT_MOCK_REPORT_VERSION` makes it report another version, to test
 //! the host's mismatch handling.
@@ -22,6 +23,11 @@ fn main() {
         std::process::exit(2);
     }
     let key = key.trim().to_owned();
+    // The rest of stdin is the lifeline: exit when the host goes away.
+    std::thread::spawn(|| {
+        let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+        std::process::exit(0);
+    });
     if key.len() < 32 {
         eprintln!("mock runtime: no credential on stdin");
         std::process::exit(2);

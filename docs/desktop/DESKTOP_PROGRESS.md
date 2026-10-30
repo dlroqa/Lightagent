@@ -18,9 +18,10 @@ next update names its run.
 |---|---|---|---|---|---|
 | D0 Baseline and feature audit | **CI-validated** (gate passed) | `desktop/d0-audit` | https://github.com/dlroqa/Lightagent/pull/90 | `bc01426ed6d55c1ceb951d886e1a58ea9ad4c008` | `bc01426` / tree `4b135f94d45dc7d5e1f3142cc1c5ed88ac30a868` |
 | D1 Architecture and UI specification | **CI-validated** (gate passed) | `desktop/d1-architecture` (stacked on D0) | https://github.com/dlroqa/Lightagent/pull/92 | `350b48b3d0d072213e2028d8b5fb53022d61c340` | `350b48b` / tree `e43ab411568dda5c183963966d09131d21898581` |
-| D2 CI and desktop skeleton | implemented; `735cffe` CI-validated; the lockfile commit (this one) awaits validation | `desktop/d2-shell` (stacked on D1) | https://github.com/dlroqa/Lightagent/pull/93 | this commit (child of `735cffe`) | `735cffe` / tree `099a477834334ce2dca8d2f621d9ef522348659c` |
+| D2 CI and desktop skeleton | `735cffe` CI-validated; lockfile commit `003a71c` validation in progress (recorded next update) | `desktop/d2-shell` (stacked on D1) | https://github.com/dlroqa/Lightagent/pull/93 | `003a71c2473f3e18cb503f326ae3fc8a153dcc38` | `735cffe` / tree `099a477834334ce2dca8d2f621d9ef522348659c` |
+| D3a Real runtime: `serve --desktop` | implemented; validation pending | `desktop/d3a-runtime` (stacked on D2) | recorded in the next update | this commit | none yet |
 | D1 spike (evidence only, never merged) | runner evidence complete | `desktop/d1-spike` | https://github.com/dlroqa/Lightagent/pull/91 | `82896bcd63f3bd6786dcea12b603241e50a3a9ea` | `82896bc` / tree `d9cde26142a63a716a58f35dc33330be0e90d8b7` |
-| D3–D10 | not started | — | — | — | — |
+| D3b–D10 | not started | — | — | — | — |
 
 The latest progress record is the copy on the highest stacked desktop branch.
 Branches lower in the stack keep the record as of their own commit.
@@ -257,6 +258,35 @@ D2 runner evidence at `735cffe` (runner measurements, mock runtime). Times are s
   Chromium render before changing styles.
 - **Dependency policy:** clean on all targets (409 crates).
 
+## D3a — The real runtime in desktop mode
+
+- `lightagent serve --desktop [--profile <id>]` (`crates/lightagent/src/serve.rs`, `run_desktop`):
+  - loopback only;
+  - the key is the first line of stdin, and the rest of stdin is the **lifeline**: on EOF, graceful shutdown, then exit within 5 s;
+  - scaffolds an empty home and the protected `default` profile on first start;
+  - writes one JSON handshake line to stdout and nothing else there;
+  - serves no Web UI.
+- `lightagent_api::desktop` is the guard on every route, including `/health`
+  (otherwise unauthenticated) and the event stream. It checks the exact
+  `Host`, refuses any `Origin` and any `Sec-Fetch-Site` other than `none`,
+  and compares the Bearer key in constant time. Each refusal has its own
+  category. Unit tests cover the guard; `crates/lightagent/tests/desktop_serve.rs`
+  drives the real binary over raw TCP (no key, wrong key, other Host, Origin,
+  cross-site, `/health`, SSE, no Web UI, lifeline exit, refused binds and a
+  missing key).
+- Host:
+  - `--parent-pid` is gone (the real CLI never had it); the host keeps stdin open as the lifeline;
+  - `stop()` closes the lifeline, then waits up to 5 s before killing.
+
+  The mock got the same lifeline.
+- The shell CI bundles the real `lightagent` (built `--locked` in the root
+  workspace) with an isolated `LIGHTAGENT_HOME`. The ready e2e now **fails**
+  if the runtime outlives a terminated host (`E2E_REQUIRE_NO_ORPHAN=1`).
+  Version mismatch is still proven by swapping in the mock. Linux also runs
+  under `dbus-run-session` to test the D-Bus hypothesis for the 30 s delay.
+- Inventory: two host-owned rows (`serve --desktop` and `--profile`); 308 rows; denominator unchanged at 226.
+- Architecture §4 and §6 were updated: the stdin lifeline replaces `--parent-pid`, with the reasons.
+
 ## Artifacts and retention
 
 | Artifact | Run | Retention |
@@ -283,5 +313,6 @@ D2 runner evidence at `735cffe` (runner measurements, mock runtime). Times are s
 
 ## Next
 
-1. Get the D2 jobs green on the exact head, commit `desktop/Cargo.lock`, and record the evidence.
-2. D3a: `lightagent-ops` plus `serve --desktop` in the real runtime (stdin key, Host/Origin, handshake, `--profile`, `--parent-pid`), replacing the mock.
+1. Record the D2 lockfile-commit validation, and validate the D3a head (`desktop` and `check`).
+2. D3b: host lifecycle hardening: crash detection and one restart, runtime log view, single instance, Windows job object, and shutdown with active runs.
+3. D4a: `lightagent-ops` typed operations for profiles (with `GET /runs?state=active`), then config, provider, and workspaces.

@@ -87,9 +87,11 @@ arg lightagent remote-credential revoke <id>
 arg lightagent remote-credential rotate --secret-file
 arg lightagent remote-credential rotate --secret-stdin
 arg lightagent remote-credential rotate <id>
+arg lightagent serve --desktop
 arg lightagent serve --host
 arg lightagent serve --key-env
 arg lightagent serve --port
+arg lightagent serve --profile
 arg lightagent serve --web-root
 arg lightagent sessions delete <id>
 arg lightagent sessions show <id>

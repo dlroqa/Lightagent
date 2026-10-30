@@ -725,6 +725,124 @@ pub(crate) async fn build_run_manager() -> Result<RunManager, String> {
     Ok(RunManager::new(factory))
 }
 
+/// The protocol `serve --desktop` speaks to the desktop host
+/// (docs/desktop/contract/operations.json).
+const DESKTOP_PROTOCOL: u32 = 1;
+
+/// `serve --desktop`: the desktop app's owned runtime
+/// (docs/desktop/DESKTOP_ARCHITECTURE.md §4, §6).
+///
+/// The first line of standard input is the per-launch key; the rest of
+/// standard input is a lifeline the desktop host holds open for as long as it
+/// lives, so the runtime exits however the host ends. Once bound, one JSON
+/// handshake line goes to stdout, and every request must then pass the
+/// desktop guard: the exact Host, no Origin, and the key.
+pub async fn run_desktop(host: String, port: u16, profile: Option<String>) -> Result<(), String> {
+    if host != "127.0.0.1" {
+        return Err("--desktop binds 127.0.0.1 only".to_string());
+    }
+    let key = read_desktop_key()?;
+    let paths = LightagentPaths::resolve().map_err(|error| error.to_string())?;
+    paths.scaffold().map_err(|error| error.to_string())?;
+    let config = ConfigStore::at(&paths)
+        .load()
+        .map_err(|error| error.to_string())?;
+    let store = ProfileStore::new(paths.root());
+    crate::ensure_default_profile(&store, &config)?;
+    let active = match profile {
+        Some(id) => {
+            let id = ProfileId::new(id).map_err(|error| error.to_string())?;
+            store.load(&id).map_err(|error| error.to_string())?;
+            id
+        }
+        None => store
+            .active()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "no active profile".to_string())?,
+    };
+    let sessions = SessionStore::at_profile(&store.handle(&active));
+    let context_limit = config.runtime.n_ctx.unwrap_or(4_096) as usize;
+    let factory = Arc::new(LightweightRunFactory {
+        root: paths.root().to_path_buf(),
+        jev: crate::coordinator::JevState::new(),
+    });
+    let state = AppState {
+        manager: RunManager::new(factory),
+        auth: AuthConfig::keyed(key.clone(), [Scope::Admin]),
+        sessions,
+        session_profile: active.as_str().to_owned(),
+        context_limit,
+        config_store: Some(ConfigStore::at(&paths)),
+        busy_sessions: Arc::new(tokio::sync::Mutex::new(Default::default())),
+        web_root: None,
+    };
+
+    let listener = TcpListener::bind((host.as_str(), port))
+        .await
+        .map_err(|error| format!("could not bind {host}:{port}: {error}"))?;
+    let bound = listener.local_addr().map_err(|error| error.to_string())?;
+    let guard = lightagent_api::desktop::DesktopGuard::new(bound, &key);
+    let app = router(state).layer(axum::middleware::from_fn_with_state(
+        guard,
+        lightagent_api::desktop::guard,
+    ));
+
+    let handshake = serde_json::json!({
+        "lightagent": "serve",
+        "protocol": DESKTOP_PROTOCOL,
+        "version": crate::VERSION,
+        "addr": bound.to_string(),
+        "profile": active.as_str(),
+        "capabilities": [
+            "runs", "sessions", "approvals", "settings", "tools", "skills", "workers", "provider", "jev"
+        ],
+    });
+    {
+        use std::io::Write as _;
+        let mut stdout = std::io::stdout().lock();
+        writeln!(stdout, "{handshake}")
+            .and_then(|()| stdout.flush())
+            .map_err(|error| format!("could not report ready: {error}"))?;
+    }
+    eprintln!(
+        "Lightagent desktop runtime on {bound} (profile '{}')",
+        active.as_str()
+    );
+
+    let lifeline = CancellationToken::new();
+    {
+        let lifeline = lifeline.clone();
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+            lifeline.cancel();
+            // Let in-flight responses finish briefly, then go regardless:
+            // the host that would read them is gone.
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            std::process::exit(0);
+        });
+    }
+    axum::serve(listener, app.into_make_service())
+        .with_graceful_shutdown(async move { lifeline.cancelled().await })
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// The launch key: the first line of standard input, never an argument or an
+/// environment variable, where other processes could read it.
+fn read_desktop_key() -> Result<String, String> {
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|error| format!("could not read the desktop key ({})", error.kind()))?;
+    let key = line.trim();
+    if key.len() < 32 || !key.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return Err(
+            "--desktop needs the launch key as the first line of standard input".to_string(),
+        );
+    }
+    Ok(key.to_owned())
+}
+
 /// Bind and serve the API until interrupted.
 pub async fn run(
     host: String,

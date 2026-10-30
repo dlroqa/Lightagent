@@ -11,6 +11,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod auth;
+pub mod desktop;
 pub mod manager;
 #[cfg(feature = "provisioning-api")]
 pub mod provisioning;

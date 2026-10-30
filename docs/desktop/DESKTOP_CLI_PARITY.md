@@ -7,7 +7,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 - Denominator: 226
 - Implemented: 0 of 226
 - Pending D1 decision rows: 0
-- Total rows: 306
+- Total rows: 308
 
 | Kind | Rows |
 |---|---|
@@ -21,7 +21,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | extension-registration | 6 |
 | keybinding | 6 |
 | mcp-registration | 10 |
-| option | 56 |
+| option | 58 |
 | setup-option | 10 |
 | skill-registration | 1 |
 | slash | 16 |
@@ -30,7 +30,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | Applicability | Rows |
 |---|---|
 | applicable | 272 |
-| host-owned | 5 |
+| host-owned | 7 |
 | not-applicable | 29 |
 
 ## Applicability decisions (resolved in D1)
@@ -168,6 +168,8 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.serve.opt.port` | `lightagent serve --port` | host-owned | no | (desktop runtime lifecycle; remote mode endpoint settings) — input 'port' | host: sidecar launch | not-started | `crates/lightagent/src/lib.rs:127; crates/lightagent/src/serve.rs:732` |
 | `cli.serve.opt.key-env` | `lightagent serve --key-env` | host-owned | no | (desktop runtime lifecycle; remote mode endpoint settings) — input 'key-env' | host: sidecar launch | not-started | `crates/lightagent/src/lib.rs:127; crates/lightagent/src/serve.rs:732` |
 | `cli.serve.opt.web-root` | `lightagent serve --web-root` | host-owned | no | (desktop runtime lifecycle; remote mode endpoint settings) — input 'web-root' | host: sidecar launch | not-started | `crates/lightagent/src/lib.rs:127; crates/lightagent/src/serve.rs:732` |
+| `cli.serve.opt.desktop` | `lightagent serve --desktop` | host-owned | no | (desktop runtime lifecycle; remote mode endpoint settings) — input 'desktop' | host: sidecar launch | not-started | `crates/lightagent/src/serve.rs (run_desktop)` |
+| `cli.serve.opt.profile` | `lightagent serve --profile` | host-owned | no | (desktop runtime lifecycle; remote mode endpoint settings) — input 'profile' | host: sidecar launch | not-started | `crates/lightagent/src/lib.rs:127; crates/lightagent/src/serve.rs:732` |
 | `cli.identity.credential.issue.opt.expires-in` | `lightagent identity credential issue --expires-in` | applicable | yes | Settings/Identity: issue → native save dialog for --secret-file — input 'expires-in' | extract: identity_admin (secret goes to an owner-only file; never into renderer state) | not-started | `crates/lightagent/src/identity_admin.rs:77` |
 | `cli.identity.credential.issue.opt.capability` | `lightagent identity credential issue --capability` | applicable | yes | Settings/Identity: issue → native save dialog for --secret-file — input 'capability' | extract: identity_admin (secret goes to an owner-only file; never into renderer state) | not-started | `crates/lightagent/src/identity_admin.rs:77` |
 | `cli.identity.credential.issue.opt.profile` | `lightagent identity credential issue --profile` | applicable | yes | Settings/Identity: issue → native save dialog for --secret-file — input 'profile' | extract: identity_admin (secret goes to an owner-only file; never into renderer state) | not-started | `crates/lightagent/src/identity_admin.rs:77` |

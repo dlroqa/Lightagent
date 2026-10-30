@@ -137,6 +137,15 @@ enum Command {
         /// Serve the built WebUI panel from this directory (e.g. frontend/dist).
         #[arg(long)]
         web_root: Option<std::path::PathBuf>,
+        /// Run as the desktop app's owned runtime: loopback only, the key read
+        /// from standard input, one JSON ready line on stdout, every request
+        /// checked for Host, Origin and the key; exits when standard input
+        /// closes.
+        #[arg(long, conflicts_with_all = ["key_env", "web_root"])]
+        desktop: bool,
+        /// With --desktop: serve this profile instead of the active one.
+        #[arg(long, requires = "desktop")]
+        profile: Option<String>,
     },
     /// Manage local identities: users, credentials, ownership and audit.
     /// Operator-only (this OS account); does not enable multi-user mode.
@@ -462,7 +471,15 @@ async fn dispatch(cli: Cli) -> Result<(), String> {
             port,
             key_env,
             web_root,
-        }) => serve::run(host, port, key_env, web_root).await,
+            desktop,
+            profile,
+        }) => {
+            if desktop {
+                serve::run_desktop(host, port, profile).await
+            } else {
+                serve::run(host, port, key_env, web_root).await
+            }
+        }
         Some(Command::Identity { action }) => identity_admin::run(action, cli.json),
         Some(Command::RemoteCredential { action }) => remote_credentials::run(action, cli.json),
         Some(Command::Acp) => acp::run().await,
