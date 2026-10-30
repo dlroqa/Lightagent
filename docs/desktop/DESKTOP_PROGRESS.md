@@ -17,9 +17,10 @@ next update names its run.
 | Slice | State | Branch | Draft PR | Latest implementation commit | Latest tested commit |
 |---|---|---|---|---|---|
 | D0 Baseline and feature audit | **CI-validated** (gate passed) | `desktop/d0-audit` | https://github.com/dlroqa/Lightagent/pull/90 | `bc01426ed6d55c1ceb951d886e1a58ea9ad4c008` | `bc01426` / tree `4b135f94d45dc7d5e1f3142cc1c5ed88ac30a868` |
-| D1 Architecture and UI specification | implemented; validation pending | `desktop/d1-architecture` (stacked on D0) | recorded in the next update | this commit | none yet |
+| D1 Architecture and UI specification | **CI-validated** (gate passed) | `desktop/d1-architecture` (stacked on D0) | https://github.com/dlroqa/Lightagent/pull/92 | `350b48b3d0d072213e2028d8b5fb53022d61c340` | `350b48b` / tree `e43ab411568dda5c183963966d09131d21898581` |
+| D2 CI and desktop skeleton | implemented; `735cffe` CI-validated; the lockfile commit (this one) awaits validation | `desktop/d2-shell` (stacked on D1) | https://github.com/dlroqa/Lightagent/pull/93 | this commit (child of `735cffe`) | `735cffe` / tree `099a477834334ce2dca8d2f621d9ef522348659c` |
 | D1 spike (evidence only, never merged) | runner evidence complete | `desktop/d1-spike` | https://github.com/dlroqa/Lightagent/pull/91 | `82896bcd63f3bd6786dcea12b603241e50a3a9ea` | `82896bc` / tree `d9cde26142a63a716a58f35dc33330be0e90d8b7` |
-| D2–D10 | not started | — | — | — | — |
+| D3–D10 | not started | — | — | — | — |
 
 The latest progress record is the copy on the highest stacked desktop branch.
 Branches lower in the stack keep the record as of their own commit.
@@ -199,6 +200,62 @@ is a baseline defect.
 | 2026-10-30 | Spike run 1: all Tauri jobs succeeded and were measured; all Electron jobs **failed** before measuring (npm did not fetch the Electron binary) | `cf5cb85` | https://github.com/dlroqa/Lightagent/actions/runs/40996571854 |
 | 2026-10-30 | Spike fix `018`: run Electron's install script explicitly; branch fast-forwarded | `82896bc` / `d9cde26` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/40997083470 |
 | 2026-10-30 | Spike run 2: **8/8 success**. Measurements are in DESKTOP_ARCHITECTURE.md §3 | `82896bc` | https://github.com/dlroqa/Lightagent/actions/runs/40997420599 |
+| 2026-10-30 | D1 documents: edit request `019`, base `bc01426`; branch created without force; draft PR #92 (base `desktop/d0-audit`) | `350b48b` / `e43ab41` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/40998171345 |
+| 2026-10-30 | `desktop` on `350b48b`: **success** (inventory with the D1 resolutions, denominator 226) | `350b48b` | https://github.com/dlroqa/Lightagent/actions/runs/40998231436 |
+| 2026-10-30 | `check` on `350b48b`: **success** | `350b48b` | https://github.com/dlroqa/Lightagent/actions/runs/40998231460 |
+| 2026-10-30 | **D1 gate passed** at `350b48b` | — | — |
+
+## D2 — CI and desktop skeleton
+
+- `desktop/` is a separate Cargo workspace:
+  - `src-tauri`, the host (Tauri 2.12.4): contract allowlist, stdin launch key, handshake and version check, SSE relay, and an HTTP client with no proxy and no redirects;
+  - `mock-sidecar`, a std-only stand-in runtime with the same Host/Origin/Bearer checks.
+- Frontend: `src/api/transport.ts` (IPC `fetch` and `EventSource` in the desktop build; unchanged in the browser), `DesktopGate`, and `vite build --mode desktop` → `dist-desktop`.
+- Contract: `docs/desktop/contract/operations.json` (23 operations), checked by `scripts/check-desktop-contract.py`, which has a self-test.
+- CI (`desktop.yml`):
+  - contract and inventory checks;
+  - host fmt, clippy, tests, and dependency policy;
+  - shell bundle plus end-to-end runs (ready, version mismatch, key-leak scan, runtime-orphan observation) on four targets, with artifacts kept 30 days.
+- Tooling: `tools/source-edit` now also formats touched `desktop/*.rs` files with
+  `rustfmt --edition 2024` (tool commit `bcff82c`; never merged).
+- Known D2 gaps, carried to D3 by design:
+  - the runtime is the mock;
+  - there is no parent-death watchdog, so the e2e records whether the runtime outlives a terminated host;
+  - `desktop/Cargo.lock` is generated on the first run and committed afterwards.
+
+| When (UTC) | Event | Commit / tree | Evidence |
+|---|---|---|---|
+| 2026-10-30 | Tooling: `tools/source-edit` formats touched `desktop/*.rs` files (never merged) | tool `bcff82c` | — |
+| 2026-10-30 | Edit request `020-desktop-d2-shell` on base `350b48b`; the runner ran `rustfmt` on 5 files; workflow blob verified and attached; branch created without force; draft PR #93 | prepared `3c724e9`; final `735cffe` / `099a477` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/40999368319 |
+| 2026-10-30 | `desktop` on `735cffe`: **success**, 6/6 jobs (details below) | `735cffe` | https://github.com/dlroqa/Lightagent/actions/runs/40999470324 |
+| 2026-10-30 | `check` on `735cffe`: **success** (includes the browser Web UI build and render with the transport change) | `735cffe` | https://github.com/dlroqa/Lightagent/actions/runs/40999470417 |
+| 2026-10-30 | Lockfile commit: `desktop/Cargo.lock` taken byte-for-byte from the `desktop-cargo-lock` artifact of run 40999470324 (409 crates) | this commit | recorded in the next update |
+
+D2 runner evidence at `735cffe` (runner measurements, mock runtime). Times are seconds from app spawn:
+
+| Target | Runtime ready | Page loaded | UI ready | First API call | Mismatch shown | Package | Minimum OS in binary |
+|---|---|---|---|---|---|---|---|
+| macOS x86_64 (`macos-15-intel`) | 1.87 | 3.35 | 3.93 | 4.29 | 1.16 | dmg 5.1 MB | host and runtime `minos 10.14`; plist 10.14 |
+| macOS arm64 (`macos-15`) | 1.93 | 3.98 | 4.59 | 5.56 | 2.96 | dmg 4.9 MB | `minos 11.0`; plist **11.0** (D1 inconsistency fixed) |
+| Windows x64 (`windows-latest`) | 3.02 | 3.12 | 3.12 | 3.22 | 0.64 | nsis 3.0 MB, msi 3.8 MB | — |
+| Linux x64 (`ubuntu-22.04`, Xvfb) | **30.26** | 30.96 | 31.06 | 31.16 | 30.46 | deb 3.9 MB, AppImage 78.8 MB | — |
+
+- **Launch-key leak scan:** no 64-hex value in any argv, any readable
+  environment, or the report, on all four targets in both modes.
+- **Version mismatch:** refused on every target, with the explanatory screen
+  (screenshot artifact).
+- **Runtime outlived a terminated host:** `true` on all four targets in ready
+  mode. This is the expected D2 gap; D3 must make it `false` (parent watchdog,
+  job object, process group).
+- **Linux 30 s delay:** `RUNTIME_READY` itself arrives at about 30 s, and
+  `WEBKIT_DISABLE_DMABUF_RENDERER=1` changes nothing (30.16 s). The delay is
+  therefore before Tauri's setup hook runs, not in rendering. It is consistent
+  with GTK waiting on a missing D-Bus session bus under bare Xvfb. D3 tests this
+  with `dbus-run-session`.
+- **Visual note for D8:** in the macOS WKWebView screenshot, the gradient
+  heading and the brand text render with low contrast. Compare with the
+  Chromium render before changing styles.
+- **Dependency policy:** clean on all targets (409 crates).
 
 ## Artifacts and retention
 
@@ -208,6 +265,8 @@ is a baseline defect.
 | `spike-tauri-<target>`: measure.json, screenshot, Cargo.lock, dmg/msi/nsis/deb/AppImage | 40997420599 (also 40996571854) | 30 days |
 | `spike-electron-<target>`: measure.json, screenshot | 40997420599 | 30 days |
 | `lightagent-web-screens` (existing `check` job) | 40996392105 | repository default |
+| `desktop-shell-<target>`: e2e JSON, report, screenshots (ready and mismatch), dmg/nsis/msi/deb/AppImage | 40999470324 | 30 days |
+| `desktop-cargo-lock` | 40999470324 | 30 days |
 
 ## Local backup
 
@@ -224,8 +283,5 @@ is a baseline defect.
 
 ## Next
 
-1. Validate the D1 head on `desktop` and `check`, and record it here.
-2. D2: the `desktop/` Tauri shell and the frontend transport in desktop mode,
-   with the operation contract and its check, a mock sidecar, and render and
-   screenshot CI on four targets. D2 also investigates the Linux load time and
-   sets the per-architecture plist minimum.
+1. Get the D2 jobs green on the exact head, commit `desktop/Cargo.lock`, and record the evidence.
+2. D3a: `lightagent-ops` plus `serve --desktop` in the real runtime (stdin key, Host/Origin, handshake, `--profile`, `--parent-pid`), replacing the mock.

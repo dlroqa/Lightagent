@@ -1,0 +1,6 @@
+/target
+# Generated on the runner from icon/LightagentLogo.png by `tauri icon`.
+/src-tauri/icons
+# The sidecar binary is built and staged on the runner, never committed.
+/src-tauri/binaries
+/src-tauri/gen

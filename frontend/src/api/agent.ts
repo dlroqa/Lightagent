@@ -1,5 +1,7 @@
 /** Same-origin client for the Lightagent HTTP API (`/api/lightagent/v1`). */
 
+import { apiFetch } from "./transport";
+
 const BASE = "/api/lightagent/v1";
 
 export interface ToolInfo {
@@ -311,7 +313,7 @@ export interface ApprovalRow {
 }
 
 async function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${BASE}${path}`, {
+  const response = await apiFetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
     ...init,
   });
@@ -357,7 +359,7 @@ export const agentApi = {
   createSession: () => jsonRequest<{ id: string }>("/sessions", { method: "POST", body: "{}" }),
   uploadAttachment: async (sessionId: string, file: File): Promise<UploadedAttachment> => {
     const filename = file.name.replace(/[^A-Za-z0-9._ -]/g, "_").slice(0, 180) || "attachment";
-    const response = await fetch(`${BASE}/sessions/${encodeURIComponent(sessionId)}/attachments`, {
+    const response = await apiFetch(`${BASE}/sessions/${encodeURIComponent(sessionId)}/attachments`, {
       method: "POST",
       headers: { "X-Lightagent-Filename": filename },
       body: file,
