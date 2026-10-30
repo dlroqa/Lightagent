@@ -49,8 +49,12 @@ def read(rel):
 
 
 def before_tests(text):
-    """The text before the first `#[cfg(test)]` module."""
-    return text.split("#[cfg(test)]", 1)[0]
+    """The text before the file's top-level `#[cfg(test)] mod …` module.
+
+    A single item can carry `#[cfg(test)]` anywhere in a file, so only the
+    attribute at column 0 directly above a `mod` marks where tests begin.
+    """
+    return re.split(r"^#\[cfg\(test\)\]\s*\n(?:pub(?:\([^)]*\))? )?mod ", text, maxsplit=1, flags=re.M)[0]
 
 
 def block(text, start):
