@@ -16,9 +16,13 @@ next update names its run.
 
 | Slice | State | Branch | Draft PR | Latest implementation commit | Latest tested commit |
 |---|---|---|---|---|---|
-| D0 Baseline and feature audit | implemented; validation pending | `desktop/d0-audit` | pending | (this commit's parent chain; see the D0 log) | none yet |
-| D1 Architecture and UI specification | not started | — | — | — | — |
+| D0 Baseline and feature audit | **CI-validated** (gate passed) | `desktop/d0-audit` | https://github.com/dlroqa/Lightagent/pull/90 | `bc01426ed6d55c1ceb951d886e1a58ea9ad4c008` | `bc01426` / tree `4b135f94d45dc7d5e1f3142cc1c5ed88ac30a868` |
+| D1 Architecture and UI specification | implemented; validation pending | `desktop/d1-architecture` (stacked on D0) | recorded in the next update | this commit | none yet |
+| D1 spike (evidence only, never merged) | runner evidence complete | `desktop/d1-spike` | https://github.com/dlroqa/Lightagent/pull/91 | `82896bcd63f3bd6786dcea12b603241e50a3a9ea` | `82896bc` / tree `d9cde26142a63a716a58f35dc33330be0e90d8b7` |
 | D2–D10 | not started | — | — | — | — |
+
+The latest progress record is the copy on the highest stacked desktop branch.
+Branches lower in the stack keep the record as of their own commit.
 
 ## Execution method
 
@@ -133,11 +137,10 @@ is a baseline defect.
   - backend-only API rows. Four API rows count because the WebUI exposes them
     with no CLI equivalent: Jev status/verify, session search, session
     rename/pin, and attachments.
-- **Six open applicability decisions** (8 rows), resolved in D1:
-  - D1-Q1: `update` and its `--check` and `--force` options;
-  - D1-Q2: `/update`;
-  - D1-Q3–Q5: the three feature-gated provisioning routes;
-  - D1-Q6: `LIGHTAGENT_INSTALL_ROOT`.
+- Six applicability decisions (8 rows) were open at D0 and are **resolved in D1**
+  (DESKTOP_ARCHITECTURE.md §11). The parity denominator is now **226**
+  (`update --check` became applicable; the other 7 rows are not applicable,
+  each with a reason).
 - New backend operations required for existing CLI capabilities (not new
   scope): **continue** and **steering** (D5), and typed MCP server
   configuration (D6).
@@ -165,7 +168,46 @@ is a baseline defect.
 | When (UTC) | Event | Commit / tree | Evidence |
 |---|---|---|---|
 | 2026-10-29 | Static audit of the frozen SHA | `12582a0` / `59b8f13` | local reading; baseline runs above |
-| 2026-10-29 | Edit request `015-desktop-d0-audit` prepared commit (D0 files without the workflow) | recorded in the next update | source-edit run, recorded in the next update |
+| 2026-10-30 | Edit request `015-desktop-d0-audit` applied on base `12582a0` | prepared `352200b` / `93c943e`; final `2c9df87` / `50c8bb6` (workflow blob `e637300` checked byte-for-byte against the reviewed file, then attached) | source-edit https://github.com/dlroqa/Lightagent/actions/runs/40995818991 |
+| 2026-10-30 | Branch `desktop/d0-audit` created at `2c9df87` (no force); draft PR #90 opened | `2c9df87` | https://github.com/dlroqa/Lightagent/pull/90 |
+| 2026-10-30 | `desktop` on `2c9df87`: **failure**. The clap-tree test passed; the static check reported 10 false "chat keys" drifts, because `before_tests` split `chat.rs` at an item-level `#[cfg(test)]` (line 186) instead of the test module | `2c9df87` / `50c8bb6` | https://github.com/dlroqa/Lightagent/actions/runs/40995946041 |
+| 2026-10-30 | Fix: edit request `016-desktop-d0-key-scan`; branch fast-forwarded (parent `2c9df87`, no force) | `bc01426` / `4b135f9` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/40996341547 |
+| 2026-10-30 | `desktop` on `bc01426`: **success**. The self-test detected all 9 injected additions (slash, chat keys, ACP, MCP, extension manifest, config sections, HTTP routes, env, cli-tree); 0 drift errors; 306 rows; parity 0/225; the clap tree matches | `bc01426` / `4b135f9` | https://github.com/dlroqa/Lightagent/actions/runs/40996391964 |
+| 2026-10-30 | `check` on `bc01426`: **success**, all 13 jobs (four-platform check, Web UI render, package smoke, release gate, contracts) | `bc01426` | https://github.com/dlroqa/Lightagent/actions/runs/40996392105 |
+| 2026-10-30 | **D0 gate passed** at `bc01426` | — | — |
+
+## D1 — Architecture and UI specification
+
+- Decision: **Tauri 2** host with an owned `lightagent serve --desktop`
+  sidecar, and typed IPC with a host-only HTTP client. The renderer never holds
+  the key. See [DESKTOP_ARCHITECTURE.md](DESKTOP_ARCHITECTURE.md).
+- The framework was decided on hosted evidence: spike run
+  https://github.com/dlroqa/Lightagent/actions/runs/40997420599 (8/8 jobs) at
+  `82896bc`. The Intel binary has `minos 10.14`; Electron 42's runtime
+  requires macOS 12.0.
+- Open risks carried into D2:
+  - a 30 s Tauri first page load on Linux under Xvfb;
+  - the arm64 plist minimum inconsistency;
+  - slower Tauri startup than Electron on Windows;
+  - 10.14 runtime unverifiable on hosted runners (blocked; no allowed alternative).
+- Acceptance gates: [DESKTOP_ACCEPTANCE.md](DESKTOP_ACCEPTANCE.md). Merge
+  order: [DESKTOP_MERGE_ORDER.md](DESKTOP_MERGE_ORDER.md).
+
+| When (UTC) | Event | Commit / tree | Evidence |
+|---|---|---|---|
+| 2026-10-30 | Spike: edit request `017-desktop-d1-spike` on base `12582a0`; branch `desktop/d1-spike` created; draft PR #91 | `cf5cb85` / `89fe912` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/40996500866 |
+| 2026-10-30 | Spike run 1: all Tauri jobs succeeded and were measured; all Electron jobs **failed** before measuring (npm did not fetch the Electron binary) | `cf5cb85` | https://github.com/dlroqa/Lightagent/actions/runs/40996571854 |
+| 2026-10-30 | Spike fix `018`: run Electron's install script explicitly; branch fast-forwarded | `82896bc` / `d9cde26` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/40997083470 |
+| 2026-10-30 | Spike run 2: **8/8 success**. Measurements are in DESKTOP_ARCHITECTURE.md §3 | `82896bc` | https://github.com/dlroqa/Lightagent/actions/runs/40997420599 |
+
+## Artifacts and retention
+
+| Artifact | Run | Retention |
+|---|---|---|
+| `prepared-015-desktop-d0-audit.txt`, `prepared-016-…` (commit, tree, diff) | 40995818991, 40996341547 | 30 days |
+| `spike-tauri-<target>`: measure.json, screenshot, Cargo.lock, dmg/msi/nsis/deb/AppImage | 40997420599 (also 40996571854) | 30 days |
+| `spike-electron-<target>`: measure.json, screenshot | 40997420599 | 30 days |
+| `lightagent-web-screens` (existing `check` job) | 40996392105 | repository default |
 
 ## Local backup
 
@@ -173,12 +215,17 @@ is a baseline defect.
   (origin `https://github.com/dlroqa/Lightagent.git`). It is synchronized with
   `git fetch` only: no reset, no clean, no force.
 - Local progress copy: `~/Repositories/LAcode/desktop-progress/`.
-- Last synchronization and backed-up commit: recorded in each update below.
+- Last synchronization: 2026-10-30T03:33:59Z, by fetch only. Backed up:
+  - `master` `12582a0`;
+  - `origin/desktop/d0-audit` `bc01426`;
+  - `origin/desktop/d1-spike` `82896bc`.
+
+  The working tree was clean.
 
 ## Next
 
-1. Record the D0 commit, branch, and draft PR, and get the `desktop` and `check` runs green on the exact head.
-2. D1: DESKTOP_ARCHITECTURE.md (framework ADR, threat model, profile-switch
-   protocol, local-server security design, screen map) and
-   DESKTOP_ACCEPTANCE.md, with a hosted spike workflow for the framework
-   measurements.
+1. Validate the D1 head on `desktop` and `check`, and record it here.
+2. D2: the `desktop/` Tauri shell and the frontend transport in desktop mode,
+   with the operation contract and its check, a mock sidecar, and render and
+   screenshot CI on four targets. D2 also investigates the Linux load time and
+   sets the per-architecture plist minimum.
