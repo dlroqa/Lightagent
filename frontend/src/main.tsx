@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { HashRouter } from "react-router-dom";
 
 import { App } from "./App";
+import { DesktopGate } from "./desktop/DesktopGate";
 import { PreferencesProvider } from "./state/preferences";
 import "./styles/app.css";
 
@@ -21,9 +22,11 @@ if (!container) {
 createRoot(container).render(
   <StrictMode>
     <PreferencesProvider>
-      <HashRouter>
-        <App />
-      </HashRouter>
+      <DesktopGate>
+        <HashRouter>
+          <App />
+        </HashRouter>
+      </DesktopGate>
     </PreferencesProvider>
   </StrictMode>,
 );

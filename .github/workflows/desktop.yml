@@ -1,8 +1,12 @@
 name: desktop
 
 # Lightagent Desktop gates (docs/desktop/). Each slice adds its jobs here;
-# everything runs on GitHub-hosted runners. D0: the capability inventory must
-# match the source, and the drift check must prove it detects additions.
+# everything runs on GitHub-hosted runners and checks out the exact PR head,
+# so the evidence names the commit under review.
+#   D0  inventory: the capability inventory matches the source.
+#   D2  contract, host and shell: the operation contract matches the server
+#       and the UI client; the desktop host builds, lints and tests; the
+#       packaged shell starts its runtime and renders on every target.
 
 on:
   pull_request:
@@ -11,7 +15,7 @@ on:
       - 'frontend/**'
       - 'desktop/**'
       - 'docs/desktop/**'
-      - 'scripts/check-desktop-inventory.py'
+      - 'scripts/check-desktop-*.py'
       - '.github/workflows/desktop.yml'
   workflow_dispatch:
 
@@ -24,6 +28,7 @@ permissions:
 
 env:
   CARGO_INCREMENTAL: '0'
+  TAURI_CLI: '@tauri-apps/cli@2.12.3'
 
 jobs:
   inventory:
@@ -31,8 +36,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
-      # The exact PR head, not the synthetic merge commit, so the evidence
-      # names the commit under review.
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -48,6 +51,12 @@ jobs:
       - name: The inventory matches the source
         if: success() || failure()
         run: python3 -I scripts/check-desktop-inventory.py
+      - name: The contract check detects drift (self-test)
+        if: success() || failure()
+        run: python3 -I scripts/check-desktop-contract.py --self-test
+      - name: The operation contract matches the server and the UI client
+        if: success() || failure()
+        run: python3 -I scripts/check-desktop-contract.py
       - run: rustup show
         if: success() || failure()
       - uses: Swatinem/rust-cache@v2
@@ -57,3 +66,194 @@ jobs:
       - name: The CLI tree matches clap
         if: success() || failure()
         run: cargo test -p lightagent --lib --locked desktop_inventory
+
+  host:
+    name: desktop host (fmt, clippy, tests, dependency policy)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Linux system packages (webview)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+          key: desktop-host
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Frontend (both builds)
+        run: |
+          npm ci --prefix frontend
+          npm run build --prefix frontend
+          npm run build:desktop --prefix frontend
+      - name: Stage the runtime and icons the host build expects
+        run: |
+          locked=$([ -f desktop/Cargo.lock ] && echo --locked || true)
+          cargo build $locked --manifest-path desktop/Cargo.toml -p lightagent-mock-sidecar
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          mkdir -p desktop/src-tauri/binaries
+          cp desktop/target/debug/lightagent-mock-sidecar "desktop/src-tauri/binaries/lightagent-sidecar-$triple"
+          (cd desktop && npx --yes "$TAURI_CLI" icon ../icon/LightagentLogo.png -o src-tauri/icons)
+      - name: Format
+        run: cargo fmt --manifest-path desktop/Cargo.toml --all --check
+      - name: Clippy
+        run: |
+          locked=$([ -f desktop/Cargo.lock ] && echo --locked || true)
+          cargo clippy $locked --manifest-path desktop/Cargo.toml --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: |
+          locked=$([ -f desktop/Cargo.lock ] && echo --locked || true)
+          cargo test $locked --manifest-path desktop/Cargo.toml --workspace
+      - name: Dependency policy (the repository's banned crates, all targets)
+        run: |
+          status=0
+          for crate in aws-lc-sys aws-lc-rs openssl-sys native-tls bindgen cmake; do
+            if cargo tree --manifest-path desktop/Cargo.toml --workspace --target all -e normal,build -i "$crate" >/dev/null 2>&1; then
+              echo "::error::POLICY: \`$crate\` is in the desktop dependency graph"; status=1
+            fi
+          done
+          [ -f desktop/Cargo.lock ] && git diff --exit-code -- desktop/Cargo.lock \
+            || echo "::warning::desktop/Cargo.lock is not committed yet; the generated one is uploaded"
+          echo "- desktop dependency policy: $([ $status = 0 ] && echo clean || echo VIOLATED); crates: $(grep -c '^name = ' desktop/Cargo.lock)" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit $status
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: desktop-cargo-lock
+          retention-days: 30
+          path: desktop/Cargo.lock
+
+  shell:
+    name: desktop shell (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15-intel, label: macos-x64, arch: x86_64, macos_min: '10.14', bundles: 'app,dmg' }
+          - { os: macos-15, label: macos-arm64, arch: arm64, macos_min: '11.0', bundles: 'app,dmg' }
+          - { os: windows-latest, label: windows-x64, arch: x86_64, bundles: 'nsis,msi' }
+          - { os: ubuntu-22.04, label: linux-x64, arch: x86_64, bundles: 'deb,appimage' }
+    defaults:
+      run:
+        shell: bash
+    env:
+      APPIMAGE_EXTRACT_AND_RUN: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Runner identity and tested commit
+        env:
+          WANT_ARCH: ${{ matrix.arch }}
+        run: |
+          arch=$(uname -m); case "$arch" in x86_64|amd64|AMD64) arch=x86_64;; aarch64|arm64) arch=arm64;; esac
+          {
+            echo "### desktop shell ${{ matrix.label }}"
+            echo "- image: ${ImageOS:-unknown} ${ImageVersion:-}"
+            echo "- head: \`$(git rev-parse HEAD)\` tree \`$(git rev-parse 'HEAD^{tree}')\`"
+            [ "$(uname -s)" = Darwin ] && echo "- macOS $(sw_vers -productVersion), translated: $(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)"
+            true
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$arch" = "$WANT_ARCH" ] || { echo "runner is $arch, expected $WANT_ARCH" >&2; exit 1; }
+      - name: macOS deployment target
+        if: matrix.macos_min
+        run: echo "MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos_min }}" >> "$GITHUB_ENV"
+      - name: Linux system packages (webview, display)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf file xvfb imagemagick
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+          key: desktop-shell-${{ matrix.label }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install psutil==7.1.0 pillow==11.3.0
+      - name: Desktop frontend
+        run: |
+          npm ci --prefix frontend
+          npm run build:desktop --prefix frontend
+      - name: Stage the runtime (D2 mock) and icons
+        run: |
+          locked=$([ -f desktop/Cargo.lock ] && echo --locked || true)
+          cargo build $locked --release --manifest-path desktop/Cargo.toml -p lightagent-mock-sidecar
+          triple=$(rustc -vV | sed -n 's/^host: //p'); ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
+          mkdir -p desktop/src-tauri/binaries
+          cp "desktop/target/release/lightagent-mock-sidecar$ext" "desktop/src-tauri/binaries/lightagent-sidecar-$triple$ext"
+          (cd desktop && npx --yes "$TAURI_CLI" icon ../icon/LightagentLogo.png -o src-tauri/icons)
+      - name: Build and bundle
+        working-directory: desktop
+        run: |
+          config='{}'
+          [ -n "${{ matrix.macos_min }}" ] && config="{\"bundle\":{\"macOS\":{\"minimumSystemVersion\":\"${{ matrix.macos_min }}\"}}}"
+          start=$(date +%s)
+          npx --yes "$TAURI_CLI" build --ci --bundles ${{ matrix.bundles }} --config "$config"
+          echo "- build+bundle: $(( $(date +%s) - start ))s" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Package facts
+        working-directory: desktop/target/release
+        run: |
+          {
+            if [ "$(uname -s)" = Darwin ]; then
+              app=$(ls -d bundle/macos/*.app)
+              for bin in "$app/Contents/MacOS/"*; do
+                echo "- $(basename "$bin"): $(lipo -archs "$bin"), $(otool -l "$bin" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print "minos "$2; exit}')"
+              done
+              echo "- LSMinimumSystemVersion: $(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")"
+            fi
+            find bundle -maxdepth 2 -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' \) -print0 \
+              | while IFS= read -r -d '' f; do python -c "import os,sys; print('- %s: %.1f MB' % (os.path.basename(sys.argv[1]), os.path.getsize(sys.argv[1])/1048576))" "$f"; done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: End-to-end (runner, ready and mismatch)
+        run: |
+          out="$RUNNER_TEMP/desktop-e2e"
+          r=desktop/target/release
+          case "$(uname -s)" in
+            Darwin) app=("$(ls -d $r/bundle/macos/*.app)/Contents/MacOS/lightagent-desktop"); wrap=() ;;
+            Linux) app=("$r/lightagent-desktop"); wrap=(xvfb-run -a -s '-screen 0 1280x800x24') ;;
+            *) app=("$r/lightagent-desktop.exe"); wrap=() ;;
+          esac
+          status=0
+          "${wrap[@]}" python desktop/e2e/run.py "$out" ready -- "${app[@]}" || status=1
+          LIGHTAGENT_MOCK_REPORT_VERSION=0.0.0-mismatch "${wrap[@]}" python desktop/e2e/run.py "$out" mismatch -- "${app[@]}" || status=1
+          if [ "$RUNNER_OS" = Linux ]; then
+            # D1 found a 30 s first load under Xvfb; measure the DMA-BUF renderer's share.
+            WEBKIT_DISABLE_DMABUF_RENDERER=1 "${wrap[@]}" python desktop/e2e/run.py "$out/no-dmabuf" ready -- "${app[@]}" || true
+          fi
+          python - "$out" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import glob, json, os, sys
+          for path in sorted(glob.glob(os.path.join(sys.argv[1], "**", "e2e-*.json"), recursive=True)):
+              d = json.load(open(path))
+              label = os.path.relpath(path, sys.argv[1])
+              print(f"- {label}: milestones {d['milestones_s']}, missing {d['missing']}, key leaks {d['key_leaks'] or 'none'}, runtime survived host termination: {d['runtime_survived_host_termination']}")
+          PY
+          exit $status
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: desktop-shell-${{ matrix.label }}
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/desktop-e2e/
+            desktop/target/release/bundle/**/*.dmg
+            desktop/target/release/bundle/**/*.msi
+            desktop/target/release/bundle/nsis/*.exe
+            desktop/target/release/bundle/**/*.deb
+            desktop/target/release/bundle/**/*.AppImage

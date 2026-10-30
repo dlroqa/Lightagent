@@ -1,0 +1,30 @@
+{
+ "schema": "lightagent-desktop-operations/1",
+ "protocol": 1,
+ "note": "The only HTTP operations the desktop host forwards for the UI. Order matters: a literal path precedes a template that would also match it. Kept equal to the server routes and covering the frontend client by scripts/check-desktop-contract.py.",
+ "operations": [
+  {"id": "health", "method": "GET", "path": "/health"},
+  {"id": "tools.list", "method": "GET", "path": "/api/lightagent/v1/tools"},
+  {"id": "workers.list", "method": "GET", "path": "/api/lightagent/v1/workers"},
+  {"id": "provider.get", "method": "GET", "path": "/api/lightagent/v1/provider"},
+  {"id": "jev.status", "method": "GET", "path": "/api/lightagent/v1/jev"},
+  {"id": "jev.verify", "method": "POST", "path": "/api/lightagent/v1/jev/verify"},
+  {"id": "skills.list", "method": "GET", "path": "/api/lightagent/v1/skills"},
+  {"id": "profiles.list", "method": "GET", "path": "/api/lightagent/v1/profiles"},
+  {"id": "settings.get", "method": "GET", "path": "/api/lightagent/v1/settings"},
+  {"id": "settings.put", "method": "PUT", "path": "/api/lightagent/v1/settings"},
+  {"id": "runs.create", "method": "POST", "path": "/api/lightagent/v1/runs"},
+  {"id": "runs.get", "method": "GET", "path": "/api/lightagent/v1/runs/{id}"},
+  {"id": "runs.events", "method": "GET", "path": "/api/lightagent/v1/runs/{id}/events", "query": ["after"], "stream": true},
+  {"id": "runs.cancel", "method": "POST", "path": "/api/lightagent/v1/runs/{id}/cancel"},
+  {"id": "sessions.list", "method": "GET", "path": "/api/lightagent/v1/sessions"},
+  {"id": "sessions.create", "method": "POST", "path": "/api/lightagent/v1/sessions"},
+  {"id": "sessions.search", "method": "GET", "path": "/api/lightagent/v1/sessions/search", "query": ["q"]},
+  {"id": "sessions.get", "method": "GET", "path": "/api/lightagent/v1/sessions/{id}"},
+  {"id": "sessions.update", "method": "PATCH", "path": "/api/lightagent/v1/sessions/{id}"},
+  {"id": "sessions.delete", "method": "DELETE", "path": "/api/lightagent/v1/sessions/{id}", "destructive": true},
+  {"id": "sessions.attach", "method": "POST", "path": "/api/lightagent/v1/sessions/{id}/attachments", "raw_body": true},
+  {"id": "approvals.list", "method": "GET", "path": "/api/lightagent/v1/approvals"},
+  {"id": "approvals.respond", "method": "POST", "path": "/api/lightagent/v1/approvals/{run}"}
+ ]
+}

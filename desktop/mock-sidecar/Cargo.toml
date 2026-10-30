@@ -1,0 +1,12 @@
+[package]
+name = "lightagent-mock-sidecar"
+description = "D2 stand-in runtime for desktop tests: speaks the desktop handshake and serves fixed responses. Never shipped once the real runtime is bundled (D3)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "lightagent-mock-sidecar"
+path = "src/main.rs"
