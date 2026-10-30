@@ -116,8 +116,11 @@ the new tests run inside its existing jobs:
 | [check 41144876654](https://github.com/dlroqa/Lightagent/actions/runs/41144876654) | `0da3370` | Failed: fmt and clippy passed; 20 of 21 `lightagent-api` API tests passed, and `regenerating_replaces_the_latest_answer_in_place` failed on a wrong assumption in the test (see below). `standalone Web UI render` passed. |
 | [check 41145565722](https://github.com/dlroqa/Lightagent/actions/runs/41145565722) | `15e2693` | **Passed**: every job, including `check` on linux-x64, windows-x64, macos-arm64 and macos-x64 (fmt, clippy, workspace tests with both regenerate tests, frontend production build), and `standalone Web UI render` with the response-action check. |
 | [jev evaluation 41145565768](https://github.com/dlroqa/Lightagent/actions/runs/41145565768), [subagents 41145565880](https://github.com/dlroqa/Lightagent/actions/runs/41145565880) | `15e2693` | Passed. The dispatched `subagent fixture fail` and `verify` runs failed, as they do on other branches. |
+| [check 41146435877](https://github.com/dlroqa/Lightagent/actions/runs/41146435877), [jev evaluation 41146435771](https://github.com/dlroqa/Lightagent/actions/runs/41146435771), [subagents 41146435803](https://github.com/dlroqa/Lightagent/actions/runs/41146435803) | `b6adee5` | **Passed**: every `check` job on all four platforms, and `standalone Web UI render`. This commit changed only this document. The dispatched fixture `fail` and `verify` runs failed, as usual. |
 | [jev evaluation 41144035777](https://github.com/dlroqa/Lightagent/actions/runs/41144035777) | `13f2ecc` | Passed |
 | [subagents 41144035939](https://github.com/dlroqa/Lightagent/actions/runs/41144035939) | `13f2ecc` | Passed. The `subagent fixture fail` and `verify` runs it dispatches failed, as they do on other branches. |
+
+Later commits that only update this table also run CI, but they are not listed here.
 
 ## Failures and resolutions
 
