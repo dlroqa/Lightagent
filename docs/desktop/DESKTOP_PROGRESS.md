@@ -22,7 +22,7 @@ next update names its run.
 | D3a Real runtime: `serve --desktop` | **CI-validated** (gate passed) | `desktop/d3a-runtime` (stacked on D2) | https://github.com/dlroqa/Lightagent/pull/94 | `130dde98e5cade253b00d69f8e1c499587128e3d` | `130dde9` / tree `ab98037ea76bd083da863dd88c112dc4c7a5f5fc` |
 | D3b Host lifecycle: crash, restart, single instance | **CI-validated** (gate passed) | `desktop/d3b-lifecycle` (stacked on D3a) | https://github.com/dlroqa/Lightagent/pull/95 | `1f0ed6900c166fc1dd32ed3ab38d546119929635` | `1f0ed69` / tree `4d70aaf397fc5d4f50f65906579e46b035a88063` |
 | D4a Profiles: shared operations and API | **CI-validated** (gate passed) | `desktop/d4a-profiles` (stacked on D3b) | https://github.com/dlroqa/Lightagent/pull/96 | `c544d7ae40f8962c287ae39a8234e1665aaf6796` | `c544d7a` / tree `78dcded80caee0555f30a7304d97f9a42a9813e7` |
-| D4b Profile switch, close with runs, Profiles screen | `75fa438` CI-validated; `fb7ac39` **failed** the web render (a race, below); the fix (this commit) awaits validation | `desktop/d4b-profile-ui` (stacked on D4a) | https://github.com/dlroqa/Lightagent/pull/97 | this commit (child of `fb7ac39`) | `75fa438` / tree `1e0f2f5b118c791bf4825c41f64d48c3fbbed51c` |
+| D4b Profile switch, close with runs, Profiles screen | **CI-validated** (gate passed at `cd799a4`); this commit records parity only | `desktop/d4b-profile-ui` (stacked on D4a) | https://github.com/dlroqa/Lightagent/pull/97 | this commit (child of `cd799a4`) | `cd799a4` / tree `0627bd89aae122de6f41add447b3047cfdde01d0` |
 | D1 spike (evidence only, never merged) | runner evidence complete | `desktop/d1-spike` | https://github.com/dlroqa/Lightagent/pull/91 | `82896bcd63f3bd6786dcea12b603241e50a3a9ea` | `82896bc` / tree `d9cde26142a63a716a58f35dc33330be0e90d8b7` |
 | D3b–D10 | not started | — | — | — | — |
 
@@ -435,6 +435,11 @@ D3b e2e results at `9dc6783` on the three shells that ran (seconds from the even
 | 2026-10-30 | `desktop` on `75fa438`: **success** (host fmt, clippy and tests including `switch` unit tests; four-target shells; e2e ready, crash, duplicate and mismatch) | `75fa438` | https://github.com/dlroqa/Lightagent/actions/runs/41052025446 |
 | 2026-10-30 | Reviewing the Profiles screenshot (artifact `lightagent-web-screens`) found two defects the checks did not catch: the row's name and its id·model line ran together, and a deleted profile's details stayed on screen. Fixed in `fb7ac39`, and the e2e now asserts that the details disappear | `fb7ac39` / `2298c7d` | screenshot `profiles.png`, run 41052025410; source-edit https://github.com/dlroqa/Lightagent/actions/runs/41055739535 |
 | 2026-10-30 | `desktop` on `fb7ac39`: **success**. `check` on `fb7ac39`: **failure**, only in `standalone Web UI render`: after **Create**, the details card never appeared. Cause: the new "clear details when the profile is gone" effect saw the catalog from *before* the reload, which lacked the just-created profile, and cleared the selection. The fix (this commit) clears the selection explicitly when that profile is deleted, with no inference from a possibly stale catalog | `fb7ac39` | https://github.com/dlroqa/Lightagent/actions/runs/41055791157 (job 124062872105), https://github.com/dlroqa/Lightagent/actions/runs/41055791246 |
+| 2026-10-30 | Fix: edit request `028-desktop-d4b-detail-race`; branch fast-forwarded | `cd799a4` / `0627bd8` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41057740598 |
+| 2026-10-30 | `desktop` on `cd799a4`: **success** | `cd799a4` | https://github.com/dlroqa/Lightagent/actions/runs/41057799963 |
+| 2026-10-30 | `check` on `cd799a4`, attempt 1: **failure**, only in `paired Lightweight contract E2E`. The job failed while GitHub set it up, before any repository code ran: `Unable to resolve action actions/checkout@v7, unable to find version v7`. The other 12 jobs of the same run resolved the same action. Classified as a transient GitHub action-resolution failure, not a code defect. **One** re-run of that job only (GitHub keeps attempt 1's log) | `cd799a4` | https://github.com/dlroqa/Lightagent/actions/runs/41057799814 (attempt 1, job 124069612248) |
+| 2026-10-30 | `check` on `cd799a4`, attempt 2: **success**, all jobs, including the Profiles UI flow in `standalone Web UI render` | `cd799a4` | https://github.com/dlroqa/Lightagent/actions/runs/41057799814 |
+| 2026-10-30 | **D4b gate passed** at `cd799a4`. Parity: 15 of 226 rows implemented (the profile list, show, create, preset, use and delete capabilities with their inputs), each citing `cd799a4` and its runs. `cli.profile.use` records the desktop switch's native-automation gap | — | DESKTOP_CLI_PARITY.md, "Implemented rows and evidence" |
 
 ## Artifacts and retention
 
@@ -462,6 +467,5 @@ D3b e2e results at `9dc6783` on the three shells that ran (seconds from the even
 
 ## Next
 
-1. Validate this D4b follow-up, then mark the `cli.profile.*` rows implemented, citing that evidence and the desktop-switch gap.
-2. D4c: configuration (show, path, get, set) as typed operations, with a lock and an ETag (`409` on a stale write).
+1. D4c: configuration (show, path, get, set, Jev routing report). Design: one locked read-modify-write with an ETag in `lightagent-core`'s `ConfigStore` (`update(expected_etag, change)`), used by `lightagent config set`, the existing `PUT /settings`, and the new config routes. A stale write gets `409 conflict`, and two processes cannot interleave. Then a Settings advanced editor with typed key and value.
 3. D4d–e: provider, models, key entry and endpoint test; workspaces.
