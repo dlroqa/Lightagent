@@ -14,10 +14,11 @@ import {
   type ToolInfo,
   type UploadedAttachment,
 } from "../api/agent";
-import { promptTimestamp } from "../api/format";
+import { answerTimestamp, promptTimestamp } from "../api/format";
 import { Empty, Pill } from "../components/Bits";
 import { AnimatedLogo } from "../components/Logo";
 import { Menu, MenuItem } from "../components/Menu";
+import { ResponseActions } from "../components/ResponseActions";
 import { TopBar } from "../components/Shell";
 import { usePoll } from "../hooks/usePoll";
 import { useRunEvents, type Delivery, type RunEvent } from "../hooks/useRunEvents";
@@ -490,6 +491,12 @@ export function Agent() {
     return last?.stop_reason ? describeStop(last.stop_reason, lastMessage?.role === "assistant") : null;
   }, [answer, done, events, runId, session]);
   const deliveryNotice = runId !== null && done ? describeDelivery(delivery) : null;
+  // The action row sits under the final answer only: a saved assistant
+  // message that ends the transcript, with no run streaming or queued.
+  const finalAnswerIndex = !running && !showLiveAnswer && steering.length === 0 &&
+    session?.messages[session.messages.length - 1]?.role === "assistant"
+    ? session.messages.length - 1
+    : -1;
   const pending = useMemo(() => {
     if (done) return null;
     let open: { toolCallId: string; tool: string } | null = null;
@@ -834,6 +841,32 @@ export function Agent() {
     }
   }
 
+  /** Replace the final answer with a fresh run of the prompt it answered. */
+  async function regenerate() {
+    const id = activeId;
+    const latest = session?.runs[session.runs.length - 1];
+    if (!id || !latest || hasPendingWork || busy) return;
+    setFollowTranscript(true);
+    setBusy(true);
+    setError(null);
+    try {
+      const run = await agentApi.regenerate(id, latest.run_id, selectedModel || undefined);
+      // The server has removed the old answer; drop it here too rather than
+      // showing it above the new one until the session reloads.
+      setSession((current) => current?.id === id
+        ? { ...current, messages: current.messages.slice(0, -1), runs: current.runs.slice(0, -1) }
+        : current);
+      backgroundRuns.current.set(id, run.id);
+      if (selected.current === id) setRunId(run.id);
+      await load(id);
+      sessions.refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function uploadFiles(files: FileList | null) {
     if (!files?.length || hasPendingWork) return;
     setBusy(true);
@@ -1128,7 +1161,19 @@ export function Agent() {
                       hint="Messages, runs, and tool calls are saved with this session." />
                   )}
                   {session.messages.map((message, index) => (
-                    <AgentMessage key={message.role + index} message={message} />
+                    <AgentMessage key={message.role + index} message={message}
+                      actions={index === finalAnswerIndex && (
+                        <ResponseActions
+                          text={message.content}
+                          title={session.title}
+                          timestamp={message.created_at ? answerTimestamp(unix(message.created_at)) : null}
+                          onRetry={session.runs.length > 0 && !busy ? () => void regenerate() : undefined}
+                          // TODO(branch-in-new-chat): the API cannot yet create a
+                          // session from another's transcript up to a message. Pass
+                          // `onBranch` here once it can; until then the menu row is
+                          // shown disabled.
+                        />
+                      )} />
                   ))}
                   {routingStatus && <div className="routing-status" role="status">
                     <Cpu size={14} aria-hidden="true" />
@@ -1426,7 +1471,12 @@ function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete
   );
 }
 
-function AgentMessage({ message, streaming }: { message: SessionMessage; streaming?: boolean }) {
+function AgentMessage({ message, streaming, actions }: {
+  message: SessionMessage;
+  streaming?: boolean;
+  /** Controls shown beneath the message, inside it. */
+  actions?: ReactNode;
+}) {
   const mine = message.role === "user";
   const timestamp = mine && message.created_at ? promptTimestamp(unix(message.created_at)) : null;
   return (
@@ -1435,6 +1485,7 @@ function AgentMessage({ message, streaming }: { message: SessionMessage; streami
       <article className={`chat-message${mine ? " is-user" : ""}${streaming ? " is-streaming" : ""}`}
         aria-label={mine ? "Your message" : "Agent message"}>
         <div className="chat-message__content">{linkifyMessage(message.content)}</div>
+        {actions}
       </article>
     </>
   );

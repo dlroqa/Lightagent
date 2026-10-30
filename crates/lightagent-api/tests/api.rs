@@ -1351,3 +1351,197 @@ async fn session_history_is_packed_against_the_resolved_window() {
     .await
     .unwrap();
 }
+
+/// Records each run's prompt and packed history.
+struct PromptFactory {
+    requests: Arc<tokio::sync::Mutex<Vec<(String, Vec<ProviderMessage>)>>>,
+}
+
+#[async_trait]
+impl RunFactory for PromptFactory {
+    async fn run(
+        &self,
+        request: StartRun,
+        sink: AgentEventSink,
+        cancel: tokio_util::sync::CancellationToken,
+        decisions: UnboundedReceiver<ApprovalDecision>,
+    ) -> RunStatus {
+        self.requests
+            .lock()
+            .await
+            .push((request.message.clone(), request.history.clone()));
+        MockFactory.run(request, sink, cancel, decisions).await
+    }
+}
+
+/// Wait until session `id` has `runs` saved runs and is free for another.
+async fn settled(
+    store: &SessionStore,
+    busy: &tokio::sync::Mutex<std::collections::HashSet<lightagent_store::SessionId>>,
+    id: &lightagent_store::SessionId,
+    runs: usize,
+) -> lightagent_store::Session {
+    loop {
+        let saved = store.load(id).unwrap();
+        if saved.runs.len() == runs && !busy.lock().await.contains(id) {
+            return saved;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test]
+async fn regenerating_replaces_the_latest_answer_in_place() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut state = app_state(AuthConfig::open());
+        let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        state.manager = RunManager::new(Arc::new(PromptFactory {
+            requests: Arc::clone(&requests),
+        }));
+        let store = state.sessions.clone();
+        let busy = Arc::clone(&state.busy_sessions);
+        let addr = spawn_server(state).await;
+        let (_, body) = http(
+            &addr,
+            "POST",
+            "/api/lightagent/v1/sessions",
+            &[],
+            Some("{}"),
+        )
+        .await;
+        let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let parsed = lightagent_store::SessionId::parse(&id).unwrap();
+        for (index, message) in ["hello", "follow up"].into_iter().enumerate() {
+            let payload = serde_json::json!({ "message": message, "session_id": id }).to_string();
+            let (status, body) = http(
+                &addr,
+                "POST",
+                "/api/lightagent/v1/runs",
+                &[],
+                Some(&payload),
+            )
+            .await;
+            assert_eq!(status, 202, "{body}");
+            settled(&store, &busy, &parsed, index + 1).await;
+        }
+        let before = store.load(&parsed).unwrap();
+        let replaced = before.runs[1].run_id.clone();
+
+        let payload = serde_json::json!({ "run_id": replaced }).to_string();
+        let (status, body) = http(
+            &addr,
+            "POST",
+            &format!("/api/lightagent/v1/sessions/{id}/regenerate"),
+            &[],
+            Some(&payload),
+        )
+        .await;
+        assert_eq!(status, 202, "{body}");
+        let run = serde_json::from_str::<serde_json::Value>(&body).unwrap();
+        assert_eq!(run["session_id"], id);
+        let created = run["id"].as_str().unwrap().to_owned();
+        assert_ne!(created, replaced);
+
+        let after = settled(&store, &busy, &parsed, 2).await;
+        // The prompt is kept once; only its answer and run record change.
+        let roles: Vec<&str> = after.messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, ["user", "assistant", "user", "assistant"]);
+        assert_eq!(after.messages[2].content, "follow up");
+        assert_eq!(after.messages[3].content, "The time is now.");
+        assert_eq!(after.runs[0].run_id, before.runs[0].run_id);
+        assert_eq!(after.runs[1].run_id, created);
+        assert_eq!(after.runs[1].stop_reason.as_deref(), Some("EndTurn"));
+
+        // The prompt is run again with the history its first run had.
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[2], requests[1]);
+        assert_eq!(requests[2].0, "follow up");
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn regenerating_anything_but_the_latest_answer_is_refused() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let state = app_state(AuthConfig::open());
+        let store = state.sessions.clone();
+        let busy = Arc::clone(&state.busy_sessions);
+        let addr = spawn_server(state).await;
+        let (_, body) = http(
+            &addr,
+            "POST",
+            "/api/lightagent/v1/sessions",
+            &[],
+            Some("{}"),
+        )
+        .await;
+        let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let parsed = lightagent_store::SessionId::parse(&id).unwrap();
+        let regenerate = |run_id: String| {
+            let addr = addr.clone();
+            let path = format!("/api/lightagent/v1/sessions/{id}/regenerate");
+            async move {
+                let payload = serde_json::json!({ "run_id": run_id }).to_string();
+                http(&addr, "POST", &path, &[], Some(&payload)).await
+            }
+        };
+
+        // Nothing has been answered yet.
+        let (status, _) = regenerate("run-none".into()).await;
+        assert_eq!(status, 409);
+
+        for (index, message) in ["first", "second"].into_iter().enumerate() {
+            let payload = serde_json::json!({ "message": message, "session_id": id }).to_string();
+            let (status, body) = http(
+                &addr,
+                "POST",
+                "/api/lightagent/v1/runs",
+                &[],
+                Some(&payload),
+            )
+            .await;
+            assert_eq!(status, 202, "{body}");
+            settled(&store, &busy, &parsed, index + 1).await;
+        }
+        let before = store.load(&parsed).unwrap();
+
+        // An earlier answer, or a run id from a transcript that moved on.
+        let (status, body) = regenerate(before.runs[0].run_id.clone()).await;
+        assert_eq!(status, 409, "{body}");
+        assert!(body.contains("latest answer"));
+        assert_eq!(store.load(&parsed).unwrap(), before);
+
+        // A transcript that ends with a prompt, not that run's answer.
+        let mut unanswered = before.clone();
+        unanswered.push_message(lightagent_store::StoredMessage::new("user", "third"));
+        store.save(&unanswered).unwrap();
+        let (status, _) = regenerate(before.runs[1].run_id.clone()).await;
+        assert_eq!(status, 409);
+        assert_eq!(store.load(&parsed).unwrap(), unanswered);
+
+        // An unknown session is answered like any missing one.
+        let missing = lightagent_store::SessionId::generate();
+        let payload = serde_json::json!({ "run_id": before.runs[1].run_id }).to_string();
+        let (status, _) = http(
+            &addr,
+            "POST",
+            &format!("/api/lightagent/v1/sessions/{}/regenerate", missing.as_str()),
+            &[],
+            Some(&payload),
+        )
+        .await;
+        assert_eq!(status, 404);
+        // A refused regeneration leaves the session free for the next run.
+        assert!(!busy.lock().await.contains(&parsed));
+    })
+    .await
+    .unwrap();
+}

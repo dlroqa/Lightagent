@@ -4,6 +4,7 @@
 
 import { mkdir } from "node:fs/promises";
 import { chromium } from "playwright";
+import { checkResponseActions } from "./actions.mjs";
 import { checkDeliveryStates } from "./delivery.mjs";
 import { checkJevStates } from "./jev.mjs";
 
@@ -349,6 +350,13 @@ async function main() {
     failures.push(...(await checkDeliveryStates(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`delivery states: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // The action row under the final answer, and its regenerate wiring.
+  try {
+    failures.push(...(await checkResponseActions(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`response actions: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // Last: these states change the server's Jev settings.

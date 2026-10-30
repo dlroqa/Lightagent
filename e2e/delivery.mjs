@@ -349,7 +349,7 @@ const occurrences = (haystack, needle) => haystack.split(needle).length - 1;
  * unreachable), so the Agent screen opens it as a conversation rather than as
  * a new chat. The scripted run under test is then sent into it.
  */
-async function seededSession(base, title) {
+export async function seededSession(base, title) {
   const api = async (path, init = {}) => {
     const response = await fetch(`${base}/api/lightagent/v1${path}`, {
       headers: { "content-type": "application/json" },
