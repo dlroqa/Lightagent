@@ -218,7 +218,22 @@ jobs:
           config='{}'
           [ -n "${{ matrix.macos_min }}" ] && config="{\"bundle\":{\"macOS\":{\"minimumSystemVersion\":\"${{ matrix.macos_min }}\"}}}"
           start=$(date +%s)
-          npx --yes "$TAURI_CLI" build --ci --bundles ${{ matrix.bundles }} --config "$config"
+          # hdiutil on hosted macOS images intermittently fails with "Resource
+          # busy" (D3b run 41003067980). Only that exact failure is retried,
+          # at most three attempts; every attempt's log is kept as an artifact
+          # and each retry is reported. Any other failure fails at once.
+          mkdir -p "$RUNNER_TEMP/desktop-e2e"
+          for attempt in 1 2 3; do
+            log="$RUNNER_TEMP/desktop-e2e/bundle-attempt-$attempt.log"
+            if npx --yes "$TAURI_CLI" build --ci --bundles ${{ matrix.bundles }} --config "$config" 2>&1 | tee "$log"; then
+              break
+            fi
+            if ! grep -q 'hdiutil: create failed - Resource busy' "$log" || [ "$attempt" = 3 ]; then
+              exit 1
+            fi
+            echo "- bundling attempt $attempt hit hdiutil 'Resource busy'; retrying (log kept)" | tee -a "$GITHUB_STEP_SUMMARY"
+            sleep 20
+          done
           echo "- build+bundle: $(( $(date +%s) - start ))s" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Package facts
         working-directory: desktop/target/release

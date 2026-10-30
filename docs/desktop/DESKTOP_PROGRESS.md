@@ -336,6 +336,22 @@ D3a runner evidence with the **real runtime** bundled. Seconds from app spawn:
 - **Deferred to D4a:** a close with active runs (warn, or cancel then quit),
   which needs the active-runs operation.
 
+| When (UTC) | Event | Commit / tree | Evidence |
+|---|---|---|---|
+| 2026-10-30 | Edit request `023-desktop-d3b-lifecycle` on base `130dde9`; workflow blob verified and attached; branch created without force; draft PR #95 | prepared `abc1e9f`; final `9dc6783` / `4465812` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41002983519 |
+| 2026-10-30 | `check` on `9dc6783`: **success** | `9dc6783` | https://github.com/dlroqa/Lightagent/actions/runs/41003068075 |
+| 2026-10-30 | `desktop` on `9dc6783`: **failure**. Inventory, host (fmt, clippy, tests), and the macos-arm64, windows-x64 and linux-x64 shells passed every e2e mode. The **macos-x64 shell failed while packaging, before any test ran**: `hdiutil: create failed - Resource busy` from Tauri's `bundle_dmg.sh` | `9dc6783` | https://github.com/dlroqa/Lightagent/actions/runs/41003067980 (job 123891687408) |
+| 2026-10-30 | Investigation: the failing step is the OS disk-image tool, not desktop code; D3b changed no bundling input; the same step passed on that runner image in D2 and D3a. Mitigation (the next commit): retry **only** that exact `hdiutil` message, at most 3 attempts, with every attempt's log kept as an artifact and each retry reported in the job summary. Any other failure still fails at once | — | — |
+
+D3b e2e results at `9dc6783` on the three shells that ran (seconds from the event that started each check):
+
+| Target | Ready (first API call) | Crash: exit reported → restarted | Duplicate: second launch refused, no runtime | Mismatch refused | Runtime outlived the host |
+|---|---|---|---|---|---|
+| macOS arm64 | 5.23 | 2.98 → 2.98 | 4.36 (UI 5.10) | yes | no |
+| Windows x64 | 2.84 | 1.04 → 1.04 | 0.75 (UI 0.85) | yes | no |
+| Linux x64 (session bus) | 1.50 | 0.82 → 0.82 | 0.91 (UI 1.21) | yes | no |
+| Linux x64, no session bus (recorded only) | 30.65 | — | — | — | no |
+
 ## Artifacts and retention
 
 | Artifact | Run | Retention |
