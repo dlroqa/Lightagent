@@ -2008,6 +2008,60 @@ async fn models(json: bool) -> Result<(), String> {
     }
 }
 
+/// The clap command tree, pinned in `docs/desktop/cli-tree.txt` so the
+/// desktop capability inventory notices every added or removed command,
+/// option, argument, value or alias.
+#[cfg(test)]
+mod desktop_inventory {
+    use clap::CommandFactory as _;
+
+    fn walk(command: &clap::Command, path: &str, out: &mut Vec<String>) {
+        for alias in command.get_visible_aliases() {
+            out.push(format!("alias {path} = {alias}"));
+        }
+        for arg in command.get_arguments() {
+            let id = arg.get_id().as_str();
+            if id == "help" || id == "version" {
+                continue;
+            }
+            let name = match arg.get_long() {
+                Some(long) => format!("--{long}"),
+                None => format!("<{id}>"),
+            };
+            out.push(format!("arg {path} {name}"));
+            if arg.get_action().takes_values() {
+                for value in arg.get_possible_values() {
+                    if !value.is_hide_set() {
+                        out.push(format!("value {path} {name} {}", value.get_name()));
+                    }
+                }
+            }
+        }
+        for sub in command.get_subcommands() {
+            if sub.get_name() == "help" {
+                continue;
+            }
+            let child = format!("{path} {}", sub.get_name());
+            out.push(format!("cmd {child}"));
+            walk(sub, &child, out);
+        }
+    }
+
+    #[test]
+    fn the_cli_tree_matches_the_desktop_inventory() {
+        let mut out = vec!["cmd lightagent".to_owned()];
+        walk(&super::Cli::command(), "lightagent", &mut out);
+        out.sort();
+        let actual = out.join("\n") + "\n";
+        let expected = include_str!("../../../docs/desktop/cli-tree.txt").replace("\r\n", "\n");
+        assert!(
+            actual == expected,
+            "the CLI changed: update docs/desktop/cli-tree.txt and the matching rows in \
+             docs/desktop/desktop-capabilities.json\n----- actual cli tree -----\n{actual}----- end -----"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

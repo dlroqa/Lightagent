@@ -1,0 +1,197 @@
+alias lightagent profile = profiles
+alias lightagent profile create = add
+arg lightagent --json
+arg lightagent banner --preview
+arg lightagent chat --profile
+arg lightagent chat --session
+arg lightagent config get <key>
+arg lightagent config set <key>
+arg lightagent config set <value>
+arg lightagent extensions disable <name>
+arg lightagent extensions enable <name>
+arg lightagent extensions install --profile
+arg lightagent extensions install <source>
+arg lightagent extensions show <name>
+arg lightagent extensions uninstall --profile
+arg lightagent extensions uninstall <name>
+arg lightagent identity audit --limit
+arg lightagent identity credential issue --capability
+arg lightagent identity credential issue --expires-in
+arg lightagent identity credential issue --profile
+arg lightagent identity credential issue --secret-file
+arg lightagent identity credential issue <principal>
+arg lightagent identity credential list --principal
+arg lightagent identity credential revoke <key_id>
+arg lightagent identity credential rotate --expires-in
+arg lightagent identity credential rotate --secret-file
+arg lightagent identity credential rotate <key_id>
+arg lightagent identity grants list --profile
+arg lightagent identity grants revoke <capability>
+arg lightagent identity grants revoke <principal>
+arg lightagent identity grants revoke <profile>
+arg lightagent identity owner assign <principal>
+arg lightagent identity owner assign <profile>
+arg lightagent identity owner reassign <principal>
+arg lightagent identity owner reassign <profile>
+arg lightagent identity owner remove <profile>
+arg lightagent identity user create <id>
+arg lightagent identity user suspend <id>
+arg lightagent import hermes --dry-run
+arg lightagent import hermes --force
+arg lightagent import hermes --from
+arg lightagent init --base-url
+arg lightagent init --force
+arg lightagent init --model
+arg lightagent init --profile
+arg lightagent memory add --kind
+arg lightagent memory add --tag
+arg lightagent memory add <text>
+arg lightagent memory candidates <session>
+arg lightagent memory forget <id>
+arg lightagent memory promote --kind
+arg lightagent memory promote --tag
+arg lightagent memory promote --text
+arg lightagent memory promote <message>
+arg lightagent memory promote <session>
+arg lightagent memory reflect <topic>
+arg lightagent memory search --top-k
+arg lightagent memory search <query>
+arg lightagent memory update <id>
+arg lightagent memory update <text>
+arg lightagent profile create --model
+arg lightagent profile create --name
+arg lightagent profile create --persona
+arg lightagent profile create <id>
+arg lightagent profile delete <id>
+arg lightagent profile preset <id>
+arg lightagent profile preset <preset>
+arg lightagent profile show <id>
+arg lightagent profile use <id>
+arg lightagent rag add --source
+arg lightagent rag add <path>
+arg lightagent rag search --top-k
+arg lightagent rag search <query>
+arg lightagent remote-credential add --destination
+arg lightagent remote-credential add --expires-in
+arg lightagent remote-credential add --max-requests-per-run
+arg lightagent remote-credential add --operation
+arg lightagent remote-credential add --secret-file
+arg lightagent remote-credential add --secret-stdin
+arg lightagent remote-credential add --service
+arg lightagent remote-credential add <profile>
+arg lightagent remote-credential audit --limit
+arg lightagent remote-credential keygen <path>
+arg lightagent remote-credential list --profile
+arg lightagent remote-credential rekey --previous-key-file
+arg lightagent remote-credential revoke <id>
+arg lightagent remote-credential rotate --secret-file
+arg lightagent remote-credential rotate --secret-stdin
+arg lightagent remote-credential rotate <id>
+arg lightagent serve --host
+arg lightagent serve --key-env
+arg lightagent serve --port
+arg lightagent serve --web-root
+arg lightagent sessions delete <id>
+arg lightagent sessions show <id>
+arg lightagent setup <section>
+arg lightagent update --check
+arg lightagent update --force
+arg lightagent workers assign --builtin
+arg lightagent workers assign --profile
+arg lightagent workers assign --worker
+arg lightagent workers assign <role>
+arg lightagent workers revoke --profile
+arg lightagent workers revoke <role>
+arg lightagent workers status --profile
+cmd lightagent
+cmd lightagent acp
+cmd lightagent architecture
+cmd lightagent banner
+cmd lightagent chat
+cmd lightagent config
+cmd lightagent config get
+cmd lightagent config jev-routing-report
+cmd lightagent config path
+cmd lightagent config set
+cmd lightagent config show
+cmd lightagent doctor
+cmd lightagent extensions
+cmd lightagent extensions disable
+cmd lightagent extensions enable
+cmd lightagent extensions install
+cmd lightagent extensions list
+cmd lightagent extensions show
+cmd lightagent extensions uninstall
+cmd lightagent identity
+cmd lightagent identity audit
+cmd lightagent identity credential
+cmd lightagent identity credential issue
+cmd lightagent identity credential list
+cmd lightagent identity credential revoke
+cmd lightagent identity credential rotate
+cmd lightagent identity grants
+cmd lightagent identity grants list
+cmd lightagent identity grants revoke
+cmd lightagent identity owner
+cmd lightagent identity owner assign
+cmd lightagent identity owner reassign
+cmd lightagent identity owner remove
+cmd lightagent identity status
+cmd lightagent identity user
+cmd lightagent identity user create
+cmd lightagent identity user list
+cmd lightagent identity user suspend
+cmd lightagent import
+cmd lightagent import hermes
+cmd lightagent init
+cmd lightagent memory
+cmd lightagent memory add
+cmd lightagent memory candidates
+cmd lightagent memory clear
+cmd lightagent memory forget
+cmd lightagent memory list
+cmd lightagent memory promote
+cmd lightagent memory reflect
+cmd lightagent memory search
+cmd lightagent memory update
+cmd lightagent models
+cmd lightagent profile
+cmd lightagent profile create
+cmd lightagent profile delete
+cmd lightagent profile list
+cmd lightagent profile preset
+cmd lightagent profile show
+cmd lightagent profile use
+cmd lightagent rag
+cmd lightagent rag add
+cmd lightagent rag clear
+cmd lightagent rag list
+cmd lightagent rag search
+cmd lightagent remote-credential
+cmd lightagent remote-credential add
+cmd lightagent remote-credential audit
+cmd lightagent remote-credential keygen
+cmd lightagent remote-credential list
+cmd lightagent remote-credential rekey
+cmd lightagent remote-credential revoke
+cmd lightagent remote-credential rotate
+cmd lightagent remote-credential status
+cmd lightagent serve
+cmd lightagent sessions
+cmd lightagent sessions delete
+cmd lightagent sessions list
+cmd lightagent sessions show
+cmd lightagent setup
+cmd lightagent tools
+cmd lightagent tools list
+cmd lightagent update
+cmd lightagent workers
+cmd lightagent workers assign
+cmd lightagent workers revoke
+cmd lightagent workers status
+value lightagent setup <section> approvals
+value lightagent setup <section> profiles
+value lightagent setup <section> provider
+value lightagent setup <section> tools
+value lightagent setup <section> tui
+value lightagent setup <section> web

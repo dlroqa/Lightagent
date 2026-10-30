@@ -1,0 +1,59 @@
+name: desktop
+
+# Lightagent Desktop gates (docs/desktop/). Each slice adds its jobs here;
+# everything runs on GitHub-hosted runners. D0: the capability inventory must
+# match the source, and the drift check must prove it detects additions.
+
+on:
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'frontend/**'
+      - 'desktop/**'
+      - 'docs/desktop/**'
+      - 'scripts/check-desktop-inventory.py'
+      - '.github/workflows/desktop.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  inventory:
+    name: desktop capability inventory
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      # The exact PR head, not the synthetic merge commit, so the evidence
+      # names the commit under review.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Record the tested commit
+        run: |
+          {
+            echo "### Tested commit"
+            echo "- head: \`$(git rev-parse HEAD)\`"
+            echo "- tree: \`$(git rev-parse 'HEAD^{tree}')\`"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The drift check detects additions (self-test)
+        run: python3 -I scripts/check-desktop-inventory.py --self-test
+      - name: The inventory matches the source
+        if: success() || failure()
+        run: python3 -I scripts/check-desktop-inventory.py
+      - run: rustup show
+        if: success() || failure()
+      - uses: Swatinem/rust-cache@v2
+        if: success() || failure()
+        with:
+          key: desktop-inventory
+      - name: The CLI tree matches clap
+        if: success() || failure()
+        run: cargo test -p lightagent --lib --locked desktop_inventory
