@@ -1,0 +1,2407 @@
+=== base 350b48b3d0d072213e2028d8b5fb53022d61c340
+=== message
+Desktop D2: Tauri shell, IPC transport, operation contract and hosted shell CI
+
+Adds the desktop/ workspace: a Tauri 2 host that owns one runtime (stdin
+launch key, handshake and version check, contract allowlist, SSE relay,
+no proxy and no redirects) and a std-only mock runtime with the same
+Host/Origin/Bearer checks. The frontend gains a transport that uses IPC in
+the desktop build and is unchanged in the browser, plus a start-up gate.
+The operation contract is checked against the server routes and the UI
+client. desktop.yml builds, lints, tests and bundles the shell on four
+targets and runs end-to-end checks for readiness, version mismatch and
+launch-key leaks.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== write scripts/check-desktop-contract.py
+#!/usr/bin/env python3
+"""Keep the desktop operation contract equal to the server and the UI client.
+
+docs/desktop/contract/operations.json is the allowlist the desktop host
+enforces for every UI request (desktop/src-tauri/src/contract.rs embeds it).
+It must:
+
+  * list exactly the routes `lightagent_api::router` serves (method + path),
+    so the host can never forward something the server lacks, and every
+    server route is either reachable or deliberately added here;
+  * cover every path the frontend client (frontend/src/api/agent.ts) calls.
+
+The frontend check compares paths, not methods: the client builds requests
+through helpers, and a wrong method is refused by the host at run time.
+`--self-test` adds a server route and a client path in memory and requires
+both to be reported.
+"""
+
+import importlib.util
+import json
+import os
+import re
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE = "/api/lightagent/v1"
+
+
+def load_inventory_module():
+    path = os.path.join(ROOT, "scripts", "check-desktop-inventory.py")
+    spec = importlib.util.spec_from_file_location("desktop_inventory", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def read(rel):
+    with open(os.path.join(ROOT, rel), encoding="utf-8") as handle:
+        return handle.read()
+
+
+def shape(path):
+    """A path with every parameter collapsed to `{}`, relative to the API base."""
+    if path.startswith(BASE):
+        path = path[len(BASE):]
+    return re.sub(r"\{[^}]*\}", "{}", path)
+
+
+def client_paths(text):
+    text = text.replace("${BASE}", "")
+    found = set()
+    for literal in re.findall(r'[`"](/[^`"\s]*)[`"]', text):
+        path = literal.split("?", 1)[0]
+        path = re.sub(r"\$\{[^}]*\}", "{}", path)
+        if path in ("", BASE):
+            continue
+        found.add(path)
+    return found
+
+
+def check(contract, server_text, client_text, scan_routes):
+    errors = []
+    ops = contract["operations"]
+    ids = [op["id"] for op in ops]
+    if len(ids) != len(set(ids)):
+        errors.append("contract: duplicate operation id")
+    for op in ops:
+        if op["method"] not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+            errors.append(f"contract: {op['id']} has method {op['method']!r}")
+        if not op["path"].startswith("/"):
+            errors.append(f"contract: {op['id']} path must start with '/'")
+    listed = {f"{op['method']} {op['path']}" for op in ops}
+    served = scan_routes(server_text)
+    for item in sorted(served - listed):
+        errors.append(f"server: {item} is served but not in the contract")
+    for item in sorted(listed - served):
+        errors.append(f"server: contract lists {item} but the server does not serve it")
+    shapes = {shape(op["path"]) for op in ops}
+    for path in sorted(client_paths(client_text) - shapes):
+        errors.append(f"client: frontend calls {path} but no contract operation has that path")
+    return errors
+
+
+def main():
+    inventory = load_inventory_module()
+    with open(os.path.join(ROOT, "docs", "desktop", "contract", "operations.json"), encoding="utf-8") as handle:
+        contract = json.load(handle)
+    server = read("crates/lightagent-api/src/lib.rs")
+    client = read("frontend/src/api/agent.ts")
+    if "--self-test" in sys.argv:
+        base = check(contract, server, client, inventory.scan_routes)
+        if base:
+            print("self-test needs a clean baseline:\n" + "\n".join(base))
+            return 1
+        added_route = server.replace('.route("/health", get(health))',
+                                     '.route("/health", get(health))\n        .route("/api/lightagent/v1/memory", get(health))', 1)
+        added_call = client + '\nconst probe = () => jsonRequest("/memory/search");\n'
+        failures = 0
+        for label, args, prefix in (("server route", (added_route, client), "server:"),
+                                    ("client path", (server, added_call), "client:")):
+            hit = [e for e in check(contract, args[0], args[1], inventory.scan_routes) if e.startswith(prefix)]
+            print(f"self-test {label}: {'detected' if hit else 'MISSED'} {hit[:1]}")
+            failures += 0 if hit else 1
+        return 1 if failures else 0
+    errors = check(contract, server, client, inventory.scan_routes)
+    print(f"desktop operation contract: {len(contract['operations'])} operations, {len(errors)} errors")
+    for error in errors:
+        print(f"::error::{error}")
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+=== write .github/workflows/desktop.yml
+name: desktop
+
+# Lightagent Desktop gates (docs/desktop/). Each slice adds its jobs here;
+# everything runs on GitHub-hosted runners and checks out the exact PR head,
+# so the evidence names the commit under review.
+#   D0  inventory: the capability inventory matches the source.
+#   D2  contract, host and shell: the operation contract matches the server
+#       and the UI client; the desktop host builds, lints and tests; the
+#       packaged shell starts its runtime and renders on every target.
+
+on:
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'frontend/**'
+      - 'desktop/**'
+      - 'docs/desktop/**'
+      - 'scripts/check-desktop-*.py'
+      - '.github/workflows/desktop.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+  TAURI_CLI: '@tauri-apps/cli@2.12.3'
+
+jobs:
+  inventory:
+    name: desktop capability inventory
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Record the tested commit
+        run: |
+          {
+            echo "### Tested commit"
+            echo "- head: \`$(git rev-parse HEAD)\`"
+            echo "- tree: \`$(git rev-parse 'HEAD^{tree}')\`"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The drift check detects additions (self-test)
+        run: python3 -I scripts/check-desktop-inventory.py --self-test
+      - name: The inventory matches the source
+        if: success() || failure()
+        run: python3 -I scripts/check-desktop-inventory.py
+      - name: The contract check detects drift (self-test)
+        if: success() || failure()
+        run: python3 -I scripts/check-desktop-contract.py --self-test
+      - name: The operation contract matches the server and the UI client
+        if: success() || failure()
+        run: python3 -I scripts/check-desktop-contract.py
+      - run: rustup show
+        if: success() || failure()
+      - uses: Swatinem/rust-cache@v2
+        if: success() || failure()
+        with:
+          key: desktop-inventory
+      - name: The CLI tree matches clap
+        if: success() || failure()
+        run: cargo test -p lightagent --lib --locked desktop_inventory
+
+  host:
+    name: desktop host (fmt, clippy, tests, dependency policy)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Linux system packages (webview)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+          key: desktop-host
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Frontend (both builds)
+        run: |
+          npm ci --prefix frontend
+          npm run build --prefix frontend
+          npm run build:desktop --prefix frontend
+      - name: Stage the runtime and icons the host build expects
+        run: |
+          locked=$([ -f desktop/Cargo.lock ] && echo --locked || true)
+          cargo build $locked --manifest-path desktop/Cargo.toml -p lightagent-mock-sidecar
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          mkdir -p desktop/src-tauri/binaries
+          cp desktop/target/debug/lightagent-mock-sidecar "desktop/src-tauri/binaries/lightagent-sidecar-$triple"
+          (cd desktop && npx --yes "$TAURI_CLI" icon ../icon/LightagentLogo.png -o src-tauri/icons)
+      - name: Format
+        run: cargo fmt --manifest-path desktop/Cargo.toml --all --check
+      - name: Clippy
+        run: |
+          locked=$([ -f desktop/Cargo.lock ] && echo --locked || true)
+          cargo clippy $locked --manifest-path desktop/Cargo.toml --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: |
+          locked=$([ -f desktop/Cargo.lock ] && echo --locked || true)
+          cargo test $locked --manifest-path desktop/Cargo.toml --workspace
+      - name: Dependency policy (the repository's banned crates, all targets)
+        run: |
+          status=0
+          for crate in aws-lc-sys aws-lc-rs openssl-sys native-tls bindgen cmake; do
+            if cargo tree --manifest-path desktop/Cargo.toml --workspace --target all -e normal,build -i "$crate" >/dev/null 2>&1; then
+              echo "::error::POLICY: \`$crate\` is in the desktop dependency graph"; status=1
+            fi
+          done
+          [ -f desktop/Cargo.lock ] && git diff --exit-code -- desktop/Cargo.lock \
+            || echo "::warning::desktop/Cargo.lock is not committed yet; the generated one is uploaded"
+          echo "- desktop dependency policy: $([ $status = 0 ] && echo clean || echo VIOLATED); crates: $(grep -c '^name = ' desktop/Cargo.lock)" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit $status
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: desktop-cargo-lock
+          retention-days: 30
+          path: desktop/Cargo.lock
+
+  shell:
+    name: desktop shell (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15-intel, label: macos-x64, arch: x86_64, macos_min: '10.14', bundles: 'app,dmg' }
+          - { os: macos-15, label: macos-arm64, arch: arm64, macos_min: '11.0', bundles: 'app,dmg' }
+          - { os: windows-latest, label: windows-x64, arch: x86_64, bundles: 'nsis,msi' }
+          - { os: ubuntu-22.04, label: linux-x64, arch: x86_64, bundles: 'deb,appimage' }
+    defaults:
+      run:
+        shell: bash
+    env:
+      APPIMAGE_EXTRACT_AND_RUN: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Runner identity and tested commit
+        env:
+          WANT_ARCH: ${{ matrix.arch }}
+        run: |
+          arch=$(uname -m); case "$arch" in x86_64|amd64|AMD64) arch=x86_64;; aarch64|arm64) arch=arm64;; esac
+          {
+            echo "### desktop shell ${{ matrix.label }}"
+            echo "- image: ${ImageOS:-unknown} ${ImageVersion:-}"
+            echo "- head: \`$(git rev-parse HEAD)\` tree \`$(git rev-parse 'HEAD^{tree}')\`"
+            [ "$(uname -s)" = Darwin ] && echo "- macOS $(sw_vers -productVersion), translated: $(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)"
+            true
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$arch" = "$WANT_ARCH" ] || { echo "runner is $arch, expected $WANT_ARCH" >&2; exit 1; }
+      - name: macOS deployment target
+        if: matrix.macos_min
+        run: echo "MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos_min }}" >> "$GITHUB_ENV"
+      - name: Linux system packages (webview, display)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf file xvfb imagemagick
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+          key: desktop-shell-${{ matrix.label }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install psutil==7.1.0 pillow==11.3.0
+      - name: Desktop frontend
+        run: |
+          npm ci --prefix frontend
+          npm run build:desktop --prefix frontend
+      - name: Stage the runtime (D2 mock) and icons
+        run: |
+          locked=$([ -f desktop/Cargo.lock ] && echo --locked || true)
+          cargo build $locked --release --manifest-path desktop/Cargo.toml -p lightagent-mock-sidecar
+          triple=$(rustc -vV | sed -n 's/^host: //p'); ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
+          mkdir -p desktop/src-tauri/binaries
+          cp "desktop/target/release/lightagent-mock-sidecar$ext" "desktop/src-tauri/binaries/lightagent-sidecar-$triple$ext"
+          (cd desktop && npx --yes "$TAURI_CLI" icon ../icon/LightagentLogo.png -o src-tauri/icons)
+      - name: Build and bundle
+        working-directory: desktop
+        run: |
+          config='{}'
+          [ -n "${{ matrix.macos_min }}" ] && config="{\"bundle\":{\"macOS\":{\"minimumSystemVersion\":\"${{ matrix.macos_min }}\"}}}"
+          start=$(date +%s)
+          npx --yes "$TAURI_CLI" build --ci --bundles ${{ matrix.bundles }} --config "$config"
+          echo "- build+bundle: $(( $(date +%s) - start ))s" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Package facts
+        working-directory: desktop/target/release
+        run: |
+          {
+            if [ "$(uname -s)" = Darwin ]; then
+              app=$(ls -d bundle/macos/*.app)
+              for bin in "$app/Contents/MacOS/"*; do
+                echo "- $(basename "$bin"): $(lipo -archs "$bin"), $(otool -l "$bin" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print "minos "$2; exit}')"
+              done
+              echo "- LSMinimumSystemVersion: $(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")"
+            fi
+            find bundle -maxdepth 2 -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' \) -print0 \
+              | while IFS= read -r -d '' f; do python -c "import os,sys; print('- %s: %.1f MB' % (os.path.basename(sys.argv[1]), os.path.getsize(sys.argv[1])/1048576))" "$f"; done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: End-to-end (runner, ready and mismatch)
+        run: |
+          out="$RUNNER_TEMP/desktop-e2e"
+          r=desktop/target/release
+          case "$(uname -s)" in
+            Darwin) app=("$(ls -d $r/bundle/macos/*.app)/Contents/MacOS/lightagent-desktop"); wrap=() ;;
+            Linux) app=("$r/lightagent-desktop"); wrap=(xvfb-run -a -s '-screen 0 1280x800x24') ;;
+            *) app=("$r/lightagent-desktop.exe"); wrap=() ;;
+          esac
+          status=0
+          "${wrap[@]}" python desktop/e2e/run.py "$out" ready -- "${app[@]}" || status=1
+          LIGHTAGENT_MOCK_REPORT_VERSION=0.0.0-mismatch "${wrap[@]}" python desktop/e2e/run.py "$out" mismatch -- "${app[@]}" || status=1
+          if [ "$RUNNER_OS" = Linux ]; then
+            # D1 found a 30 s first load under Xvfb; measure the DMA-BUF renderer's share.
+            WEBKIT_DISABLE_DMABUF_RENDERER=1 "${wrap[@]}" python desktop/e2e/run.py "$out/no-dmabuf" ready -- "${app[@]}" || true
+          fi
+          python - "$out" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import glob, json, os, sys
+          for path in sorted(glob.glob(os.path.join(sys.argv[1], "**", "e2e-*.json"), recursive=True)):
+              d = json.load(open(path))
+              label = os.path.relpath(path, sys.argv[1])
+              print(f"- {label}: milestones {d['milestones_s']}, missing {d['missing']}, key leaks {d['key_leaks'] or 'none'}, runtime survived host termination: {d['runtime_survived_host_termination']}")
+          PY
+          exit $status
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: desktop-shell-${{ matrix.label }}
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/desktop-e2e/
+            desktop/target/release/bundle/**/*.dmg
+            desktop/target/release/bundle/**/*.msi
+            desktop/target/release/bundle/nsis/*.exe
+            desktop/target/release/bundle/**/*.deb
+            desktop/target/release/bundle/**/*.AppImage
+=== write frontend/src/vite-env.d.ts
+/// <reference types="vite/client" />
+=== write frontend/src/desktop/desktop-gate.css
+/* Desktop start-up gate: semantic tokens only (styles/tokens.css). */
+.desktop-gate {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+  background: var(--ground-1);
+  color: var(--text);
+  font-family: var(--font);
+}
+
+.desktop-gate__panel {
+  width: min(560px, 100%);
+  padding: var(--space-8);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  color: var(--card-foreground);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+
+.desktop-gate__panel--error {
+  border-color: var(--danger);
+  text-align: left;
+}
+
+.desktop-gate__title {
+  margin: 0 0 var(--space-3);
+  font-size: 1.25rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.desktop-gate__title:focus {
+  outline: none;
+}
+
+.desktop-gate__title:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+
+.desktop-gate__text {
+  margin: 0 0 var(--space-3);
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+.desktop-gate__text--muted {
+  color: var(--text-muted);
+}
+
+.desktop-gate__facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-1) var(--space-4);
+  margin: var(--space-4) 0 0;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+.desktop-gate__facts dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.desktop-gate__pulse {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-bottom: var(--space-4);
+  border-radius: 50%;
+  background: var(--accent);
+  animation: desktop-gate-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes desktop-gate-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-gate__pulse { animation: none; opacity: 1; }
+}
+=== write frontend/src/desktop/DesktopGate.tsx
+import { useEffect, useRef, useState, type ReactNode } from "react";
+
+import { invoke, isDesktop } from "../api/transport";
+import "./desktop-gate.css";
+
+/** The desktop host's view of its bundled runtime (`runtime_status`). */
+interface RuntimeStatus {
+  state: "starting" | "ready" | "failed" | "mismatch";
+  detail: string | null;
+  desktop_version: string;
+  runtime_version: string | null;
+  profile: string | null;
+}
+
+/**
+ * In the desktop app, hold the UI until the bundled runtime is ready, and
+ * explain plainly when it cannot start. In the browser build this renders its
+ * children directly.
+ */
+export function DesktopGate({ children }: { children: ReactNode }) {
+  const [status, setStatus] = useState<RuntimeStatus | null>(null);
+  const [hostError, setHostError] = useState<string | null>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
+
+  useEffect(() => {
+    if (!isDesktop) return;
+    let stopped = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const next = await invoke<RuntimeStatus>("runtime_status");
+        if (stopped) return;
+        setStatus(next);
+        if (next.state === "starting") {
+          timer = window.setTimeout(() => void poll(), 250);
+        } else {
+          void invoke("e2e_note", { note: next.state === "ready" ? "ui_ready" : "ui_error" }).catch(() => undefined);
+        }
+      } catch (cause) {
+        if (!stopped) setHostError(cause instanceof Error ? cause.message : String(cause));
+      }
+    };
+    void poll();
+    return () => {
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, []);
+
+  const failed = hostError !== null || status?.state === "failed" || status?.state === "mismatch";
+  useEffect(() => {
+    if (failed) heading.current?.focus();
+  }, [failed]);
+
+  if (!isDesktop || status?.state === "ready") return <>{children}</>;
+
+  if (!failed) {
+    return (
+      <main className="desktop-gate" aria-busy="true">
+        <div className="desktop-gate__panel" role="status" aria-live="polite">
+          <span className="desktop-gate__pulse" aria-hidden="true" />
+          <h1 className="desktop-gate__title">Starting Lightagent…</h1>
+          <p className="desktop-gate__text">Starting the bundled runtime on this computer.</p>
+        </div>
+      </main>
+    );
+  }
+
+  const mismatch = status?.state === "mismatch";
+  return (
+    <main className="desktop-gate">
+      <div className="desktop-gate__panel desktop-gate__panel--error" role="alert">
+        <h1 className="desktop-gate__title" tabIndex={-1} ref={heading}>
+          {mismatch ? "The bundled runtime does not match this app" : "Lightagent could not start its runtime"}
+        </h1>
+        <p className="desktop-gate__text">
+          {hostError ?? status?.detail ?? "The runtime stopped before it was ready."}
+        </p>
+        <p className="desktop-gate__text desktop-gate__text--muted">
+          {mismatch
+            ? "Reinstall Lightagent Desktop so the app and its runtime come from the same release. Nothing was run."
+            : "Quit and reopen Lightagent. If it happens again, the runtime log in Settings → Diagnostics shows why."}
+        </p>
+        <dl className="desktop-gate__facts">
+          <dt>App</dt>
+          <dd>{status?.desktop_version ?? "unknown"}</dd>
+          <dt>Runtime</dt>
+          <dd>{status?.runtime_version ?? "not reported"}</dd>
+        </dl>
+      </div>
+    </main>
+  );
+}
+=== write frontend/src/api/transport.ts
+/**
+ * How the UI reaches the Lightagent API.
+ *
+ * The browser build is served by `lightagent serve` itself, so it uses
+ * same-origin `fetch` and `EventSource` unchanged. The desktop build
+ * (`vite build --mode desktop`) has no network access at all: each request
+ * goes to the desktop host over IPC, which checks it against the operation
+ * contract (docs/desktop/contract/operations.json) and forwards it to the
+ * runtime it owns, with a credential this code never sees.
+ *
+ * Both paths keep the same semantics, so `agent.ts` and `useRunEvents.ts`
+ * (ordered event ids, gap detection, `?after=` replay) behave identically.
+ */
+
+type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+
+export const isDesktop = import.meta.env.MODE === "desktop";
+
+/** Call a desktop host command. Rejects outside the desktop app. */
+export function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  const tauri = (window as unknown as { __TAURI__?: { core?: { invoke?: Invoke } } }).__TAURI__;
+  const call = tauri?.core?.invoke;
+  if (!call) return Promise.reject(new Error("The desktop host is not available."));
+  return call<T>(command, args);
+}
+
+interface HostResponse {
+  status: number;
+  content_type: string;
+  body: string;
+}
+
+async function blobToBase64(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  for (let start = 0; start < bytes.length; start += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(start, start + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function requestTarget(input: RequestInfo | URL): string {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (/^[a-z]+:/i.test(url)) {
+    const parsed = new URL(url);
+    return parsed.pathname + parsed.search;
+  }
+  return url;
+}
+
+async function desktopFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  let body: string | null = null;
+  let bodyBase64: string | null = null;
+  if (init.body instanceof Blob) {
+    bodyBase64 = await blobToBase64(init.body);
+  } else if (typeof init.body === "string") {
+    body = init.body;
+  }
+  const result = await invoke<HostResponse>("api_fetch", {
+    method: (init.method ?? "GET").toUpperCase(),
+    target: requestTarget(input),
+    body,
+    bodyBase64,
+    filename: headers.get("X-Lightagent-Filename"),
+  });
+  const empty = result.status === 204 || result.status === 304;
+  return new Response(empty ? null : result.body, {
+    status: result.status,
+    headers: { "content-type": result.content_type },
+  });
+}
+
+interface HostEvent {
+  id: string | null;
+  event: string;
+  data: string;
+}
+
+interface HostPoll {
+  events: HostEvent[];
+  closed: boolean;
+  error: string | null;
+}
+
+/**
+ * The `EventSource` surface `useRunEvents` relies on, fed by the host's relay.
+ * Like a browser source that has given up, it reports `CLOSED` and `onerror`
+ * when the stream ends without `close()`, so the hook resumes with `?after=`.
+ */
+class DesktopEventSource extends EventTarget {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSED = 2;
+
+  readyState = DesktopEventSource.CONNECTING;
+  onopen: ((event: Event) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  private subscription: number | null = null;
+  private stopped = false;
+
+  constructor(readonly url: string) {
+    super();
+    void this.relay();
+  }
+
+  close(): void {
+    this.stopped = true;
+    this.readyState = DesktopEventSource.CLOSED;
+    if (this.subscription !== null) {
+      void invoke("api_unsubscribe", { subscription: this.subscription }).catch(() => undefined);
+    }
+  }
+
+  private async relay(): Promise<void> {
+    try {
+      this.subscription = await invoke<number>("api_subscribe", { target: this.url });
+      if (this.stopped) {
+        this.close();
+        return;
+      }
+      this.readyState = DesktopEventSource.OPEN;
+      this.onopen?.(new Event("open"));
+      while (!this.stopped) {
+        const batch = await invoke<HostPoll>("api_events_poll", { subscription: this.subscription, waitMs: 20000 });
+        for (const event of batch.events) {
+          if (this.stopped) return;
+          this.dispatchEvent(new MessageEvent(event.event, { data: event.data, lastEventId: event.id ?? "" }));
+        }
+        if (batch.closed) break;
+      }
+    } catch {
+      // Reported through onerror below, exactly as a failed browser stream is.
+    }
+    if (!this.stopped) {
+      this.readyState = DesktopEventSource.CLOSED;
+      this.onerror?.(new Event("error"));
+    }
+  }
+}
+
+/** `fetch` for the Lightagent API in this build. */
+export const apiFetch: typeof fetch = isDesktop
+  ? (desktopFetch as typeof fetch)
+  : (input, init) => fetch(input, init);
+
+/** `EventSource` for the Lightagent API in this build. */
+export const ApiEventSource: typeof EventSource = isDesktop
+  ? (DesktopEventSource as unknown as typeof EventSource)
+  : EventSource;
+=== write desktop/Cargo.toml
+# Lightagent Desktop (docs/desktop/DESKTOP_ARCHITECTURE.md).
+#
+# A workspace of its own: the Tauri host and its test runtime keep their
+# dependency graph and lockfile out of the root workspace, so the root's
+# no-sudo build and `scripts/check-deps.sh` gate are untouched. The same
+# banned-crate rules are applied to this graph by `.github/workflows/desktop.yml`.
+[workspace]
+resolver = "3"
+members = ["src-tauri", "mock-sidecar"]
+
+[workspace.package]
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.98"
+license = "Apache-2.0"
+repository = "https://github.com/dlroqa/Lightagent"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "debuginfo"
+panic = "abort"
+=== write desktop/.gitignore
+/target
+# Generated on the runner from icon/LightagentLogo.png by `tauri icon`.
+/src-tauri/icons
+# The sidecar binary is built and staged on the runner, never committed.
+/src-tauri/binaries
+/src-tauri/gen
+=== write desktop/mock-sidecar/Cargo.toml
+[package]
+name = "lightagent-mock-sidecar"
+description = "D2 stand-in runtime for desktop tests: speaks the desktop handshake and serves fixed responses. Never shipped once the real runtime is bundled (D3)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "lightagent-mock-sidecar"
+path = "src/main.rs"
+=== write desktop/mock-sidecar/src/main.rs
+//! A stand-in runtime for desktop tests (D2), standard library only.
+//!
+//! It implements the desktop side of `lightagent serve --desktop` as specified
+//! in docs/desktop/DESKTOP_ARCHITECTURE.md §4 and §6: the key arrives on
+//! stdin, the server binds 127.0.0.1 on an ephemeral port and prints one
+//! handshake line, and every request must carry the exact Host, no Origin,
+//! and the bearer key. Responses are fixed; the real runtime replaces this
+//! in D3.
+//!
+//! `LIGHTAGENT_MOCK_REPORT_VERSION` makes it report another version, to test
+//! the host's mismatch handling.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::time::Duration;
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn main() {
+    let mut key = String::new();
+    if std::io::stdin().read_line(&mut key).is_err() {
+        std::process::exit(2);
+    }
+    let key = key.trim().to_owned();
+    if key.len() < 32 {
+        eprintln!("mock runtime: no credential on stdin");
+        std::process::exit(2);
+    }
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("mock runtime: cannot bind: {error}");
+            std::process::exit(1);
+        }
+    };
+    let port = match listener.local_addr() {
+        Ok(addr) => addr.port(),
+        Err(_) => std::process::exit(1),
+    };
+    let version = std::env::var("LIGHTAGENT_MOCK_REPORT_VERSION").unwrap_or_else(|_| VERSION.to_owned());
+    println!(
+        "{{\"lightagent\":\"serve\",\"protocol\":1,\"version\":\"{version}\",\"addr\":\"127.0.0.1:{port}\",\"profile\":\"default\",\"capabilities\":[\"mock\"]}}"
+    );
+    eprintln!("mock runtime listening on 127.0.0.1:{port}");
+    let host = format!("127.0.0.1:{port}");
+    let bearer = format!("Bearer {key}");
+    for stream in listener.incoming().flatten() {
+        let host = host.clone();
+        let bearer = bearer.clone();
+        std::thread::spawn(move || {
+            let _ = serve(stream, &host, &bearer);
+        });
+    }
+}
+
+struct Request {
+    method: String,
+    path: String,
+    headers: Vec<(String, String)>,
+}
+
+impl Request {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+fn read_request(stream: &TcpStream) -> std::io::Result<Request> {
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let mut parts = line.split_whitespace();
+    let method = parts.next().unwrap_or("").to_owned();
+    let path = parts.next().unwrap_or("").to_owned();
+    let mut headers = Vec::new();
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header)? == 0 {
+            break;
+        }
+        let header = header.trim_end();
+        if header.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            headers.push((name.trim().to_owned(), value.trim().to_owned()));
+        }
+    }
+    let length = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.parse::<u64>().ok())
+        .unwrap_or(0)
+        .min(32 * 1024 * 1024);
+    let mut body = Vec::new();
+    reader.take(length).read_to_end(&mut body)?;
+    Ok(Request { method, path, headers })
+}
+
+fn respond(mut stream: &TcpStream, status: &str, content_type: &str, body: &str) -> std::io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+fn serve(stream: TcpStream, host: &str, bearer: &str) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    let request = read_request(&stream)?;
+    let json = "application/json";
+    // The same three checks, in the same order, as the real desktop mode.
+    if request.header("host") != Some(host) {
+        return respond(&stream, "403 Forbidden", json, "{\"error\":{\"category\":\"host_rejected\"}}");
+    }
+    if request.header("origin").is_some() {
+        return respond(&stream, "403 Forbidden", json, "{\"error\":{\"category\":\"origin_rejected\"}}");
+    }
+    if request.header("authorization") != Some(bearer) {
+        return respond(&stream, "401 Unauthorized", json, "{\"error\":{\"category\":\"unauthenticated\"}}");
+    }
+    let path = request.path.split('?').next().unwrap_or("");
+    let route = path.strip_prefix("/api/lightagent/v1").unwrap_or(path);
+    if request.method == "GET" && route.starts_with("/runs/") && route.ends_with("/events") {
+        let mut stream = &stream;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+        )?;
+        write!(stream, "id: 0\nevent: run.started\ndata: {{}}\n\n")?;
+        write!(stream, "id: 1\nevent: run.completed\ndata: {{\"reason\":\"mock\"}}\n\n")?;
+        return Ok(());
+    }
+    let body = match (request.method.as_str(), route) {
+        ("GET", "/health") => "{\"status\":\"ok\",\"service\":\"lightagent-mock\"}",
+        ("GET", "/tools") => {
+            "{\"tools\":[{\"name\":\"datetime.now\",\"risk\":\"read\",\"description\":\"Mock runtime tool (D2).\"}]}"
+        }
+        ("GET", "/skills") => "{\"skills\":[]}",
+        ("GET", "/workers") => "{\"workers\":[]}",
+        ("GET", "/approvals") => "{\"approvals\":[]}",
+        ("GET", "/sessions") => "{\"sessions\":[]}",
+        ("GET", "/sessions/search") => "{\"sessions\":[]}",
+        ("GET", "/profiles") => {
+            "{\"active_profile\":\"default\",\"profiles\":[{\"id\":\"default\",\"name\":\"Default\",\"model\":\"mock\",\"active\":true}]}"
+        }
+        ("GET", "/provider") => {
+            "{\"provider\":\"mock\",\"base_url\":\"http://127.0.0.1:9\",\"configured_model\":\"mock\",\"models\":[\"mock\"],\"model_aliases\":{},\"model_catalog\":{},\"runtime_models\":[],\"streaming\":true,\"tool_calls\":true,\"reasoning_content\":false}"
+        }
+        ("GET", "/settings") => SETTINGS,
+        ("GET", "/jev") => JEV,
+        _ => {
+            return respond(
+                &stream,
+                "501 Not Implemented",
+                json,
+                "{\"error\":{\"category\":\"unavailable\",\"message\":\"not implemented by the D2 mock runtime\"}}",
+            );
+        }
+    };
+    respond(&stream, "200 OK", json, body)
+}
+
+const SETTINGS: &str = concat!(
+    "{\"max_turns\":8,\"max_tool_calls\":16,\"wall_clock_secs\":null,\"approval_policy\":\"balanced\",",
+    "\"web_enabled\":false,\"filesystem_tools_enabled\":false,\"terminal_enabled\":false,\"memory_enabled\":true,",
+    "\"show_reasoning_in_tui\":true,\"subagents_enabled\":false,\"delegate_timeout_secs\":120,",
+    "\"jev\":{\"enabled\":false,\"base_url\":null,\"api_key_configured\":false,\"model\":\"jev\",\"confidence_threshold\":0.8,",
+    "\"allowed_models\":[],\"allowed_profiles\":[],\"timeout_secs\":10},",
+    "\"qdrant\":{\"enabled\":false,\"base_url\":null,\"api_key_configured\":false,\"collection\":\"lightagent\",\"timeout_secs\":10},",
+    "\"infinity\":{\"enabled\":false,\"base_url\":null,\"api_key_configured\":false,\"embedding_model\":\"\",\"rerank_model\":\"\",\"timeout_secs\":10},",
+    "\"open_terminal\":{\"enabled\":false,\"base_url\":null,\"api_key_configured\":false,\"request_timeout_secs\":10,",
+    "\"execution_timeout_secs\":60,\"poll_interval_ms\":250,\"max_output_bytes\":65536}}"
+);
+
+const JEV: &str = concat!(
+    "{\"name\":\"Jev\",\"provider\":\"mock\",\"kind\":\"classifier\",\"description\":\"Not configured in the mock runtime.\",",
+    "\"profile\":\"default\",\"endpoint_configured\":false,\"api_key_configured\":false,\"api_key_resolvable\":false,",
+    "\"configured\":false,\"enabled\":false,\"model\":\"jev\",\"verification\":null,",
+    "\"classification\":{\"mode\":\"off\",\"profile_permitted\":false,\"max_input_chars\":2000,\"default_threshold\":0.8,",
+    "\"version_thresholds\":{},\"max_calls_per_run\":1},",
+    "\"explicit_tool\":{\"name\":\"jev.classify\",\"enabled\":false,\"available\":false},",
+    "\"permissions\":{\"risk\":\"read\",\"requirements\":[]},\"last_classification\":null}"
+);
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fixtures_are_json_shaped() {
+        for fixture in [super::SETTINGS, super::JEV] {
+            assert!(fixture.starts_with('{') && fixture.ends_with('}'));
+            assert_eq!(fixture.matches('{').count(), fixture.matches('}').count());
+        }
+    }
+}
+=== write desktop/src-tauri/Cargo.toml
+[package]
+name = "lightagent-desktop"
+description = "The Lightagent desktop host: owns the window and the bundled runtime."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "=2.7.3", features = [] }
+
+[dependencies]
+tauri = { version = "=2.12.4", features = [] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+# Plain HTTP to the owned loopback runtime only; no TLS stack in D2.
+reqwest = { version = "0.13.4", default-features = false, features = ["stream"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+tokio = { version = "1.53.1", features = ["sync", "time"] }
+getrandom = "0.4.3"
+base64 = "0.22.1"
+=== write desktop/src-tauri/tauri.conf.json
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Lightagent",
+  "version": "0.5.0",
+  "identifier": "dev.lightagent.desktop",
+  "build": {
+    "frontendDist": "../../frontend/dist-desktop"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Lightagent",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "externalBin": ["binaries/lightagent-sidecar"],
+    "macOS": {
+      "minimumSystemVersion": "10.14"
+    }
+  }
+}
+=== write desktop/src-tauri/build.rs
+fn main() {
+    tauri_build::build()
+}
+=== write desktop/src-tauri/src/main.rs
+//! The Lightagent Desktop host (docs/desktop/DESKTOP_ARCHITECTURE.md).
+//!
+//! It owns the window and one bundled runtime. The UI has no network access:
+//! it asks the host, over IPC, for operations from the contract, and the host
+//! makes the HTTP request to its runtime with a credential the UI never sees.
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod contract;
+mod sidecar;
+mod sse;
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::Write as _;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
+
+use base64::Engine as _;
+use futures_util::StreamExt as _;
+use serde::Serialize;
+use tauri::Manager as _;
+use tokio::sync::Notify;
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The longest a single events poll waits for something to arrive.
+const MAX_POLL: Duration = Duration::from_secs(25);
+
+enum Runtime {
+    Starting,
+    Ready(sidecar::Sidecar),
+    Failed(String),
+    Mismatch { expected: String, found: String },
+}
+
+struct Host {
+    contract: contract::Contract,
+    runtime: Mutex<Runtime>,
+    http: reqwest::Client,
+    subscriptions: Mutex<HashMap<u64, Arc<Subscription>>>,
+    next_subscription: AtomicU64,
+    e2e: E2e,
+}
+
+#[derive(Default)]
+struct Subscription {
+    state: Mutex<SubscriptionState>,
+    notify: Notify,
+    task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+}
+
+#[derive(Default)]
+struct SubscriptionState {
+    events: VecDeque<sse::SseEvent>,
+    closed: bool,
+    error: Option<String>,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Host {
+    /// The runtime's base URL and authorization, copied out so no lock is held
+    /// across a request.
+    fn connection(&self) -> Result<(String, String), String> {
+        match &*lock(&self.runtime) {
+            Runtime::Ready(sidecar) => Ok((sidecar.base_url(), sidecar.authorization())),
+            Runtime::Starting => Err("the runtime is still starting".to_owned()),
+            Runtime::Failed(reason) => Err(format!("the runtime is unavailable: {reason}")),
+            Runtime::Mismatch { .. } => Err("the runtime version does not match this app".to_owned()),
+        }
+    }
+
+    fn stop_runtime(&self) {
+        let previous = std::mem::replace(&mut *lock(&self.runtime), Runtime::Failed("stopped".to_owned()));
+        drop(previous);
+    }
+}
+
+/// Unattended-test evidence: when `LIGHTAGENT_DESKTOP_E2E_REPORT` names a
+/// file, milestones are appended to it. Nothing secret is ever written.
+struct E2e {
+    path: Option<PathBuf>,
+    started: Instant,
+    seen: Mutex<HashSet<String>>,
+}
+
+impl E2e {
+    fn from_env() -> Self {
+        Self {
+            path: std::env::var_os("LIGHTAGENT_DESKTOP_E2E_REPORT").map(PathBuf::from),
+            started: Instant::now(),
+            seen: Mutex::default(),
+        }
+    }
+
+    fn note_once(&self, tag: &str, detail: &str) {
+        let Some(path) = &self.path else { return };
+        if !lock(&self.seen).insert(format!("{tag} {detail}")) {
+            return;
+        }
+        let line = format!("{tag} {detail} t_ms={}\n", self.started.elapsed().as_millis());
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct RuntimeStatus {
+    state: &'static str,
+    detail: Option<String>,
+    desktop_version: &'static str,
+    runtime_version: Option<String>,
+    profile: Option<String>,
+    capabilities: Vec<String>,
+}
+
+#[tauri::command]
+fn runtime_status(host: tauri::State<'_, Arc<Host>>) -> RuntimeStatus {
+    let mut status = RuntimeStatus {
+        state: "starting",
+        detail: None,
+        desktop_version: VERSION,
+        runtime_version: None,
+        profile: None,
+        capabilities: Vec::new(),
+    };
+    match &*lock(&host.runtime) {
+        Runtime::Starting => {}
+        Runtime::Ready(sidecar) => {
+            status.state = "ready";
+            status.runtime_version = Some(sidecar.handshake.version.clone());
+            status.profile = sidecar.handshake.profile.clone();
+            status.capabilities = sidecar.handshake.capabilities.clone();
+        }
+        Runtime::Failed(reason) => {
+            status.state = "failed";
+            status.detail = Some(reason.clone());
+        }
+        Runtime::Mismatch { expected, found } => {
+            status.state = "mismatch";
+            status.detail = Some(format!("this app needs runtime {expected}; the bundled runtime reported {found}"));
+            status.runtime_version = Some(found.clone());
+        }
+    }
+    status
+}
+
+/// The runtime's most recent output lines (already redacted), for diagnostics.
+#[tauri::command]
+fn runtime_logs(host: tauri::State<'_, Arc<Host>>, limit: usize) -> Vec<String> {
+    match &*lock(&host.runtime) {
+        Runtime::Ready(sidecar) => {
+            let logs = lock(&sidecar.logs);
+            let skip = logs.len().saturating_sub(limit.min(500));
+            logs.iter().skip(skip).cloned().collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+#[derive(Serialize)]
+struct FetchResult {
+    status: u16,
+    content_type: String,
+    body: String,
+}
+
+fn valid_filename(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 180
+        && name != "."
+        && name != ".."
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ' ' | '-'))
+}
+
+#[tauri::command]
+async fn api_fetch(
+    host: tauri::State<'_, Arc<Host>>,
+    method: String,
+    target: String,
+    body: Option<String>,
+    body_base64: Option<String>,
+    filename: Option<String>,
+) -> Result<FetchResult, String> {
+    let operation = host.contract.resolve(&method, &target)?.clone();
+    if operation.stream {
+        return Err(format!("{} is a stream; subscribe to it instead", operation.id));
+    }
+    let (base, authorization) = host.connection()?;
+    let verb = reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| "invalid method".to_owned())?;
+    let mut request = host
+        .http
+        .request(verb, format!("{base}{target}"))
+        .header(reqwest::header::AUTHORIZATION, authorization);
+    if operation.raw_body {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(body_base64.unwrap_or_default())
+            .map_err(|_| "the attachment is not valid base64".to_owned())?;
+        let filename = filename
+            .filter(|name| valid_filename(name))
+            .ok_or("an attachment needs a plain file name")?;
+        request = request.header("X-Lightagent-Filename", filename).body(bytes);
+    } else if let Some(body) = body {
+        request = request.header(reqwest::header::CONTENT_TYPE, "application/json").body(body);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("the runtime did not answer: {}", error.without_url()))?;
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("the runtime's answer was cut off: {}", error.without_url()))?;
+    if (200..300).contains(&status) {
+        host.e2e.note_once("API_OK", &operation.id);
+    }
+    Ok(FetchResult { status, content_type, body })
+}
+
+#[tauri::command]
+async fn api_subscribe(host: tauri::State<'_, Arc<Host>>, target: String) -> Result<u64, String> {
+    let operation = host.contract.resolve("GET", &target)?;
+    if !operation.stream {
+        return Err(format!("{} is not a stream", operation.id));
+    }
+    let (base, authorization) = host.connection()?;
+    let request = host
+        .http
+        .get(format!("{base}{target}"))
+        .header(reqwest::header::AUTHORIZATION, authorization)
+        .header(reqwest::header::ACCEPT, "text/event-stream");
+    let id = host.next_subscription.fetch_add(1, Ordering::Relaxed);
+    let subscription = Arc::new(Subscription::default());
+    lock(&host.subscriptions).insert(id, Arc::clone(&subscription));
+    let relay = Arc::clone(&subscription);
+    let task = tauri::async_runtime::spawn(async move {
+        let outcome = relay_stream(request, &relay).await;
+        {
+            let mut state = lock(&relay.state);
+            state.closed = true;
+            state.error = outcome.err();
+        }
+        relay.notify.notify_waiters();
+    });
+    *lock(&subscription.task) = Some(task);
+    Ok(id)
+}
+
+async fn relay_stream(request: reqwest::RequestBuilder, subscription: &Subscription) -> Result<(), String> {
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("the runtime did not answer: {}", error.without_url()))?;
+    if !response.status().is_success() {
+        return Err(format!("the runtime refused the stream ({})", response.status().as_u16()));
+    }
+    let mut parser = sse::SseParser::default();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("the stream broke: {}", error.without_url()))?;
+        let events = parser.push(&chunk);
+        if !events.is_empty() {
+            lock(&subscription.state).events.extend(events);
+            subscription.notify.notify_waiters();
+        }
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct PollResult {
+    events: Vec<sse::SseEvent>,
+    closed: bool,
+    error: Option<String>,
+}
+
+fn drain(state: &mut SubscriptionState) -> PollResult {
+    let events: Vec<_> = state.events.drain(..).collect();
+    PollResult { events, closed: state.closed, error: state.error.clone() }
+}
+
+#[tauri::command]
+async fn api_events_poll(host: tauri::State<'_, Arc<Host>>, subscription: u64, wait_ms: u64) -> Result<PollResult, String> {
+    let entry = lock(&host.subscriptions)
+        .get(&subscription)
+        .cloned()
+        .ok_or("unknown subscription")?;
+    // Register for a wake-up before looking, so an event that lands in
+    // between is never missed.
+    let mut notified = std::pin::pin!(entry.notify.notified());
+    notified.as_mut().enable();
+    let ready = {
+        let state = lock(&entry.state);
+        !state.events.is_empty() || state.closed
+    };
+    if !ready {
+        let _ = tokio::time::timeout(Duration::from_millis(wait_ms).min(MAX_POLL), notified).await;
+    }
+    let result = drain(&mut lock(&entry.state));
+    if result.closed {
+        lock(&host.subscriptions).remove(&subscription);
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn api_unsubscribe(host: tauri::State<'_, Arc<Host>>, subscription: u64) {
+    if let Some(entry) = lock(&host.subscriptions).remove(&subscription)
+        && let Some(task) = lock(&entry.task).take()
+    {
+        task.abort();
+    }
+}
+
+#[tauri::command]
+fn e2e_note(host: tauri::State<'_, Arc<Host>>, note: String) -> Result<(), String> {
+    match note.as_str() {
+        "ui_ready" => host.e2e.note_once("UI_READY", ""),
+        "ui_error" => host.e2e.note_once("UI_ERROR", ""),
+        _ => return Err("unknown note".to_owned()),
+    }
+    Ok(())
+}
+
+fn start_runtime(host: &Host) {
+    let launched = sidecar::bundled_binary()
+        .map_err(sidecar::LaunchError::Failed)
+        .and_then(|binary| sidecar::launch(&binary, None, VERSION));
+    let next = match launched {
+        Ok(sidecar) => {
+            host.e2e.note_once("RUNTIME_READY", &format!("version={}", sidecar.handshake.version));
+            Runtime::Ready(sidecar)
+        }
+        Err(sidecar::LaunchError::Failed(reason)) => {
+            host.e2e.note_once("RUNTIME_FAILED", "");
+            Runtime::Failed(reason)
+        }
+        Err(sidecar::LaunchError::Mismatch { expected, found }) => {
+            host.e2e.note_once("HANDSHAKE_MISMATCH", &format!("expected={expected} found={found}"));
+            Runtime::Mismatch { expected, found }
+        }
+    };
+    *lock(&host.runtime) = next;
+}
+
+fn main() {
+    let contract = match contract::Contract::load() {
+        Ok(contract) => contract,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
+    // Loopback only: never through a proxy from the environment, and never
+    // following a redirect that would carry the credential elsewhere.
+    let http = match reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(http) => http,
+        Err(error) => {
+            eprintln!("could not build the HTTP client: {error}");
+            std::process::exit(1);
+        }
+    };
+    let host = Arc::new(Host {
+        contract,
+        runtime: Mutex::new(Runtime::Starting),
+        http,
+        subscriptions: Mutex::default(),
+        next_subscription: AtomicU64::new(1),
+        e2e: E2e::from_env(),
+    });
+    let app = tauri::Builder::default()
+        .manage(Arc::clone(&host))
+        .invoke_handler(tauri::generate_handler![
+            runtime_status,
+            runtime_logs,
+            api_fetch,
+            api_subscribe,
+            api_events_poll,
+            api_unsubscribe,
+            e2e_note
+        ])
+        .on_page_load(|webview, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
+                && let Some(host) = webview.try_state::<Arc<Host>>()
+            {
+                host.e2e.note_once("PAGE_LOADED", "");
+            }
+        })
+        .setup(|app| {
+            let host = Arc::clone(app.state::<Arc<Host>>().inner());
+            std::thread::spawn(move || start_runtime(&host));
+            Ok(())
+        })
+        .build(tauri::generate_context!());
+    let app = match app {
+        Ok(app) => app,
+        Err(error) => {
+            eprintln!("could not start the window: {error}");
+            std::process::exit(1);
+        }
+    };
+    app.run(|app, event| {
+        if let tauri::RunEvent::Exit = event
+            && let Some(host) = app.try_state::<Arc<Host>>()
+        {
+            host.stop_runtime();
+        }
+    });
+}
+=== write desktop/src-tauri/src/sidecar.rs
+//! Launching and owning the bundled runtime.
+//!
+//! The host starts exactly one binary: the `lightagent-sidecar` shipped next
+//! to its own executable (never one found on `PATH`). The per-launch key is a
+//! fresh 256-bit value from the OS generator, written once to the child's
+//! stdin and then the pipe is closed; it never appears in argv, the
+//! environment, a URL, a file, a log line, or the UI. The child answers with
+//! one JSON handshake line on stdout, and is refused unless its protocol and
+//! version match this build.
+
+use std::collections::VecDeque;
+use std::io::{BufRead as _, BufReader, Read, Write as _};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use serde::Deserialize;
+
+/// How long a starting runtime may take to report ready.
+pub const READY_TIMEOUT: Duration = Duration::from_secs(20);
+/// Lines of runtime output kept in memory for diagnostics.
+const LOG_LINES: usize = 2_000;
+
+/// The one line a runtime prints when it is ready.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Handshake {
+    pub lightagent: String,
+    pub protocol: u32,
+    pub version: String,
+    pub addr: String,
+    #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+/// Why a runtime did not become usable.
+#[derive(Debug)]
+pub enum LaunchError {
+    Failed(String),
+    Mismatch { expected: String, found: String },
+}
+
+/// A running, owned runtime.
+pub struct Sidecar {
+    child: Child,
+    key: String,
+    pub handshake: Handshake,
+    pub logs: Arc<Mutex<VecDeque<String>>>,
+}
+
+impl Sidecar {
+    pub fn base_url(&self) -> String {
+        format!("http://{}", self.handshake.addr)
+    }
+
+    pub fn authorization(&self) -> String {
+        format!("Bearer {}", self.key)
+    }
+
+    /// Stop the runtime this host started, and nothing else.
+    pub fn stop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for Sidecar {
+    fn drop(&mut self) {
+        self.stop();
+        // Overwrite the key before its memory is released.
+        let len = self.key.len();
+        self.key.clear();
+        self.key.extend(std::iter::repeat_n('0', len));
+    }
+}
+
+/// The bundled runtime: next to the host's own executable.
+pub fn bundled_binary() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|error| format!("cannot locate the app: {error}"))?;
+    let dir = exe.parent().ok_or("the app has no directory")?;
+    let name = if cfg!(windows) { "lightagent-sidecar.exe" } else { "lightagent-sidecar" };
+    let path = dir.join(name);
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(format!("the bundled runtime is missing ({name} next to the app)"))
+    }
+}
+
+fn new_key() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|_| "the OS random source is unavailable".to_owned())?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Start `binary` as an owned runtime for `profile` and wait for its handshake.
+pub fn launch(binary: &Path, profile: Option<&str>, expected_version: &str) -> Result<Sidecar, LaunchError> {
+    let key = new_key().map_err(LaunchError::Failed)?;
+    let mut command = Command::new(binary);
+    command
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .arg("--parent-pid")
+        .arg(std::process::id().to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(profile) = profile {
+        command.arg("--profile").arg(profile);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| LaunchError::Failed(format!("could not start the runtime: {error}")))?;
+
+    // Deliver the key and close stdin so the runtime sees end-of-input.
+    let delivered = child
+        .stdin
+        .take()
+        .map(|mut stdin| stdin.write_all(format!("{key}\n").as_bytes()))
+        .transpose();
+    if !matches!(delivered, Ok(Some(()))) {
+        let _ = child.kill();
+        return Err(LaunchError::Failed("could not hand the runtime its credential".to_owned()));
+    }
+
+    let logs = Arc::new(Mutex::new(VecDeque::with_capacity(LOG_LINES)));
+    let (ready_tx, ready_rx) = mpsc::channel::<String>();
+    if let Some(stdout) = child.stdout.take() {
+        let logs = Arc::clone(&logs);
+        let key = key.clone();
+        std::thread::spawn(move || pump(stdout, &logs, &key, Some(ready_tx)));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let logs = Arc::clone(&logs);
+        let key = key.clone();
+        std::thread::spawn(move || pump(stderr, &logs, &key, None));
+    }
+
+    let line = match ready_rx.recv_timeout(READY_TIMEOUT) {
+        Ok(line) => line,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(LaunchError::Failed(match error {
+                mpsc::RecvTimeoutError::Timeout => format!(
+                    "the runtime did not report ready within {} s",
+                    READY_TIMEOUT.as_secs()
+                ),
+                mpsc::RecvTimeoutError::Disconnected => {
+                    "the runtime exited before reporting ready".to_owned()
+                }
+            }));
+        }
+    };
+    let handshake: Handshake = match serde_json::from_str(&line) {
+        Ok(handshake) => handshake,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(LaunchError::Failed("the runtime's ready line is not a handshake".to_owned()));
+        }
+    };
+    let mut sidecar = Sidecar { child, key, handshake, logs };
+    if sidecar.handshake.lightagent != "serve" || sidecar.handshake.protocol != crate::contract::PROTOCOL {
+        let found = format!("{} protocol {}", sidecar.handshake.lightagent, sidecar.handshake.protocol);
+        sidecar.stop();
+        return Err(LaunchError::Mismatch {
+            expected: format!("serve protocol {}", crate::contract::PROTOCOL),
+            found,
+        });
+    }
+    if sidecar.handshake.version != expected_version {
+        let found = sidecar.handshake.version.clone();
+        sidecar.stop();
+        return Err(LaunchError::Mismatch { expected: expected_version.to_owned(), found });
+    }
+    if !is_loopback_addr(&sidecar.handshake.addr) {
+        sidecar.stop();
+        return Err(LaunchError::Failed("the runtime is not bound to 127.0.0.1".to_owned()));
+    }
+    Ok(sidecar)
+}
+
+fn is_loopback_addr(addr: &str) -> bool {
+    addr.strip_prefix("127.0.0.1:")
+        .is_some_and(|port| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// Copy one output stream into the bounded log, redacting the key should it
+/// ever appear, and hand the first stdout line to the launcher.
+fn pump(stream: impl Read, logs: &Mutex<VecDeque<String>>, key: &str, mut ready: Option<mpsc::Sender<String>>) {
+    for line in BufReader::new(stream).lines() {
+        let Ok(line) = line else { break };
+        let line = line.replace(key, "<redacted>");
+        if let Some(sender) = ready.take() {
+            let _ = sender.send(line.clone());
+        }
+        if let Ok(mut logs) = logs.lock() {
+            if logs.len() == LOG_LINES {
+                logs.pop_front();
+            }
+            logs.push_back(line);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keys_are_fresh_and_256_bit() {
+        let a = new_key().expect("key");
+        let b = new_key().expect("key");
+        assert_eq!(a.len(), 64);
+        assert!(a.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn only_loopback_addresses_are_accepted() {
+        assert!(is_loopback_addr("127.0.0.1:49152"));
+        for addr in ["0.0.0.0:80", "127.0.0.1:", "localhost:80", "10.0.0.1:80", "127.0.0.1:80/x"] {
+            assert!(!is_loopback_addr(addr), "{addr}");
+        }
+    }
+}
+=== write desktop/src-tauri/src/contract.rs
+//! The operation contract: the only requests the UI may have the host make.
+//!
+//! The contract is `docs/desktop/contract/operations.json`, embedded at build
+//! time and kept equal to the server's routes by
+//! `scripts/check-desktop-contract.py`. A request that matches no operation,
+//! carries an unlisted query parameter, or has a path segment outside the
+//! identifier alphabet is refused before any connection is made.
+
+use serde::Deserialize;
+
+const CONTRACT: &str = include_str!("../../../docs/desktop/contract/operations.json");
+
+/// The protocol version the contract describes; the runtime's handshake must
+/// report the same.
+pub const PROTOCOL: u32 = 1;
+
+#[derive(Debug, Deserialize)]
+pub struct Contract {
+    pub protocol: u32,
+    pub operations: Vec<Operation>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Operation {
+    pub id: String,
+    pub method: String,
+    pub path: String,
+    #[serde(default)]
+    pub query: Vec<String>,
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(default)]
+    pub raw_body: bool,
+}
+
+impl Contract {
+    pub fn load() -> Result<Self, String> {
+        let contract: Self = serde_json::from_str(CONTRACT)
+            .map_err(|error| format!("the operation contract is malformed: {error}"))?;
+        if contract.protocol != PROTOCOL {
+            return Err(format!(
+                "the operation contract is protocol {}, the host speaks {PROTOCOL}",
+                contract.protocol
+            ));
+        }
+        Ok(contract)
+    }
+
+    /// The operation `method target` names, where `target` is a path with an
+    /// optional query string.
+    pub fn resolve(&self, method: &str, target: &str) -> Result<&Operation, String> {
+        if target.contains('#') {
+            return Err("a request target may not carry a fragment".to_owned());
+        }
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
+        let operation = self
+            .operations
+            .iter()
+            .find(|operation| operation.method == method && matches(&operation.path, path))
+            .ok_or_else(|| format!("{method} {path} is not in the desktop operation contract"))?;
+        for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+            let key = pair.split_once('=').map_or(pair, |(key, _)| key);
+            if !operation.query.iter().any(|allowed| allowed == key) {
+                return Err(format!(
+                    "query parameter {key:?} is not allowed for {}",
+                    operation.id
+                ));
+            }
+        }
+        Ok(operation)
+    }
+}
+
+fn matches(template: &str, path: &str) -> bool {
+    let template: Vec<&str> = template.split('/').collect();
+    let path: Vec<&str> = path.split('/').collect();
+    template.len() == path.len()
+        && template.iter().zip(&path).all(|(expected, actual)| {
+            if expected.starts_with('{') && expected.ends_with('}') {
+                valid_segment(actual)
+            } else {
+                expected == actual
+            }
+        })
+}
+
+/// An identifier segment: letters, digits, `-`, `_`, `.` and `:`, at most
+/// 200 bytes, and never only dots.
+fn valid_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment.len() <= 200
+        && !segment.bytes().all(|byte| byte == b'.')
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn contract() -> Contract {
+        Contract::load().expect("the embedded contract parses")
+    }
+
+    #[test]
+    fn known_operations_resolve() {
+        let contract = contract();
+        let cases = [
+            ("GET", "/health", "health"),
+            ("GET", "/api/lightagent/v1/sessions", "sessions.list"),
+            ("GET", "/api/lightagent/v1/sessions/search?q=hello", "sessions.search"),
+            ("GET", "/api/lightagent/v1/sessions/abc-123", "sessions.get"),
+            ("GET", "/api/lightagent/v1/runs/r_1/events?after=4", "runs.events"),
+            ("POST", "/api/lightagent/v1/approvals/run-7", "approvals.respond"),
+        ];
+        for (method, target, id) in cases {
+            assert_eq!(contract.resolve(method, target).map(|op| op.id.as_str()), Ok(id), "{method} {target}");
+        }
+        assert!(contract.resolve("GET", "/api/lightagent/v1/runs/r/events").expect("stream").stream);
+    }
+
+    #[test]
+    fn everything_else_is_refused() {
+        let contract = contract();
+        for (method, target) in [
+            ("GET", "/api/lightagent/v1/memory"),
+            ("DELETE", "/api/lightagent/v1/tools"),
+            ("GET", "/api/lightagent/v1/sessions/.."),
+            ("GET", "/api/lightagent/v1/sessions/a%2Fb"),
+            ("GET", "/api/lightagent/v1/sessions/a/../../b"),
+            ("GET", "/api/lightagent/v1/sessions?evil=1"),
+            ("GET", "/api/lightagent/v1/runs/r/events?after=1&token=x"),
+            ("GET", "/api/lightagent/v1/sessions#x"),
+            ("GET", "http://example.com/api/lightagent/v1/tools"),
+        ] {
+            assert!(contract.resolve(method, target).is_err(), "{method} {target} must be refused");
+        }
+    }
+}
+=== write desktop/src-tauri/src/sse.rs
+//! A server-sent-events parser for the host's relay of run streams.
+//!
+//! The relay forwards each event's `id`, `event` and `data` unchanged, so the
+//! UI's existing sequencing (ordered ids, gap detection, `?after=` replay in
+//! `frontend/src/hooks/useRunEvents.ts`) behaves exactly as with a browser
+//! `EventSource`.
+
+use serde::Serialize;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SseEvent {
+    pub id: Option<String>,
+    pub event: String,
+    pub data: String,
+}
+
+/// Incremental parser: feed it byte chunks as they arrive, in any split.
+#[derive(Default)]
+pub struct SseParser {
+    buffer: Vec<u8>,
+    id: Option<String>,
+    event: Option<String>,
+    data: Vec<String>,
+}
+
+impl SseParser {
+    pub fn push(&mut self, chunk: &[u8]) -> Vec<SseEvent> {
+        self.buffer.extend_from_slice(chunk);
+        let mut events = Vec::new();
+        while let Some(end) = self.buffer.iter().position(|&byte| byte == b'\n') {
+            let line: Vec<u8> = self.buffer.drain(..=end).collect();
+            // A whole line is complete UTF-8 even when a chunk split a character.
+            let line = String::from_utf8_lossy(&line);
+            let line = line.trim_end_matches(['\n', '\r']);
+            if line.is_empty() {
+                if !self.data.is_empty() || self.event.is_some() {
+                    events.push(SseEvent {
+                        id: self.id.clone(),
+                        event: self.event.take().unwrap_or_else(|| "message".to_owned()),
+                        data: self.data.join("\n"),
+                    });
+                    self.data.clear();
+                }
+                continue;
+            }
+            if line.starts_with(':') {
+                continue;
+            }
+            let (field, value) = match line.split_once(':') {
+                Some((field, value)) => (field, value.strip_prefix(' ').unwrap_or(value)),
+                None => (line, ""),
+            };
+            match field {
+                "data" => self.data.push(value.to_owned()),
+                "event" => self.event = Some(value.to_owned()),
+                // The last id persists across events, as `lastEventId` does.
+                "id" if !value.contains('\0') => self.id = Some(value.to_owned()),
+                _ => {}
+            }
+        }
+        events
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn events_survive_any_chunking() {
+        let stream = "id: 0\nevent: run.started\ndata: {\"a\":1}\n\n: keep-alive\n\nid: 1\nevent: text\ndata: é\ndata: two\n\n";
+        let whole = SseParser::default().push(stream.as_bytes());
+        let mut parser = SseParser::default();
+        let mut split = Vec::new();
+        for byte in stream.as_bytes() {
+            split.extend(parser.push(std::slice::from_ref(byte)));
+        }
+        assert_eq!(whole, split);
+        assert_eq!(whole.len(), 2);
+        assert_eq!(whole[0], SseEvent { id: Some("0".into()), event: "run.started".into(), data: "{\"a\":1}".into() });
+        assert_eq!(whole[1].data, "é\ntwo");
+        assert_eq!(whole[1].id.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn crlf_and_unnamed_events() {
+        let events = SseParser::default().push(b"data: x\r\n\r\n");
+        assert_eq!(events, vec![SseEvent { id: None, event: "message".into(), data: "x".into() }]);
+    }
+}
+=== write desktop/src-tauri/capabilities/default.json
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The main window gets no core or plugin permissions: no file system, shell, HTTP, or process access. It reaches only the host's own commands, which check every request against docs/desktop/contract/operations.json.",
+  "windows": ["main"],
+  "permissions": []
+}
+=== write desktop/e2e/run.py
+"""Unattended desktop end-to-end check on a GitHub-hosted runner.
+
+Usage: python run.py <out-dir> <ready|mismatch> -- <app command...>
+
+Launches the packaged app with LIGHTAGENT_DESKTOP_E2E_REPORT set, waits for
+the host's milestones, screenshots the window, and checks that no 256-bit
+hex value (the shape of the launch key) appears in any process command line
+or environment of the app's tree, or in the report. Then it stops the host
+the way a crash would (terminate) and records whether the runtime outlived
+it. Writes e2e.json; exits non-zero when an expectation is not met.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+import psutil
+
+EXPECT = {
+    "ready": ["RUNTIME_READY", "PAGE_LOADED", "UI_READY", "API_OK sessions.list"],
+    "mismatch": ["HANDSHAKE_MISMATCH", "PAGE_LOADED", "UI_ERROR"],
+}
+KEY_SHAPE = re.compile(r"\b[0-9a-f]{64}\b")
+
+
+def screenshot(path):
+    try:
+        if sys.platform == "darwin":
+            subprocess.run(["screencapture", "-x", path], check=True, timeout=30)
+        elif sys.platform.startswith("linux"):
+            subprocess.run(["import", "-window", "root", path], check=True, timeout=30)
+        else:
+            from PIL import ImageGrab
+
+            ImageGrab.grab().save(path)
+        return True
+    except Exception as error:
+        print(f"screenshot failed: {error}")
+        return False
+
+
+def tree(pid):
+    try:
+        root = psutil.Process(pid)
+        return [root] + root.children(recursive=True)
+    except psutil.Error:
+        return []
+
+
+def main():
+    out = os.path.abspath(sys.argv[1])
+    mode = sys.argv[2]
+    command = sys.argv[sys.argv.index("--") + 1:]
+    os.makedirs(out, exist_ok=True)
+    report = os.path.join(out, f"report-{mode}.txt")
+    if os.path.exists(report):
+        os.remove(report)
+    env = dict(os.environ, LIGHTAGENT_DESKTOP_E2E_REPORT=report)
+    started = time.time()
+    app = subprocess.Popen(command, env=env)
+    want = EXPECT[mode]
+    seen = {}
+    while time.time() - started < 90 and app.poll() is None:
+        text = open(report, encoding="utf-8").read() if os.path.exists(report) else ""
+        for tag in want:
+            if tag not in seen and any(line.startswith(tag) for line in text.splitlines()):
+                seen[tag] = round(time.time() - started, 3)
+        if len(seen) == len(want):
+            break
+        time.sleep(0.1)
+    time.sleep(2)
+    result = {"mode": mode, "milestones_s": seen, "missing": [t for t in want if t not in seen]}
+    result["screenshot"] = screenshot(os.path.join(out, f"screenshot-{mode}.png"))
+
+    processes = tree(app.pid)
+    result["processes"] = [p.name() for p in processes if p.is_running()]
+    leaks = []
+    for process in processes:
+        try:
+            if KEY_SHAPE.search(" ".join(process.cmdline())):
+                leaks.append(f"argv of {process.name()}")
+        except psutil.Error:
+            pass
+        try:
+            if any(KEY_SHAPE.search(value) for value in process.environ().values()):
+                leaks.append(f"environment of {process.name()}")
+        except psutil.Error:
+            pass  # not readable on every OS; recorded below
+    report_text = open(report, encoding="utf-8").read() if os.path.exists(report) else ""
+    if KEY_SHAPE.search(report_text):
+        leaks.append("e2e report")
+    result["key_leaks"] = leaks
+    result["report"] = report_text.splitlines()
+
+    sidecars = [p for p in processes if "sidecar" in p.name()]
+    app.terminate()
+    try:
+        app.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        app.kill()
+    time.sleep(3)
+    survivors = [p for p in sidecars if p.is_running()]
+    result["runtime_survived_host_termination"] = bool(survivors)
+    for process in survivors:
+        process.kill()
+
+    with open(os.path.join(out, f"e2e-{mode}.json"), "w", encoding="utf-8") as handle:
+        json.dump(result, handle, indent=1)
+    print(json.dumps(result, indent=1))
+    return 1 if result["missing"] or leaks else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+=== write docs/desktop/DESKTOP_PROGRESS.md
+# Lightagent Desktop — progress
+
+Governing documents: [DESKTOP_BUILD_PLAN.md](DESKTOP_BUILD_PLAN.md) and
+[DESKTOP_CLAUDE_PROMPT.md](DESKTOP_CLAUDE_PROMPT.md).
+
+States: **proposed** → **implemented** (committed on a branch) →
+**CI-validated** (a named hosted run passed on that exact commit) →
+**packaged-tested** → **approved**. Nothing has been merged, tagged,
+published, or deployed.
+
+A commit cannot record its own SHA. Each update records evidence for commits
+that already exist; the commit carrying an update is itself untested until the
+next update names its run.
+
+## Status board
+
+| Slice | State | Branch | Draft PR | Latest implementation commit | Latest tested commit |
+|---|---|---|---|---|---|
+| D0 Baseline and feature audit | **CI-validated** (gate passed) | `desktop/d0-audit` | https://github.com/dlroqa/Lightagent/pull/90 | `bc01426ed6d55c1ceb951d886e1a58ea9ad4c008` | `bc01426` / tree `4b135f94d45dc7d5e1f3142cc1c5ed88ac30a868` |
+| D1 Architecture and UI specification | **CI-validated** (gate passed) | `desktop/d1-architecture` (stacked on D0) | https://github.com/dlroqa/Lightagent/pull/92 | `350b48b3d0d072213e2028d8b5fb53022d61c340` | `350b48b` / tree `e43ab411568dda5c183963966d09131d21898581` |
+| D2 CI and desktop skeleton | implemented; validation pending | `desktop/d2-shell` (stacked on D1) | recorded in the next update | this commit | none yet |
+| D1 spike (evidence only, never merged) | runner evidence complete | `desktop/d1-spike` | https://github.com/dlroqa/Lightagent/pull/91 | `82896bcd63f3bd6786dcea12b603241e50a3a9ea` | `82896bc` / tree `d9cde26142a63a716a58f35dc33330be0e90d8b7` |
+| D3–D10 | not started | — | — | — | — |
+
+The latest progress record is the copy on the highest stacked desktop branch.
+Branches lower in the stack keep the record as of their own commit.
+
+## Execution method
+
+- **Editing:** the existing `source-edit` workflow on the never-merged
+  `tools/source-edit` branch. An edit request pinned to a base SHA is applied
+  on a GitHub-hosted `ubuntu-24.04` runner, which runs `cargo fmt` and creates
+  a commit through the git data API without moving any branch. Blobs for
+  workflow files are created there. The final commit, which attaches them, is
+  created through the git data API under the owner's token (scopes `repo`,
+  `workflow`). A `desktop/*` branch ref is then created or fast-forwarded to
+  it, never forced.
+- **Validation:** `.github/workflows/desktop.yml` (this slice) plus the
+  existing `check` workflow, on GitHub-hosted runners only.
+- **Local machine:** a repository backup and these documents only. No local
+  builds, tests, or source edits.
+
+## D0 — Baseline and feature audit
+
+### Baseline
+
+| Item | Value |
+|---|---|
+| Repository | `dlroqa/Lightagent` |
+| Default branch | `master` |
+| Audited (frozen) SHA | `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (merge of PR #89, `release/v0.5.0-dry-run`) |
+| Audited tree | `59b8f136534d228e328ef6795c26f63de6f47faa` |
+| Version | 0.5.0; Rust 1.98.0 pinned (`rust-toolchain.toml`); edition 2024 |
+| Latest release | v0.5.0 |
+| Open PRs at audit | none |
+| Overlapping desktop work | none: no branch or file referenced a desktop shell, Tauri, or Electron |
+| AGENTS.md / CONTRIBUTING / SECURITY | absent. The binding repository policy is the dependency policy in `Cargo.toml` (no cmake, no OpenSSL, no libclang; polars/tonic/sqlx banned), gated by `scripts/check-deps.sh`, plus `scripts/check-secrets.sh` |
+
+### Baseline Actions evidence (audited SHA)
+
+| Workflow | Run | Result |
+|---|---|---|
+| check | https://github.com/dlroqa/Lightagent/actions/runs/40975649064 | success: 13 jobs, including check on macos-arm64 (`macos-15`), macos-x64 (`macos-15-intel`), windows-x64, and linux-x64; Web UI render; package smoke; release gate |
+| jev evaluation | https://github.com/dlroqa/Lightagent/actions/runs/40975649134 | success |
+| subagents | https://github.com/dlroqa/Lightagent/actions/runs/40975721175 | success |
+| subagent fixture (pass) | https://github.com/dlroqa/Lightagent/actions/runs/40975766850 | success (expected) |
+| subagent fixture (fail) | https://github.com/dlroqa/Lightagent/actions/runs/40975789839 | failure (**expected**) |
+| subagent fixture (verify) | https://github.com/dlroqa/Lightagent/actions/runs/40975863447 | failure (**expected**) |
+| release (v0.5.0) | https://github.com/dlroqa/Lightagent/actions/runs/40976901096 | success |
+
+**Why the two fixture failures are deliberate:**
+`.github/workflows/subagent-fixture.yml` (header comment, lines 3-10) is a
+target for the `subagents` tester broker's live check. In `mode: fail`, its
+one step runs `echo "FAIL: deliberate fixture failure"; exit 1`. In
+`mode: verify`, it compiles and tests `fixtures/subagents/coder/lib.rs`, whose
+test `tests::one_is_one` deliberately fails. The log of run 40975863447 shows
+`panicked at fixtures/subagents/coder/lib.rs:14:9: assertion left == right
+failed` and `test result: FAILED. 0 passed; 1 failed`. The broker must report
+each fixture's outcome as it is. The `subagents` run that dispatched them
+(40975721175) passed, so the broker reported them correctly. Neither failure
+is a baseline defect.
+
+### Audit findings that shape D1–D3
+
+1. **The process model exists.** `lightagent serve` (`crates/lightagent/src/serve.rs:732`)
+   serves `/api/lightagent/v1` (21 method/route pairs, `crates/lightagent-api/src/lib.rs:73-112`)
+   and the React 19 + Vite WebUI from `--web-root` (`frontend/`; screens `/`, `/tools`, `/settings`).
+2. **The API covers only part of the CLI.** It has no operation for config
+   path/get/set and the Jev routing report, models, profile
+   show/create/use/preset/delete, the extensions commands, worker
+   assign/revoke, memory, RAG, identity, remote credentials, import, doctor,
+   init/setup, onboard, reload, **continue** (resume after the time budget), or
+   **steering** (input queued while a run is in progress).
+3. **CLI handlers are print-bound.** They have the shape
+   `fn(args…, json: bool) -> Result<(), String>` and print their results
+   (for example `extensions.rs:27`, `rag.rs:697`, `import.rs:28`, `memory.rs`).
+   Typed shared operations must be extracted (D3) so CLI, API, and desktop call
+   the same code.
+4. **Loopback is unauthenticated.** `serve.rs:746-758`: with no `--key-env`,
+   a loopback bind uses `AuthConfig::open()`. `crates/lightagent-api` has no
+   Host or Origin validation, so a DNS-rebinding page or any local process can
+   drive tools. This is an input to the D1 security design.
+5. **One profile per server process.** `AppState.session_profile` is fixed
+   at start (`serve.rs:739-760`). `POST /runs {profile}` is honoured only in
+   multi-user mode (`lib.rs:1148-1160`). The active-profile write
+   `ProfileStore::set_active` is atomic (temp file + rename,
+   `paths.rs:173-185`), but no lock coordinates a running server with a CLI
+   that switches profile. This is an input to the D1 profile-switch decision.
+6. **Secret authority.** Provider keys are stored in owner-only
+   `~/.lightagent/secrets` and referenced as `SecretRef`. The
+   remote-credential vault is sealed with
+   `LIGHTAGENT_CREDENTIAL_KEY[_FILE]`. Identity secrets have strict delivery
+   rules (`identity_admin.rs:10-14`).
+7. **Targets and runners.** `check.yml` and `release.yml` already run
+   natively on `macos-15-intel` (x86_64, `MACOSX_DEPLOYMENT_TARGET=10.14`),
+   `macos-15` (arm64, 11.0), `windows-latest`, and `ubuntu-22.04`/`24.04`.
+   The 10.14 floor is a declared deployment target; no hosted runner executes
+   macOS older than 15. It stays an unverified target (D1).
+
+### Capability inventory
+
+- Files: [desktop-capabilities.json](desktop-capabilities.json) (rows),
+  [cli-tree.txt](cli-tree.txt) (pinned clap tree), and
+  [DESKTOP_CLI_PARITY.md](DESKTOP_CLI_PARITY.md) (readable matrix).
+- 306 rows: 86 commands, 56 options, 47 positional arguments, 6 setup-section
+  values, 2 aliases, 10 setup options, 16 slash commands, 6 key bindings,
+  8 ACP methods, 10 MCP registration fields, 6 extension registration rows,
+  1 skill registration row, 14 config sections, 12 environment variables, and
+  26 API operations.
+- **Parity denominator: 225** applicable, counted rows. **Implemented: 0 of 225.**
+- Rows that do not count toward parity:
+  - groups, and commands that run a default subcommand;
+  - aliases;
+  - 26 rows marked `duplicate_of` (for example `/tools` → `cli.tools.list`,
+    and ACP methods → Conversations rows);
+  - 22 not-applicable rows, each with a reason;
+  - 5 host-owned `serve` rows;
+  - backend-only API rows. Four API rows count because the WebUI exposes them
+    with no CLI equivalent: Jev status/verify, session search, session
+    rename/pin, and attachments.
+- Six applicability decisions (8 rows) were open at D0 and are **resolved in D1**
+  (DESKTOP_ARCHITECTURE.md §11). The parity denominator is now **226**
+  (`update --check` became applicable; the other 7 rows are not applicable,
+  each with a reason).
+- New backend operations required for existing CLI capabilities (not new
+  scope): **continue** and **steering** (D5), and typed MCP server
+  configuration (D6).
+
+### Drift check
+
+- `desktop_inventory` (Rust test in `crates/lightagent/src/lib.rs`) walks
+  `Cli::command()` and requires an exact match with `cli-tree.txt`. Any added,
+  removed, or renamed command, option, argument, setup value, or alias fails it.
+- `scripts/check-desktop-inventory.py` statically checks:
+  - slash words, chat key codes, and ACP methods;
+  - MCP transports and fields, and extension manifest fields;
+  - config sections and HTTP routes;
+  - literal environment names;
+  - the inventory schema and denominator, and the parity matrix.
+
+  `--self-test` injects one addition into each surface and requires the check
+  to report it.
+- It cannot detect setup menu items, new modifier combinations, behaviour
+  changes behind unchanged names, config keys below the section level, or
+  computed environment names. These are listed in DESKTOP_CLI_PARITY.md.
+
+### D0 log
+
+| When (UTC) | Event | Commit / tree | Evidence |
+|---|---|---|---|
+| 2026-10-29 | Static audit of the frozen SHA | `12582a0` / `59b8f13` | local reading; baseline runs above |
+| 2026-10-30 | Edit request `015-desktop-d0-audit` applied on base `12582a0` | prepared `352200b` / `93c943e`; final `2c9df87` / `50c8bb6` (workflow blob `e637300` checked byte-for-byte against the reviewed file, then attached) | source-edit https://github.com/dlroqa/Lightagent/actions/runs/40995818991 |
+| 2026-10-30 | Branch `desktop/d0-audit` created at `2c9df87` (no force); draft PR #90 opened | `2c9df87` | https://github.com/dlroqa/Lightagent/pull/90 |
+| 2026-10-30 | `desktop` on `2c9df87`: **failure**. The clap-tree test passed; the static check reported 10 false "chat keys" drifts, because `before_tests` split `chat.rs` at an item-level `#[cfg(test)]` (line 186) instead of the test module | `2c9df87` / `50c8bb6` | https://github.com/dlroqa/Lightagent/actions/runs/40995946041 |
+| 2026-10-30 | Fix: edit request `016-desktop-d0-key-scan`; branch fast-forwarded (parent `2c9df87`, no force) | `bc01426` / `4b135f9` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/40996341547 |
+| 2026-10-30 | `desktop` on `bc01426`: **success**. The self-test detected all 9 injected additions (slash, chat keys, ACP, MCP, extension manifest, config sections, HTTP routes, env, cli-tree); 0 drift errors; 306 rows; parity 0/225; the clap tree matches | `bc01426` / `4b135f9` | https://github.com/dlroqa/Lightagent/actions/runs/40996391964 |
+| 2026-10-30 | `check` on `bc01426`: **success**, all 13 jobs (four-platform check, Web UI render, package smoke, release gate, contracts) | `bc01426` | https://github.com/dlroqa/Lightagent/actions/runs/40996392105 |
+| 2026-10-30 | **D0 gate passed** at `bc01426` | — | — |
+
+## D1 — Architecture and UI specification
+
+- Decision: **Tauri 2** host with an owned `lightagent serve --desktop`
+  sidecar, and typed IPC with a host-only HTTP client. The renderer never holds
+  the key. See [DESKTOP_ARCHITECTURE.md](DESKTOP_ARCHITECTURE.md).
+- The framework was decided on hosted evidence: spike run
+  https://github.com/dlroqa/Lightagent/actions/runs/40997420599 (8/8 jobs) at
+  `82896bc`. The Intel binary has `minos 10.14`; Electron 42's runtime
+  requires macOS 12.0.
+- Open risks carried into D2:
+  - a 30 s Tauri first page load on Linux under Xvfb;
+  - the arm64 plist minimum inconsistency;
+  - slower Tauri startup than Electron on Windows;
+  - 10.14 runtime unverifiable on hosted runners (blocked; no allowed alternative).
+- Acceptance gates: [DESKTOP_ACCEPTANCE.md](DESKTOP_ACCEPTANCE.md). Merge
+  order: [DESKTOP_MERGE_ORDER.md](DESKTOP_MERGE_ORDER.md).
+
+| When (UTC) | Event | Commit / tree | Evidence |
+|---|---|---|---|
+| 2026-10-30 | Spike: edit request `017-desktop-d1-spike` on base `12582a0`; branch `desktop/d1-spike` created; draft PR #91 | `cf5cb85` / `89fe912` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/40996500866 |
+| 2026-10-30 | Spike run 1: all Tauri jobs succeeded and were measured; all Electron jobs **failed** before measuring (npm did not fetch the Electron binary) | `cf5cb85` | https://github.com/dlroqa/Lightagent/actions/runs/40996571854 |
+| 2026-10-30 | Spike fix `018`: run Electron's install script explicitly; branch fast-forwarded | `82896bc` / `d9cde26` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/40997083470 |
+| 2026-10-30 | Spike run 2: **8/8 success**. Measurements are in DESKTOP_ARCHITECTURE.md §3 | `82896bc` | https://github.com/dlroqa/Lightagent/actions/runs/40997420599 |
+| 2026-10-30 | D1 documents: edit request `019`, base `bc01426`; branch created without force; draft PR #92 (base `desktop/d0-audit`) | `350b48b` / `e43ab41` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/40998171345 |
+| 2026-10-30 | `desktop` on `350b48b`: **success** (inventory with the D1 resolutions, denominator 226) | `350b48b` | https://github.com/dlroqa/Lightagent/actions/runs/40998231436 |
+| 2026-10-30 | `check` on `350b48b`: **success** | `350b48b` | https://github.com/dlroqa/Lightagent/actions/runs/40998231460 |
+| 2026-10-30 | **D1 gate passed** at `350b48b` | — | — |
+
+## D2 — CI and desktop skeleton
+
+- `desktop/` is a separate Cargo workspace:
+  - `src-tauri`, the host (Tauri 2.12.4): contract allowlist, stdin launch key, handshake and version check, SSE relay, and an HTTP client with no proxy and no redirects;
+  - `mock-sidecar`, a std-only stand-in runtime with the same Host/Origin/Bearer checks.
+- Frontend: `src/api/transport.ts` (IPC `fetch` and `EventSource` in the desktop build; unchanged in the browser), `DesktopGate`, and `vite build --mode desktop` → `dist-desktop`.
+- Contract: `docs/desktop/contract/operations.json` (23 operations), checked by `scripts/check-desktop-contract.py`, which has a self-test.
+- CI (`desktop.yml`):
+  - contract and inventory checks;
+  - host fmt, clippy, tests, and dependency policy;
+  - shell bundle plus end-to-end runs (ready, version mismatch, key-leak scan, runtime-orphan observation) on four targets, with artifacts kept 30 days.
+- Tooling: `tools/source-edit` now also formats touched `desktop/*.rs` files with
+  `rustfmt --edition 2024` (tool commit `bcff82c`; never merged).
+- Known D2 gaps, carried to D3 by design:
+  - the runtime is the mock;
+  - there is no parent-death watchdog, so the e2e records whether the runtime outlives a terminated host;
+  - `desktop/Cargo.lock` is generated on the first run and committed afterwards.
+
+## Artifacts and retention
+
+| Artifact | Run | Retention |
+|---|---|---|
+| `prepared-015-desktop-d0-audit.txt`, `prepared-016-…` (commit, tree, diff) | 40995818991, 40996341547 | 30 days |
+| `spike-tauri-<target>`: measure.json, screenshot, Cargo.lock, dmg/msi/nsis/deb/AppImage | 40997420599 (also 40996571854) | 30 days |
+| `spike-electron-<target>`: measure.json, screenshot | 40997420599 | 30 days |
+| `lightagent-web-screens` (existing `check` job) | 40996392105 | repository default |
+
+## Local backup
+
+- Backup clone: `~/Repositories/LAcode/Lightagent` on the owner's machine
+  (origin `https://github.com/dlroqa/Lightagent.git`). It is synchronized with
+  `git fetch` only: no reset, no clean, no force.
+- Local progress copy: `~/Repositories/LAcode/desktop-progress/`.
+- Last synchronization: 2026-10-30T03:33:59Z, by fetch only. Backed up:
+  - `master` `12582a0`;
+  - `origin/desktop/d0-audit` `bc01426`;
+  - `origin/desktop/d1-spike` `82896bc`.
+
+  The working tree was clean.
+
+## Next
+
+1. Get the D2 jobs green on the exact head, commit `desktop/Cargo.lock`, and record the evidence.
+2. D3a: `lightagent-ops` plus `serve --desktop` in the real runtime (stdin key, Host/Origin, handshake, `--profile`, `--parent-pid`), replacing the mock.
+=== write docs/desktop/contract/operations.json
+{
+ "schema": "lightagent-desktop-operations/1",
+ "protocol": 1,
+ "note": "The only HTTP operations the desktop host forwards for the UI. Order matters: a literal path precedes a template that would also match it. Kept equal to the server routes and covering the frontend client by scripts/check-desktop-contract.py.",
+ "operations": [
+  {"id": "health", "method": "GET", "path": "/health"},
+  {"id": "tools.list", "method": "GET", "path": "/api/lightagent/v1/tools"},
+  {"id": "workers.list", "method": "GET", "path": "/api/lightagent/v1/workers"},
+  {"id": "provider.get", "method": "GET", "path": "/api/lightagent/v1/provider"},
+  {"id": "jev.status", "method": "GET", "path": "/api/lightagent/v1/jev"},
+  {"id": "jev.verify", "method": "POST", "path": "/api/lightagent/v1/jev/verify"},
+  {"id": "skills.list", "method": "GET", "path": "/api/lightagent/v1/skills"},
+  {"id": "profiles.list", "method": "GET", "path": "/api/lightagent/v1/profiles"},
+  {"id": "settings.get", "method": "GET", "path": "/api/lightagent/v1/settings"},
+  {"id": "settings.put", "method": "PUT", "path": "/api/lightagent/v1/settings"},
+  {"id": "runs.create", "method": "POST", "path": "/api/lightagent/v1/runs"},
+  {"id": "runs.get", "method": "GET", "path": "/api/lightagent/v1/runs/{id}"},
+  {"id": "runs.events", "method": "GET", "path": "/api/lightagent/v1/runs/{id}/events", "query": ["after"], "stream": true},
+  {"id": "runs.cancel", "method": "POST", "path": "/api/lightagent/v1/runs/{id}/cancel"},
+  {"id": "sessions.list", "method": "GET", "path": "/api/lightagent/v1/sessions"},
+  {"id": "sessions.create", "method": "POST", "path": "/api/lightagent/v1/sessions"},
+  {"id": "sessions.search", "method": "GET", "path": "/api/lightagent/v1/sessions/search", "query": ["q"]},
+  {"id": "sessions.get", "method": "GET", "path": "/api/lightagent/v1/sessions/{id}"},
+  {"id": "sessions.update", "method": "PATCH", "path": "/api/lightagent/v1/sessions/{id}"},
+  {"id": "sessions.delete", "method": "DELETE", "path": "/api/lightagent/v1/sessions/{id}", "destructive": true},
+  {"id": "sessions.attach", "method": "POST", "path": "/api/lightagent/v1/sessions/{id}/attachments", "raw_body": true},
+  {"id": "approvals.list", "method": "GET", "path": "/api/lightagent/v1/approvals"},
+  {"id": "approvals.respond", "method": "POST", "path": "/api/lightagent/v1/approvals/{run}"}
+ ]
+}
+=== replace frontend/package.json
+--- find
+    "typecheck": "tsc --noEmit",
+--- with
+    "build:desktop": "tsc --noEmit && vite build --mode desktop",
+    "typecheck": "tsc --noEmit",
+=== replace frontend/vite.config.ts
+--- find
+      outDir: "dist",
+--- with
+      // The desktop build talks to its host over IPC, never to an API origin.
+      outDir: mode === "desktop" ? "dist-desktop" : "dist",
+=== replace .gitignore
+--- find
+/frontend/dist
+/e2e/node_modules
+--- with
+/frontend/dist
+/frontend/dist-desktop
+/e2e/node_modules
+=== replace frontend/src/api/agent.ts
+--- find
+const BASE = "/api/lightagent/v1";
+--- with
+import { apiFetch } from "./transport";
+
+const BASE = "/api/lightagent/v1";
+=== replace frontend/src/api/agent.ts
+--- find
+  const response = await fetch(`${BASE}${path}`, {
+--- with
+  const response = await apiFetch(`${BASE}${path}`, {
+=== replace frontend/src/api/agent.ts
+--- find
+    const response = await fetch(`${BASE}/sessions/${encodeURIComponent(sessionId)}/attachments`, {
+--- with
+    const response = await apiFetch(`${BASE}/sessions/${encodeURIComponent(sessionId)}/attachments`, {
+=== replace frontend/src/hooks/useRunEvents.ts
+--- find
+import { agentApi } from "../api/agent";
+--- with
+import { agentApi } from "../api/agent";
+import { ApiEventSource } from "../api/transport";
+=== replace frontend/src/hooks/useRunEvents.ts
+--- find
+      const next = new EventSource(agentApi.eventsUrl(runId, lastId));
+--- with
+      const next = new ApiEventSource(agentApi.eventsUrl(runId, lastId));
+=== replace frontend/src/hooks/useRunEvents.ts
+--- find
+        if (next.readyState === EventSource.CLOSED) scheduleReconnect();
+--- with
+        if (next.readyState === ApiEventSource.CLOSED) scheduleReconnect();
+=== replace frontend/src/main.tsx
+--- find
+import { App } from "./App";
+--- with
+import { App } from "./App";
+import { DesktopGate } from "./desktop/DesktopGate";
+=== replace frontend/src/main.tsx
+--- find
+      <HashRouter>
+        <App />
+      </HashRouter>
+--- with
+      <DesktopGate>
+        <HashRouter>
+          <App />
+        </HashRouter>
+      </DesktopGate>
+=== end
