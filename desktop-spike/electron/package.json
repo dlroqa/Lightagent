@@ -1,0 +1,10 @@
+{
+  "name": "lightagent-desktop-spike-electron",
+  "private": true,
+  "version": "0.0.0",
+  "description": "D1 evidence spike only (never merged): the smallest Electron window, measured on GitHub-hosted runners.",
+  "main": "main.js",
+  "devDependencies": {
+    "electron": "42.11.14"
+  }
+}
