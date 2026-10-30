@@ -204,7 +204,16 @@ jobs:
         run: |
           set -euo pipefail
           bin=./lightagent; [ -f lightagent.exe ] && bin=./lightagent.exe
-          "$bin" serve --web-root ./web > "$T/serve.log" 2>&1 &
+          if [ "$RUNNER_OS" = Windows ]; then
+            "$bin" serve --web-root ./web > "$T/serve.log" 2>&1 &
+          else
+            # A non-interactive shell starts `&` jobs with SIGINT ignored, and
+            # serve installs no handler of its own, so it would inherit that.
+            # Restore the default a terminal gives a foreground command, then
+            # exec the same command (same PID), so Ctrl-C can be tested.
+            perl -e '$SIG{INT} = $SIG{QUIT} = "DEFAULT"; exec @ARGV or die "exec: $!"' \
+              "$bin" serve --web-root ./web > "$T/serve.log" 2>&1 &
+          fi
           echo "SERVE_PID=$!" >> "$GITHUB_ENV"
           if [ -r "/proc/$!/winpid" ]; then echo "SERVE_WINPID=$(cat "/proc/$!/winpid")" >> "$GITHUB_ENV"; fi
           for _ in $(seq 1 60); do
