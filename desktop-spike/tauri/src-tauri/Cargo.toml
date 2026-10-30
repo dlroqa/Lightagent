@@ -1,0 +1,22 @@
+# D1 evidence spike only (never merged): the smallest Tauri 2 window, built
+# and measured on GitHub-hosted runners. Its own workspace keeps it out of the
+# root workspace, its lockfile, and its dependency-policy gate.
+[package]
+name = "lightagent-desktop-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "=2.7.3", features = [] }
+
+[dependencies]
+tauri = { version = "=2.12.4", features = [] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "debuginfo"
+panic = "abort"
