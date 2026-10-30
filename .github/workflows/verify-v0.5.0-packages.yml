@@ -1,0 +1,310 @@
+name: verify v0.5.0 packages
+
+# One-off verification of the v0.5.0 draft release's attached packages:
+# fetch the exact assets, check them against the attached SHA256SUMS, then
+# extract and run each package natively, start its Web UI with the packaged
+# `web/` directory, and load it in a browser. Nothing is built, packages are
+# never re-uploaded, and the repository is never checked out, so no
+# source-tree file can stand in for a missing package file. Read-only: it
+# creates, changes and publishes nothing.
+# Runs only on a push to its own branch, which is never merged.
+
+on:
+  push:
+    branches: [verify/v0.5.0-packages]
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  RELEASE_ID: '428527051'
+  TAG_RUN: '40978700028'
+  VERSION: 0.5.0
+  # GitHub's server-side digest of each attached asset, read from the
+  # release-assets API before this run. The packages are accepted only when
+  # their bytes match these and the attached SHA256SUMS.
+  SUMS_SHA256: 038da0baae454c5879720f3affff8d7e233e2c9e3881748a3282fc4188bfef0b
+
+jobs:
+  fetch:
+    name: fetch and verify the attached packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      source: ${{ steps.release.outputs.source || 'tag-run-artifacts' }}
+    steps:
+      - name: Download the draft release's assets
+        id: release
+        # A draft is listed only to tokens with push access; this token is
+        # read-only, so this may be refused. If so, the next step takes the
+        # same files from the tag run that uploaded them.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          mkdir -p staging
+          gh api "repos/$REPO/releases/$RELEASE_ID/assets" --jq '.[] | "\(.id) \(.name)"' > assets.list
+          cat assets.list
+          [ "$(wc -l < assets.list)" = 5 ] || { echo "expected 5 assets" >&2; exit 1; }
+          while read -r id name; do
+            gh api -H 'Accept: application/octet-stream' "repos/$REPO/releases/assets/$id" > "staging/$name"
+          done < assets.list
+          # Only a complete set is used; a partial one leaves room for the fallback.
+          mv staging assets
+          echo "source=release-assets" >> "$GITHUB_OUTPUT"
+      - name: Otherwise, take them from the tag run's artifacts
+        if: steps.release.outcome != 'success'
+        uses: actions/download-artifact@v8
+        with:
+          run-id: ${{ env.TAG_RUN }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: ${{ runner.temp }}/assets
+          merge-multiple: true
+      - name: Check every byte against the attached SHA256SUMS
+        working-directory: ${{ runner.temp }}/assets
+        run: |
+          set -euo pipefail
+          ls -l
+          echo "source: ${{ steps.release.outputs.source || 'tag-run-artifacts' }}"
+          [ "$(sha256sum SHA256SUMS | cut -d' ' -f1)" = "$SUMS_SHA256" ] \
+            || { echo "SHA256SUMS is not the attached file" >&2; exit 1; }
+          sha256sum -c SHA256SUMS
+          [ "$(ls lightagent-* | wc -l)" = 4 ]
+          {
+            echo "### v0.5.0 packages"
+            echo "Source: ${{ steps.release.outputs.source || 'tag-run-artifacts' }}"
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  run-package:
+    name: run package (${{ matrix.label }})
+    needs: fetch
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15-intel, label: macos-x64, triple: x86_64-apple-darwin, arch: x86_64, ext: tar.gz }
+          - { os: macos-15, label: macos-arm64, triple: aarch64-apple-darwin, arch: arm64, ext: tar.gz }
+          - { os: windows-latest, label: windows-x64, triple: x86_64-pc-windows-msvc, arch: x86_64, ext: zip }
+          - { os: ubuntu-24.04, label: linux-x64, triple: x86_64-unknown-linux-gnu, arch: x86_64, ext: tar.gz }
+    defaults:
+      run:
+        shell: bash
+    env:
+      PACKAGE: lightagent-0.5.0-${{ matrix.triple }}
+      URL: http://127.0.0.1:8735/
+    steps:
+      - name: Runner architecture
+        env:
+          WANT_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### run package (${{ matrix.label }})"
+            echo "- uname: $(uname -srm)"
+            if [ "$(uname -s)" = Darwin ]; then
+              echo "- macOS: $(sw_vers -productVersion) ($(sw_vers -buildVersion))"
+              echo "- CPU: $(sysctl -n machdep.cpu.brand_string)"
+              echo "- hw.optional.arm64: $(sysctl -n hw.optional.arm64 2>/dev/null || echo absent)"
+              echo "- sysctl.proc_translated: $(sysctl -n sysctl.proc_translated 2>/dev/null || echo absent)"
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$(uname -m)" = "$WANT_ARCH" ] || { echo "runner is $(uname -m), expected $WANT_ARCH" >&2; exit 1; }
+          if [ "$(uname -s)" = Darwin ]; then
+            [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 0 ] || { echo "Rosetta" >&2; exit 1; }
+            if [ "$WANT_ARCH" = x86_64 ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = 1 ]; then
+              echo "an Apple silicon machine, not an Intel Mac" >&2; exit 1
+            fi
+          fi
+          # One temp path both bash and the runner accept (D:/a/_temp on Windows).
+          t="$RUNNER_TEMP"; command -v cygpath >/dev/null && t="$(cygpath -m "$RUNNER_TEMP")"
+          echo "T=$t" >> "$GITHUB_ENV"
+          echo "PKG_DIR=$t/clean/$PACKAGE" >> "$GITHUB_ENV"
+          echo "LIGHTAGENT_HOME=$t/lightagent-home" >> "$GITHUB_ENV"
+      # The tag run's own artifacts, accepted only if their bytes are the
+      # attached assets' (pinned digests below); nothing is re-uploaded.
+      - uses: actions/download-artifact@v8
+        with:
+          run-id: ${{ env.TAG_RUN }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          name: lightagent-${{ matrix.label }}
+          path: ${{ runner.temp }}/assets
+      - uses: actions/download-artifact@v8
+        with:
+          run-id: ${{ env.TAG_RUN }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          name: release-SHA256SUMS
+          path: ${{ runner.temp }}/assets
+      - name: Verify and extract this package outside any checkout
+        run: |
+          set -euo pipefail
+          cd "$T/assets"
+          ls -l
+          sha() { if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+          [ "$(sha SHA256SUMS | cut -d' ' -f1)" = "$SUMS_SHA256" ] \
+            || { echo "SHA256SUMS is not the attached file" >&2; exit 1; }
+          grep "  $PACKAGE.${{ matrix.ext }}\$" SHA256SUMS > mine
+          cat mine
+          sha -c mine
+          mkdir -p "$T/clean"
+          case "${{ matrix.ext }}" in
+            zip) unzip -q "$PACKAGE.zip" -d "$T/clean" ;;
+            *) tar -xzf "$PACKAGE.tar.gz" -C "$T/clean" ;;
+          esac
+          echo "workspace (no checkout): $(ls -A "$GITHUB_WORKSPACE" | wc -l | tr -d ' ') entries"
+          ls -la "$PKG_DIR" "$PKG_DIR/web"
+      - name: CLI version
+        working-directory: ${{ env.PKG_DIR }}
+        run: |
+          set -euo pipefail
+          bin=./lightagent; [ -f lightagent.exe ] && bin=./lightagent.exe
+          if [ "$(uname -s)" = Darwin ]; then echo "lipo: $(lipo -archs "$bin")"; fi
+          version="$("$bin" --version)"
+          echo "- --version: $version" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$version" = "lightagent $VERSION" ]
+      - name: A fresh home has no profile, so serve asks for init
+        working-directory: ${{ env.PKG_DIR }}
+        run: |
+          set -uo pipefail
+          bin=./lightagent; [ -f lightagent.exe ] && bin=./lightagent.exe
+          [ ! -e "$LIGHTAGENT_HOME" ] || { echo "home is not fresh" >&2; exit 1; }
+          "$bin" serve --web-root ./web > "$T/serve-noinit.log" 2>&1 &
+          pid=$!
+          for _ in $(seq 1 15); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+          if kill -0 "$pid" 2>/dev/null; then kill "$pid"; echo "serve started without a profile" >&2; exit 1; fi
+          wait "$pid"; status=$?
+          cat "$T/serve-noinit.log"
+          echo "exit status: $status"
+          [ "$status" != 0 ] && grep -q 'no active profile' "$T/serve-noinit.log"
+      - name: lightagent init (temporary home, unreachable provider)
+        working-directory: ${{ env.PKG_DIR }}
+        run: |
+          set -euo pipefail
+          bin=./lightagent; [ -f lightagent.exe ] && bin=./lightagent.exe
+          # Port 0 is never served, so nothing here can reach a model.
+          "$bin" init --base-url http://127.0.0.1:0
+      - name: Start the Web UI with the documented command
+        working-directory: ${{ env.PKG_DIR }}
+        run: |
+          set -euo pipefail
+          bin=./lightagent; [ -f lightagent.exe ] && bin=./lightagent.exe
+          "$bin" serve --web-root ./web > "$T/serve.log" 2>&1 &
+          echo "SERVE_PID=$!" >> "$GITHUB_ENV"
+          if [ -r "/proc/$!/winpid" ]; then echo "SERVE_WINPID=$(cat "/proc/$!/winpid")" >> "$GITHUB_ENV"; fi
+          for _ in $(seq 1 60); do
+            curl -fsS -o /dev/null "$URL" 2>/dev/null && break
+            sleep 1
+          done
+          cat "$T/serve.log"
+          curl -fsS -o /dev/null "$URL"
+          grep -q 'Lightagent API listening on http://127.0.0.1:8735/api/lightagent/v1' "$T/serve.log"
+          grep -q 'Serving the panel from ./web at http://127.0.0.1:8735/' "$T/serve.log"
+      - name: Entry page, every referenced asset, and the API
+        run: |
+          set -euo pipefail
+          curl -fsS -D "$T/index.headers" "$URL" -o "$T/index.html"
+          grep -i '^content-type: text/html' "$T/index.headers"
+          grep -q '<div id="root">' "$T/index.html"
+          refs="$(grep -oE '(src|href)="/[^"]+"' "$T/index.html" | sed -E 's/^(src|href)="\/(.*)"$/\2/' | sort -u)"
+          echo "$refs"
+          echo "$refs" | grep -qE '\.js$' || { echo "no script referenced" >&2; exit 1; }
+          echo "$refs" | grep -qE '\.css$' || { echo "no stylesheet referenced" >&2; exit 1; }
+          for ref in $refs; do
+            code="$(curl -sS -o "$T/asset" -w '%{http_code}' "$URL$ref")"
+            type="$(curl -sS -o /dev/null -w '%{content_type}' "$URL$ref")"
+            size="$(wc -c < "$T/asset" | tr -d ' ')"
+            echo "  /$ref -> $code $type $size bytes"
+            [ "$code" = 200 ] && [ "$size" -gt 0 ] || { echo "asset /$ref failed" >&2; exit 1; }
+            case "$ref" in
+              *.js) case "$type" in text/javascript*) ;; *) echo "bad type for /$ref" >&2; exit 1 ;; esac ;;
+              *.css) case "$type" in text/css*) ;; *) echo "bad type for /$ref" >&2; exit 1 ;; esac ;;
+            esac
+          done
+          curl -fsS -o "$T/tools.json" "${URL}api/lightagent/v1/tools"
+          grep -q 'datetime.now' "$T/tools.json"
+          echo "API tools list reachable"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Load the interface in a browser
+        run: |
+          set -euo pipefail
+          mkdir -p "$T/pw" "$T/screens"
+          cd "$T/pw"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund playwright@1.55.0 >/dev/null
+          if [ "$RUNNER_OS" = Linux ]; then npx playwright install --with-deps chromium; else npx playwright install chromium; fi
+          cat > check.mjs <<'EOF'
+          import { chromium } from "playwright";
+          const base = process.env.URL;
+          const out = process.argv[2];
+          const origin = new URL(base).origin;
+          const pageErrors = [], consoleErrors = [], failedStatic = [], apiErrors = [];
+          const browser = await chromium.launch();
+          const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+          page.on("pageerror", (e) => pageErrors.push(String(e)));
+          page.on("console", (m) => { if (m.type() === "error") consoleErrors.push(m.text()); });
+          page.on("requestfailed", (r) => {
+            if (!r.url().startsWith(origin)) return;
+            (r.url().includes("/api/lightagent/") ? apiErrors : failedStatic).push(`${r.url()} ${r.failure()?.errorText}`);
+          });
+          page.on("response", (r) => {
+            if (!r.url().startsWith(origin) || r.status() < 400) return;
+            (r.url().includes("/api/lightagent/") ? apiErrors : failedStatic).push(`${r.status()} ${r.url()}`);
+          });
+          await page.goto(base, { waitUntil: "load" });
+          await page.getByRole("textbox", { name: "Ask Lightagent" }).waitFor({ timeout: 30000 });
+          await page.getByRole("button", { name: "Send message" }).waitFor({ timeout: 30000 });
+          const title = await page.title();
+          const rootChildren = await page.locator("#root > *").count();
+          await page.screenshot({ path: `${out}/home.png` });
+          await page.goto(`${base}#/agent/tools`, { waitUntil: "load" });
+          await page.getByText("datetime.now", { exact: true }).first().waitFor({ timeout: 30000 });
+          await page.screenshot({ path: `${out}/tools.png` });
+          await browser.close();
+          const report = { title, rootChildren, pageErrors, consoleErrors, failedStatic, apiErrors };
+          console.log(JSON.stringify(report, null, 2));
+          if (pageErrors.length || failedStatic.length || rootChildren === 0) process.exit(1);
+          EOF
+          node check.mjs "$T/screens" | tee "$T/screens/browser-report.json"
+      - name: Stop the server
+        if: always()
+        run: |
+          set -uo pipefail
+          [ -n "${SERVE_PID:-}" ] || exit 0
+          if [ -n "${SERVE_WINPID:-}" ]; then
+            how="taskkill (Windows has no Ctrl-C for a detached process)"
+            taskkill //F //PID "$SERVE_WINPID"
+            alive() { tasklist //FI "PID eq $SERVE_WINPID" //NH | grep -q "$SERVE_WINPID"; }
+          else
+            how="SIGINT (Ctrl-C)"
+            kill -INT "$SERVE_PID"
+            alive() { kill -0 "$SERVE_PID" 2>/dev/null; }
+          fi
+          for _ in $(seq 1 15); do alive || break; sleep 1; done
+          if alive; then echo "server still running after $how" >&2; exit 1; fi
+          if curl -fsS -o /dev/null "$URL" 2>/dev/null; then echo "port 8735 still answering" >&2; exit 1; fi
+          echo "- stop: server exited after $how; port 8735 released" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: v0.5.0-webui-${{ matrix.label }}
+          path: |
+            ${{ runner.temp }}/screens/
+            ${{ runner.temp }}/serve.log
+            ${{ runner.temp }}/serve-noinit.log
+            ${{ runner.temp }}/index.html
