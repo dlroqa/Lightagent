@@ -47,6 +47,13 @@ export function ProfilesScreen() {
     void load();
   }, [load]);
 
+  // A profile that no longer exists (deleted here or by the CLI) has no details to show.
+  useEffect(() => {
+    if (catalog && selected && !catalog.profiles.some((profile) => profile.id === selected)) {
+      setSelected(null);
+    }
+  }, [catalog, selected]);
+
   const active = catalog?.active_profile ?? null;
   return (
     <>

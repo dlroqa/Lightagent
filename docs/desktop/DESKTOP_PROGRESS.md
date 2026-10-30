@@ -22,7 +22,7 @@ next update names its run.
 | D3a Real runtime: `serve --desktop` | **CI-validated** (gate passed) | `desktop/d3a-runtime` (stacked on D2) | https://github.com/dlroqa/Lightagent/pull/94 | `130dde98e5cade253b00d69f8e1c499587128e3d` | `130dde9` / tree `ab98037ea76bd083da863dd88c112dc4c7a5f5fc` |
 | D3b Host lifecycle: crash, restart, single instance | **CI-validated** (gate passed) | `desktop/d3b-lifecycle` (stacked on D3a) | https://github.com/dlroqa/Lightagent/pull/95 | `1f0ed6900c166fc1dd32ed3ab38d546119929635` | `1f0ed69` / tree `4d70aaf397fc5d4f50f65906579e46b035a88063` |
 | D4a Profiles: shared operations and API | **CI-validated** (gate passed) | `desktop/d4a-profiles` (stacked on D3b) | https://github.com/dlroqa/Lightagent/pull/96 | `c544d7ae40f8962c287ae39a8234e1665aaf6796` | `c544d7a` / tree `78dcded80caee0555f30a7304d97f9a42a9813e7` |
-| D4b Profile switch, close with runs, Profiles screen | implemented; validation pending | `desktop/d4b-profile-ui` (stacked on D4a) | recorded in the next update | this commit | none yet |
+| D4b Profile switch, close with runs, Profiles screen | `75fa438` CI-validated; the follow-up UI fix (this commit) awaits validation | `desktop/d4b-profile-ui` (stacked on D4a) | https://github.com/dlroqa/Lightagent/pull/97 | this commit (child of `75fa438`) | `75fa438` / tree `1e0f2f5b118c791bf4825c41f64d48c3fbbed51c` |
 | D1 spike (evidence only, never merged) | runner evidence complete | `desktop/d1-spike` | https://github.com/dlroqa/Lightagent/pull/91 | `82896bcd63f3bd6786dcea12b603241e50a3a9ea` | `82896bc` / tree `d9cde26142a63a716a58f35dc33330be0e90d8b7` |
 | D3b–D10 | not started | — | — | — | — |
 
@@ -427,6 +427,14 @@ D3b e2e results at `9dc6783` on the three shells that ran (seconds from the even
   two flows are not claimed as end-to-end verified.
 - **Architecture §7 and §12** now describe the operations seam that was built.
 
+| When (UTC) | Event | Commit / tree | Evidence |
+|---|---|---|---|
+| 2026-10-30 | A first push of request `026` was **empty**: the helper scripts were lost with a session restart, and `base64` failed. Its source-edit run failed with "request names no base commit"; no commit was created and no branch moved | — | source-edit run for `026` (failure) |
+| 2026-10-30 | Edit request `026b-desktop-d4b-profile-ui` on base `c544d7a`; `rustfmt` ran; branch created without force; draft PR #97 | `75fa438` / `1e0f2f5` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41051926559 |
+| 2026-10-30 | `check` on `75fa438`: **success**, including `standalone Web UI render`, where the new Profiles flow passed (invalid id refused, create, details, preset, use, typed-confirmation delete, `default` protected; the store checked after each step) | `75fa438` | https://github.com/dlroqa/Lightagent/actions/runs/41052025410 |
+| 2026-10-30 | `desktop` on `75fa438`: **success** (host fmt, clippy and tests including `switch` unit tests; four-target shells; e2e ready, crash, duplicate and mismatch) | `75fa438` | https://github.com/dlroqa/Lightagent/actions/runs/41052025446 |
+| 2026-10-30 | Reviewing the Profiles screenshot (artifact `lightagent-web-screens`) found two defects the checks did not catch: the row's name and its id·model line ran together, and a deleted profile's details stayed on screen. Both are fixed in this commit; the e2e now asserts that the details disappear | this commit | screenshot `profiles.png`, run 41052025410 |
+
 ## Artifacts and retention
 
 | Artifact | Run | Retention |
@@ -453,6 +461,6 @@ D3b e2e results at `9dc6783` on the three shells that ran (seconds from the even
 
 ## Next
 
-1. Validate D4b, then mark the `cli.profile.*` rows implemented with that evidence.
+1. Validate this D4b follow-up, then mark the `cli.profile.*` rows implemented, citing that evidence and the desktop-switch gap.
 2. D4c: configuration (show, path, get, set) as typed operations, with a lock and an ETag (`409` on a stale write).
 3. D4d–e: provider, models, key entry and endpoint test; workspaces.

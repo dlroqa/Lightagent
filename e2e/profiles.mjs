@@ -44,6 +44,10 @@ export async function checkProfileStates(browser, base, outDir) {
     await confirm.click();
     await page.getByText("Deleted profile 'e2e-work'").waitFor({ timeout: 10000 });
     if (has(await catalog(), "e2e-work")) failures.push("profiles: the deleted profile is still in the store");
+    await page.waitForTimeout(500);
+    if (await page.getByRole("heading", { name: "Profile: e2e-work" }).count()) {
+      failures.push("profiles: the deleted profile's details are still shown");
+    }
 
     // `default` is protected: the UI offers no delete for it.
     const defaultRow = page.getByRole("listitem").filter({ hasText: "default ·" });
