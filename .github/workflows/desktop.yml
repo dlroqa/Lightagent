@@ -10,6 +10,7 @@ name: desktop
 #   D3  the shell bundles the real runtime (`lightagent serve --desktop`),
 #       which must exit when the host goes away; the mock remains only to
 #       prove a version mismatch is refused.
+#   D3b crash detection and one restart, and the single-instance policy.
 
 on:
   pull_request:
@@ -240,17 +241,22 @@ jobs:
           ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
           case "$(uname -s)" in
             Darwin) dir="$(ls -d $r/bundle/macos/*.app)/Contents/MacOS"; wrap=() ;;
-            Linux) dir="$r"; wrap=(xvfb-run -a -s '-screen 0 1280x800x24') ;;
+            # A session bus, as every Linux desktop has: without one GTK waits
+            # about 30 s at start-up (D3a evidence), measured separately below.
+            Linux) dir="$r"; wrap=(xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session --) ;;
             *) dir="$r"; wrap=() ;;
           esac
           app=("$dir/lightagent-desktop$ext")
           # An isolated home: the bundled runtime scaffolds it on first start.
           export LIGHTAGENT_HOME="$RUNNER_TEMP/lightagent-home"
           status=0
-          E2E_REQUIRE_NO_ORPHAN=1 "${wrap[@]}" python desktop/e2e/run.py "$out" ready -- "${app[@]}" || status=1
+          export E2E_REQUIRE_NO_ORPHAN=1
+          for mode in ready crash duplicate; do
+            "${wrap[@]}" python desktop/e2e/run.py "$out" "$mode" -- "${app[@]}" || status=1
+          done
           if [ "$RUNNER_OS" = Linux ]; then
-            # D2 placed the 30 s delay before Tauri setup; test the D-Bus session bus hypothesis.
-            E2E_REQUIRE_NO_ORPHAN=1 "${wrap[@]}" dbus-run-session -- python desktop/e2e/run.py "$out/dbus-session" ready -- "${app[@]}" || true
+            # Residual risk: a Linux session without a D-Bus session bus (recorded, not gated).
+            xvfb-run -a -s '-screen 0 1280x800x24' python desktop/e2e/run.py "$out/no-session-bus" ready -- "${app[@]}" || true
           fi
           # Version mismatch: swap in the mock runtime, which can report another version.
           cp "$dir/lightagent-sidecar$ext" "$RUNNER_TEMP/real-sidecar$ext"
