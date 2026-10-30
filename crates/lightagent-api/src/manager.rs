@@ -350,6 +350,16 @@ pub struct RuntimeModel {
 /// the bounded tool executor. The factory calls [`drive`] with the loop it built.
 #[async_trait]
 pub trait RunFactory: Send + Sync + 'static {
+    /// A profile operation, performed by the embedder that owns the profile
+    /// store (`lightagent serve`); see [`crate::ops`]. Embedders that only
+    /// run agents keep this default.
+    async fn profiles(
+        &self,
+        _request: crate::ops::ProfileRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
     /// Tools currently visible to the factory's active target.
     async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
         let registry = lightagent_tools::ToolRegistry::builtin();
@@ -992,6 +1002,20 @@ impl RunManager {
             }
         }
         active
+    }
+
+    /// The runs that have not reached a terminal state, for an operator's
+    /// view: the desktop app asks before it switches profile or quits.
+    pub async fn active_runs(&self) -> Vec<Arc<RunState>> {
+        self.active().await
+    }
+
+    /// Perform a profile operation through the factory (see [`crate::ops`]).
+    pub async fn profiles(
+        &self,
+        request: crate::ops::ProfileRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.profiles(request).await
     }
 
     /// The active revocable runs an identity change described by `scope`

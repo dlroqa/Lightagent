@@ -64,6 +64,13 @@ async fn inference_for_request(
 
 #[async_trait]
 impl RunFactory for LightweightRunFactory {
+    async fn profiles(
+        &self,
+        request: lightagent_api::ops::ProfileRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        let paths = LightagentPaths::rooted_at(&self.root);
+        crate::ops::Profiles::open(&paths)?.perform(request)
+    }
     async fn tools(&self) -> Result<Vec<ToolDefinition>, String> {
         let paths = LightagentPaths::rooted_at(&self.root);
         let config = ConfigStore::at(&paths).load().map_err(|e| e.to_string())?;

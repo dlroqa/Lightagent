@@ -20,7 +20,8 @@ next update names its run.
 | D1 Architecture and UI specification | **CI-validated** (gate passed) | `desktop/d1-architecture` (stacked on D0) | https://github.com/dlroqa/Lightagent/pull/92 | `350b48b3d0d072213e2028d8b5fb53022d61c340` | `350b48b` / tree `e43ab411568dda5c183963966d09131d21898581` |
 | D2 CI and desktop skeleton | **CI-validated** (gate passed) | `desktop/d2-shell` (stacked on D1) | https://github.com/dlroqa/Lightagent/pull/93 | `003a71c2473f3e18cb503f326ae3fc8a153dcc38` | `003a71c` / tree `d5fabeed9cb429f227689920ab03139c5d921f74` |
 | D3a Real runtime: `serve --desktop` | **CI-validated** (gate passed) | `desktop/d3a-runtime` (stacked on D2) | https://github.com/dlroqa/Lightagent/pull/94 | `130dde98e5cade253b00d69f8e1c499587128e3d` | `130dde9` / tree `ab98037ea76bd083da863dd88c112dc4c7a5f5fc` |
-| D3b Host lifecycle: crash, restart, single instance | implemented; validation pending | `desktop/d3b-lifecycle` (stacked on D3a) | recorded in the next update | this commit | none yet |
+| D3b Host lifecycle: crash, restart, single instance | implemented; `9dc6783` failed only in DMG packaging on macos-x64 (see the D3b log); the fix `1f0ed69` is being validated | `desktop/d3b-lifecycle` (stacked on D3a) | https://github.com/dlroqa/Lightagent/pull/95 | `1f0ed6900c166fc1dd32ed3ab38d546119929635` | `check` passed at `9dc6783`; `desktop` not yet green |
+| D4a Profiles: shared operations and API | implemented; validation pending | `desktop/d4a-profiles` (stacked on D3b) | recorded in the next update | this commit | none yet |
 | D1 spike (evidence only, never merged) | runner evidence complete | `desktop/d1-spike` | https://github.com/dlroqa/Lightagent/pull/91 | `82896bcd63f3bd6786dcea12b603241e50a3a9ea` | `82896bc` / tree `d9cde26142a63a716a58f35dc33330be0e90d8b7` |
 | D3b–D10 | not started | — | — | — | — |
 
@@ -342,6 +343,7 @@ D3a runner evidence with the **real runtime** bundled. Seconds from app spawn:
 | 2026-10-30 | `check` on `9dc6783`: **success** | `9dc6783` | https://github.com/dlroqa/Lightagent/actions/runs/41003068075 |
 | 2026-10-30 | `desktop` on `9dc6783`: **failure**. Inventory, host (fmt, clippy, tests), and the macos-arm64, windows-x64 and linux-x64 shells passed every e2e mode. The **macos-x64 shell failed while packaging, before any test ran**: `hdiutil: create failed - Resource busy` from Tauri's `bundle_dmg.sh` | `9dc6783` | https://github.com/dlroqa/Lightagent/actions/runs/41003067980 (job 123891687408) |
 | 2026-10-30 | Investigation: the failing step is the OS disk-image tool, not desktop code; D3b changed no bundling input; the same step passed on that runner image in D2 and D3a. Mitigation (the next commit): retry **only** that exact `hdiutil` message, at most 3 attempts, with every attempt's log kept as an artifact and each retry reported in the job summary. Any other failure still fails at once | — | — |
+| 2026-10-30 | Fix: edit request `024-desktop-d3b-dmg-retry`; branch fast-forwarded without force | `1f0ed69` / `4d70aaf` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41004969575 |
 
 D3b e2e results at `9dc6783` on the three shells that ran (seconds from the event that started each check):
 
@@ -351,6 +353,36 @@ D3b e2e results at `9dc6783` on the three shells that ran (seconds from the even
 | Windows x64 | 2.84 | 1.04 → 1.04 | 0.75 (UI 0.85) | yes | no |
 | Linux x64 (session bus) | 1.50 | 0.82 → 0.82 | 0.91 (UI 1.21) | yes | no |
 | Linux x64, no session bus (recorded only) | 30.65 | — | — | — | no |
+
+## D4a — Profiles: shared operations and API
+
+- **Shared operations** (`crates/lightagent/src/ops.rs`, `ops::Profiles`):
+  list, show, create, preset, use (an atomic active-profile write), and
+  delete (an active profile hands over to `default`; `default` is
+  protected). Each returns data. `lightagent profile …` now calls them with
+  **unchanged output**, and `lightagent serve` performs the same operations
+  for the API through the existing `RunFactory` seam.
+- **Seam decision:** the operations live in the CLI crate and reach the API
+  through `RunFactory`, not through a new `lightagent-ops` crate. A new crate
+  would change the root `Cargo.lock`, which cannot be regenerated locally under
+  the execution policy, and the CLI crate already owns every store. The
+  architecture's §12 crate name is superseded by this seam (recorded in D4b's
+  architecture update).
+- **API** (operator scope, `Scope::Admin`; every other caller is refused):
+  `GET /runs` (active runs), `POST /profiles`, `GET|DELETE /profiles/{id}`,
+  `PUT /profiles/{id}/active`, `POST /profiles/{id}/preset`. Errors are
+  `{"error":{"category","message"}}` with stable categories (`not_found`
+  404, `invalid` 400, `conflict` 409, `denied` 403, `unavailable` 503,
+  `internal` 500).
+- **Contract:** 29 operations, including `profiles.delete`, which is marked
+  destructive. **Inventory:** the six new API rows; the CLI profile rows now
+  name their shared operation and route. The denominator is unchanged at
+  226: these rows count once the desktop UI exists (D4b).
+- **Evidence test** (`crates/lightagent/tests/desktop_profiles.rs`): the
+  real runtime in desktop mode creates, shows, presets, activates and
+  deletes profiles over HTTP, and `lightagent profile list --json` on the
+  same home reports exactly that state (CLI–desktop equivalence). It also
+  checks the five error categories and the hand-over to `default`.
 
 ## Artifacts and retention
 
@@ -378,6 +410,6 @@ D3b e2e results at `9dc6783` on the three shells that ran (seconds from the even
 
 ## Next
 
-1. Validate the D3b head (`desktop` and `check`) and record it.
-2. D4a: `lightagent-ops` typed operations for profiles (show/create/use/preset/delete, with `GET /runs?state=active`); the profile switch protocol (DESKTOP_ARCHITECTURE.md §7); close with active runs.
-3. D4b–d: config (lock + ETag), provider/models/key entry/endpoint test, workspaces.
+1. Validate D3b `1f0ed69` and D4a, and record both.
+2. D4b: the host's start-new-then-commit profile switch (DESKTOP_ARCHITECTURE.md §7), close with active runs, and the desktop Profiles screen. The `cli.profile.*` rows then count as implemented once tested.
+3. D4c–e: config (lock + ETag), provider/models/key entry/endpoint test, workspaces.
