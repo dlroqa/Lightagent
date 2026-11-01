@@ -22,9 +22,10 @@ next update names its run.
 | D3a Real runtime: `serve --desktop` | **CI-validated** (gate passed) | `desktop/d3a-runtime` (stacked on D2) | https://github.com/dlroqa/Lightagent/pull/94 | `130dde98e5cade253b00d69f8e1c499587128e3d` | `130dde9` / tree `ab98037ea76bd083da863dd88c112dc4c7a5f5fc` |
 | D3b Host lifecycle: crash, restart, single instance | **CI-validated** (gate passed) | `desktop/d3b-lifecycle` (stacked on D3a) | https://github.com/dlroqa/Lightagent/pull/95 | `1f0ed6900c166fc1dd32ed3ab38d546119929635` | `1f0ed69` / tree `4d70aaf397fc5d4f50f65906579e46b035a88063` |
 | D4a Profiles: shared operations and API | **CI-validated** (gate passed) | `desktop/d4a-profiles` (stacked on D3b) | https://github.com/dlroqa/Lightagent/pull/96 | `c544d7ae40f8962c287ae39a8234e1665aaf6796` | `c544d7a` / tree `78dcded80caee0555f30a7304d97f9a42a9813e7` |
-| D4b Profile switch, close with runs, Profiles screen | `cd799a4` passed its first gate; an owner review then found the switch commit was not all or nothing. The correction (this commit) awaits validation; the gate is **reopened** until it passes | `desktop/d4b-profile-ui` (stacked on D4a) | https://github.com/dlroqa/Lightagent/pull/97 | this commit (child of `8c27f93`) | `cd799a4` / tree `0627bd89aae122de6f41add447b3047cfdde01d0` (before the correction) |
+| D4b Profile switch, close with runs, Profiles screen | **CI-validated**: the review correction `5f364e2` passed `check` and `desktop` (see "D4b review") | `desktop/d4b-profile-ui` (stacked on D4a) | https://github.com/dlroqa/Lightagent/pull/97 | `5f364e27470f70b65fb13afe246e9302440ff4f4`, plus documentation-only commits (this one included) | `5f364e2` / tree `355aefbccb02b88d530d8b796b06952dc2272eec` |
+| #98 response actions (outside the stack; see DESKTOP_MERGE_ORDER.md) | `check` passed on #98's head; with D4b plus the adoption commit, `check` and `desktop` passed | `feat/response-action-bar`; evidence `integration/desktop-d4b-response-actions` | https://github.com/dlroqa/Lightagent/pull/98; evidence https://github.com/dlroqa/Lightagent/pull/99 | `987c6dba0f4d536477f87a78d1ecc46d7a90af96`; integration `b4a61c970989b59e382f9dfe2338c01d4f96747f` | `987c6db`; integration `b4a61c9` / tree `4d4cedbf340ea11ba57c23550a556f7dc400dd1d` |
 | D1 spike (evidence only, never merged) | runner evidence complete | `desktop/d1-spike` | https://github.com/dlroqa/Lightagent/pull/91 | `82896bcd63f3bd6786dcea12b603241e50a3a9ea` | `82896bc` / tree `d9cde26142a63a716a58f35dc33330be0e90d8b7` |
-| D3b–D10 | not started | — | — | — | — |
+| D4c–D10 | not started (D4c verified unstarted on 2026-11-01: no branch, PR or edit request) | — | — | — | — |
 
 The latest progress record is the copy on the highest stacked desktop branch.
 Branches lower in the stack keep the record as of their own commit.
@@ -480,6 +481,42 @@ D3b e2e results at `9dc6783` on the three shells that ran (seconds from the even
 - **Still not claimed:** native UI automation of the switch and close
   dialogs (D8). The scenarios above exercise the host's switch path for
   real, but not by clicking the WebView.
+- **Validated:** the correction `5f364e2` (tree `355aefb`, source-edit
+  https://github.com/dlroqa/Lightagent/actions/runs/41139470951) passed
+  `desktop` https://github.com/dlroqa/Lightagent/actions/runs/41139553166.
+  All 7 jobs passed, including `desktop profile switch (linux, e2e hooks)`
+  and the capability inventory. It also passed `check`
+  https://github.com/dlroqa/Lightagent/actions/runs/41139553292. The runs
+  date from 2026-10-30 and are recorded on 2026-11-01. The gate reopened
+  for the correction is met at `5f364e2`.
+
+## #98 response actions and the desktop stack (2026-11-01)
+
+#98 adds an action row under the final Web UI answer and
+`POST /api/lightagent/v1/sessions/{id}/regenerate`. It is outside the
+desktop stack and does **not** replace D4c. Its own record is
+`docs/response-action-bar-progress.md` on its branch, which notes a policy
+departure: its first commits were edited locally and pushed with
+`git push`. Its review commit and everything after went through
+source-edit.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-01 | Review fix (edit request `031`): the saved answer is kept until a regeneration completes with an answer. Session write access is required. New tests cover failure, cancellation, concurrency, a stale id, scopes and ownership | `987c6db` / `d6bd0ad` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41354616741 |
+| 2026-11-01 | `check` on `987c6db`: **success** | `987c6db` | https://github.com/dlroqa/Lightagent/actions/runs/41354677426 |
+| 2026-11-01 | Evidence branch `integration/desktop-d4b-response-actions` created at `5f364e2`, then a server-side merge of `987c6db`, with no conflicts | `3b64f25` / `675266d` | `POST /repos/…/merges` |
+| 2026-11-01 | `check` on `3b64f25`: **success**. `desktop`: **failure**, only in `desktop capability inventory`: the new route is missing from the inventory and from the contract (server and client) | `3b64f25` | https://github.com/dlroqa/Lightagent/actions/runs/41354728282, https://github.com/dlroqa/Lightagent/actions/runs/41354730506 |
+| 2026-11-01 | Adoption (edit request `032`): contract operation `sessions.regenerate`; the host refuses it during a switch (unit-tested); inventory and parity row `api.post.sessions.id.regenerate`, **not-started** on desktop (denominator 226 → 227, implemented 15) | `b4a61c9` / `4d4cedb` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41356132619 |
+| 2026-11-01 | `desktop` on `b4a61c9`: **success**, all 7 jobs. `check`: **success**, all 13 jobs | `b4a61c9` | https://github.com/dlroqa/Lightagent/actions/runs/41356206421, https://github.com/dlroqa/Lightagent/actions/runs/41356206521 (draft PR #99) |
+
+These are not desktop capabilities. None counts toward parity:
+- Ratings are temporary.
+- Sharing sends text.
+- Branching is disabled.
+- There is no previous-answer navigation.
+- The regenerate row is **not-started** on desktop: no native UI automation
+  covers it (D8), and clipboard, Web Share and speech synthesis are
+  unverified in the desktop WebView.
 
 ## Artifacts and retention
 
@@ -511,12 +548,17 @@ D3b e2e results at `9dc6783` on the three shells that ran (seconds from the even
   | 2026-10-30T03:33:59Z | `d0-audit` `bc01426`, `d1-spike` `82896bc` | first sync |
   | 2026-10-30T13:01:04Z | through `d4b-profile-ui` `8c27f93` | D4b first gate |
   | 2026-10-30T22:37:46Z | `d0-audit` `bc01426`, `d1-architecture` `350b48b`, `d2-shell` `003a71c`, `d3a-runtime` `130dde9`, `d3b-lifecycle` `1f0ed69`, `d4a-profiles` `c544d7a`, `d4b-profile-ui` `8c27f93` | baseline re-verified before the D4b review fix; working tree clean |
+  | 2026-11-01T22:27:58Z | `d4b-profile-ui` `5f364e2`, `feat/response-action-bar` `987c6db`, `integration/desktop-d4b-response-actions` `b4a61c9`, `tools/source-edit` `df11eac` (lower slices unchanged) | before recording #98's integration; fetch only, working tree `master` `12582a0` clean |
 
   A documentation commit cannot record itself. Each row names the heads
   that existed when the sync ran. The commit that carries a row is
   backed up by the next sync.
 
 ## Next
+
+#98 does not replace D4c. D4c starts from the D4b head and stays in the
+established order. On 2026-11-01 no other Claude session was running on the
+owner's machine, and no D4c branch, PR or edit request existed.
 
 1. D4c: configuration (show, path, get, set, Jev routing report). Design: one locked read-modify-write with an ETag in `lightagent-core`'s `ConfigStore` (`update(expected_etag, change)`), used by `lightagent config set`, the existing `PUT /settings`, and the new config routes. A stale write gets `409 conflict`, and two processes cannot interleave. Then a Settings advanced editor with typed key and value.
 3. D4d–e: provider, models, key entry and endpoint test; workspaces.
