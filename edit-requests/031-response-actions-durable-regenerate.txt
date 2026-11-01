@@ -1,0 +1,951 @@
+=== base 4b611e5786c741c770e277aaedd6c1f784d1bf99
+=== message
+Keep the saved answer until a regeneration has a new one
+
+Review of #98 found that regenerating removed the saved answer before the
+new run started, so a provider failure or a cancellation lost it. The
+session is now left untouched while the new run works; when that run
+completes with an answer, the old answer and its run record are exchanged
+for the new ones in one save, and otherwise nothing changes. The rollback
+path is gone because there is nothing to roll back.
+
+Replacing an answer also needs session write access now, for every kind of
+caller, as well as run access.
+
+Tests cover a provider failure and a cancellation (the saved answer
+survives, also while the run works), two simultaneous regenerations (one
+admitted), a stale run id after a replacement, the tool history of the new
+answer, scoped keys, and multi-user ownership. The Web UI hides the answer
+being replaced only while its replacement streams, shows it again if the
+run fails, and the browser check covers that failure.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+    /// The session's latest answer, from run `run_id`, is replaced: it is
+    /// removed and the prompt it answered is run again.
+--- with
+    /// The prompt behind the session's latest answer, from run `run_id`, is
+    /// run again; a finished new answer replaces that one.
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+/// Run the prompt behind session `id`'s latest answer again, in place of that
+/// answer. The new run is created, authorized, streamed and saved exactly as
+/// any session run is; only the transcript it continues differs.
+--- with
+/// Run the prompt behind session `id`'s latest answer again, in place of that
+/// answer. The new run is created, authorized and streamed exactly as any
+/// session run is. The saved answer stays until the new run has finished
+/// with an answer; only then are the two exchanged, in one save.
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+    Json(body): Json<RegenerateBody>,
+) -> Response {
+    let run = CreateRunBody {
+--- with
+    Json(body): Json<RegenerateBody>,
+) -> Response {
+    // Replacing a saved answer changes the session, so session write access
+    // is needed as well as the run access `start_run` checks, whoever asks.
+    if let Err(response) = access(
+        &state,
+        &headers,
+        Scope::SessionsWrite,
+        body.profile.as_deref(),
+    ) {
+        return *response;
+    }
+    let run = CreateRunBody {
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+    let mut session_id = None;
+    // A regenerated session as it was before its answer was removed, put
+    // back if the new run is refused.
+    let mut replaced: Option<Session> = None;
+--- with
+    let mut session_id = None;
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+            Turn::Regenerate { run_id } => {
+                let original = session.clone();
+                let Some(prompt) = take_latest_answer(&mut session, run_id) else {
+                    busy.remove(&id);
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(json!({"error": "only the latest answer can be regenerated"})),
+                    )
+                        .into_response();
+                };
+                // The prompt stays saved; the model sees what preceded it,
+                // as it did on the prompt's first run.
+                let mut earlier = session.clone();
+                earlier.messages.pop();
+                history = model_history(&earlier, &prompt, history_limit);
+                profile = Some(session.profile.clone());
+                body.message = prompt;
+                replaced = Some(original);
+            }
+        }
+        if let Err(error) = session_store.save(&session) {
+--- with
+            Turn::Regenerate { run_id } => {
+                // Checked on a copy: nothing is saved until the new run has
+                // finished with an answer (`record_run_in_session`).
+                let mut earlier = session.clone();
+                let Some(prompt) = take_latest_answer(&mut earlier, run_id) else {
+                    busy.remove(&id);
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(json!({"error": "only the latest answer can be regenerated"})),
+                    )
+                        .into_response();
+                };
+                // The model sees what preceded the prompt, as it did on the
+                // prompt's first run.
+                earlier.messages.pop();
+                history = model_history(&earlier, &prompt, history_limit);
+                profile = Some(session.profile.clone());
+                body.message = prompt;
+            }
+        }
+        if matches!(turn, Turn::Append)
+            && let Err(error) = session_store.save(&session)
+        {
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+                            if let Some(original) = &replaced
+                                && let Err(error) = session_store.save(original)
+                            {
+                                eprintln!("could not restore agent session: {error}");
+                            }
+                            if let Some(id) = &session_id {
+--- with
+                            if let Some(id) = &session_id {
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+    if let Some(id) = &session_id {
+        tokio::spawn(record_run_in_session(
+            Arc::clone(&run),
+            session_store.clone(),
+            Arc::clone(&state.busy_sessions),
+            id.clone(),
+        ));
+    }
+--- with
+    if let Some(id) = &session_id {
+        let replacing = match turn {
+            Turn::Append => None,
+            Turn::Regenerate { run_id } => Some(run_id),
+        };
+        tokio::spawn(record_run_in_session(
+            Arc::clone(&run),
+            session_store.clone(),
+            Arc::clone(&state.busy_sessions),
+            id.clone(),
+            replacing,
+        ));
+    }
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+/// Once `run` is terminal, record its events into session `id` and release
+/// the session for its next run.
+async fn record_run_in_session(
+    run: Arc<RunState>,
+    sessions: SessionStore,
+    busy: Arc<Mutex<HashSet<SessionId>>>,
+    id: SessionId,
+) {
+--- with
+/// Once `run` is terminal, record its events into session `id` and release
+/// the session for its next run.
+///
+/// A run `replacing` the answer that saved run wrote is recorded only when it
+/// completed with an answer: then the old answer and its run record are
+/// exchanged for the new ones in one save. A failed, cancelled or empty run
+/// leaves the session exactly as it was, so the saved answer survives.
+async fn record_run_in_session(
+    run: Arc<RunState>,
+    sessions: SessionStore,
+    busy: Arc<Mutex<HashSet<SessionId>>>,
+    id: SessionId,
+    replacing: Option<String>,
+) {
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+                    let stop = stop_reason_of(&events).unwrap_or_else(|| format!("{status:?}"));
+                    session.record_run_events(&events, &stop);
+                    if let Err(error) = sessions.save(&session) {
+                        eprintln!("could not save agent session {id:?}: {error}");
+                    }
+--- with
+                    let stop = stop_reason_of(&events).unwrap_or_else(|| format!("{status:?}"));
+                    let record = match &replacing {
+                        None => true,
+                        Some(old) => {
+                            status == RunStatus::Completed
+                                && answered(&events)
+                                && take_latest_answer(&mut session, old).is_some()
+                        }
+                    };
+                    if record {
+                        session.record_run_events(&events, &stop);
+                        if let Err(error) = sessions.save(&session) {
+                            eprintln!("could not save agent session {id:?}: {error}");
+                        }
+                    }
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+fn stop_reason_of(events: &[AgentEvent]) -> Option<String> {
+--- with
+/// Whether the run's events carry any answer text.
+fn answered(events: &[AgentEvent]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::Content { text } if !text.is_empty()))
+}
+
+fn stop_reason_of(events: &[AgentEvent]) -> Option<String> {
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+            Arc::clone(&busy),
+            id.clone(),
+        ));
+--- with
+            Arc::clone(&busy),
+            id.clone(),
+            None,
+        ));
+=== replace crates/lightagent-api/tests/api.rs
+--- find
+        // A refused regeneration leaves the session free for the next run.
+        assert!(!busy.lock().await.contains(&parsed));
+    })
+    .await
+    .unwrap();
+}
+--- with
+        // A refused regeneration leaves the session free for the next run.
+        assert!(!busy.lock().await.contains(&parsed));
+    })
+    .await
+    .unwrap();
+}
+
+/// How a [`GateFactory`] run ends once it is released.
+#[derive(Clone, Copy)]
+enum GateMode {
+    /// The mock answer: a `datetime.now` call, then text.
+    Answer,
+    /// A provider failure, after part of an answer has streamed.
+    Fail,
+}
+
+/// Holds each run until [`GateFactory::release`], or until it is cancelled,
+/// and counts the runs it was asked for.
+#[derive(Clone)]
+struct GateFactory {
+    gate: Arc<tokio::sync::Semaphore>,
+    mode: Arc<std::sync::Mutex<GateMode>>,
+    started: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl GateFactory {
+    fn new(mode: GateMode) -> Self {
+        Self {
+            gate: Arc::new(tokio::sync::Semaphore::new(0)),
+            mode: Arc::new(std::sync::Mutex::new(mode)),
+            started: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    fn release(&self) {
+        self.gate.add_permits(1);
+    }
+
+    fn set(&self, mode: GateMode) {
+        *self.mode.lock().unwrap() = mode;
+    }
+
+    fn started(&self) -> usize {
+        self.started.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl RunFactory for GateFactory {
+    async fn run(
+        &self,
+        request: StartRun,
+        sink: AgentEventSink,
+        cancel: tokio_util::sync::CancellationToken,
+        decisions: UnboundedReceiver<ApprovalDecision>,
+    ) -> RunStatus {
+        self.started
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mode = *self.mode.lock().unwrap();
+        if matches!(mode, GateMode::Fail) {
+            let _ = sink.send(lightagent_core::AgentEvent::Content {
+                text: "partial words".into(),
+            });
+        }
+        tokio::select! {
+            permit = self.gate.acquire() => {
+                if let Ok(permit) = permit {
+                    permit.forget();
+                }
+            }
+            () = cancel.cancelled() => return RunStatus::Cancelled,
+        }
+        match mode {
+            GateMode::Answer => MockFactory.run(request, sink, cancel, decisions).await,
+            GateMode::Fail => RunStatus::Failed,
+        }
+    }
+}
+
+/// A session holding one answered prompt, saved as a finished run with one
+/// tool call, as a real run would have left it.
+fn answered_session(store: &SessionStore) -> lightagent_store::Session {
+    let mut session = lightagent_store::Session::new("default", "Answered");
+    session.push_message(lightagent_store::StoredMessage::new(
+        "user",
+        "what time is it",
+    ));
+    session.push_message(lightagent_store::StoredMessage::new(
+        "assistant",
+        "the old answer",
+    ));
+    let now = std::time::SystemTime::now();
+    session.push_run(lightagent_store::RunRecord {
+        run_id: "run-old".into(),
+        started_at: now,
+        ended_at: Some(now),
+        stop_reason: Some("EndTurn".into()),
+        tools: vec![lightagent_store::ToolHistoryEntry {
+            id: "call_old".into(),
+            tool: "datetime.now".into(),
+            arguments_preview: "{}".into(),
+            result_excerpt: "earlier".into(),
+            source: None,
+            truncated: false,
+            outcome: "ok".into(),
+            duration_ms: None,
+        }],
+    });
+    store.save(&session).unwrap();
+    session
+}
+
+async fn regenerate(
+    addr: &str,
+    id: &str,
+    run_id: &str,
+    headers: &[(&str, &str)],
+) -> (u16, String) {
+    let payload = serde_json::json!({ "run_id": run_id }).to_string();
+    http(
+        addr,
+        "POST",
+        &format!("/api/lightagent/v1/sessions/{id}/regenerate"),
+        headers,
+        Some(&payload),
+    )
+    .await
+}
+
+/// Wait until session `id` is free for another run.
+async fn released(
+    busy: &tokio::sync::Mutex<std::collections::HashSet<lightagent_store::SessionId>>,
+    id: &lightagent_store::SessionId,
+) {
+    while busy.lock().await.contains(id) {
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test]
+async fn a_failed_or_cancelled_regeneration_keeps_the_saved_answer() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut state = app_state(AuthConfig::open());
+        let factory = GateFactory::new(GateMode::Fail);
+        state.manager = RunManager::new(Arc::new(factory.clone()));
+        let store = state.sessions.clone();
+        let busy = Arc::clone(&state.busy_sessions);
+        let saved = answered_session(&store);
+        let id = saved.id.as_str().to_owned();
+        let addr = spawn_server(state).await;
+
+        // A provider failure after part of a new answer streamed.
+        let (status, body) = regenerate(&addr, &id, "run-old", &[]).await;
+        assert_eq!(status, 202, "{body}");
+        while factory.started() < 1 {
+            tokio::task::yield_now().await;
+        }
+        // While the new run works, the saved answer is untouched on disk.
+        assert_eq!(store.load(&saved.id).unwrap(), saved);
+        factory.release();
+        released(&busy, &saved.id).await;
+        assert_eq!(store.load(&saved.id).unwrap(), saved);
+
+        // A cancelled regeneration, likewise.
+        let (status, body) = regenerate(&addr, &id, "run-old", &[]).await;
+        assert_eq!(status, 202, "{body}");
+        let run = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (status, _) = http(
+            &addr,
+            "POST",
+            &format!("/api/lightagent/v1/runs/{run}/cancel"),
+            &[],
+            Some("{}"),
+        )
+        .await;
+        assert_eq!(status, 200);
+        released(&busy, &saved.id).await;
+        assert_eq!(store.load(&saved.id).unwrap(), saved);
+
+        // The kept answer can still be regenerated; a finished run replaces it.
+        factory.set(GateMode::Answer);
+        let (status, body) = regenerate(&addr, &id, "run-old", &[]).await;
+        assert_eq!(status, 202, "{body}");
+        factory.release();
+        released(&busy, &saved.id).await;
+        let after = store.load(&saved.id).unwrap();
+        let roles: Vec<&str> = after.messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, ["user", "assistant"]);
+        assert_eq!(after.messages[0].content, "what time is it");
+        assert_eq!(after.messages[1].content, "The time is now.");
+        assert_eq!(after.runs.len(), 1);
+        assert_ne!(after.runs[0].run_id, "run-old");
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_regenerations_admit_one_and_a_replaced_run_id_is_stale() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut state = app_state(AuthConfig::open());
+        let factory = GateFactory::new(GateMode::Answer);
+        state.manager = RunManager::new(Arc::new(factory.clone()));
+        let store = state.sessions.clone();
+        let busy = Arc::clone(&state.busy_sessions);
+        let saved = answered_session(&store);
+        let id = saved.id.as_str().to_owned();
+        let addr = spawn_server(state).await;
+
+        let (first, second) = tokio::join!(
+            regenerate(&addr, &id, "run-old", &[]),
+            regenerate(&addr, &id, "run-old", &[]),
+        );
+        let mut statuses = [first.0, second.0];
+        statuses.sort_unstable();
+        assert_eq!(statuses, [202, 409], "{first:?} {second:?}");
+        factory.release();
+        released(&busy, &saved.id).await;
+        assert_eq!(factory.started(), 1);
+
+        // The prompt is kept once and the answer replaced; the tool history
+        // is the new run's alone.
+        let after = store.load(&saved.id).unwrap();
+        let roles: Vec<&str> = after.messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, ["user", "assistant"]);
+        assert_eq!(after.messages[0].content, "what time is it");
+        assert_eq!(after.messages[1].content, "The time is now.");
+        assert_eq!(after.runs.len(), 1);
+        let tools: Vec<(&str, &str, &str)> = after.runs[0]
+            .tools
+            .iter()
+            .map(|tool| (tool.id.as_str(), tool.tool.as_str(), tool.outcome.as_str()))
+            .collect();
+        assert_eq!(tools, [("call_1", "datetime.now", "ok")]);
+
+        // The replaced run's id no longer names the latest answer.
+        let (status, _) = regenerate(&addr, &id, "run-old", &[]).await;
+        assert_eq!(status, 409);
+        assert_eq!(store.load(&saved.id).unwrap(), after);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn regenerating_needs_session_write_access_as_well_as_run_access() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for (scopes, expected) in [
+            (vec![Scope::RunsWrite], 403),
+            (vec![Scope::SessionsWrite], 403),
+            (vec![Scope::RunsWrite, Scope::SessionsWrite], 202),
+        ] {
+            let label = format!("{scopes:?}");
+            let state = app_state(AuthConfig::keyed("secret", scopes));
+            let store = state.sessions.clone();
+            let busy = Arc::clone(&state.busy_sessions);
+            let saved = answered_session(&store);
+            let addr = spawn_server(state).await;
+            let (status, body) = regenerate(
+                &addr,
+                saved.id.as_str(),
+                "run-old",
+                &[("Authorization", "Bearer secret")],
+            )
+            .await;
+            assert_eq!(status, expected, "{label}: {body}");
+            released(&busy, &saved.id).await;
+            if expected == 403 {
+                assert_eq!(store.load(&saved.id).unwrap(), saved, "{label}");
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+=== replace crates/lightagent-api/tests/profile_scoped.rs
+--- find
+// 5. Profile enumeration lists only accessible profiles.
+--- with
+// Regenerating replaces an answer only for the session's owner, with run and
+// session write access on its profile; anyone else changes nothing.
+#[tokio::test]
+async fn regenerating_needs_ownership_and_write_permission() {
+    let world = world().await;
+    let mine = create(&world, &world.alice, "alice-bot").await;
+    let body = json!({"message": "hi", "profile": "alice-bot", "session_id": mine}).to_string();
+    let (status, body) = call(
+        &world.addr,
+        "POST",
+        "/api/lightagent/v1/runs",
+        &world.alice,
+        Some(&body),
+    )
+    .await;
+    assert_eq!(status, 202, "{body}");
+    let store =
+        SessionStore::at_profile(&ProfileStore::new(&world.home.0).handle(&profile("alice-bot")));
+    let id = lightagent_store::SessionId::parse(&mine).unwrap();
+    let answered = loop {
+        let session = store.load(&id).unwrap();
+        if session.runs.len() == 1 {
+            break session;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    let path = format!("{SESSIONS}/{mine}/regenerate");
+    let request =
+        |bot: &str| json!({"run_id": answered.runs[0].run_id, "profile": bot}).to_string();
+    for (token, bot, expected) in [
+        (&world.bob, "bob-bot", 404),
+        (&world.bob, "alice-bot", 403),
+        (&world.alice_ro, "alice-bot", 403),
+    ] {
+        let (status, body) = call(&world.addr, "POST", &path, token, Some(&request(bot))).await;
+        assert_eq!(status, expected, "{bot}: {body}");
+        assert_eq!(store.load(&id).unwrap(), answered, "{bot}: untouched");
+    }
+
+    // Alice, on her own session: accepted once her first run has released
+    // it, and the answer is replaced.
+    let mut accepted = None;
+    for _ in 0..100 {
+        let reply = call(
+            &world.addr,
+            "POST",
+            &path,
+            &world.alice,
+            Some(&request("alice-bot")),
+        )
+        .await;
+        if reply.0 == 409 && reply.1.contains("active run") {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            continue;
+        }
+        accepted = Some(reply);
+        break;
+    }
+    let (status, body) = accepted.unwrap();
+    assert_eq!(status, 202, "{body}");
+    let replaced = loop {
+        let session = store.load(&id).unwrap();
+        if session.updated_at != answered.updated_at {
+            break session;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    let roles: Vec<&str> = replaced
+        .messages
+        .iter()
+        .map(|m| m.role.as_str())
+        .collect();
+    assert_eq!(roles, ["user", "assistant"]);
+    assert_eq!(replaced.runs.len(), 1);
+    assert_eq!(world.runs.lock().unwrap().len(), 2);
+}
+
+// 5. Profile enumeration lists only accessible profiles.
+=== replace frontend/src/screens/Agent.tsx
+--- find
+  const [busy, setBusy] = useState(false);
+--- with
+  const [busy, setBusy] = useState(false);
+  // The regeneration this page started: its run, and the saved run whose
+  // answer it would replace.
+  const [replacing, setReplacing] = useState<{ sessionId: string; runId: string; savedRunId: string } | null>(null);
+=== replace frontend/src/screens/Agent.tsx
+--- find
+  // The action row sits under the final answer only: a saved assistant
+  // message that ends the transcript, with no run streaming or queued.
+  const finalAnswerIndex = !running && !showLiveAnswer && steering.length === 0 &&
+    session?.messages[session.messages.length - 1]?.role === "assistant"
+    ? session.messages.length - 1
+    : -1;
+--- with
+  // The server keeps the saved answer until a regeneration has a new one.
+  // While the new one streams, or until it is saved, the old one is hidden.
+  // If the run fails, is cancelled or brings no answer, the old one is still
+  // the saved answer: it is shown again and the partial new one is not.
+  const regenerating = replacing !== null && replacing.runId === runId &&
+    replacing.sessionId === session?.id;
+  const keptAfterRegeneration = regenerating && done &&
+    (failure !== null || cancelled || answer.trim().length === 0);
+  const liveAnswerShown = showLiveAnswer && answer.length > 0 && !keptAfterRegeneration;
+  const hiddenAnswerIndex = regenerating && !keptAfterRegeneration &&
+    session?.runs[session.runs.length - 1]?.run_id === replacing?.savedRunId &&
+    session?.messages[session.messages.length - 1]?.role === "assistant"
+    ? session.messages.length - 1
+    : -1;
+  // The action row sits under the final answer only: a saved assistant
+  // message that ends the transcript, with no run streaming or queued.
+  const finalAnswerIndex = !running && !liveAnswerShown && hiddenAnswerIndex < 0 &&
+    steering.length === 0 &&
+    session?.messages[session.messages.length - 1]?.role === "assistant"
+    ? session.messages.length - 1
+    : -1;
+=== replace frontend/src/screens/Agent.tsx
+--- find
+      const run = await agentApi.regenerate(id, latest.run_id, selectedModel || undefined);
+      // The server has removed the old answer; drop it here too rather than
+      // showing it above the new one until the session reloads.
+      setSession((current) => current?.id === id
+        ? { ...current, messages: current.messages.slice(0, -1), runs: current.runs.slice(0, -1) }
+        : current);
+      backgroundRuns.current.set(id, run.id);
+--- with
+      const run = await agentApi.regenerate(id, latest.run_id, selectedModel || undefined);
+      setReplacing({ sessionId: id, runId: run.id, savedRunId: latest.run_id });
+      backgroundRuns.current.set(id, run.id);
+=== replace frontend/src/screens/Agent.tsx
+--- find
+                  {session.messages.map((message, index) => (
+--- with
+                  {session.messages.map((message, index) => index === hiddenAnswerIndex ? null : (
+=== replace frontend/src/screens/Agent.tsx
+--- find
+                  {showLiveAnswer && answer && (
+--- with
+                  {liveAnswerShown && (
+=== replace frontend/src/screens/Agent.tsx
+--- find
+                  {failure && <div className="notice notice--danger" style={{ marginTop: 10 }}>{failure}</div>}
+--- with
+                  {failure && <div className="notice notice--danger" style={{ marginTop: 10 }}>{failure}</div>}
+                  {keptAfterRegeneration && (
+                    <div className="notice notice--info" role="status" style={{ marginTop: 10 }}>
+                      The new answer was not finished, so the previous answer is kept.
+                    </div>
+                  )}
+=== replace e2e/actions.mjs
+--- find
+/** The scripted transcript for each stage of the regeneration. */
+function transcript(stage) {
+  const earlier = [message("user", FIRST_PROMPT), message("assistant", FIRST_ANSWER), message("user", PROMPT)];
+  switch (stage) {
+    case "answered": return { messages: [...earlier, message("assistant", OLD_ANSWER)], runs: [run(FIRST_RUN), run(OLD_RUN)] };
+    case "regenerating": return { messages: earlier, runs: [run(FIRST_RUN)] };
+    default: return { messages: [...earlier, message("assistant", NEW_ANSWER)], runs: [run(FIRST_RUN), run(SAVED_NEW_RUN)] };
+  }
+}
+--- with
+const FAILED_RUN = "run-00000000000000000000000000000a04";
+const PARTIAL = "Half of an answer that never";
+
+/**
+ * The scripted transcript. Like the real server, it keeps the saved answer
+ * while a regeneration runs and exchanges it only once the new run has
+ * finished with an answer; a failed run leaves it as it was.
+ */
+function transcript(answer, savedRun) {
+  const earlier = [message("user", FIRST_PROMPT), message("assistant", FIRST_ANSWER), message("user", PROMPT)];
+  return { messages: [...earlier, message("assistant", answer)], runs: [run(FIRST_RUN), run(savedRun)] };
+}
+=== replace e2e/actions.mjs
+--- find
+  let stage = "answered";
+  let release;
+  const released = new Promise((resolve) => { release = resolve; });
+  const server = createServer(async (request, response) => {
+--- with
+  // Each Try again the page sends is answered by the next plan: the first
+  // finishes with a new answer, the second fails part-way.
+  const plans = [
+    { api: NEW_RUN, saved: SAVED_NEW_RUN, ok: true },
+    { api: FAILED_RUN, ok: false },
+  ].map((plan) => {
+    let release;
+    const released = new Promise((resolve) => { release = resolve; });
+    return { ...plan, release, released, done: false };
+  });
+  let answer = OLD_ANSWER;
+  let savedRun = OLD_RUN;
+  const server = createServer(async (request, response) => {
+=== replace e2e/actions.mjs
+--- find
+        return json(200, { ...real, ...transcript(stage) });
+      }
+      if (request.method === "POST" && url.pathname === `${sessionPath}/regenerate`) {
+        record.regenerations.push(JSON.parse(payload.toString("utf8")));
+        stage = "regenerating";
+        return json(202, { id: NEW_RUN, status: "running", session_id: id });
+      }
+      if (url.pathname === `/api/lightagent/v1/runs/${NEW_RUN}/events`) {
+        response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+        response.write("retry: 300\n\n");
+        response.write(frame(0, "run.started", { run: NEW_RUN, parent: null }));
+        response.write(frame(1, "model.delta", { content: NEW_ANSWER }));
+        // Held open until the test has looked at the streaming state.
+        await released;
+        stage = "regenerated";
+        response.write(frame(2, "turn.completed", {}));
+        response.write(frame(3, "run.completed", { reason: "EndTurn", complete: true }));
+        return response.end();
+      }
+      if (request.method === "GET" && url.pathname === `/api/lightagent/v1/runs/${NEW_RUN}`) {
+        const finished = stage === "regenerated";
+        return json(200, {
+          id: NEW_RUN, status: finished ? "completed" : "running", events: finished ? 4 : 2,
+          pending_approval: null, stop_reason: finished ? "EndTurn" : null,
+        });
+      }
+--- with
+        return json(200, { ...real, ...transcript(answer, savedRun) });
+      }
+      if (request.method === "POST" && url.pathname === `${sessionPath}/regenerate`) {
+        const plan = plans[record.regenerations.length];
+        record.regenerations.push(JSON.parse(payload.toString("utf8")));
+        if (!plan) return json(409, { error: "only the latest answer can be regenerated" });
+        return json(202, { id: plan.api, status: "running", session_id: id });
+      }
+      const streamed = plans.find((plan) => url.pathname === `/api/lightagent/v1/runs/${plan.api}/events`);
+      if (streamed) {
+        response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+        response.write("retry: 300\n\n");
+        response.write(frame(0, "run.started", { run: streamed.api, parent: null }));
+        response.write(frame(1, "model.delta", { content: streamed.ok ? NEW_ANSWER : PARTIAL }));
+        // Held open until the test has looked at the streaming state.
+        await streamed.released;
+        if (streamed.ok) {
+          answer = NEW_ANSWER;
+          savedRun = streamed.saved;
+          response.write(frame(2, "turn.completed", {}));
+          response.write(frame(3, "run.completed", { reason: "EndTurn", complete: true }));
+        } else {
+          response.write(frame(2, "run.failed", { reason: "Error", complete: false }));
+        }
+        streamed.done = true;
+        return response.end();
+      }
+      const polled = plans.find((plan) => url.pathname === `/api/lightagent/v1/runs/${plan.api}`);
+      if (request.method === "GET" && polled) {
+        const status = !polled.done ? "running" : polled.ok ? "completed" : "failed";
+        return json(200, {
+          id: polled.api, status, events: polled.done ? 4 : 2,
+          pending_approval: null, stop_reason: !polled.done ? null : polled.ok ? "EndTurn" : "Error",
+        });
+      }
+=== replace e2e/actions.mjs
+--- find
+  return { server, origin: `http://127.0.0.1:${server.address().port}`, release };
+--- with
+  return {
+    server,
+    origin: `http://127.0.0.1:${server.address().port}`,
+    release: (index) => plans[index]?.release(),
+    releaseAll: () => plans.forEach((plan) => plan.release()),
+  };
+=== replace e2e/actions.mjs
+--- find
+    proxy.release();
+    await toolbar.waitFor({ timeout: 15000 });
+--- with
+    proxy.release(0);
+    await toolbar.waitFor({ timeout: 15000 });
+=== replace e2e/actions.mjs
+--- find
+    await assertOnlyUnderFinalAnswer(page, failures, "after try again");
+--- with
+    await assertOnlyUnderFinalAnswer(page, failures, "after try again");
+
+    // A failed Try again: the server keeps the saved answer, so the page
+    // shows it again, says so, and drops the partial new one.
+    await toolbar.getByRole("button", { name: "Try again" }).click();
+    await page.waitForFunction(() => !document.querySelector('[role="toolbar"][aria-label="Response actions"]'), null, { timeout: 5000 })
+      .catch(() => failures.push("actions: the row stayed while a failing answer streamed"));
+    if ((await page.evaluate(() => document.body.innerText)).includes(NEW_ANSWER)) {
+      failures.push("actions: the answer being replaced stayed on screen");
+    }
+    proxy.release(1);
+    await page.getByText("the previous answer is kept", { exact: false }).waitFor({ timeout: 15000 });
+    await toolbar.waitFor({ timeout: 15000 });
+    await page.waitForTimeout(500);
+    const kept = await page.evaluate(() => document.body.innerText);
+    if (record.regenerations.length !== 2 || record.regenerations[1]?.run_id !== SAVED_NEW_RUN) {
+      failures.push(`actions: second regenerate requests ${JSON.stringify(record.regenerations)}`);
+    }
+    if (kept.split(NEW_ANSWER).length - 1 !== 1) failures.push("actions: the kept answer is not shown exactly once");
+    if (kept.includes(PARTIAL)) failures.push("actions: the failed run's partial answer is shown");
+    if (kept.split(PROMPT).length - 1 !== 1) failures.push("actions: the prompt is not shown exactly once after a failure");
+    await assertOnlyUnderFinalAnswer(page, failures, "after a failed try again");
+    await page.screenshot({ path: `${dir}/regeneration-failed-dark.png` });
+=== replace e2e/actions.mjs
+--- find
+    proxy.release();
+    await context.close();
+--- with
+    proxy.releaseAll();
+    await context.close();
+=== replace CHANGELOG.md
+--- find
+  of the same prompt. The prompt is kept once; the old answer and its run
+  record are removed; the new run is authorized, streamed and saved like any
+  session run. Anything but the latest answer is refused with 409, and a
+  refused run restores the session.
+--- with
+  of the same prompt. The prompt is kept once. The saved answer stays until
+  the new run completes with an answer; then the answer and its run record
+  are exchanged in one save. A failed, cancelled or empty run changes
+  nothing. It needs session write access as well as run access, and
+  anything but the latest answer is refused with 409.
+=== replace docs/response-action-bar-progress.md
+--- find
+Building, rendering and testing run on GitHub Actions only. The local
+checkout was used to edit files, read source and keep this record. No build,
+test, formatter, linter or browser was run locally.
+--- with
+Building, formatting, rendering and testing run on GitHub Actions only. No
+build, test, formatter, linter or browser was run locally.
+
+## How the edits were made
+
+- **`13f2ecc` to `4b611e5`** (the implementation, three CI fixes and the CI
+  records) were edited in a local git worktree with an editor and
+  text-splicing scripts, committed locally, and pushed with `git push`. The
+  task that started #98 allowed local editing. The repository's standing
+  policy (docs/desktop/DESKTOP_CLAUDE_PROMPT.md on the desktop branches)
+  does not: implementation edits go through GitHub-native APIs or the
+  GitHub-hosted `source-edit` workflow. **This is a departure from that
+  policy.** It is recorded here, and the commits are not rewritten.
+- **From the review commit on**, edits are edit requests on
+  `tools/source-edit`, submitted through the GitHub contents API. The
+  `source-edit` workflow applies each one on a GitHub-hosted runner, runs
+  `cargo fmt` on the touched Rust files, and creates the commit through the
+  git data API. The branch is then fast-forwarded through the refs API,
+  never forced. The request text was composed in the submitting API call;
+  no local source file was edited.
+=== replace docs/response-action-bar-progress.md
+--- find
+| Try again | `POST /api/lightagent/v1/sessions/{id}/regenerate` with the latest run's id, through `agentApi.regenerate`. The new run streams through the existing `useRunEvents` path, the old answer is dropped from view at once, and the saved session replaces it when the run ends. |
+--- with
+| Try again | `POST /api/lightagent/v1/sessions/{id}/regenerate` with the latest saved run's id, through `agentApi.regenerate`. The new run streams through the existing `useRunEvents` path. While it streams, the answer it would replace is hidden. If the run completes with an answer, the saved session holds the new answer. If it fails, is cancelled or brings nothing, the old answer is shown again, because the server kept it, with a notice that it was kept. |
+=== replace docs/response-action-bar-progress.md
+--- find
+- Under the session lock it checks three things: `run_id` is the session's
+  latest run, that run has finished, and the transcript ends with a user
+  prompt and an assistant answer. Otherwise it answers 409 and changes
+  nothing.
+- It removes the answer and its run record, keeps the prompt once, and runs
+  the prompt again with the same history its first run had. The normal
+  recorder saves the new answer.
+- If a supervised (multi-user) start is refused, the original session is
+  saved back.
+--- with
+- It also needs **session write access** for every caller, checked before
+  anything else (`access(…, SessionsWrite, profile)`). A scoped key needs
+  both `runs_write` and `sessions_write`. In multi-user mode, a user needs
+  both on the session's profile and must own the session. Another user's,
+  an unowned or a missing session is answered 404.
+- Under the session lock (the busy-session set) it checks three things, on
+  a copy of the session: `run_id` is the session's latest run, that run has
+  finished, and the transcript ends with a user prompt and an assistant
+  answer. Otherwise it answers 409. **Nothing is written at this point.**
+- The prompt is run again with the history its first run had: the
+  transcript before the prompt, without the old answer's run record.
+- The session stays locked from validation until the run is recorded, so
+  no second run or regeneration can start on it. When the run ends,
+  `record_run_in_session` reloads the session. It exchanges the old answer
+  and its run record for the new ones, in **one atomic save** (temporary
+  file then rename), only if the run **completed with answer text** and
+  the old answer is still the latest. A failed, cancelled, refused or empty
+  run writes nothing, so the saved answer survives. That includes a server
+  stopping mid-run, because the file was never changed.
+=== replace docs/response-action-bar-progress.md
+--- find
+## Limitations and follow-ups
+--- with
+## Review of the regenerate path (2026-11-01)
+
+| Requirement | Finding at `4b611e5` | Now |
+| --- | --- | --- |
+| Authorization and ownership before any change | Ownership and scope checks ran before the session was touched. In single-user and operator mode, only `runs_write` was required. | Session write access is required for every caller as well (`regenerating_needs_session_write_access_as_well_as_run_access`, and the multi-user `regenerating_needs_ownership_and_write_permission`). |
+| One session lock over validation, change, admission and rollback | The busy-session entry covered all of them. | Unchanged, and there is no longer any change or rollback before admission. |
+| A failed regeneration cannot destroy the saved answer | **Defect.** The answer and its run record were removed and saved before the run started. A provider failure, a cancellation or a server stop lost them for good. Only a refused supervised start restored them. | Fixed. Nothing is written until the run completes with an answer (`a_failed_or_cancelled_regeneration_keeps_the_saved_answer` checks the file during the run and after a failure and a cancellation). |
+| Simultaneous regeneration | Not tested. | One request is admitted and the other gets 409; the factory runs once (`concurrent_regenerations_admit_one_and_a_replaced_run_id_is_stale`). |
+| Stale run ids | An earlier run and an unknown run were tested. | Also the replaced run's id after a replacement. |
+| Run-start refusal | Restored by a save in the refusal branch, which was untested. | Nothing is written before admission, so a refusal changes nothing; the restore code is removed. A supervised refusal at start is a revocation race, and no test reproduces it deterministically. This is stated, not claimed as tested. |
+| Tool history valid, prompt not duplicated | The prompt was kept once, and tool history was not checked. | The new run record carries only the new run's tool calls (`call_1`, `datetime.now`, `ok`), and the old record (`call_old`) is gone. The prompt appears once in every test, and in the browser check after success and after failure. |
+
+**Remaining gaps:**
+- A concurrent `PATCH /sessions/{id}` (rename, pin, archive), or an
+  attachment upload, can still overwrite a run's saved result. Those
+  routes do not take the session lock. This lost update existed before
+  #98 and affects every session run, not only regeneration.
+- The desktop app needs the contract entry described under "Desktop".
+
+## Limitations and follow-ups
+=== replace docs/response-action-bar-progress.md
+--- find
+- Branch in new chat needs an API that copies a session's transcript up to a
+  message into a new session. Until then the row is disabled.
+--- with
+These are deliberately deferred. None of them counts as a completed Web or
+desktop capability:
+
+- **Branching is disabled.** Branch in new chat needs an API that copies a
+  session's transcript up to a message into a new session. Until then the
+  row is disabled.
+=== replace docs/response-action-bar-progress.md
+--- find
+- Ratings are not persisted or sent anywhere, because there is no feedback
+  endpoint.
+- Regenerate replaces only the latest answer, which is what the UI offers. A
+  regenerated answer's earlier version is not kept, so there is no version
+  switcher.
+- Sharing sends the answer's text. The Web UI has no public link for one
+  answer to share instead.
+--- with
+- **Ratings are temporary.** They live in the page only and are neither
+  persisted nor sent, because there is no feedback endpoint.
+- **There is no previous-answer navigation.** Regenerate replaces only the
+  latest answer. A replaced answer is not kept, so there is no version
+  switcher.
+- **Sharing sends text.** The Web UI has no public link to one answer.
+
+## Desktop
+
+The Lightagent Desktop stack (#90–#97, unmerged) forwards UI requests only
+when they are listed in `docs/desktop/contract/operations.json`. While a
+profile switch runs, it also refuses requests that start a run
+(`desktop/src-tauri/src/switch.rs`). #98 is based on `master`, which has
+neither, so it cannot change them itself. The integration evidence lives on
+a separate branch; see the merge-order entry in the desktop progress record.
+=== end
