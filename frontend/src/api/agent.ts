@@ -164,6 +164,10 @@ export interface AgentSession {
 }
 
 export interface LightagentSettings {
+  /** The config revision these values were read at; responses only. */
+  revision?: string;
+  /** Sent on a save: refused with 409 unless the config is still at it. */
+  expected_revision?: string;
   max_turns: number;
   max_tool_calls: number;
   wall_clock_secs: number | null;
@@ -353,6 +357,20 @@ async function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+/** `lightagent config path|show`: where the config lives, its revision, and its redacted content. */
+export interface ConfigView {
+  path: string;
+  revision: string;
+  config: Record<string, unknown>;
+}
+
+/** One config key as `lightagent config get` reads it (secrets redacted). */
+export interface ConfigValue {
+  key: string;
+  value: string;
+  revision: string;
+}
+
 export const agentApi = {
   tools: () => jsonRequest<{ tools: ToolInfo[] }>("/tools"),
   skills: () => jsonRequest<{ skills: SkillInfo[] }>("/skills"),
@@ -362,6 +380,14 @@ export const agentApi = {
     jsonRequest<LightagentSettings>("/settings", {
       method: "PUT",
       body: JSON.stringify(settings),
+    }),
+  config: () => jsonRequest<ConfigView>("/config"),
+  configKey: (key: string) => jsonRequest<ConfigValue>(`/config/${encodeURIComponent(key)}`),
+  /** `lightagent config set`; refused with 409 when `expectedRevision` is stale. */
+  setConfigKey: (key: string, value: string, expectedRevision?: string) =>
+    jsonRequest<ConfigValue>(`/config/${encodeURIComponent(key)}`, {
+      method: "PUT",
+      body: JSON.stringify({ value, expected_revision: expectedRevision }),
     }),
   provider: () => jsonRequest<ProviderCapabilities>("/provider"),
   jevStatus: () => jsonRequest<JevStatus>("/jev"),

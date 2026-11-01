@@ -1,0 +1,54 @@
+/* The Settings screen's advanced configuration editor. */
+.config-editor {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-2) var(--space-3);
+  align-items: center;
+  margin-top: var(--space-3);
+}
+
+.config-editor input {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-quiet);
+  border-radius: var(--radius-sm);
+  background: var(--surface-solid);
+  color: var(--text);
+  font: inherit;
+}
+
+.config-editor__actions {
+  grid-column: 2;
+  display: flex;
+  gap: var(--space-2);
+}
+
+.config-editor__error {
+  margin: var(--space-2) 0 0;
+  color: var(--danger);
+}
+
+.config-editor__show {
+  margin-top: var(--space-3);
+}
+
+.config-editor__show pre {
+  max-height: 320px;
+  overflow: auto;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 560px) {
+  .config-editor {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .config-editor__actions {
+    grid-column: 1;
+  }
+}

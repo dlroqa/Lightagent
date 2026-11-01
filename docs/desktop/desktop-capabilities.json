@@ -93,11 +93,11 @@
   }
  ],
  "summary": {
-  "total_rows": 314,
+  "total_rows": 317,
   "by_kind": {
    "acp-method": 8,
    "alias": 2,
-   "api": 32,
+   "api": 35,
    "argument": 47,
    "command": 86,
    "config": 14,
@@ -112,7 +112,7 @@
    "value": 6
   },
   "by_applicability": {
-   "applicable": 278,
+   "applicable": 281,
    "host-owned": 7,
    "not-applicable": 29
   },
@@ -7123,6 +7123,78 @@
    "backend": "api: POST /sessions/{id}/attachments",
    "permission": "local-operator",
    "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.config",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/config",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "The config's path, revision and redacted content (lightagent config path/show)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/config"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: GET /config",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.config.key",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/config/{key}",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "One config key, redacted as lightagent config get reads it",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/config/{key}"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: GET /config/{key}",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.put.config.key",
+   "kind": "api",
+   "surface": "PUT /api/lightagent/v1/config/{key}",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "Set one config key under the config lock, as lightagent config set; 409 when expected_revision is stale",
+   "tree_key": null,
+   "tokens": [
+    "PUT /api/lightagent/v1/config/{key}"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: PUT /config/{key}",
+   "permission": "local-operator",
+   "data_scope": "installation",
    "desktop_status": "not-started",
    "verification": null,
    "tested_sha": null,

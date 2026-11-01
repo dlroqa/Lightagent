@@ -1387,14 +1387,16 @@ pub async fn run(
                             crate::markdown::install_onboarding(&path, &profile_dir)
                         });
                         if result.is_ok() {
-                            let config_store = ConfigStore::at(&paths);
-                            let mut updated = config_store.load().map_err(|e| e.to_string())?;
-                            updated.extensions.enabled = true;
-                            updated
-                                .extensions
-                                .disabled
-                                .retain(|name| name != "user-onboarding");
-                            config_store.save(&updated).map_err(|e| e.to_string())?;
+                            ConfigStore::at(&paths)
+                                .update(None, |updated| {
+                                    updated.extensions.enabled = true;
+                                    updated
+                                        .extensions
+                                        .disabled
+                                        .retain(|name| name != "user-onboarding");
+                                    Ok::<(), String>(())
+                                })
+                                .map_err(|e| e.to_string())?;
                             println!(
                                 "Installed profile onboarding from the dropped Markdown file."
                             );

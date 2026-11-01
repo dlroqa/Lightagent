@@ -15,6 +15,7 @@ import {
 import { Switch } from "../components/Bits";
 import { JevClassificationSection } from "../components/Jev";
 import { Card } from "../components/Card";
+import { ConfigEditorCard } from "../components/ConfigEditor";
 import { TopBar } from "../components/Shell";
 import { usePoll } from "../hooks/usePoll";
 import { usePreferences } from "../state/preferences";
@@ -39,12 +40,20 @@ export function SettingsScreen() {
     setSaving(true);
     setMessage(null);
     try {
-      const saved = await agentApi.saveSettings({ ...current, ...patch });
+      // Saved against the revision these values were loaded at: a change
+      // made meanwhile elsewhere is never silently overwritten.
+      const saved = await agentApi.saveSettings({ ...current, ...patch, expected_revision: current.revision });
       setCurrent(saved);
       setMessage("Saved. New runs use these settings.");
       jev.refresh();
     } catch (cause) {
-      setMessage(cause instanceof Error ? cause.message : String(cause));
+      const text = cause instanceof Error ? cause.message : String(cause);
+      if (text.startsWith("409:")) {
+        setMessage("These settings were changed elsewhere (another window, the CLI or the desktop app), so nothing was saved. The current values are shown now; apply your change again.");
+        settings.refresh();
+      } else {
+        setMessage(text);
+      }
     } finally {
       setSaving(false);
     }
@@ -209,6 +218,8 @@ export function SettingsScreen() {
               endpoint={value?.open_terminal} disabled={!value || saving}
               onSave={(open_terminal) => persist({ open_terminal })} />
           </Card>
+
+          <ConfigEditorCard />
 
           <Card title="Appearance">
             <div className="field" style={{ marginBottom: 16 }}>

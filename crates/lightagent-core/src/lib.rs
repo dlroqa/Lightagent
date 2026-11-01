@@ -19,6 +19,7 @@
 
 pub mod allocation;
 pub mod config;
+pub mod config_keys;
 pub mod credentials;
 pub mod event;
 pub mod generation;
@@ -42,13 +43,13 @@ pub use allocation::{
 };
 pub use config::{
     AdaptiveAllocation, AgentConfig, AllowedWorkflow, ApprovalPolicy, Config, ConfigError,
-    ConfigStore, DUCKDUCKGO_SEARCH_ENDPOINT, ExtensionsConfig, GenerationConfig,
+    ConfigRevision, ConfigStore, DUCKDUCKGO_SEARCH_ENDPOINT, ExtensionsConfig, GenerationConfig,
     GenerationOverride, GithubActionsConfig, InferenceConfig, InfinityConfig,
     JevClassificationConfig, JevClassificationMode, JevConfig, JevRoutingGrant, JevRoutingInput,
     JevRoutingPermission, McpConfig, McpServerEntry, OpenTerminalConfig, PlatformConfig,
     PlatformEndpointConfig, QdrantConfig, SavedProvider, SecretLookup, SecretRef, SecurityConfig,
-    SubagentsConfig, ToolNameMode, ToolPolicyMode, ToolsConfig, WebConfig, WebSearchConfig,
-    WorkerResolution,
+    SubagentsConfig, ToolNameMode, ToolPolicyMode, ToolsConfig, UpdateError, WebConfig,
+    WebSearchConfig, WorkerResolution,
 };
 pub use event::{
     AgentEvent, ClassificationDiagnostics, SpecialistRestriction, SpecialistSelection,

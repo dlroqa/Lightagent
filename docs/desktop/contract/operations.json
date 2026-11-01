@@ -80,6 +80,21 @@
    "path": "/api/lightagent/v1/settings"
   },
   {
+   "id": "config.show",
+   "method": "GET",
+   "path": "/api/lightagent/v1/config"
+  },
+  {
+   "id": "config.get",
+   "method": "GET",
+   "path": "/api/lightagent/v1/config/{key}"
+  },
+  {
+   "id": "config.set",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/config/{key}"
+  },
+  {
    "id": "runs.create",
    "method": "POST",
    "path": "/api/lightagent/v1/runs"
