@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { ArrowLeft, Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Search, Settings, SquarePen, Wrench } from "lucide-react";
+import { ArrowLeft, Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Search, Settings, SquarePen, Users, Wrench } from "lucide-react";
 
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { usePreferences } from "../state/preferences";
@@ -83,6 +83,7 @@ export function Shell() {
           </div>
           <div className="menu__divider" />
           <MenuItem onClick={() => { setAccountOpen(false); navigate("/tools"); }}><span className="session-menu__item"><Wrench size={17} /> Tools</span></MenuItem>
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/profiles"); }}><span className="session-menu__item"><Users size={17} /> Profiles</span></MenuItem>
           <MenuItem onClick={() => { setAccountOpen(false); navigate("/settings"); }}><span className="session-menu__item"><Settings size={17} /> Settings</span></MenuItem>
         </Menu>
 

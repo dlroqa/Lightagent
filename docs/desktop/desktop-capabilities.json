@@ -117,7 +117,7 @@
    "not-applicable": 29
   },
   "parity_denominator": 226,
-  "parity_implemented": 0,
+  "parity_implemented": 15,
   "pending_decision_rows": 0,
   "not_counted_duplicates": 26
  },
@@ -821,10 +821,10 @@
    "backend": "ops::Profiles::list; api: GET /profiles",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Profiles screen list (UI e2e: e2e/profiles.mjs in the standalone Web UI render job); API = CLI (crates/lightagent/tests/desktop_profiles.rs (all four platforms))",
+   "tested_sha": "cd799a44e767f9b845aa5b079775373ed6a64c71",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41057799814 (check, attempt 2; attempt 1 failed only on a GitHub action-resolution error in an unrelated job); https://github.com/dlroqa/Lightagent/actions/runs/41057799963 (desktop)"
   },
   {
    "id": "cli.profile.show",
@@ -843,10 +843,10 @@
    "backend": "ops::Profiles::show; api: GET /profiles/{id}",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Details card (UI e2e); API = CLI (crates/lightagent/tests/desktop_profiles.rs (all four platforms))",
+   "tested_sha": "cd799a44e767f9b845aa5b079775373ed6a64c71",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41057799814 (check, attempt 2; attempt 1 failed only on a GitHub action-resolution error in an unrelated job); https://github.com/dlroqa/Lightagent/actions/runs/41057799963 (desktop)"
   },
   {
    "id": "cli.profile.show.arg.id",
@@ -865,10 +865,10 @@
    "backend": "ops::Profiles::show; api: GET /profiles/{id}",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Details card (UI e2e); API = CLI (crates/lightagent/tests/desktop_profiles.rs (all four platforms))",
+   "tested_sha": "cd799a44e767f9b845aa5b079775373ed6a64c71",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41057799814 (check, attempt 2; attempt 1 failed only on a GitHub action-resolution error in an unrelated job); https://github.com/dlroqa/Lightagent/actions/runs/41057799963 (desktop)"
   },
   {
    "id": "cli.profile.create",
@@ -887,10 +887,10 @@
    "backend": "ops::Profiles::create; api: POST /profiles",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Create form with id rule and errors (UI e2e); API = CLI (crates/lightagent/tests/desktop_profiles.rs (all four platforms))",
+   "tested_sha": "cd799a44e767f9b845aa5b079775373ed6a64c71",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41057799814 (check, attempt 2; attempt 1 failed only on a GitHub action-resolution error in an unrelated job); https://github.com/dlroqa/Lightagent/actions/runs/41057799963 (desktop)"
   },
   {
    "id": "cli.profile.create.arg.id",
@@ -909,10 +909,10 @@
    "backend": "ops::Profiles::create; api: POST /profiles",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Create form with id rule and errors (UI e2e); API = CLI (crates/lightagent/tests/desktop_profiles.rs (all four platforms))",
+   "tested_sha": "cd799a44e767f9b845aa5b079775373ed6a64c71",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41057799814 (check, attempt 2; attempt 1 failed only on a GitHub action-resolution error in an unrelated job); https://github.com/dlroqa/Lightagent/actions/runs/41057799963 (desktop)"
   },
   {
    "id": "cli.profile.create.opt.name",
@@ -931,10 +931,10 @@
    "backend": "ops::Profiles::create; api: POST /profiles",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Create form with id rule and errors (UI e2e); API = CLI (crates/lightagent/tests/desktop_profiles.rs (all four platforms))",
+   "tested_sha": "cd799a44e767f9b845aa5b079775373ed6a64c71",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41057799814 (check, attempt 2; attempt 1 failed only on a GitHub action-resolution error in an unrelated job); https://github.com/dlroqa/Lightagent/actions/runs/41057799963 (desktop)"
   },
   {
    "id": "cli.profile.create.opt.persona",
@@ -953,10 +953,10 @@
    "backend": "ops::Profiles::create; api: POST /profiles",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Create form with id rule and errors (UI e2e); API = CLI (crates/lightagent/tests/desktop_profiles.rs (all four platforms))",
+   "tested_sha": "cd799a44e767f9b845aa5b079775373ed6a64c71",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41057799814 (check, attempt 2; attempt 1 failed only on a GitHub action-resolution error in an unrelated job); https://github.com/dlroqa/Lightagent/actions/runs/41057799963 (desktop)"
   },
   {
    "id": "cli.profile.create.opt.model",
@@ -975,10 +975,10 @@
    "backend": "ops::Profiles::create; api: POST /profiles",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Create form with id rule and errors (UI e2e); API = CLI (crates/lightagent/tests/desktop_profiles.rs (all four platforms))",
+   "tested_sha": "cd799a44e767f9b845aa5b079775373ed6a64c71",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41057799814 (check, attempt 2; attempt 1 failed only on a GitHub action-resolution error in an unrelated job); https://github.com/dlroqa/Lightagent/actions/runs/41057799963 (desktop)"
   },
   {
    "id": "cli.profile.use",
@@ -997,10 +997,10 @@
    "backend": "ops::Profiles::use_profile; api: PUT /profiles/{id}/active (+ host sidecar switch, D4b)",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Browser: Use sets the CLI's active profile (UI e2e; API = CLI, crates/lightagent/tests/desktop_profiles.rs (all four platforms)). Desktop: runtime switch (switch.rs) unit-tested and compiled on four targets; native end-to-end automation pending D8 (not claimed)",
+   "tested_sha": "cd799a44e767f9b845aa5b079775373ed6a64c71",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41057799814 (check, attempt 2; attempt 1 failed only on a GitHub action-resolution error in an unrelated job); https://github.com/dlroqa/Lightagent/actions/runs/41057799963 (desktop)"
   },
   {
    "id": "cli.profile.use.arg.id",
@@ -1019,10 +1019,10 @@
    "backend": "ops::Profiles::use_profile; api: PUT /profiles/{id}/active (+ host sidecar switch, D4b)",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Browser: Use sets the CLI's active profile (UI e2e; API = CLI, crates/lightagent/tests/desktop_profiles.rs (all four platforms)). Desktop: runtime switch (switch.rs) unit-tested and compiled on four targets; native end-to-end automation pending D8 (not claimed)",
+   "tested_sha": "cd799a44e767f9b845aa5b079775373ed6a64c71",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41057799814 (check, attempt 2; attempt 1 failed only on a GitHub action-resolution error in an unrelated job); https://github.com/dlroqa/Lightagent/actions/runs/41057799963 (desktop)"
   },
   {
    "id": "cli.profile.preset",
@@ -1041,10 +1041,10 @@
    "backend": "ops::Profiles::preset; api: POST /profiles/{id}/preset",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Preset form (UI e2e); API = CLI (crates/lightagent/tests/desktop_profiles.rs (all four platforms))",
+   "tested_sha": "cd799a44e767f9b845aa5b079775373ed6a64c71",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41057799814 (check, attempt 2; attempt 1 failed only on a GitHub action-resolution error in an unrelated job); https://github.com/dlroqa/Lightagent/actions/runs/41057799963 (desktop)"
   },
   {
    "id": "cli.profile.preset.arg.id",
@@ -1063,10 +1063,10 @@
    "backend": "ops::Profiles::preset; api: POST /profiles/{id}/preset",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Preset form (UI e2e); API = CLI (crates/lightagent/tests/desktop_profiles.rs (all four platforms))",
+   "tested_sha": "cd799a44e767f9b845aa5b079775373ed6a64c71",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41057799814 (check, attempt 2; attempt 1 failed only on a GitHub action-resolution error in an unrelated job); https://github.com/dlroqa/Lightagent/actions/runs/41057799963 (desktop)"
   },
   {
    "id": "cli.profile.preset.arg.preset",
@@ -1085,10 +1085,10 @@
    "backend": "ops::Profiles::preset; api: POST /profiles/{id}/preset",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Preset form (UI e2e); API = CLI (crates/lightagent/tests/desktop_profiles.rs (all four platforms))",
+   "tested_sha": "cd799a44e767f9b845aa5b079775373ed6a64c71",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41057799814 (check, attempt 2; attempt 1 failed only on a GitHub action-resolution error in an unrelated job); https://github.com/dlroqa/Lightagent/actions/runs/41057799963 (desktop)"
   },
   {
    "id": "cli.profile.delete",
@@ -1107,10 +1107,10 @@
    "backend": "ops::Profiles::delete; api: DELETE /profiles/{id}",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Typed-confirmation delete, default protected (UI e2e); API = CLI (crates/lightagent/tests/desktop_profiles.rs (all four platforms))",
+   "tested_sha": "cd799a44e767f9b845aa5b079775373ed6a64c71",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41057799814 (check, attempt 2; attempt 1 failed only on a GitHub action-resolution error in an unrelated job); https://github.com/dlroqa/Lightagent/actions/runs/41057799963 (desktop)"
   },
   {
    "id": "cli.profile.delete.arg.id",
@@ -1129,10 +1129,10 @@
    "backend": "ops::Profiles::delete; api: DELETE /profiles/{id}",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Typed-confirmation delete, default protected (UI e2e); API = CLI (crates/lightagent/tests/desktop_profiles.rs (all four platforms))",
+   "tested_sha": "cd799a44e767f9b845aa5b079775373ed6a64c71",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41057799814 (check, attempt 2; attempt 1 failed only on a GitHub action-resolution error in an unrelated job); https://github.com/dlroqa/Lightagent/actions/runs/41057799963 (desktop)"
   },
   {
    "id": "cli.extensions",

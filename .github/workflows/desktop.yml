@@ -11,6 +11,8 @@ name: desktop
 #       which must exit when the host goes away; the mock remains only to
 #       prove a version mismatch is refused.
 #   D3b crash detection and one restart, and the single-instance policy.
+#   D4b profile switch: all-or-nothing commit, failure paths and concurrency,
+#       through a Linux test build with `--features e2e-hooks` (never bundled).
 
 on:
   pull_request:
@@ -298,3 +300,59 @@ jobs:
             desktop/target/release/bundle/nsis/*.exe
             desktop/target/release/bundle/**/*.deb
             desktop/target/release/bundle/**/*.AppImage
+
+  switch:
+    name: desktop profile switch (linux, e2e hooks)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Record the tested commit
+        run: echo "- head \`$(git rev-parse HEAD)\` tree \`$(git rev-parse 'HEAD^{tree}')\`" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Linux system packages (webview, display, session bus)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf xvfb dbus-x11
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            desktop -> target
+          key: desktop-switch
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install psutil==7.1.0
+      - name: Desktop frontend
+        run: |
+          npm ci --prefix frontend
+          npm run build:desktop --prefix frontend
+      - name: The runtime, and the test-only host (e2e hooks; never bundled)
+        run: |
+          cargo build --locked -p lightagent
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          mkdir -p desktop/src-tauri/binaries
+          cp target/debug/lightagent "desktop/src-tauri/binaries/lightagent-sidecar-$triple"
+          (cd desktop && npx --yes "$TAURI_CLI" icon ../icon/LightagentLogo.png -o src-tauri/icons)
+          cargo clippy --locked --manifest-path desktop/Cargo.toml -p lightagent-desktop --features e2e-hooks -- -D warnings
+          cargo build --locked --manifest-path desktop/Cargo.toml -p lightagent-desktop --features "e2e-hooks tauri/custom-protocol"
+          [ -x desktop/target/debug/lightagent-sidecar ] || cp target/debug/lightagent desktop/target/debug/lightagent-sidecar
+      - name: Switch scenarios (ok, start failure, commit failure, concurrent)
+        run: |
+          export LIGHTAGENT_HOME="$RUNNER_TEMP/switch-home"
+          xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- \
+            python desktop/e2e/switch.py "$RUNNER_TEMP/switch-e2e" target/debug/lightagent -- desktop/target/debug/lightagent-desktop
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: desktop-switch-e2e
+          retention-days: 30
+          path: ${{ runner.temp }}/switch-e2e/
