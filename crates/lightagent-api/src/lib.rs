@@ -37,8 +37,9 @@ use lightagent_core::identity::{
     authorize_capability, revoked_message,
 };
 use lightagent_core::{
-    AgentEvent, ApprovalPolicy, ConfigStore, LightagentPaths, PlatformEndpointConfig, ProfileId,
-    ProfileStore, SecretRef, SkillStore, skill_dirs,
+    AgentEvent, ApprovalPolicy, ConfigError, ConfigRevision, ConfigStore, LightagentPaths,
+    PlatformEndpointConfig, ProfileId, ProfileStore, SecretRef, SkillStore, UpdateError,
+    skill_dirs,
 };
 use lightagent_store::{Session, SessionId, SessionStore, StoredMessage, model_history};
 use serde::{Deserialize, Serialize};
@@ -103,6 +104,11 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/lightagent/v1/settings",
             get(get_settings).put(save_settings),
+        )
+        .route("/api/lightagent/v1/config", get(get_config))
+        .route(
+            "/api/lightagent/v1/config/{key}",
+            get(get_config_key).put(set_config_key),
         )
         .route("/api/lightagent/v1/runs", get(list_runs).post(create_run))
         .route("/api/lightagent/v1/runs/{id}", get(get_run))
@@ -947,6 +953,13 @@ struct UiSettings {
     qdrant: UiQdrantSettings,
     infinity: UiInfinitySettings,
     open_terminal: UiOpenTerminalSettings,
+    /// The config revision these values were read at; responses only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revision: Option<String>,
+    /// On a save: refused with 409 unless the config is still at this
+    /// revision. Absent, the save applies to the config as it is now.
+    #[serde(default, skip_serializing)]
+    expected_revision: Option<String>,
 }
 
 fn ui_settings(config: &lightagent_core::Config) -> UiSettings {
@@ -1007,6 +1020,8 @@ fn ui_settings(config: &lightagent_core::Config) -> UiSettings {
             poll_interval_ms: Some(config.platform.open_terminal.poll_interval_ms),
             max_output_bytes: Some(config.platform.open_terminal.max_output_bytes),
         },
+        revision: None,
+        expected_revision: None,
     }
 }
 
@@ -1074,11 +1089,12 @@ async fn get_settings(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
     let Some(store) = &state.config_store else {
         return internal("Lightagent settings are unavailable in this embedding");
     };
-    let config = match store.load() {
-        Ok(config) => config,
+    let (config, revision) = match store.load_with_revision() {
+        Ok(loaded) => loaded,
         Err(error) => return internal(&error.to_string()),
     };
     let mut settings = ui_settings(&config);
+    settings.revision = Some(revision.as_str().to_owned());
     match active_profile(store, &state.session_profile) {
         Ok(Some((_, profile))) => {
             settings.approval_policy = profile.approval_policy;
@@ -1104,17 +1120,58 @@ async fn save_settings(
     let Some(store) = &state.config_store else {
         return internal("Lightagent settings are unavailable in this embedding");
     };
-    let mut config = match store.load() {
-        Ok(config) => config,
-        Err(error) => return internal(&error.to_string()),
-    };
-    config.agent.max_turns = settings.max_turns;
-    config.agent.max_tool_calls = settings.max_tool_calls;
-    config.agent.wall_clock_secs = settings.wall_clock_secs;
     let profile = match active_profile(store, &state.session_profile) {
         Ok(profile) => profile,
         Err(error) => return internal(&error),
     };
+    let expected = settings
+        .expected_revision
+        .as_deref()
+        .map(ConfigRevision::parse);
+    // Kept for the active profile, which is written after the config.
+    let (approval_policy, max_turns, max_tool_calls, wall_clock_secs) = (
+        settings.approval_policy,
+        settings.max_turns,
+        settings.max_tool_calls,
+        settings.wall_clock_secs,
+    );
+    // One locked read-modify-write: the values apply to the config as it is
+    // now, so a concurrent change to any other key is kept.
+    let updated = store.update(expected.as_ref(), |config| {
+        apply_ui_settings(config, store, settings)
+    });
+    let revision = match updated {
+        Ok(((), revision)) => revision,
+        Err(UpdateError::Change(error)) => return internal(&error),
+        Err(UpdateError::Store(error)) => return config_error(error),
+    };
+    if let Some((profiles, mut profile)) = profile {
+        profile.approval_policy = approval_policy;
+        profile.limits.max_turns = max_turns;
+        profile.limits.max_tool_calls = max_tool_calls;
+        profile.limits.wall_clock_secs = wall_clock_secs;
+        if let Err(error) = profiles.save(&profile) {
+            return internal(&error.to_string());
+        }
+    }
+    let config = match store.load() {
+        Ok(config) => config,
+        Err(error) => return internal(&error.to_string()),
+    };
+    let mut saved = ui_settings(&config);
+    saved.revision = Some(revision.as_str().to_owned());
+    Json(saved).into_response()
+}
+
+/// Apply the Settings screen's values to `config`.
+fn apply_ui_settings(
+    config: &mut lightagent_core::Config,
+    store: &ConfigStore,
+    settings: UiSettings,
+) -> Result<(), String> {
+    config.agent.max_turns = settings.max_turns;
+    config.agent.max_tool_calls = settings.max_tool_calls;
+    config.agent.wall_clock_secs = settings.wall_clock_secs;
     config.security.approval_policy = settings.approval_policy;
     config.web.enabled = settings.web_enabled;
     config.tools.enabled = settings.filesystem_tools_enabled;
@@ -1161,9 +1218,7 @@ async fn save_settings(
     if let Some(profiles) = settings.jev.routing_allowed_profiles {
         config.platform.jev.routing_allowed_profiles = profiles;
     }
-    if let Err(error) = apply_jev_api_key(&mut config, store, settings.jev.api_key) {
-        return internal(&error);
-    }
+    apply_jev_api_key(config, store, settings.jev.api_key)?;
     apply_platform_endpoint(
         &mut config.platform.qdrant.endpoint,
         &settings.qdrant.endpoint,
@@ -1197,21 +1252,92 @@ async fn save_settings(
     if let Some(value) = settings.open_terminal.max_output_bytes {
         config.platform.open_terminal.max_output_bytes = value;
     }
-    if let Err(error) = config.validate() {
-        return bad_request(&error.to_string());
+    Ok(())
+}
+
+/// A key write, as `lightagent config set <key> <value>` takes it.
+#[derive(Deserialize)]
+struct ConfigWrite {
+    value: String,
+    /// When set, refused with 409 unless the config is still at it.
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// `lightagent config path` and `show`: where the config lives, its
+/// revision, and its content with secrets redacted.
+async fn get_config(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
     }
-    if let Some((profiles, mut profile)) = profile {
-        profile.approval_policy = settings.approval_policy;
-        profile.limits.max_turns = settings.max_turns;
-        profile.limits.max_tool_calls = settings.max_tool_calls;
-        profile.limits.wall_clock_secs = settings.wall_clock_secs;
-        if let Err(error) = profiles.save(&profile) {
-            return internal(&error.to_string());
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => Json(json!({
+            "path": store.path().display().to_string(),
+            "revision": revision.as_str(),
+            "config": config.redacted_json(),
+        }))
+        .into_response(),
+        Err(error) => config_error(error),
+    }
+}
+
+/// `lightagent config get <key>`: the same keys, the same redaction.
+async fn get_config_key(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => match lightagent_core::config_keys::get_key(&config, &key) {
+            Some(value) => {
+                Json(json!({ "key": key, "value": value, "revision": revision.as_str() }))
+                    .into_response()
+            }
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("unknown or unreadable config key '{key}'") })),
+            )
+                .into_response(),
+        },
+        Err(error) => config_error(error),
+    }
+}
+
+/// `lightagent config set <key> <value>`, the same locked write. With
+/// `expected_revision`, only when nothing changed since it was read.
+async fn set_config_key(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+    Json(body): Json<ConfigWrite>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let expected = body.expected_revision.as_deref().map(ConfigRevision::parse);
+    let written = store.update(expected.as_ref(), |config| {
+        lightagent_core::config_keys::set_key(config, &key, &body.value)?;
+        Ok::<_, String>(lightagent_core::config_keys::get_key(config, &key).unwrap_or_default())
+    });
+    match written {
+        Ok((value, revision)) => {
+            Json(json!({ "key": key, "value": value, "revision": revision.as_str() }))
+                .into_response()
         }
-    }
-    match store.save(&config) {
-        Ok(()) => Json(ui_settings(&config)).into_response(),
-        Err(error) => internal(&error.to_string()),
+        Err(UpdateError::Change(message)) => bad_request(&message),
+        Err(UpdateError::Store(error)) => config_error(error),
     }
 }
 
@@ -1796,6 +1922,26 @@ async fn upload_attachment(
 
 fn bad_request(message: &str) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({"error": message}))).into_response()
+}
+
+/// The answer for a config write that did not happen: an invalid result is
+/// the caller's (400), a stale revision is a conflict that names the current
+/// one (409), and a lock held elsewhere is temporary (503).
+fn config_error(error: ConfigError) -> Response {
+    match &error {
+        ConfigError::Invalid(_) => bad_request(&error.to_string()),
+        ConfigError::Conflict { current, .. } => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": error.to_string(), "revision": current })),
+        )
+            .into_response(),
+        ConfigError::Busy { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+        _ => internal(&error.to_string()),
+    }
 }
 
 async fn get_session(

@@ -5,15 +5,15 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 ## Coverage
 
 - Denominator: 226
-- Implemented: 15 of 226
+- Implemented: 22 of 226
 - Pending D1 decision rows: 0
-- Total rows: 314
+- Total rows: 317
 
 | Kind | Rows |
 |---|---|
 | acp-method | 8 |
 | alias | 2 |
-| api | 32 |
+| api | 35 |
 | argument | 47 |
 | command | 86 |
 | config | 14 |
@@ -29,7 +29,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 
 | Applicability | Rows |
 |---|---|
-| applicable | 278 |
+| applicable | 281 |
 | host-owned | 7 |
 | not-applicable | 29 |
 
@@ -63,6 +63,13 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.profile.preset.arg.preset` | `cd799a4` | Preset form (UI e2e); API = CLI (crates/lightagent/tests/desktop_profiles.rs (all four platforms)) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41057799814), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41057799963) |
 | `cli.profile.delete` | `cd799a4` | Typed-confirmation delete, default protected (UI e2e); API = CLI (crates/lightagent/tests/desktop_profiles.rs (all four platforms)) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41057799814), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41057799963) |
 | `cli.profile.delete.arg.id` | `cd799a4` | Typed-confirmation delete, default protected (UI e2e); API = CLI (crates/lightagent/tests/desktop_profiles.rs (all four platforms)) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41057799814), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41057799963) |
+| `cli.config.show` | `0e46892` | Advanced configuration card shows the redacted config (UI e2e: e2e/config.mjs in the standalone Web UI render job); API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41359276745), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41359276774) |
+| `cli.config.path` | `0e46892` | Advanced configuration card shows the config path (UI e2e); GET /config path = `config path` (API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms)); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41359276745), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41359276774) |
+| `cli.config.get` | `0e46892` | Advanced configuration card Read (UI e2e); API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms), including the unknown-key error; desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41359276745), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41359276774) |
+| `cli.config.get.arg.key` | `0e46892` | Advanced configuration card Key field (UI e2e); API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41359276745), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41359276774) |
+| `cli.config.set` | `0e46892` | Advanced configuration card Set: write, stale 409 with nothing written, invalid value refused (UI e2e); API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms); one cross-process lock (desktop_config.rs, core config tests); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41359276745), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41359276774) |
+| `cli.config.set.arg.key` | `0e46892` | Advanced configuration card Key field (UI e2e); API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41359276745), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41359276774) |
+| `cli.config.set.arg.value` | `0e46892` | Advanced configuration card Value field, invalid value refused with the CLI's words (UI e2e; API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms)); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41359276745), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41359276774) |
 
 ## What the drift check cannot detect automatically
 
@@ -81,10 +88,10 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.init` | `lightagent init` | applicable | yes | First-run wizard | extract: lib.rs init() | not-started | `crates/lightagent/src/lib.rs:73` |
 | `cli.setup` | `lightagent setup` | applicable | no | Settings (sections) | extract: setup.rs run_with_io() section operations | not-started | `crates/lightagent/src/lib.rs:88; crates/lightagent/src/setup.rs:15` |
 | `cli.config` | `lightagent config` | applicable | dup→`cli.config.show` | Settings/Diagnostics | extract: lib.rs config_cmd() | not-started | `crates/lightagent/src/lib.rs:94` |
-| `cli.config.show` | `lightagent config show` | applicable | yes | Settings/Diagnostics: effective configuration | api: GET /settings (subset); extract: config_cmd(Show) | not-started | `crates/lightagent/src/lib.rs:195` |
-| `cli.config.path` | `lightagent config path` | applicable | yes | Settings/Diagnostics | extract: config_cmd(Path) | not-started | `crates/lightagent/src/lib.rs:197` |
-| `cli.config.get` | `lightagent config get` | applicable | yes | Settings: advanced key editor (typed) | extract: config_cmd(Get) | not-started | `crates/lightagent/src/lib.rs:199` |
-| `cli.config.set` | `lightagent config set` | applicable | yes | Settings: advanced key editor (typed, validated) | api: PUT /settings (subset); extract: config_cmd(Set) | not-started | `crates/lightagent/src/lib.rs:201` |
+| `cli.config.show` | `lightagent config show` | applicable | yes | Settings/Diagnostics: effective configuration | api: GET /settings (subset); extract: config_cmd(Show) | implemented | `crates/lightagent/src/lib.rs:195` |
+| `cli.config.path` | `lightagent config path` | applicable | yes | Settings/Diagnostics | extract: config_cmd(Path) | implemented | `crates/lightagent/src/lib.rs:197` |
+| `cli.config.get` | `lightagent config get` | applicable | yes | Settings: advanced key editor (typed) | extract: config_cmd(Get) | implemented | `crates/lightagent/src/lib.rs:199` |
+| `cli.config.set` | `lightagent config set` | applicable | yes | Settings: advanced key editor (typed, validated) | api: PUT /settings (subset); extract: config_cmd(Set) | implemented | `crates/lightagent/src/lib.rs:201` |
 | `cli.config.jev-routing-report` | `lightagent config jev-routing-report` | applicable | yes | Settings/Diagnostics: Jev routing report | extract: jev_routing_report() | not-started | `crates/lightagent/src/lib.rs:203` |
 | `cli.models` | `lightagent models` | applicable | yes | Providers/Models | extract: lib.rs models(); api: GET /provider (capabilities only) | not-started | `crates/lightagent/src/lib.rs:99` |
 | `cli.tools` | `lightagent tools` | applicable | dup→`cli.tools.list` | Tools/MCP/Extensions | api: GET /tools | not-started | `crates/lightagent/src/lib.rs:101` |
@@ -231,9 +238,9 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | ID | Surface | Applicability | Counts | UI path | Backend | Status | Source |
 |---|---|---|---|---|---|---|---|
 | `cli.setup.arg.section` | `lightagent setup <section>` | applicable | no | Settings (sections) — input 'section' | extract: setup.rs run_with_io() section operations | not-started | `crates/lightagent/src/lib.rs:88; crates/lightagent/src/setup.rs:15` |
-| `cli.config.get.arg.key` | `lightagent config get <key>` | applicable | yes | Settings: advanced key editor (typed) — input 'key' | extract: config_cmd(Get) | not-started | `crates/lightagent/src/lib.rs:199` |
-| `cli.config.set.arg.key` | `lightagent config set <key>` | applicable | yes | Settings: advanced key editor (typed, validated) — input 'key' | api: PUT /settings (subset); extract: config_cmd(Set) | not-started | `crates/lightagent/src/lib.rs:201` |
-| `cli.config.set.arg.value` | `lightagent config set <value>` | applicable | yes | Settings: advanced key editor (typed, validated) — input 'value' | api: PUT /settings (subset); extract: config_cmd(Set) | not-started | `crates/lightagent/src/lib.rs:201` |
+| `cli.config.get.arg.key` | `lightagent config get <key>` | applicable | yes | Settings: advanced key editor (typed) — input 'key' | extract: config_cmd(Get) | implemented | `crates/lightagent/src/lib.rs:199` |
+| `cli.config.set.arg.key` | `lightagent config set <key>` | applicable | yes | Settings: advanced key editor (typed, validated) — input 'key' | api: PUT /settings (subset); extract: config_cmd(Set) | implemented | `crates/lightagent/src/lib.rs:201` |
+| `cli.config.set.arg.value` | `lightagent config set <value>` | applicable | yes | Settings: advanced key editor (typed, validated) — input 'value' | api: PUT /settings (subset); extract: config_cmd(Set) | implemented | `crates/lightagent/src/lib.rs:201` |
 | `cli.profile.show.arg.id` | `lightagent profile show <id>` | applicable | yes | Profiles/Workspaces: detail — input 'id' | ops::Profiles::show; api: GET /profiles/{id} | implemented | `crates/lightagent/src/lib.rs:250` |
 | `cli.profile.create.arg.id` | `lightagent profile create <id>` | applicable | yes | Profiles/Workspaces: create form — input 'id' | ops::Profiles::create; api: POST /profiles | implemented | `crates/lightagent/src/lib.rs:253` |
 | `cli.profile.use.arg.id` | `lightagent profile use <id>` | applicable | yes | Profiles/Workspaces: switch (see D1 profile-switch protocol) — input 'id' | ops::Profiles::use_profile; api: PUT /profiles/{id}/active (+ host sidecar switch, D4b) | implemented | `crates/lightagent/src/lib.rs:263` |
@@ -455,6 +462,9 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `api.patch.sessions.id` | `PATCH /api/lightagent/v1/sessions/{id}` | applicable | yes | Conversations: rename/pin (already in WebUI) | api: PATCH /sessions/{id} | not-started | `crates/lightagent-api/src/lib.rs:99` |
 | `api.delete.sessions.id` | `DELETE /api/lightagent/v1/sessions/{id}` | applicable | no | (backend reuse) | api: DELETE /sessions/{id} | not-started | `crates/lightagent-api/src/lib.rs:99` |
 | `api.post.sessions.id.attachments` | `POST /api/lightagent/v1/sessions/{id}/attachments` | applicable | yes | Conversations: attach file (already in WebUI) | api: POST /sessions/{id}/attachments | not-started | `crates/lightagent-api/src/lib.rs:105` |
+| `api.get.config` | `GET /api/lightagent/v1/config` | applicable | no | (backend reuse) | api: GET /config | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.get.config.key` | `GET /api/lightagent/v1/config/{key}` | applicable | no | (backend reuse) | api: GET /config/{key} | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.put.config.key` | `PUT /api/lightagent/v1/config/{key}` | applicable | no | (backend reuse) | api: PUT /config/{key} | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.get.approvals` | `GET /api/lightagent/v1/approvals` | applicable | no | (backend reuse) | api: GET /approvals | not-started | `crates/lightagent-api/src/lib.rs:109` |
 | `api.post.approvals.run` | `POST /api/lightagent/v1/approvals/{run}` | applicable | no | (backend reuse) | api: POST /approvals/{run} | not-started | `crates/lightagent-api/src/lib.rs:110` |
 | `api.provisioning.put.profiles` | `PUT /api/lightagent/v1/provisioning/profiles/{profile_id}` | not-applicable (D1-Q3) | no | D1-Q3: compiled only with the provisioning-api feature, which no release build enables; remote capability listing deferred | api (feature provisioning-api) | not-started | `crates/lightagent-api/src/provisioning.rs:53` |

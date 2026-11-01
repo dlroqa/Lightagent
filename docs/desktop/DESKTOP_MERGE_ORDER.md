@@ -19,7 +19,10 @@ tree are recorded here.
 | 5 | D3b lifecycle | https://github.com/dlroqa/Lightagent/pull/95 | `desktop/d3b-lifecycle` | `desktop/d3a-runtime` | `1f0ed69` | `1f0ed69` |
 | 6 | D4a shared profile operations | https://github.com/dlroqa/Lightagent/pull/96 | `desktop/d4a-profiles` | `desktop/d3b-lifecycle` | `c544d7a` | `c544d7a` |
 | 7 | D4b profile switch and Profiles screen | https://github.com/dlroqa/Lightagent/pull/97 | `desktop/d4b-profile-ui` | `desktop/d4a-profiles` | `5f364e2` | `5f364e2` |
-| 8+ | D4c onwards | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+| 8 | D4c configuration: one locked, revision-checked writer | https://github.com/dlroqa/Lightagent/pull/101 | `desktop/d4c-config` | `desktop/d4b-profile-ui` | `0e46892` | `0e46892` |
+| 9 | Response actions delivery: #98's commits plus their desktop adoption, as one PR | opened when prepared (see below) | `desktop/d4c1-response-actions` | `desktop/d4c-config` | — | — |
+| 10 | Session writes: one locked writer (#100) | opened when prepared | `desktop/d4c2-session-writes` | `desktop/d4c1-response-actions` | — | — |
+| 11+ | D4d onwards | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
 
 Heads change as slices receive fixes. DESKTOP_PROGRESS.md records every
 head with its runs; the D10 review package fixes the final heads and the
@@ -51,17 +54,35 @@ D4c**. D4c and later slices stay stacked on D4b, independent of #98.
   and `desktop`
   ([41356206421](https://github.com/dlroqa/Lightagent/actions/runs/41356206421))
   passed on it.
-- **Proposed placement:** after whichever desktop slices are merged before
-  it, and only **together with its adoption**.
-  - Once D2 is in `master`, merging #98 alone would leave `master` failing
-    the desktop gates.
-  - Merging #98 before D2 would need the operation inside D2's contract.
-    That rewrites the stack, so it is not proposed.
-- **How the merge would go:** the integration branch is rebuilt with a
-  server-side merge on the latest stack head merged by then. The adoption
-  counts are refreshed, because later slices change the same inventory
-  totals. The combined tree is validated on hosted runners, and the owner
-  approves that exact head.
+- **Exact sequence (replaces "merge #98 together with its adoption"):**
+  1. D0–D4c merge in order (rows 1–8). Each PR is based on the one before
+     it, so after merge *k*, `master` is exactly head *k*'s tested tree. #98
+     is not merged at any of these steps.
+  2. **Row 9, the response actions delivery,** is a new PR,
+     `desktop/d4c1-response-actions`, based on `desktop/d4c-config`. It
+     holds:
+     - a server-side merge of #98's head, which brings #98's own commits
+       with no copies;
+     - **one** adoption commit on top: the contract operation
+       `sessions.regenerate`, its refusal during a profile switch, and its
+       inventory and parity row, re-applied to the counts at D4c.
+
+     It is validated on hosted runners as its own head. When it merges,
+     `master` gets #98 and its adoption together, so no `master` state
+     between rows 8 and 9 or after row 9 fails a desktop gate. #98 is then
+     shown as merged, because its head is in `master`, and it is never
+     merged on its own.
+  3. **Row 10, the session-write fix** (#100), is based on row 9, because
+     it converts #98's regenerate writer and reuses D4c's lock.
+  4. D4d and later slices continue from row 10.
+- **#99 keeps its evidence role only.** It proves the combination at D4b
+  (`b4a61c9`). Its adoption commit is not merged anywhere; row 9
+  re-applies the same change to D4c's counts. #99 is closed unmerged once
+  row 9 passes.
+- **If the owner wants #98 or #100 later,** rows 9 and 10 move to the end
+  of the stack: each is rebuilt on the last desktop head, re-validated, and
+  approved as an exact head. The rule stays the same: never #98 without
+  its adoption.
 
 Not in the merge order:
 - https://github.com/dlroqa/Lightagent/pull/91 (`desktop/d1-spike`), the D1

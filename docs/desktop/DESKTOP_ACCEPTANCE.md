@@ -44,3 +44,19 @@ investigated, never re-run until green:
 | D8 | A remote endpoint that fails produces an error, with no local execution (test). Capability or version mismatch is explicit. The WebUI Host/Origin hardening has regression tests, and existing WebUI e2e still passes. Keyboard-only navigation of every screen works (Playwright). axe accessibility scan has no critical violations |
 | D9 | Installers for all four targets with SHA-256 checksums, an SBOM, and a license inventory; vulnerability gate (cargo-audit, npm audit, high or critical) clean or documented; clean-user smoke install, launch, and uninstall where the runner allows; per-target report of build, launch, native UI, signing (unsigned), and minimum-OS evidence |
 | D10 | The combined tree of all slice heads, in merge order, passes `check` and `desktop` on all four platforms. Parity is reconciled with no unexplained gaps |
+
+## Carried requirements: response actions (#98)
+
+The response action row (Copy response, Rate response, Read aloud, Share,
+Try again, More) is in the desktop scope. What #99 established is
+**transport only**: the host forwards `sessions.regenerate` and refuses it
+during a profile switch. None of the following is satisfied yet:
+
+| ID | Requirement | Slice | Measured by |
+|---|---|---|---|
+| R1 | Try again regenerates through the host, and a failed or cancelled regeneration keeps the saved answer | D5 | fake-provider run through the desktop host (not the browser) |
+| R2 | Copy response puts the answer on the operating system's clipboard | D8 | native WebView automation reads the OS clipboard on every target |
+| R3 | Read aloud speaks where the WebView has speech synthesis, and shows the unsupported state where it has none, per target | D8 | native automation records availability and the shown state per target |
+| R4 | Share uses the WebView's share sheet where it exists and otherwise copies, saying so | D8 | native automation per target |
+| R5 | The row is keyboard-operable and has no critical axe violations in the desktop build | D8 | Playwright or `tauri-driver` with axe |
+| R6 | Ratings, branching and previous-answer navigation stay explicitly unavailable until their APIs exist, and are never counted as capabilities | D7, D10 | the inventory and the parity summary |

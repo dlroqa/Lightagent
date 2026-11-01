@@ -5,8 +5,8 @@ use std::io::{BufRead, IsTerminal as _, Write};
 use clap::ValueEnum;
 use dialoguer::{Confirm, Input, MultiSelect, Password, Select, theme::ColorfulTheme};
 use lightagent_core::{
-    AgentProfile, ApprovalPolicy, Config, ConfigStore, DUCKDUCKGO_SEARCH_ENDPOINT, LightagentPaths,
-    ProfileId, ProfileStore,
+    AgentProfile, ApprovalPolicy, Config, ConfigError, ConfigRevision, ConfigStore,
+    DUCKDUCKGO_SEARCH_ENDPOINT, LightagentPaths, ProfileId, ProfileStore,
 };
 use lightagent_core::{SavedProvider, SecretRef};
 use lightagent_provider_lightweight::{LightweightProvider, ProviderConfig};
@@ -39,11 +39,29 @@ pub(crate) async fn run(section: Option<Section>, json: bool) -> Result<(), Stri
     run_with_io(section, &paths, stdin.lock(), stdout.lock()).await
 }
 
+/// Save what setup edited, only if nobody else wrote the config since setup
+/// read it: saving its older copy would silently undo that change.
+fn save_setup(
+    store: &ConfigStore,
+    read_at: &ConfigRevision,
+    config: &Config,
+) -> Result<ConfigRevision, String> {
+    store.replace(read_at, config).map_err(|error| match error {
+        ConfigError::Conflict { .. } => "the configuration changed while setup was open \
+             (another lightagent command, the desktop app or the Web UI wrote it); \
+             nothing was saved. Run setup again to start from the current settings."
+            .to_owned(),
+        other => other.to_string(),
+    })
+}
+
 /// Full-screen-style selectors for a real terminal. Dialoguer redraws the
 /// active rows in place and supplies arrow, Space, Enter and Escape handling.
 async fn run_tui(section: Option<Section>, paths: &LightagentPaths) -> Result<(), String> {
     let store = ConfigStore::at(paths);
-    let mut config = store.load().map_err(|error| error.to_string())?;
+    let (mut config, mut revision) = store
+        .load_with_revision()
+        .map_err(|error| error.to_string())?;
     let profiles = ProfileStore::new(paths.root());
     crate::ensure_default_profile(&profiles, &config)?;
     let theme = ColorfulTheme::default();
@@ -87,7 +105,7 @@ async fn run_tui(section: Option<Section>, paths: &LightagentPaths) -> Result<()
 
         let changed = configure_tui(selected, &mut config, paths, &theme).await?;
         if changed {
-            store.save(&config).map_err(|error| error.to_string())?;
+            revision = save_setup(&store, &revision, &config)?;
             eprintln!("Saved.\n");
         } else {
             eprintln!("Cancelled; no changes saved.\n");
@@ -659,7 +677,9 @@ async fn run_with_io<R: BufRead, W: Write>(
     writer: W,
 ) -> Result<(), String> {
     let store = ConfigStore::at(paths);
-    let mut config = store.load().map_err(|error| error.to_string())?;
+    let (mut config, revision) = store
+        .load_with_revision()
+        .map_err(|error| error.to_string())?;
     let profiles = ProfileStore::new(paths.root());
     crate::ensure_default_profile(&profiles, &config)?;
     let mut prompt = Prompt { reader, writer };
@@ -705,7 +725,7 @@ async fn run_with_io<R: BufRead, W: Write>(
         }
     }
 
-    store.save(&config).map_err(|error| error.to_string())?;
+    save_setup(&store, &revision, &config)?;
     writeln!(
         prompt.writer,
         "\nSaved. Restart Lightagent to apply these settings."

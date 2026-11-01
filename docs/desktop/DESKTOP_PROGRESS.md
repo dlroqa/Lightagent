@@ -25,7 +25,8 @@ next update names its run.
 | D4b Profile switch, close with runs, Profiles screen | **CI-validated**: the review correction `5f364e2` passed `check` and `desktop` (see "D4b review") | `desktop/d4b-profile-ui` (stacked on D4a) | https://github.com/dlroqa/Lightagent/pull/97 | `5f364e27470f70b65fb13afe246e9302440ff4f4`, plus documentation-only commits (this one included) | `5f364e2` / tree `355aefbccb02b88d530d8b796b06952dc2272eec` |
 | #98 response actions (outside the stack; see DESKTOP_MERGE_ORDER.md) | `check` passed on #98's head; with D4b plus the adoption commit, `check` and `desktop` passed | `feat/response-action-bar`; evidence `integration/desktop-d4b-response-actions` | https://github.com/dlroqa/Lightagent/pull/98; evidence https://github.com/dlroqa/Lightagent/pull/99 | `987c6dba0f4d536477f87a78d1ecc46d7a90af96`; integration `b4a61c970989b59e382f9dfe2338c01d4f96747f` | `987c6db`; integration `b4a61c9` / tree `4d4cedbf340ea11ba57c23550a556f7dc400dd1d` |
 | D1 spike (evidence only, never merged) | runner evidence complete | `desktop/d1-spike` | https://github.com/dlroqa/Lightagent/pull/91 | `82896bcd63f3bd6786dcea12b603241e50a3a9ea` | `82896bc` / tree `d9cde26142a63a716a58f35dc33330be0e90d8b7` |
-| D4c–D10 | not started (D4c verified unstarted on 2026-11-01: no branch, PR or edit request) | — | — | — | — |
+| D4c Configuration: one locked, revision-checked writer | **CI-validated** at `0e46892` (check and desktop, every job); the D4 gate items listed under D4c remain | `desktop/d4c-config` (stacked on D4b `7c3e988`) | https://github.com/dlroqa/Lightagent/pull/101 | `0e4689232ae0ce0653367883222b40d41b62218d`, plus this documentation commit | `0e46892` / tree `dd1faa22ddd161d99de2407a312e8ed9d0789c54` |
+| D4d–D10 | not started | — | — | — | — |
 
 The latest progress record is the copy on the highest stacked desktop branch.
 Branches lower in the stack keep the record as of their own commit.
@@ -518,6 +519,80 @@ These are not desktop capabilities. None counts toward parity:
   covers it (D8), and clipboard, Web Share and speech synthesis are
   unverified in the desktop WebView.
 
+## D4c — Configuration: one locked, revision-checked writer
+
+Prerequisite: D4b head `7c3e988` (tree `494dffb`) passed `check`
+https://github.com/dlroqa/Lightagent/actions/runs/41357376468 and `desktop`
+https://github.com/dlroqa/Lightagent/actions/runs/41357376560 on every job.
+
+- **One writer.** `ConfigStore::update(expected, change)` in
+  `lightagent-core`:
+  1. Takes an exclusive OS lock on `config.json.lock` (std
+     `File::try_lock`, so every process takes it, with no new dependency).
+  2. Reads the file as it is now.
+  3. Refuses an `expected` revision that no longer matches as `Conflict`. A
+     revision is `sha256:` plus the hash of the file's bytes, or `absent`.
+  4. Applies the change, validates the result, and writes atomically.
+
+  A lock held longer than 5 s reports `Busy`, so a writer never waits
+  indefinitely. `replace(expected, config)` is the revision-checked form for
+  an editor working on a copy. `save` keeps its signature but takes the lock.
+- **Every writer converted:**
+  - `lightagent config set` and `init`;
+  - extension install, enable and disable;
+  - chat Markdown onboarding;
+  - `setup`, which is revision-checked: it refuses to save over a change
+    made while it was open, and says so;
+  - `PUT /settings`, now a locked read-modify-write. With
+    `expected_revision`, a stale save gets 409.
+- **CLI = API.** The key rules of `config get|set` moved to
+  `lightagent_core::config_keys`. New routes:
+  - `GET /config`: the path, the revision, and the redacted config;
+  - `GET /config/{key}`;
+  - `PUT /config/{key}`, which takes `expected_revision` and gives 409 when
+    it is stale.
+
+  All three require the admin scope, like `/settings`. An invalid value gets
+  400 with the CLI's exact message, a busy lock gets 503, and a conflict
+  names the current revision.
+- **Settings UI.** A save sends the revision it loaded, and on 409 the
+  screen reloads and says so. A new "Advanced configuration" card reads and
+  sets keys and shows the redacted config. Contract operations
+  `config.show`, `config.get` and `config.set` are added, with inventory and
+  parity rows (backend, counted through `cli.config.*`).
+- **Tests (hosted):**
+  - core: revisions, a stale update, refused and invalid changes, waiting
+    for the lock and keeping what the holder wrote, and `Busy`;
+  - `crates/lightagent/tests/desktop_config.rs`: CLI/API equivalence
+    (values, `show`/`path`, errors), stale 409 on `/config` and `/settings`,
+    secret redaction across CLI and API, and a cross-process lock test;
+  - `e2e/config.mjs`: the editor's write, a stale refusal, and an invalid
+    value.
+- **Not done yet:** `jev-routing-report` has no API route or UI.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-01 | Edit request `034`: **failure** before any commit. One find block in `crates/lightagent-core/src/lib.rs` did not match | — | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41359082770 |
+| 2026-11-01 | `034b` (that find block corrected, nothing else changed): 58 edits to 19 files; branch `desktop/d4c-config` created without force; draft PR #101 | `0e46892` / `dd1faa2` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41359185395 |
+| 2026-11-01 | `check` on `0e46892`: **success**, all jobs. The new tests ran and passed on all four platforms: the five core `config::tests`, and the four `desktop_config.rs` tests. `[ok] settings advanced configuration` in `standalone Web UI render` | `0e46892` | https://github.com/dlroqa/Lightagent/actions/runs/41359276745 |
+| 2026-11-01 | `desktop` on `0e46892`: **success**, all jobs, including the inventory and contract checks with the three new operations | `0e46892` | https://github.com/dlroqa/Lightagent/actions/runs/41359276774 |
+| 2026-11-01 | Parity: `cli.config.show`, `path`, `get` (and its key argument), and `set` (and its key and value arguments) are marked implemented: **22 of 226**. `cli.config.jev-routing-report` is not | — | DESKTOP_CLI_PARITY.md |
+
+**Still open against the D4 gate (DESKTOP_ACCEPTANCE.md):**
+- The golden comparison of CLI and desktop files in *isolated* homes. The
+  equivalence test uses one shared home and compares values and output.
+- "Concurrent `config set` and settings save give exactly one 409": the
+  stale save is tested, and the lock is tested across processes, but that
+  exact concurrent pair is not.
+- An unreadable secret file failing closed.
+- No secret value in the renderer state dump or the diagnostics bundle.
+  Redaction is tested in CLI and API output only.
+
+The response-action requirements now carried to D5 and D8 are listed in
+DESKTOP_ACCEPTANCE.md ("Carried requirements"). The session-write race is
+tracked as https://github.com/dlroqa/Lightagent/issues/100. Its fix is
+row 10 of the merge order.
+
 ## Artifacts and retention
 
 | Artifact | Run | Retention |
@@ -549,6 +624,7 @@ These are not desktop capabilities. None counts toward parity:
   | 2026-10-30T13:01:04Z | through `d4b-profile-ui` `8c27f93` | D4b first gate |
   | 2026-10-30T22:37:46Z | `d0-audit` `bc01426`, `d1-architecture` `350b48b`, `d2-shell` `003a71c`, `d3a-runtime` `130dde9`, `d3b-lifecycle` `1f0ed69`, `d4a-profiles` `c544d7a`, `d4b-profile-ui` `8c27f93` | baseline re-verified before the D4b review fix; working tree clean |
   | 2026-11-01T22:27:58Z | `d4b-profile-ui` `5f364e2`, `feat/response-action-bar` `987c6db`, `integration/desktop-d4b-response-actions` `b4a61c9`, `tools/source-edit` `df11eac` (lower slices unchanged) | before recording #98's integration; fetch only, working tree `master` `12582a0` clean |
+  | 2026-11-01T23:07:09Z | `d4b-profile-ui` `7c3e988`, `d4c-config` `0e46892`, `feat/response-action-bar` `987c6db`, `integration/desktop-d4b-response-actions` `b4a61c9`, `tools/source-edit` `a9f91a3` | D4c validated; fetch only, working tree clean |
 
   A documentation commit cannot record itself. Each row names the heads
   that existed when the sync ran. The commit that carries a row is

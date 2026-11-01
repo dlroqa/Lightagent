@@ -28,14 +28,15 @@ pub fn install(source: &Path, profile: bool, json: bool) -> Result<(), String> {
     let paths = LightagentPaths::resolve().map_err(|e| e.to_string())?;
     let root = selected_root(&paths, profile)?;
     let ext = install_from_source(source, &root)?;
-    let config_store = ConfigStore::at(&paths);
-    let mut config = config_store.load().map_err(|e| e.to_string())?;
-    config.extensions.enabled = true;
-    config.extensions.disabled.retain(|name| name != &ext.name);
-    if !ext.mcp_servers.is_empty() {
-        config.mcp.enabled = true;
-    }
-    if let Err(error) = config_store.save(&config) {
+    let saved = ConfigStore::at(&paths).update(None, |config| {
+        config.extensions.enabled = true;
+        config.extensions.disabled.retain(|name| name != &ext.name);
+        if !ext.mcp_servers.is_empty() {
+            config.mcp.enabled = true;
+        }
+        Ok::<(), String>(())
+    });
+    if let Err(error) = saved {
         let _ = lightagent_extensions::uninstall(&ext.name, &root);
         return Err(format!("could not save extension settings: {error}"));
     }
@@ -258,7 +259,6 @@ pub fn disable(name: &str, json: bool) -> Result<(), String> {
 fn toggle(name: &str, disable: bool, json: bool) -> Result<(), String> {
     let paths = LightagentPaths::resolve().map_err(|error| error.to_string())?;
     let config_store = ConfigStore::at(&paths);
-    let mut config = config_store.load().map_err(|error| error.to_string())?;
 
     // Confirm the name is actually installed, so a typo is caught here.
     let profiles = ProfileStore::new(paths.root());
@@ -271,25 +271,27 @@ fn toggle(name: &str, disable: bool, json: bool) -> Result<(), String> {
         return Err(format!("no installed extension named '{name}'"));
     }
 
-    let was_disabled = config.extensions.disabled.iter().any(|n| n == name);
-    if disable {
-        if !was_disabled {
-            config.extensions.disabled.push(name.to_owned());
-            config.extensions.disabled.sort();
-        }
-    } else {
-        config.extensions.disabled.retain(|n| n != name);
-    }
-    config_store
-        .save(&config)
+    let (enabled, _) = config_store
+        .update(None, |config| {
+            let was_disabled = config.extensions.disabled.iter().any(|n| n == name);
+            if disable {
+                if !was_disabled {
+                    config.extensions.disabled.push(name.to_owned());
+                    config.extensions.disabled.sort();
+                }
+            } else {
+                config.extensions.disabled.retain(|n| n != name);
+            }
+            Ok::<_, String>(config.extensions.enabled)
+        })
         .map_err(|error| error.to_string())?;
 
-    let active = config.extensions.enabled && !disable;
+    let active = enabled && !disable;
     if json {
         println!("{}", serde_json::json!({ "name": name, "active": active }));
     } else if disable {
         println!("Disabled '{name}'.");
-    } else if config.extensions.enabled {
+    } else if enabled {
         println!("Enabled '{name}'.");
     } else {
         println!(
