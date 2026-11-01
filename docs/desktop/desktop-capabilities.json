@@ -93,11 +93,11 @@
   }
  ],
  "summary": {
-  "total_rows": 317,
+  "total_rows": 318,
   "by_kind": {
    "acp-method": 8,
    "alias": 2,
-   "api": 35,
+   "api": 36,
    "argument": 47,
    "command": 86,
    "config": 14,
@@ -112,11 +112,11 @@
    "value": 6
   },
   "by_applicability": {
-   "applicable": 281,
+   "applicable": 282,
    "host-owned": 7,
    "not-applicable": 29
   },
-  "parity_denominator": 226,
+  "parity_denominator": 227,
   "parity_implemented": 22,
   "pending_decision_rows": 0,
   "not_counted_duplicates": 26
@@ -7121,6 +7121,30 @@
    "duplicate_of": null,
    "ui": "Conversations: attach file (already in WebUI)",
    "backend": "api: POST /sessions/{id}/attachments",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.post.sessions.id.regenerate",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/sessions/{id}/regenerate",
+   "source": "crates/lightagent-api/src/lib.rs:122",
+   "behavior": "Replace the session's latest answer with a new run of its prompt; the saved answer is kept unless the new run completes with an answer (#98)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/sessions/{id}/regenerate"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: Try again under the final answer (WebUI, #98)",
+   "backend": "api: POST /sessions/{id}/regenerate",
    "permission": "local-operator",
    "data_scope": "profile",
    "desktop_status": "not-started",

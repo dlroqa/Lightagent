@@ -20,7 +20,7 @@ tree are recorded here.
 | 6 | D4a shared profile operations | https://github.com/dlroqa/Lightagent/pull/96 | `desktop/d4a-profiles` | `desktop/d3b-lifecycle` | `c544d7a` | `c544d7a` |
 | 7 | D4b profile switch and Profiles screen | https://github.com/dlroqa/Lightagent/pull/97 | `desktop/d4b-profile-ui` | `desktop/d4a-profiles` | `5f364e2` | `5f364e2` |
 | 8 | D4c configuration: one locked, revision-checked writer | https://github.com/dlroqa/Lightagent/pull/101 | `desktop/d4c-config` | `desktop/d4b-profile-ui` | `0e46892` | `0e46892` |
-| 9 | Response actions delivery: #98's commits plus their desktop adoption, as one PR | opened when prepared (see below) | `desktop/d4c1-response-actions` | `desktop/d4c-config` | — | — |
+| 9 | Response actions delivery: #98's commits plus their desktop adoption, as one PR | https://github.com/dlroqa/Lightagent/pull/102 | `desktop/d4c1-response-actions` | `desktop/d4c-config` | `a51449c` | `a51449c` |
 | 10 | Session writes: one locked writer (#100) | opened when prepared | `desktop/d4c2-session-writes` | `desktop/d4c1-response-actions` | — | — |
 | 11+ | D4d onwards | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
 

@@ -14,10 +14,11 @@ import {
   type ToolInfo,
   type UploadedAttachment,
 } from "../api/agent";
-import { promptTimestamp } from "../api/format";
+import { answerTimestamp, promptTimestamp } from "../api/format";
 import { Empty, Pill } from "../components/Bits";
 import { AnimatedLogo } from "../components/Logo";
 import { Menu, MenuItem } from "../components/Menu";
+import { ResponseActions } from "../components/ResponseActions";
 import { TopBar } from "../components/Shell";
 import { usePoll } from "../hooks/usePoll";
 import { useRunEvents, type Delivery, type RunEvent } from "../hooks/useRunEvents";
@@ -407,6 +408,9 @@ export function Agent() {
   const [accountOpen, setAccountOpen] = useState(false);
   const [sidebarNotice, setSidebarNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The regeneration this page started: its run, and the saved run whose
+  // answer it would replace.
+  const [replacing, setReplacing] = useState<{ sessionId: string; runId: string; savedRunId: string } | null>(null);
   const [deciding, setDeciding] = useState(false);
   const [savingPolicy, setSavingPolicy] = useState(false);
   const [followTranscript, setFollowTranscript] = useState(true);
@@ -490,6 +494,27 @@ export function Agent() {
     return last?.stop_reason ? describeStop(last.stop_reason, lastMessage?.role === "assistant") : null;
   }, [answer, done, events, runId, session]);
   const deliveryNotice = runId !== null && done ? describeDelivery(delivery) : null;
+  // The server keeps the saved answer until a regeneration has a new one.
+  // While the new one streams, or until it is saved, the old one is hidden.
+  // If the run fails, is cancelled or brings no answer, the old one is still
+  // the saved answer: it is shown again and the partial new one is not.
+  const regenerating = replacing !== null && replacing.runId === runId &&
+    replacing.sessionId === session?.id;
+  const keptAfterRegeneration = regenerating && done &&
+    (failure !== null || cancelled || answer.trim().length === 0);
+  const liveAnswerShown = showLiveAnswer && answer.length > 0 && !keptAfterRegeneration;
+  const hiddenAnswerIndex = regenerating && !keptAfterRegeneration &&
+    session?.runs[session.runs.length - 1]?.run_id === replacing?.savedRunId &&
+    session?.messages[session.messages.length - 1]?.role === "assistant"
+    ? session.messages.length - 1
+    : -1;
+  // The action row sits under the final answer only: a saved assistant
+  // message that ends the transcript, with no run streaming or queued.
+  const finalAnswerIndex = !running && !liveAnswerShown && hiddenAnswerIndex < 0 &&
+    steering.length === 0 &&
+    session?.messages[session.messages.length - 1]?.role === "assistant"
+    ? session.messages.length - 1
+    : -1;
   const pending = useMemo(() => {
     if (done) return null;
     let open: { toolCallId: string; tool: string } | null = null;
@@ -834,6 +859,28 @@ export function Agent() {
     }
   }
 
+  /** Replace the final answer with a fresh run of the prompt it answered. */
+  async function regenerate() {
+    const id = activeId;
+    const latest = session?.runs[session.runs.length - 1];
+    if (!id || !latest || hasPendingWork || busy) return;
+    setFollowTranscript(true);
+    setBusy(true);
+    setError(null);
+    try {
+      const run = await agentApi.regenerate(id, latest.run_id, selectedModel || undefined);
+      setReplacing({ sessionId: id, runId: run.id, savedRunId: latest.run_id });
+      backgroundRuns.current.set(id, run.id);
+      if (selected.current === id) setRunId(run.id);
+      await load(id);
+      sessions.refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function uploadFiles(files: FileList | null) {
     if (!files?.length || hasPendingWork) return;
     setBusy(true);
@@ -1127,8 +1174,20 @@ export function Agent() {
                     <Empty title="Nothing said yet"
                       hint="Messages, runs, and tool calls are saved with this session." />
                   )}
-                  {session.messages.map((message, index) => (
-                    <AgentMessage key={message.role + index} message={message} />
+                  {session.messages.map((message, index) => index === hiddenAnswerIndex ? null : (
+                    <AgentMessage key={message.role + index} message={message}
+                      actions={index === finalAnswerIndex && (
+                        <ResponseActions
+                          text={message.content}
+                          title={session.title}
+                          timestamp={message.created_at ? answerTimestamp(unix(message.created_at)) : null}
+                          onRetry={session.runs.length > 0 && !busy ? () => void regenerate() : undefined}
+                          // TODO(branch-in-new-chat): the API cannot yet create a
+                          // session from another's transcript up to a message. Pass
+                          // `onBranch` here once it can; until then the menu row is
+                          // shown disabled.
+                        />
+                      )} />
                   ))}
                   {routingStatus && <div className="routing-status" role="status">
                     <Cpu size={14} aria-hidden="true" />
@@ -1152,7 +1211,7 @@ export function Agent() {
                       <span>{`${progressLabel(tool.name)} for “${describeTool(tool).subject}”: ${tool.progress}`}</span>
                     </div>
                   ))}
-                  {showLiveAnswer && answer && (
+                  {liveAnswerShown && (
                     <AgentMessage message={{ role: "assistant", content: answer }} streaming={!done} />
                   )}
                   {running && !answer && (
@@ -1175,6 +1234,11 @@ export function Agent() {
                     <div className="notice notice--warn" role="status" style={{ marginTop: 10 }}>{stopNotice.text}</div>
                   )}
                   {failure && <div className="notice notice--danger" style={{ marginTop: 10 }}>{failure}</div>}
+                  {keptAfterRegeneration && (
+                    <div className="notice notice--info" role="status" style={{ marginTop: 10 }}>
+                      The new answer was not finished, so the previous answer is kept.
+                    </div>
+                  )}
                   {deliveryNotice && (
                     <div className="notice notice--warn" role="status" style={{ marginTop: 10 }}>{deliveryNotice.text}</div>
                   )}
@@ -1426,7 +1490,12 @@ function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete
   );
 }
 
-function AgentMessage({ message, streaming }: { message: SessionMessage; streaming?: boolean }) {
+function AgentMessage({ message, streaming, actions }: {
+  message: SessionMessage;
+  streaming?: boolean;
+  /** Controls shown beneath the message, inside it. */
+  actions?: ReactNode;
+}) {
   const mine = message.role === "user";
   const timestamp = mine && message.created_at ? promptTimestamp(unix(message.created_at)) : null;
   return (
@@ -1435,6 +1504,7 @@ function AgentMessage({ message, streaming }: { message: SessionMessage; streami
       <article className={`chat-message${mine ? " is-user" : ""}${streaming ? " is-streaming" : ""}`}
         aria-label={mine ? "Your message" : "Agent message"}>
         <div className="chat-message__content">{linkifyMessage(message.content)}</div>
+        {actions}
       </article>
     </>
   );

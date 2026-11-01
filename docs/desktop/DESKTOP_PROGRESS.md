@@ -26,6 +26,8 @@ next update names its run.
 | #98 response actions (outside the stack; see DESKTOP_MERGE_ORDER.md) | `check` passed on #98's head; with D4b plus the adoption commit, `check` and `desktop` passed | `feat/response-action-bar`; evidence `integration/desktop-d4b-response-actions` | https://github.com/dlroqa/Lightagent/pull/98; evidence https://github.com/dlroqa/Lightagent/pull/99 | `987c6dba0f4d536477f87a78d1ecc46d7a90af96`; integration `b4a61c970989b59e382f9dfe2338c01d4f96747f` | `987c6db`; integration `b4a61c9` / tree `4d4cedbf340ea11ba57c23550a556f7dc400dd1d` |
 | D1 spike (evidence only, never merged) | runner evidence complete | `desktop/d1-spike` | https://github.com/dlroqa/Lightagent/pull/91 | `82896bcd63f3bd6786dcea12b603241e50a3a9ea` | `82896bc` / tree `d9cde26142a63a716a58f35dc33330be0e90d8b7` |
 | D4c Configuration: one locked, revision-checked writer | **CI-validated** at `0e46892` (check and desktop, every job); the D4 gate items listed under D4c remain | `desktop/d4c-config` (stacked on D4b `7c3e988`) | https://github.com/dlroqa/Lightagent/pull/101 | `0e4689232ae0ce0653367883222b40d41b62218d`, plus this documentation commit | `0e46892` / tree `dd1faa22ddd161d99de2407a312e8ed9d0789c54` |
+| Row 9: response actions delivery (#98 with its adoption) | **CI-validated** at `a51449c` (`desktop` after one re-run of an infrastructure-failed bundling job; see "Row 9") | `desktop/d4c1-response-actions` (stacked on D4c) | https://github.com/dlroqa/Lightagent/pull/102 | `a51449ce66790a1092459167545ac645cf226290`, plus this documentation commit | `a51449c` / tree `ab20d7eb19eecbc47a60a0a9e4a4df1bd85926aa` |
+| Row 10: session writes (#100) | not started | — | — | — | — |
 | D4d–D10 | not started | — | — | — | — |
 
 The latest progress record is the copy on the highest stacked desktop branch.
@@ -592,6 +594,24 @@ The response-action requirements now carried to D5 and D8 are listed in
 DESKTOP_ACCEPTANCE.md ("Carried requirements"). The session-write race is
 tracked as https://github.com/dlroqa/Lightagent/issues/100. Its fix is
 row 10 of the merge order.
+
+## Row 9 — Response actions delivery (#98 with its desktop adoption)
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-01 | D4c docs commit `551e73a` (tree `9acdd82`): `check` and `desktop` **success**, so the inventory, contract and parity edits were re-checked | `551e73a` | https://github.com/dlroqa/Lightagent/actions/runs/41360645573, https://github.com/dlroqa/Lightagent/actions/runs/41360645549 |
+| 2026-11-01 | Branch `desktop/d4c1-response-actions` created at `551e73a`, then a server-side merge of #98's head `987c6db`, with no conflicts | `5665b8f` / `5399c06` | `POST /repos/…/merges` |
+| 2026-11-01 | One adoption commit (edit request `036`): contract `sessions.regenerate`, the switch gate with tests, and inventory and parity row (227, 22 implemented). Draft PR #102 | `a51449c` / `ab20d7e` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41360714579 |
+| 2026-11-01 | `check` on `a51449c`: **success**, all jobs | `a51449c` | https://github.com/dlroqa/Lightagent/actions/runs/41360801995 |
+| 2026-11-01 | `desktop` on `a51449c`, attempt 1: **failure**, only `desktop shell (macos-x64)`, while bundling the DMG: `hdiutil: couldn't eject "disk2" - Resource busy` (×3). The D3b retry matches only `hdiutil: create failed - Resource busy`, so this variant is not retried. No PR code runs in that step, and the same job passed on `551e73a`. Classified as runner disk-image contention. **One** re-run of that job only (attempt 1's log is kept, job 125010533746) | `a51449c` | https://github.com/dlroqa/Lightagent/actions/runs/41360802130 (attempt 1) |
+| 2026-11-01 | `desktop` on `a51449c`, attempt 2: **success**, all 7 jobs | `a51449c` | https://github.com/dlroqa/Lightagent/actions/runs/41360802130 |
+
+**Follow-ups:**
+- The D3b bundling retry should also match the `couldn't eject … Resource busy`
+  variant. That is a workflow change for the slice that owns the job, and it
+  is not made here.
+- #99 is left open as evidence until the owner reviews #102.
+- Row 10 (#100) is not prepared yet.
 
 ## Artifacts and retention
 
