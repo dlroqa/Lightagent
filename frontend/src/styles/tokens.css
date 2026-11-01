@@ -27,6 +27,17 @@
   --chat-rule: rgba(15, 23, 42, 0.1);
   --chat-user-bubble: #1e4f95;
   --chat-user-text: #f8fbff;
+
+  /* --- response actions: the icon row under the final answer ------------ */
+  --response-action-icon: #5b6472;
+  --response-action-hover: #e8ecf2;
+  --response-tooltip: #1f2937;
+  --response-tooltip-text: #f8fafc;
+  --response-tooltip-border: rgba(255, 255, 255, 0.08);
+  --response-tooltip-shadow: 0 6px 18px rgba(15, 23, 42, 0.18);
+  --response-popover: #ffffff;
+  --response-popover-border: rgba(15, 42, 88, 0.12);
+  --response-popover-hover: #eef2f7;
   /* --- surfaces ---------------------------------------------------------- */
   --surface: rgba(255, 255, 255, 0.78);
   --surface-solid: #ffffff;
@@ -143,6 +154,15 @@
     --chat-rule: rgba(255, 255, 255, 0.12);
     --chat-user-bubble: #1e4f95;
     --chat-user-text: #f8fbff;
+    --response-action-icon: #b4b4b4;
+    --response-action-hover: #1d1d1d;
+    --response-tooltip: #2b2b2b;
+    --response-tooltip-text: #f5f5f5;
+    --response-tooltip-border: rgba(255, 255, 255, 0.1);
+    --response-tooltip-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+    --response-popover: #212121;
+    --response-popover-border: rgba(255, 255, 255, 0.1);
+    --response-popover-hover: #2d2d2d;
     --surface: rgba(148, 163, 184, 0.1);
     --surface-solid: #151d2e;
     --surface-raised: rgba(148, 163, 184, 0.14);
@@ -212,6 +232,15 @@
   --chat-rule: rgba(255, 255, 255, 0.12);
   --chat-user-bubble: #1e4f95;
   --chat-user-text: #f8fbff;
+  --response-action-icon: #b4b4b4;
+  --response-action-hover: #1d1d1d;
+  --response-tooltip: #2b2b2b;
+  --response-tooltip-text: #f5f5f5;
+  --response-tooltip-border: rgba(255, 255, 255, 0.1);
+  --response-tooltip-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  --response-popover: #212121;
+  --response-popover-border: rgba(255, 255, 255, 0.1);
+  --response-popover-hover: #2d2d2d;
   --surface-solid: #151d2e;
   --surface-raised: rgba(148, 163, 184, 0.14);
   --surface-sunken: rgba(2, 6, 23, 0.35);
