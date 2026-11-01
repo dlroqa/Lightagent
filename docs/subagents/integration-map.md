@@ -86,6 +86,7 @@ All run routes use protocol prefix `/api/lightagent/v1`; `/health` is unversione
 | `GET /api/lightagent/v1/runs/{id}` | In-memory run status | `RunsRead` |
 | `GET /api/lightagent/v1/runs/{id}/events` | Named SSE events | `RunsRead` |
 | `POST /api/lightagent/v1/runs/{id}/cancel` | Cancel token | `RunsWrite` |
+| `POST /api/lightagent/v1/sessions/{id}/regenerate` | Rerun the prompt behind the latest answer, replacing it | `RunsWrite` |
 | `GET, POST /api/lightagent/v1/sessions` | List/create persisted sessions | `SessionsRead` / `SessionsWrite` |
 | `GET, DELETE /api/lightagent/v1/sessions/{id}` | Read/delete persisted session | `SessionsRead` / `SessionsWrite` |
 | `GET /api/lightagent/v1/approvals` | Pending approvals | `ApprovalsWrite` |

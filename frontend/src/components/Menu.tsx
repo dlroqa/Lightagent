@@ -38,6 +38,8 @@ export function Menu({
   align = "start",
   minWidth,
   label,
+  placement = "below",
+  className,
   children,
 }: {
   open: boolean;
@@ -47,6 +49,10 @@ export function Menu({
   align?: "start" | "end";
   minWidth?: number;
   label?: string;
+  /** Where the menu opens when it fits on both sides of the trigger. */
+  placement?: "below" | "above";
+  /** A modifier class added to the `.menu` surface. */
+  className?: string;
   children: ReactNode;
 }) {
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -63,7 +69,9 @@ export function Menu({
     const menuHeight = menuRef.current?.offsetHeight ?? 0;
     const below = window.innerHeight - rect.bottom - margin;
     const above = rect.top - margin;
-    const flip = menuHeight > below && above > below;
+    const flip = placement === "above"
+      ? menuHeight <= above || above > below
+      : menuHeight > below && above > below;
     let top = flip ? rect.top - 6 - menuHeight : rect.bottom + 6;
     // Keep the whole menu on screen once its height is known: never let it run
     // off the bottom or above the top. `.menu`'s max-height keeps it shorter
@@ -75,7 +83,7 @@ export function Menu({
       top = Math.max(margin, top);
     }
     setPos({ top, left: rect.left, width: rect.width });
-  }, [anchorRef]);
+  }, [anchorRef, placement]);
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -139,7 +147,7 @@ export function Menu({
       />
       <div
         ref={menuRef}
-        className="menu"
+        className={className ? `menu ${className}` : "menu"}
         role="menu"
         aria-label={label}
         style={{ top: pos.top, left, minWidth: width }}
@@ -155,16 +163,20 @@ export function Menu({
 export function MenuItem({
   onClick,
   disabled,
+  checked,
   children,
 }: {
   onClick?: () => void;
   disabled?: boolean;
+  /** Makes the row one choice of several, checked or not. */
+  checked?: boolean;
   children: ReactNode;
 }) {
   return (
     <button
       type="button"
-      role="menuitem"
+      role={checked === undefined ? "menuitem" : "menuitemradio"}
+      aria-checked={checked}
       data-menu-item
       className="menu__item"
       disabled={disabled}

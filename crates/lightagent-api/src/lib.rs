@@ -114,6 +114,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/lightagent/v1/sessions/search", get(search_sessions))
         .route(
+            "/api/lightagent/v1/sessions/{id}/regenerate",
+            post(regenerate_run),
+        )
+        .route(
             "/api/lightagent/v1/sessions/{id}",
             get(get_session)
                 .patch(update_session)
@@ -1226,10 +1230,94 @@ struct CreateRunBody {
     model: Option<String>,
 }
 
+/// Regenerating names the run whose answer it replaces, so a request made
+/// against a transcript that has since moved on is refused, not misapplied.
+#[derive(Deserialize)]
+struct RegenerateBody {
+    run_id: String,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// How a session run treats the transcript it continues.
+enum Turn {
+    /// A new user prompt, appended to the session.
+    Append,
+    /// The prompt behind the session's latest answer, from run `run_id`, is
+    /// run again; a finished new answer replaces that one.
+    Regenerate { run_id: String },
+}
+
 async fn create_run(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(mut body): Json<CreateRunBody>,
+    Json(body): Json<CreateRunBody>,
+) -> Response {
+    start_run(state, headers, body, Turn::Append).await
+}
+
+/// Run the prompt behind session `id`'s latest answer again, in place of that
+/// answer. The new run is created, authorized and streamed exactly as any
+/// session run is. The saved answer stays until the new run has finished
+/// with an answer; only then are the two exchanged, in one save.
+async fn regenerate_run(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<RegenerateBody>,
+) -> Response {
+    // Replacing a saved answer changes the session, so session write access
+    // is needed as well as the run access `start_run` checks, whoever asks.
+    if let Err(response) = access(
+        &state,
+        &headers,
+        Scope::SessionsWrite,
+        body.profile.as_deref(),
+    ) {
+        return *response;
+    }
+    let run = CreateRunBody {
+        // Taken from the saved session once it is locked.
+        message: String::new(),
+        profile: body.profile,
+        session_id: Some(id),
+        model: body.model,
+    };
+    let turn = Turn::Regenerate {
+        run_id: body.run_id,
+    };
+    start_run(state, headers, run, turn).await
+}
+
+/// Remove the session's latest answer, and the record of the run that wrote
+/// it, and return the user prompt it answered. `None`, with the session
+/// untouched, unless run `run_id` is the session's latest finished run and the
+/// transcript ends with a user prompt and that run's answer.
+fn take_latest_answer(session: &mut Session, run_id: &str) -> Option<String> {
+    let latest = session.runs.last()?;
+    if latest.run_id != run_id || latest.stop_reason.is_none() {
+        return None;
+    }
+    let [.., prompt, answer] = session.messages.as_slice() else {
+        return None;
+    };
+    if prompt.role != "user" || answer.role != "assistant" {
+        return None;
+    }
+    let prompt = prompt.content.clone();
+    session.messages.pop();
+    session.runs.pop();
+    session.touch();
+    Some(prompt)
+}
+
+async fn start_run(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    mut body: CreateRunBody,
+    turn: Turn,
 ) -> Response {
     // Multi-user mode authorizes the caller for the profile, resolved on the
     // server, before anything profile-specific is built. `owner` records who
@@ -1356,13 +1444,38 @@ async fn create_run(
             busy.remove(&id);
             return bad_request("session profile does not match");
         }
-        history = model_history(&session, &body.message, history_limit);
-        profile = Some(session.profile.clone());
-        if session.messages.is_empty() && session.title == "agent session" {
-            session.title = session_title(&body.message);
+        match &turn {
+            Turn::Append => {
+                history = model_history(&session, &body.message, history_limit);
+                profile = Some(session.profile.clone());
+                if session.messages.is_empty() && session.title == "agent session" {
+                    session.title = session_title(&body.message);
+                }
+                session.push_message(StoredMessage::new("user", &body.message));
+            }
+            Turn::Regenerate { run_id } => {
+                // Checked on a copy: nothing is saved until the new run has
+                // finished with an answer (`record_run_in_session`).
+                let mut earlier = session.clone();
+                let Some(prompt) = take_latest_answer(&mut earlier, run_id) else {
+                    busy.remove(&id);
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(json!({"error": "only the latest answer can be regenerated"})),
+                    )
+                        .into_response();
+                };
+                // The model sees what preceded the prompt, as it did on the
+                // prompt's first run.
+                earlier.messages.pop();
+                history = model_history(&earlier, &prompt, history_limit);
+                profile = Some(session.profile.clone());
+                body.message = prompt;
+            }
         }
-        session.push_message(StoredMessage::new("user", &body.message));
-        if let Err(error) = session_store.save(&session) {
+        if matches!(turn, Turn::Append)
+            && let Err(error) = session_store.save(&session)
+        {
             busy.remove(&id);
             return internal(&error.to_string());
         }
@@ -1411,11 +1524,16 @@ async fn create_run(
         None => state.manager.start(request).await,
     };
     if let Some(id) = &session_id {
+        let replacing = match turn {
+            Turn::Append => None,
+            Turn::Regenerate { run_id } => Some(run_id),
+        };
         tokio::spawn(record_run_in_session(
             Arc::clone(&run),
             session_store.clone(),
             Arc::clone(&state.busy_sessions),
             id.clone(),
+            replacing,
         ));
     }
     (
@@ -1427,11 +1545,17 @@ async fn create_run(
 
 /// Once `run` is terminal, record its events into session `id` and release
 /// the session for its next run.
+///
+/// A run `replacing` the answer that saved run wrote is recorded only when it
+/// completed with an answer: then the old answer and its run record are
+/// exchanged for the new ones in one save. A failed, cancelled or empty run
+/// leaves the session exactly as it was, so the saved answer survives.
 async fn record_run_in_session(
     run: Arc<RunState>,
     sessions: SessionStore,
     busy: Arc<Mutex<HashSet<SessionId>>>,
     id: SessionId,
+    replacing: Option<String>,
 ) {
     let mut seen = 0;
     loop {
@@ -1444,9 +1568,19 @@ async fn record_run_in_session(
                     // The stop reason, as the terminal saves it, so a
                     // reloaded session still says why a run ended.
                     let stop = stop_reason_of(&events).unwrap_or_else(|| format!("{status:?}"));
-                    session.record_run_events(&events, &stop);
-                    if let Err(error) = sessions.save(&session) {
-                        eprintln!("could not save agent session {id:?}: {error}");
+                    let record = match &replacing {
+                        None => true,
+                        Some(old) => {
+                            status == RunStatus::Completed
+                                && answered(&events)
+                                && take_latest_answer(&mut session, old).is_some()
+                        }
+                    };
+                    if record {
+                        session.record_run_events(&events, &stop);
+                        if let Err(error) = sessions.save(&session) {
+                            eprintln!("could not save agent session {id:?}: {error}");
+                        }
                     }
                 }
                 Err(error) => eprintln!("could not read agent session {id:?}: {error}"),
@@ -2117,6 +2251,13 @@ async fn respond_approval(
 
 /// The stop reason of a run's terminal event, spelled as the `run.completed`
 /// payload spells it.
+/// Whether the run's events carry any answer text.
+fn answered(events: &[AgentEvent]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::Content { text } if !text.is_empty()))
+}
+
 fn stop_reason_of(events: &[AgentEvent]) -> Option<String> {
     events.iter().rev().find_map(|event| match event {
         AgentEvent::RunCompleted { reason } => Some(format!("{reason:?}")),
@@ -2246,6 +2387,7 @@ mod tests {
             sessions.clone(),
             Arc::clone(&busy),
             id.clone(),
+            None,
         ));
         paused.await.unwrap();
         run.push_for_test(AgentEvent::RunCompleted {
