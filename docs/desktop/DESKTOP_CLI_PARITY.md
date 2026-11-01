@@ -4,16 +4,16 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 
 ## Coverage
 
-- Denominator: 226
-- Implemented: 15 of 226
+- Denominator: 227
+- Implemented: 15 of 227
 - Pending D1 decision rows: 0
-- Total rows: 314
+- Total rows: 315
 
 | Kind | Rows |
 |---|---|
 | acp-method | 8 |
 | alias | 2 |
-| api | 32 |
+| api | 33 |
 | argument | 47 |
 | command | 86 |
 | config | 14 |
@@ -29,7 +29,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 
 | Applicability | Rows |
 |---|---|
-| applicable | 278 |
+| applicable | 279 |
 | host-owned | 7 |
 | not-applicable | 29 |
 
@@ -455,6 +455,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `api.patch.sessions.id` | `PATCH /api/lightagent/v1/sessions/{id}` | applicable | yes | Conversations: rename/pin (already in WebUI) | api: PATCH /sessions/{id} | not-started | `crates/lightagent-api/src/lib.rs:99` |
 | `api.delete.sessions.id` | `DELETE /api/lightagent/v1/sessions/{id}` | applicable | no | (backend reuse) | api: DELETE /sessions/{id} | not-started | `crates/lightagent-api/src/lib.rs:99` |
 | `api.post.sessions.id.attachments` | `POST /api/lightagent/v1/sessions/{id}/attachments` | applicable | yes | Conversations: attach file (already in WebUI) | api: POST /sessions/{id}/attachments | not-started | `crates/lightagent-api/src/lib.rs:105` |
+| `api.post.sessions.id.regenerate` | `POST /api/lightagent/v1/sessions/{id}/regenerate` | applicable | yes | Conversations: Try again under the final answer (WebUI, #98) | api: POST /sessions/{id}/regenerate | not-started | `crates/lightagent-api/src/lib.rs:116` |
 | `api.get.approvals` | `GET /api/lightagent/v1/approvals` | applicable | no | (backend reuse) | api: GET /approvals | not-started | `crates/lightagent-api/src/lib.rs:109` |
 | `api.post.approvals.run` | `POST /api/lightagent/v1/approvals/{run}` | applicable | no | (backend reuse) | api: POST /approvals/{run} | not-started | `crates/lightagent-api/src/lib.rs:110` |
 | `api.provisioning.put.profiles` | `PUT /api/lightagent/v1/provisioning/profiles/{profile_id}` | not-applicable (D1-Q3) | no | D1-Q3: compiled only with the provisioning-api feature, which no release build enables; remote capability listing deferred | api (feature provisioning-api) | not-started | `crates/lightagent-api/src/provisioning.rs:53` |

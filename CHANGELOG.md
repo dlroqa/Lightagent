@@ -4,6 +4,21 @@ All notable Lightagent changes are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- A response action row beneath the final assistant answer in the Web UI:
+  copy, rate (kept in the page), read aloud, share, try again, and a menu
+  with the answer's time and a "Branch in new chat" row that stays disabled
+  until the API can branch a session. Hover and keyboard focus show a
+  tooltip; the row is hidden while an answer streams.
+- `POST /api/lightagent/v1/sessions/{id}/regenerate` with `{"run_id": …}`:
+  replaces the session's latest answer, written by that run, with a new run
+  of the same prompt. The prompt is kept once. The saved answer stays until
+  the new run completes with an answer; then the answer and its run record
+  are exchanged in one save. A failed, cancelled or empty run changes
+  nothing. It needs session write access as well as run access, and
+  anything but the latest answer is refused with 409.
+
 ## [0.5.0] - 2026-10-29
 
 Release notes: `docs/releases/v0.5.0.md`.
