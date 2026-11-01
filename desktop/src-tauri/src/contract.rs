@@ -116,6 +116,11 @@ mod tests {
             ),
             ("GET", "/api/lightagent/v1/sessions/abc-123", "sessions.get"),
             (
+                "POST",
+                "/api/lightagent/v1/sessions/abc-123/regenerate",
+                "sessions.regenerate",
+            ),
+            (
                 "GET",
                 "/api/lightagent/v1/runs/r_1/events?after=4",
                 "runs.events",
