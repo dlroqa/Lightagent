@@ -1550,3 +1550,270 @@ async fn regenerating_anything_but_the_latest_answer_is_refused() {
     .await
     .unwrap();
 }
+
+/// How a [`GateFactory`] run ends once it is released.
+#[derive(Clone, Copy)]
+enum GateMode {
+    /// The mock answer: a `datetime.now` call, then text.
+    Answer,
+    /// A provider failure, after part of an answer has streamed.
+    Fail,
+}
+
+/// Holds each run until [`GateFactory::release`], or until it is cancelled,
+/// and counts the runs it was asked for.
+#[derive(Clone)]
+struct GateFactory {
+    gate: Arc<tokio::sync::Semaphore>,
+    mode: Arc<std::sync::Mutex<GateMode>>,
+    started: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl GateFactory {
+    fn new(mode: GateMode) -> Self {
+        Self {
+            gate: Arc::new(tokio::sync::Semaphore::new(0)),
+            mode: Arc::new(std::sync::Mutex::new(mode)),
+            started: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    fn release(&self) {
+        self.gate.add_permits(1);
+    }
+
+    fn set(&self, mode: GateMode) {
+        *self.mode.lock().unwrap() = mode;
+    }
+
+    fn started(&self) -> usize {
+        self.started.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl RunFactory for GateFactory {
+    async fn run(
+        &self,
+        request: StartRun,
+        sink: AgentEventSink,
+        cancel: tokio_util::sync::CancellationToken,
+        decisions: UnboundedReceiver<ApprovalDecision>,
+    ) -> RunStatus {
+        self.started
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mode = *self.mode.lock().unwrap();
+        if matches!(mode, GateMode::Fail) {
+            let _ = sink.send(lightagent_core::AgentEvent::Content {
+                text: "partial words".into(),
+            });
+        }
+        tokio::select! {
+            permit = self.gate.acquire() => {
+                if let Ok(permit) = permit {
+                    permit.forget();
+                }
+            }
+            () = cancel.cancelled() => return RunStatus::Cancelled,
+        }
+        match mode {
+            GateMode::Answer => MockFactory.run(request, sink, cancel, decisions).await,
+            GateMode::Fail => RunStatus::Failed,
+        }
+    }
+}
+
+/// A session holding one answered prompt, saved as a finished run with one
+/// tool call, as a real run would have left it.
+fn answered_session(store: &SessionStore) -> lightagent_store::Session {
+    let mut session = lightagent_store::Session::new("default", "Answered");
+    session.push_message(lightagent_store::StoredMessage::new(
+        "user",
+        "what time is it",
+    ));
+    session.push_message(lightagent_store::StoredMessage::new(
+        "assistant",
+        "the old answer",
+    ));
+    let now = std::time::SystemTime::now();
+    session.push_run(lightagent_store::RunRecord {
+        run_id: "run-old".into(),
+        started_at: now,
+        ended_at: Some(now),
+        stop_reason: Some("EndTurn".into()),
+        tools: vec![lightagent_store::ToolHistoryEntry {
+            id: "call_old".into(),
+            tool: "datetime.now".into(),
+            arguments_preview: "{}".into(),
+            result_excerpt: "earlier".into(),
+            source: None,
+            truncated: false,
+            outcome: "ok".into(),
+            duration_ms: None,
+        }],
+    });
+    store.save(&session).unwrap();
+    session
+}
+
+async fn regenerate(addr: &str, id: &str, run_id: &str, headers: &[(&str, &str)]) -> (u16, String) {
+    let payload = serde_json::json!({ "run_id": run_id }).to_string();
+    http(
+        addr,
+        "POST",
+        &format!("/api/lightagent/v1/sessions/{id}/regenerate"),
+        headers,
+        Some(&payload),
+    )
+    .await
+}
+
+/// Wait until session `id` is free for another run.
+async fn released(
+    busy: &tokio::sync::Mutex<std::collections::HashSet<lightagent_store::SessionId>>,
+    id: &lightagent_store::SessionId,
+) {
+    while busy.lock().await.contains(id) {
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test]
+async fn a_failed_or_cancelled_regeneration_keeps_the_saved_answer() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut state = app_state(AuthConfig::open());
+        let factory = GateFactory::new(GateMode::Fail);
+        state.manager = RunManager::new(Arc::new(factory.clone()));
+        let store = state.sessions.clone();
+        let busy = Arc::clone(&state.busy_sessions);
+        let saved = answered_session(&store);
+        let id = saved.id.as_str().to_owned();
+        let addr = spawn_server(state).await;
+
+        // A provider failure after part of a new answer streamed.
+        let (status, body) = regenerate(&addr, &id, "run-old", &[]).await;
+        assert_eq!(status, 202, "{body}");
+        while factory.started() < 1 {
+            tokio::task::yield_now().await;
+        }
+        // While the new run works, the saved answer is untouched on disk.
+        assert_eq!(store.load(&saved.id).unwrap(), saved);
+        factory.release();
+        released(&busy, &saved.id).await;
+        assert_eq!(store.load(&saved.id).unwrap(), saved);
+
+        // A cancelled regeneration, likewise.
+        let (status, body) = regenerate(&addr, &id, "run-old", &[]).await;
+        assert_eq!(status, 202, "{body}");
+        let run = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (status, _) = http(
+            &addr,
+            "POST",
+            &format!("/api/lightagent/v1/runs/{run}/cancel"),
+            &[],
+            Some("{}"),
+        )
+        .await;
+        assert_eq!(status, 200);
+        released(&busy, &saved.id).await;
+        assert_eq!(store.load(&saved.id).unwrap(), saved);
+
+        // The kept answer can still be regenerated; a finished run replaces it.
+        factory.set(GateMode::Answer);
+        let (status, body) = regenerate(&addr, &id, "run-old", &[]).await;
+        assert_eq!(status, 202, "{body}");
+        factory.release();
+        released(&busy, &saved.id).await;
+        let after = store.load(&saved.id).unwrap();
+        let roles: Vec<&str> = after.messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, ["user", "assistant"]);
+        assert_eq!(after.messages[0].content, "what time is it");
+        assert_eq!(after.messages[1].content, "The time is now.");
+        assert_eq!(after.runs.len(), 1);
+        assert_ne!(after.runs[0].run_id, "run-old");
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_regenerations_admit_one_and_a_replaced_run_id_is_stale() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut state = app_state(AuthConfig::open());
+        let factory = GateFactory::new(GateMode::Answer);
+        state.manager = RunManager::new(Arc::new(factory.clone()));
+        let store = state.sessions.clone();
+        let busy = Arc::clone(&state.busy_sessions);
+        let saved = answered_session(&store);
+        let id = saved.id.as_str().to_owned();
+        let addr = spawn_server(state).await;
+
+        let (first, second) = tokio::join!(
+            regenerate(&addr, &id, "run-old", &[]),
+            regenerate(&addr, &id, "run-old", &[]),
+        );
+        let mut statuses = [first.0, second.0];
+        statuses.sort_unstable();
+        assert_eq!(statuses, [202, 409], "{first:?} {second:?}");
+        factory.release();
+        released(&busy, &saved.id).await;
+        assert_eq!(factory.started(), 1);
+
+        // The prompt is kept once and the answer replaced; the tool history
+        // is the new run's alone.
+        let after = store.load(&saved.id).unwrap();
+        let roles: Vec<&str> = after.messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, ["user", "assistant"]);
+        assert_eq!(after.messages[0].content, "what time is it");
+        assert_eq!(after.messages[1].content, "The time is now.");
+        assert_eq!(after.runs.len(), 1);
+        let tools: Vec<(&str, &str, &str)> = after.runs[0]
+            .tools
+            .iter()
+            .map(|tool| (tool.id.as_str(), tool.tool.as_str(), tool.outcome.as_str()))
+            .collect();
+        assert_eq!(tools, [("call_1", "datetime.now", "ok")]);
+
+        // The replaced run's id no longer names the latest answer.
+        let (status, _) = regenerate(&addr, &id, "run-old", &[]).await;
+        assert_eq!(status, 409);
+        assert_eq!(store.load(&saved.id).unwrap(), after);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn regenerating_needs_session_write_access_as_well_as_run_access() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for (scopes, expected) in [
+            (vec![Scope::RunsWrite], 403),
+            (vec![Scope::SessionsWrite], 403),
+            (vec![Scope::RunsWrite, Scope::SessionsWrite], 202),
+        ] {
+            let label = format!("{scopes:?}");
+            let state = app_state(AuthConfig::keyed("secret", scopes));
+            let store = state.sessions.clone();
+            let busy = Arc::clone(&state.busy_sessions);
+            let saved = answered_session(&store);
+            let addr = spawn_server(state).await;
+            let (status, body) = regenerate(
+                &addr,
+                saved.id.as_str(),
+                "run-old",
+                &[("Authorization", "Bearer secret")],
+            )
+            .await;
+            assert_eq!(status, expected, "{label}: {body}");
+            released(&busy, &saved.id).await;
+            if expected == 403 {
+                assert_eq!(store.load(&saved.id).unwrap(), saved, "{label}");
+            }
+        }
+    })
+    .await
+    .unwrap();
+}

@@ -2,9 +2,26 @@
 
 Branch: `feat/response-action-bar` (from `master` @ `12582a0`).
 
-Building, rendering and testing run on GitHub Actions only. The local
-checkout was used to edit files, read source and keep this record. No build,
-test, formatter, linter or browser was run locally.
+Building, formatting, rendering and testing run on GitHub Actions only. No
+build, test, formatter, linter or browser was run locally.
+
+## How the edits were made
+
+- **`13f2ecc` to `4b611e5`** (the implementation, three CI fixes and the CI
+  records) were edited in a local git worktree with an editor and
+  text-splicing scripts, committed locally, and pushed with `git push`. The
+  task that started #98 allowed local editing. The repository's standing
+  policy (docs/desktop/DESKTOP_CLAUDE_PROMPT.md on the desktop branches)
+  does not: implementation edits go through GitHub-native APIs or the
+  GitHub-hosted `source-edit` workflow. **This is a departure from that
+  policy.** It is recorded here, and the commits are not rewritten.
+- **From the review commit on**, edits are edit requests on
+  `tools/source-edit`, submitted through the GitHub contents API. The
+  `source-edit` workflow applies each one on a GitHub-hosted runner, runs
+  `cargo fmt` on the touched Rust files, and creates the commit through the
+  git data API. The branch is then fast-forwarded through the refs API,
+  never forced. The request text was composed in the submitting API call;
+  no local source file was edited.
 
 ## Scope
 
@@ -25,7 +42,7 @@ test, formatter, linter or browser was run locally.
 | Rate response | Opens a menu with two choices, Good response and Bad response (`menuitemradio`, `aria-checked`). The choice is kept in component state only. The API has no feedback endpoint, and none was invented. |
 | Read aloud | `speechSynthesis` with one `SpeechSynthesisUtterance`. A second press stops it, `aria-pressed` reflects the state, and leaving the answer stops speech. Without speech synthesis the button stays focusable (`aria-disabled`) and explains on press. |
 | Share | `navigator.share({ title, text })` when it exists. Otherwise the text is copied, with a notice saying so. Cancelling the share sheet is silent. |
-| Try again | `POST /api/lightagent/v1/sessions/{id}/regenerate` with the latest run's id, through `agentApi.regenerate`. The new run streams through the existing `useRunEvents` path, the old answer is dropped from view at once, and the saved session replaces it when the run ends. |
+| Try again | `POST /api/lightagent/v1/sessions/{id}/regenerate` with the latest saved run's id, through `agentApi.regenerate`. The new run streams through the existing `useRunEvents` path. While it streams, the answer it would replace is hidden. If the run completes with an answer, the saved session holds the new answer. If it fails, is cancelled or brings nothing, the old answer is shown again, because the server kept it, with a notice that it was kept. |
 | More → Branch in new chat | Disabled, marked "Not available yet". The API cannot create a session from another session's transcript. The integration point is the `onBranch` prop, marked `TODO(branch-in-new-chat)` in `Agent.tsx`. |
 
 ### The regenerate endpoint
@@ -36,15 +53,25 @@ test, formatter, linter or browser was run locally.
 - It shares `create_run`'s code path (`start_run`), so authorization is the
   same as `POST /runs` with a `session_id`. That covers multi-user ownership,
   `runs_write` + `sessions_write`, and the busy-session lock.
-- Under the session lock it checks three things: `run_id` is the session's
-  latest run, that run has finished, and the transcript ends with a user
-  prompt and an assistant answer. Otherwise it answers 409 and changes
-  nothing.
-- It removes the answer and its run record, keeps the prompt once, and runs
-  the prompt again with the same history its first run had. The normal
-  recorder saves the new answer.
-- If a supervised (multi-user) start is refused, the original session is
-  saved back.
+- It also needs **session write access** for every caller, checked before
+  anything else (`access(…, SessionsWrite, profile)`). A scoped key needs
+  both `runs_write` and `sessions_write`. In multi-user mode, a user needs
+  both on the session's profile and must own the session. Another user's,
+  an unowned or a missing session is answered 404.
+- Under the session lock (the busy-session set) it checks three things, on
+  a copy of the session: `run_id` is the session's latest run, that run has
+  finished, and the transcript ends with a user prompt and an assistant
+  answer. Otherwise it answers 409. **Nothing is written at this point.**
+- The prompt is run again with the history its first run had: the
+  transcript before the prompt, without the old answer's run record.
+- The session stays locked from validation until the run is recorded, so
+  no second run or regeneration can start on it. When the run ends,
+  `record_run_in_session` reloads the session. It exchanges the old answer
+  and its run record for the new ones, in **one atomic save** (temporary
+  file then rename), only if the run **completed with answer text** and
+  the old answer is still the latest. A failed, cancelled, refused or empty
+  run writes nothing, so the saved answer survives. That includes a server
+  stopping mid-run, because the file was never changed.
 
 ## Files changed
 
@@ -143,14 +170,45 @@ Later commits that only update this table also run CI, but they are not listed h
    id different from the API id, so the UI is tested the way it runs in
    production (its saved-answer match, not run-id equality).
 
+## Review of the regenerate path (2026-11-01)
+
+| Requirement | Finding at `4b611e5` | Now |
+| --- | --- | --- |
+| Authorization and ownership before any change | Ownership and scope checks ran before the session was touched. In single-user and operator mode, only `runs_write` was required. | Session write access is required for every caller as well (`regenerating_needs_session_write_access_as_well_as_run_access`, and the multi-user `regenerating_needs_ownership_and_write_permission`). |
+| One session lock over validation, change, admission and rollback | The busy-session entry covered all of them. | Unchanged, and there is no longer any change or rollback before admission. |
+| A failed regeneration cannot destroy the saved answer | **Defect.** The answer and its run record were removed and saved before the run started. A provider failure, a cancellation or a server stop lost them for good. Only a refused supervised start restored them. | Fixed. Nothing is written until the run completes with an answer (`a_failed_or_cancelled_regeneration_keeps_the_saved_answer` checks the file during the run and after a failure and a cancellation). |
+| Simultaneous regeneration | Not tested. | One request is admitted and the other gets 409; the factory runs once (`concurrent_regenerations_admit_one_and_a_replaced_run_id_is_stale`). |
+| Stale run ids | An earlier run and an unknown run were tested. | Also the replaced run's id after a replacement. |
+| Run-start refusal | Restored by a save in the refusal branch, which was untested. | Nothing is written before admission, so a refusal changes nothing; the restore code is removed. A supervised refusal at start is a revocation race, and no test reproduces it deterministically. This is stated, not claimed as tested. |
+| Tool history valid, prompt not duplicated | The prompt was kept once, and tool history was not checked. | The new run record carries only the new run's tool calls (`call_1`, `datetime.now`, `ok`), and the old record (`call_old`) is gone. The prompt appears once in every test, and in the browser check after success and after failure. |
+
+**Remaining gaps:**
+- A concurrent `PATCH /sessions/{id}` (rename, pin, archive), or an
+  attachment upload, can still overwrite a run's saved result. Those
+  routes do not take the session lock. This lost update existed before
+  #98 and affects every session run, not only regeneration.
+- The desktop app needs the contract entry described under "Desktop".
+
 ## Limitations and follow-ups
 
-- Branch in new chat needs an API that copies a session's transcript up to a
-  message into a new session. Until then the row is disabled.
-- Ratings are not persisted or sent anywhere, because there is no feedback
-  endpoint.
-- Regenerate replaces only the latest answer, which is what the UI offers. A
-  regenerated answer's earlier version is not kept, so there is no version
+These are deliberately deferred. None of them counts as a completed Web or
+desktop capability:
+
+- **Branching is disabled.** Branch in new chat needs an API that copies a
+  session's transcript up to a message into a new session. Until then the
+  row is disabled.
+- **Ratings are temporary.** They live in the page only and are neither
+  persisted nor sent, because there is no feedback endpoint.
+- **There is no previous-answer navigation.** Regenerate replaces only the
+  latest answer. A replaced answer is not kept, so there is no version
   switcher.
-- Sharing sends the answer's text. The Web UI has no public link for one
-  answer to share instead.
+- **Sharing sends text.** The Web UI has no public link to one answer.
+
+## Desktop
+
+The Lightagent Desktop stack (#90–#97, unmerged) forwards UI requests only
+when they are listed in `docs/desktop/contract/operations.json`. While a
+profile switch runs, it also refuses requests that start a run
+(`desktop/src-tauri/src/switch.rs`). #98 is based on `master`, which has
+neither, so it cannot change them itself. The integration evidence lives on
+a separate branch; see the merge-order entry in the desktop progress record.

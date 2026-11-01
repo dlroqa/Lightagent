@@ -408,6 +408,9 @@ export function Agent() {
   const [accountOpen, setAccountOpen] = useState(false);
   const [sidebarNotice, setSidebarNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The regeneration this page started: its run, and the saved run whose
+  // answer it would replace.
+  const [replacing, setReplacing] = useState<{ sessionId: string; runId: string; savedRunId: string } | null>(null);
   const [deciding, setDeciding] = useState(false);
   const [savingPolicy, setSavingPolicy] = useState(false);
   const [followTranscript, setFollowTranscript] = useState(true);
@@ -491,9 +494,24 @@ export function Agent() {
     return last?.stop_reason ? describeStop(last.stop_reason, lastMessage?.role === "assistant") : null;
   }, [answer, done, events, runId, session]);
   const deliveryNotice = runId !== null && done ? describeDelivery(delivery) : null;
+  // The server keeps the saved answer until a regeneration has a new one.
+  // While the new one streams, or until it is saved, the old one is hidden.
+  // If the run fails, is cancelled or brings no answer, the old one is still
+  // the saved answer: it is shown again and the partial new one is not.
+  const regenerating = replacing !== null && replacing.runId === runId &&
+    replacing.sessionId === session?.id;
+  const keptAfterRegeneration = regenerating && done &&
+    (failure !== null || cancelled || answer.trim().length === 0);
+  const liveAnswerShown = showLiveAnswer && answer.length > 0 && !keptAfterRegeneration;
+  const hiddenAnswerIndex = regenerating && !keptAfterRegeneration &&
+    session?.runs[session.runs.length - 1]?.run_id === replacing?.savedRunId &&
+    session?.messages[session.messages.length - 1]?.role === "assistant"
+    ? session.messages.length - 1
+    : -1;
   // The action row sits under the final answer only: a saved assistant
   // message that ends the transcript, with no run streaming or queued.
-  const finalAnswerIndex = !running && !showLiveAnswer && steering.length === 0 &&
+  const finalAnswerIndex = !running && !liveAnswerShown && hiddenAnswerIndex < 0 &&
+    steering.length === 0 &&
     session?.messages[session.messages.length - 1]?.role === "assistant"
     ? session.messages.length - 1
     : -1;
@@ -851,11 +869,7 @@ export function Agent() {
     setError(null);
     try {
       const run = await agentApi.regenerate(id, latest.run_id, selectedModel || undefined);
-      // The server has removed the old answer; drop it here too rather than
-      // showing it above the new one until the session reloads.
-      setSession((current) => current?.id === id
-        ? { ...current, messages: current.messages.slice(0, -1), runs: current.runs.slice(0, -1) }
-        : current);
+      setReplacing({ sessionId: id, runId: run.id, savedRunId: latest.run_id });
       backgroundRuns.current.set(id, run.id);
       if (selected.current === id) setRunId(run.id);
       await load(id);
@@ -1160,7 +1174,7 @@ export function Agent() {
                     <Empty title="Nothing said yet"
                       hint="Messages, runs, and tool calls are saved with this session." />
                   )}
-                  {session.messages.map((message, index) => (
+                  {session.messages.map((message, index) => index === hiddenAnswerIndex ? null : (
                     <AgentMessage key={message.role + index} message={message}
                       actions={index === finalAnswerIndex && (
                         <ResponseActions
@@ -1197,7 +1211,7 @@ export function Agent() {
                       <span>{`${progressLabel(tool.name)} for “${describeTool(tool).subject}”: ${tool.progress}`}</span>
                     </div>
                   ))}
-                  {showLiveAnswer && answer && (
+                  {liveAnswerShown && (
                     <AgentMessage message={{ role: "assistant", content: answer }} streaming={!done} />
                   )}
                   {running && !answer && (
@@ -1220,6 +1234,11 @@ export function Agent() {
                     <div className="notice notice--warn" role="status" style={{ marginTop: 10 }}>{stopNotice.text}</div>
                   )}
                   {failure && <div className="notice notice--danger" style={{ marginTop: 10 }}>{failure}</div>}
+                  {keptAfterRegeneration && (
+                    <div className="notice notice--info" role="status" style={{ marginTop: 10 }}>
+                      The new answer was not finished, so the previous answer is kept.
+                    </div>
+                  )}
                   {deliveryNotice && (
                     <div className="notice notice--warn" role="status" style={{ marginTop: 10 }}>{deliveryNotice.text}</div>
                   )}

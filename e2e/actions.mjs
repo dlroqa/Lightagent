@@ -29,14 +29,17 @@ const message = (role, content) => ({ role, content, created_at: now() });
 const run = (run_id) => ({ run_id, started_at: now(), ended_at: now(), stop_reason: "EndTurn", tools: [] });
 const frame = (id, type, data) => `id: ${id}\nevent: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
 
-/** The scripted transcript for each stage of the regeneration. */
-function transcript(stage) {
+const FAILED_RUN = "run-00000000000000000000000000000a04";
+const PARTIAL = "Half of an answer that never";
+
+/**
+ * The scripted transcript. Like the real server, it keeps the saved answer
+ * while a regeneration runs and exchanges it only once the new run has
+ * finished with an answer; a failed run leaves it as it was.
+ */
+function transcript(answer, savedRun) {
   const earlier = [message("user", FIRST_PROMPT), message("assistant", FIRST_ANSWER), message("user", PROMPT)];
-  switch (stage) {
-    case "answered": return { messages: [...earlier, message("assistant", OLD_ANSWER)], runs: [run(FIRST_RUN), run(OLD_RUN)] };
-    case "regenerating": return { messages: earlier, runs: [run(FIRST_RUN)] };
-    default: return { messages: [...earlier, message("assistant", NEW_ANSWER)], runs: [run(FIRST_RUN), run(SAVED_NEW_RUN)] };
-  }
+  return { messages: [...earlier, message("assistant", answer)], runs: [run(FIRST_RUN), run(savedRun)] };
 }
 
 const DROP_REQUEST = new Set(["host", "connection", "content-length", "origin", "referer", "accept-encoding"]);
@@ -44,9 +47,18 @@ const DROP_RESPONSE = new Set(["connection", "content-length", "content-encoding
 
 /** Script session `id`'s transcript and regeneration; forward the rest to `base`. */
 async function scriptedProxy(base, id, record) {
-  let stage = "answered";
-  let release;
-  const released = new Promise((resolve) => { release = resolve; });
+  // Each Try again the page sends is answered by the next plan: the first
+  // finishes with a new answer, the second fails part-way.
+  const plans = [
+    { api: NEW_RUN, saved: SAVED_NEW_RUN, ok: true },
+    { api: FAILED_RUN, ok: false },
+  ].map((plan) => {
+    let release;
+    const released = new Promise((resolve) => { release = resolve; });
+    return { ...plan, release, released, done: false };
+  });
+  let answer = OLD_ANSWER;
+  let savedRun = OLD_RUN;
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://proxy.invalid");
@@ -60,30 +72,39 @@ async function scriptedProxy(base, id, record) {
       const sessionPath = `/api/lightagent/v1/sessions/${id}`;
       if (request.method === "GET" && url.pathname === sessionPath) {
         const real = await (await fetch(`${base}${sessionPath}`)).json();
-        return json(200, { ...real, ...transcript(stage) });
+        return json(200, { ...real, ...transcript(answer, savedRun) });
       }
       if (request.method === "POST" && url.pathname === `${sessionPath}/regenerate`) {
+        const plan = plans[record.regenerations.length];
         record.regenerations.push(JSON.parse(payload.toString("utf8")));
-        stage = "regenerating";
-        return json(202, { id: NEW_RUN, status: "running", session_id: id });
+        if (!plan) return json(409, { error: "only the latest answer can be regenerated" });
+        return json(202, { id: plan.api, status: "running", session_id: id });
       }
-      if (url.pathname === `/api/lightagent/v1/runs/${NEW_RUN}/events`) {
+      const streamed = plans.find((plan) => url.pathname === `/api/lightagent/v1/runs/${plan.api}/events`);
+      if (streamed) {
         response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
         response.write("retry: 300\n\n");
-        response.write(frame(0, "run.started", { run: NEW_RUN, parent: null }));
-        response.write(frame(1, "model.delta", { content: NEW_ANSWER }));
+        response.write(frame(0, "run.started", { run: streamed.api, parent: null }));
+        response.write(frame(1, "model.delta", { content: streamed.ok ? NEW_ANSWER : PARTIAL }));
         // Held open until the test has looked at the streaming state.
-        await released;
-        stage = "regenerated";
-        response.write(frame(2, "turn.completed", {}));
-        response.write(frame(3, "run.completed", { reason: "EndTurn", complete: true }));
+        await streamed.released;
+        if (streamed.ok) {
+          answer = NEW_ANSWER;
+          savedRun = streamed.saved;
+          response.write(frame(2, "turn.completed", {}));
+          response.write(frame(3, "run.completed", { reason: "EndTurn", complete: true }));
+        } else {
+          response.write(frame(2, "run.failed", { reason: "Error", complete: false }));
+        }
+        streamed.done = true;
         return response.end();
       }
-      if (request.method === "GET" && url.pathname === `/api/lightagent/v1/runs/${NEW_RUN}`) {
-        const finished = stage === "regenerated";
+      const polled = plans.find((plan) => url.pathname === `/api/lightagent/v1/runs/${plan.api}`);
+      if (request.method === "GET" && polled) {
+        const status = !polled.done ? "running" : polled.ok ? "completed" : "failed";
         return json(200, {
-          id: NEW_RUN, status: finished ? "completed" : "running", events: finished ? 4 : 2,
-          pending_approval: null, stop_reason: finished ? "EndTurn" : null,
+          id: polled.api, status, events: polled.done ? 4 : 2,
+          pending_approval: null, stop_reason: !polled.done ? null : polled.ok ? "EndTurn" : "Error",
         });
       }
       const headers = Object.fromEntries(
@@ -107,7 +128,12 @@ async function scriptedProxy(base, id, record) {
     }
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { server, origin: `http://127.0.0.1:${server.address().port}`, release };
+  return {
+    server,
+    origin: `http://127.0.0.1:${server.address().port}`,
+    release: (index) => plans[index]?.release(),
+    releaseAll: () => plans.forEach((plan) => plan.release()),
+  };
 }
 
 /** Stand-ins for the clipboard and speech synthesis, recording what they were given. */
@@ -268,7 +294,7 @@ export async function checkResponseActions(browser, base, outDir) {
     const streaming = await page.evaluate(() => document.body.innerText);
     if (streaming.includes(OLD_ANSWER)) failures.push("actions: the replaced answer stayed on screen");
     await page.screenshot({ path: `${dir}/regenerating-dark.png` });
-    proxy.release();
+    proxy.release(0);
     await toolbar.waitFor({ timeout: 15000 });
     await page.waitForTimeout(500);
     const text = await page.evaluate(() => document.body.innerText);
@@ -279,6 +305,28 @@ export async function checkResponseActions(browser, base, outDir) {
     if (text.split(PROMPT).length - 1 !== 1) failures.push("actions: the prompt is not shown exactly once");
     if (text.includes(OLD_ANSWER)) failures.push("actions: the replaced answer came back");
     await assertOnlyUnderFinalAnswer(page, failures, "after try again");
+
+    // A failed Try again: the server keeps the saved answer, so the page
+    // shows it again, says so, and drops the partial new one.
+    await toolbar.getByRole("button", { name: "Try again" }).click();
+    await page.waitForFunction(() => !document.querySelector('[role="toolbar"][aria-label="Response actions"]'), null, { timeout: 5000 })
+      .catch(() => failures.push("actions: the row stayed while a failing answer streamed"));
+    if ((await page.evaluate(() => document.body.innerText)).includes(NEW_ANSWER)) {
+      failures.push("actions: the answer being replaced stayed on screen");
+    }
+    proxy.release(1);
+    await page.getByText("the previous answer is kept", { exact: false }).waitFor({ timeout: 15000 });
+    await toolbar.waitFor({ timeout: 15000 });
+    await page.waitForTimeout(500);
+    const kept = await page.evaluate(() => document.body.innerText);
+    if (record.regenerations.length !== 2 || record.regenerations[1]?.run_id !== SAVED_NEW_RUN) {
+      failures.push(`actions: second regenerate requests ${JSON.stringify(record.regenerations)}`);
+    }
+    if (kept.split(NEW_ANSWER).length - 1 !== 1) failures.push("actions: the kept answer is not shown exactly once");
+    if (kept.includes(PARTIAL)) failures.push("actions: the failed run's partial answer is shown");
+    if (kept.split(PROMPT).length - 1 !== 1) failures.push("actions: the prompt is not shown exactly once after a failure");
+    await assertOnlyUnderFinalAnswer(page, failures, "after a failed try again");
+    await page.screenshot({ path: `${dir}/regeneration-failed-dark.png` });
 
     // Narrow screens: the row fits, nothing scrolls sideways.
     await page.setViewportSize({ width: 360, height: 800 });
@@ -297,7 +345,7 @@ export async function checkResponseActions(browser, base, outDir) {
     if (errors.length) failures.push(`actions: uncaught page error — ${errors[0]}`);
     console.log(`  [${failures.length ? "FAIL" : "ok"}] response actions`);
   } finally {
-    proxy.release();
+    proxy.releaseAll();
     await context.close();
     proxy.server.closeAllConnections();
     await new Promise((resolve) => proxy.server.close(resolve));

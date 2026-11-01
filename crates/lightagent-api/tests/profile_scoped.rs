@@ -580,6 +580,79 @@ async fn mutations_need_ownership_and_write_permission() {
     );
 }
 
+// Regenerating replaces an answer only for the session's owner, with run and
+// session write access on its profile; anyone else changes nothing.
+#[tokio::test]
+async fn regenerating_needs_ownership_and_write_permission() {
+    let world = world().await;
+    let mine = create(&world, &world.alice, "alice-bot").await;
+    let body = json!({"message": "hi", "profile": "alice-bot", "session_id": mine}).to_string();
+    let (status, body) = call(
+        &world.addr,
+        "POST",
+        "/api/lightagent/v1/runs",
+        &world.alice,
+        Some(&body),
+    )
+    .await;
+    assert_eq!(status, 202, "{body}");
+    let store =
+        SessionStore::at_profile(&ProfileStore::new(&world.home.0).handle(&profile("alice-bot")));
+    let id = lightagent_store::SessionId::parse(&mine).unwrap();
+    let answered = loop {
+        let session = store.load(&id).unwrap();
+        if session.runs.len() == 1 {
+            break session;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    let path = format!("{SESSIONS}/{mine}/regenerate");
+    let request =
+        |bot: &str| json!({"run_id": answered.runs[0].run_id, "profile": bot}).to_string();
+    for (token, bot, expected) in [
+        (&world.bob, "bob-bot", 404),
+        (&world.bob, "alice-bot", 403),
+        (&world.alice_ro, "alice-bot", 403),
+    ] {
+        let (status, body) = call(&world.addr, "POST", &path, token, Some(&request(bot))).await;
+        assert_eq!(status, expected, "{bot}: {body}");
+        assert_eq!(store.load(&id).unwrap(), answered, "{bot}: untouched");
+    }
+
+    // Alice, on her own session: accepted once her first run has released
+    // it, and the answer is replaced.
+    let mut accepted = None;
+    for _ in 0..100 {
+        let reply = call(
+            &world.addr,
+            "POST",
+            &path,
+            &world.alice,
+            Some(&request("alice-bot")),
+        )
+        .await;
+        if reply.0 == 409 && reply.1.contains("active run") {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            continue;
+        }
+        accepted = Some(reply);
+        break;
+    }
+    let (status, body) = accepted.unwrap();
+    assert_eq!(status, 202, "{body}");
+    let replaced = loop {
+        let session = store.load(&id).unwrap();
+        if session.updated_at != answered.updated_at {
+            break session;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    let roles: Vec<&str> = replaced.messages.iter().map(|m| m.role.as_str()).collect();
+    assert_eq!(roles, ["user", "assistant"]);
+    assert_eq!(replaced.runs.len(), 1);
+    assert_eq!(world.runs.lock().unwrap().len(), 2);
+}
+
 // 5. Profile enumeration lists only accessible profiles.
 #[tokio::test]
 async fn users_enumerate_only_accessible_profiles() {

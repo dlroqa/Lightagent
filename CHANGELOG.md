@@ -13,10 +13,11 @@ All notable Lightagent changes are documented here.
   tooltip; the row is hidden while an answer streams.
 - `POST /api/lightagent/v1/sessions/{id}/regenerate` with `{"run_id": …}`:
   replaces the session's latest answer, written by that run, with a new run
-  of the same prompt. The prompt is kept once; the old answer and its run
-  record are removed; the new run is authorized, streamed and saved like any
-  session run. Anything but the latest answer is refused with 409, and a
-  refused run restores the session.
+  of the same prompt. The prompt is kept once. The saved answer stays until
+  the new run completes with an answer; then the answer and its run record
+  are exchanged in one save. A failed, cancelled or empty run changes
+  nothing. It needs session write access as well as run access, and
+  anything but the latest answer is refused with 409.
 
 ## [0.5.0] - 2026-10-29
 
