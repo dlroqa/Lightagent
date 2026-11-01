@@ -117,7 +117,7 @@
    "not-applicable": 29
   },
   "parity_denominator": 226,
-  "parity_implemented": 15,
+  "parity_implemented": 22,
   "pending_decision_rows": 0,
   "not_counted_duplicates": 26
  },
@@ -557,10 +557,10 @@
    "backend": "api: GET /settings (subset); extract: config_cmd(Show)",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Advanced configuration card shows the redacted config (UI e2e: e2e/config.mjs in the standalone Web UI render job); API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed)",
+   "tested_sha": "0e4689232ae0ce0653367883222b40d41b62218d",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41359276745 (check); https://github.com/dlroqa/Lightagent/actions/runs/41359276774 (desktop)"
   },
   {
    "id": "cli.config.path",
@@ -579,10 +579,10 @@
    "backend": "extract: config_cmd(Path)",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Advanced configuration card shows the config path (UI e2e); GET /config path = `config path` (API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms)); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed)",
+   "tested_sha": "0e4689232ae0ce0653367883222b40d41b62218d",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41359276745 (check); https://github.com/dlroqa/Lightagent/actions/runs/41359276774 (desktop)"
   },
   {
    "id": "cli.config.get",
@@ -601,10 +601,10 @@
    "backend": "extract: config_cmd(Get)",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Advanced configuration card Read (UI e2e); API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms), including the unknown-key error; desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed)",
+   "tested_sha": "0e4689232ae0ce0653367883222b40d41b62218d",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41359276745 (check); https://github.com/dlroqa/Lightagent/actions/runs/41359276774 (desktop)"
   },
   {
    "id": "cli.config.get.arg.key",
@@ -623,10 +623,10 @@
    "backend": "extract: config_cmd(Get)",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Advanced configuration card Key field (UI e2e); API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed)",
+   "tested_sha": "0e4689232ae0ce0653367883222b40d41b62218d",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41359276745 (check); https://github.com/dlroqa/Lightagent/actions/runs/41359276774 (desktop)"
   },
   {
    "id": "cli.config.set",
@@ -645,10 +645,10 @@
    "backend": "api: PUT /settings (subset); extract: config_cmd(Set)",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Advanced configuration card Set: write, stale 409 with nothing written, invalid value refused (UI e2e); API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms); one cross-process lock (desktop_config.rs, core config tests); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed)",
+   "tested_sha": "0e4689232ae0ce0653367883222b40d41b62218d",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41359276745 (check); https://github.com/dlroqa/Lightagent/actions/runs/41359276774 (desktop)"
   },
   {
    "id": "cli.config.set.arg.key",
@@ -667,10 +667,10 @@
    "backend": "api: PUT /settings (subset); extract: config_cmd(Set)",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Advanced configuration card Key field (UI e2e); API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed)",
+   "tested_sha": "0e4689232ae0ce0653367883222b40d41b62218d",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41359276745 (check); https://github.com/dlroqa/Lightagent/actions/runs/41359276774 (desktop)"
   },
   {
    "id": "cli.config.set.arg.value",
@@ -689,10 +689,10 @@
    "backend": "api: PUT /settings (subset); extract: config_cmd(Set)",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Advanced configuration card Value field, invalid value refused with the CLI's words (UI e2e; API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms)); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed)",
+   "tested_sha": "0e4689232ae0ce0653367883222b40d41b62218d",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41359276745 (check); https://github.com/dlroqa/Lightagent/actions/runs/41359276774 (desktop)"
   },
   {
    "id": "cli.config.jev-routing-report",
