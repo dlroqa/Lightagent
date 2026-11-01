@@ -1,0 +1,2911 @@
+=== base 7c3e9884aee0fad819e081a8290c2609c7ef2550
+=== message
+Desktop D4c: one locked, revision-checked configuration writer
+
+Every config write now goes through `ConfigStore::update`: an exclusive OS
+lock on `config.json.lock` (std file locking; every process, no new
+dependency), a fresh read, an optional expected revision (SHA-256 of the
+file's bytes) refused as a conflict when stale, the change, validation,
+and an atomic write. A lock held past the wait is `Busy`, never a hang.
+
+Converted writers: `lightagent config set`, `init`, extension install and
+enable/disable, chat onboarding, `setup` (revision-checked: it refuses to
+save over a change made while it was open), and `PUT /settings` (a locked
+read-modify-write; `expected_revision` makes a stale save a 409). The key
+rules of `config get|set` move to `lightagent_core::config_keys`, so the
+CLI and the new routes accept and refuse exactly the same keys and values:
+GET /config (path, revision, redacted config), GET /config/{key},
+PUT /config/{key} (with `expected_revision`, 409 when stale).
+
+Settings sends the revision it loaded and reloads on 409; an advanced
+editor reads and sets keys through the new routes. Contract operations
+config.show/get/set, and inventory/parity rows (backend, counted through
+cli.config.*) are added.
+
+Tests: core unit tests (revisions, stale update, failed and invalid
+changes, waiting for the lock and reading fresh, Busy); a hosted
+cross-process test that holds the lock while the CLI waits and keeps a
+change made inside it; CLI/API equivalence on one home (values, errors);
+stale 409 for /config and /settings; secret redaction across CLI and API;
+and a browser check of the editor's write, stale refusal and invalid
+value.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-core/src/config.rs
+--- find
+    #[error("could not write the config at {path}: {reason}")]
+    Unwritable { path: PathBuf, reason: String },
+}
+--- with
+    #[error("could not write the config at {path}: {reason}")]
+    Unwritable { path: PathBuf, reason: String },
+    /// The file changed after the writer read it; nothing was written.
+    #[error(
+        "the config changed since revision {expected} was read (it is now {current}); nothing was written"
+    )]
+    Conflict { expected: String, current: String },
+    /// Another writer held the config lock for longer than a writer waits.
+    #[error("the config at {path} is being written by another process; try again")]
+    Busy { path: PathBuf },
+}
+=== replace crates/lightagent-core/src/config.rs
+--- find
+/// The config file, read and written whole.
+#[derive(Clone, Debug)]
+pub struct ConfigStore {
+    path: PathBuf,
+}
+--- with
+/// The config file, read whole and written whole under one lock.
+#[derive(Clone, Debug)]
+pub struct ConfigStore {
+    path: PathBuf,
+    lock_wait: std::time::Duration,
+}
+
+/// How long a writer waits for another writer's lock before reporting
+/// [`ConfigError::Busy`].
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A revision of the config file: `sha256:` and the hash of its exact bytes,
+/// or `absent` before the file exists. A writer names the revision it read;
+/// [`ConfigStore::update`] refuses a write made against any other.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigRevision(String);
+
+impl ConfigRevision {
+    fn of(bytes: Option<&[u8]>) -> Self {
+        use sha2::{Digest as _, Sha256};
+        use std::fmt::Write as _;
+        let Some(bytes) = bytes else {
+            return Self("absent".to_owned());
+        };
+        let mut text = String::from("sha256:");
+        for byte in Sha256::digest(bytes).iter() {
+            let _ = write!(text, "{byte:02x}");
+        }
+        Self(text)
+    }
+
+    /// A revision a client sends back, exactly as it was given out.
+    pub fn parse(value: &str) -> Self {
+        Self(value.trim().to_owned())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Why [`ConfigStore::update`] wrote nothing.
+#[derive(Debug)]
+pub enum UpdateError<E> {
+    /// The change itself refused, with its own error.
+    Change(E),
+    /// The store refused: a stale revision, a busy lock, an invalid result,
+    /// or a file that could not be read or written.
+    Store(ConfigError),
+}
+
+impl UpdateError<std::convert::Infallible> {
+    /// The store's error: a change that cannot fail has no other.
+    pub fn into_store(self) -> ConfigError {
+        match self {
+            Self::Store(error) => error,
+            Self::Change(never) => match never {},
+        }
+    }
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for UpdateError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Change(error) => error.fmt(f),
+            Self::Store(error) => error.fmt(f),
+        }
+    }
+}
+=== replace crates/lightagent-core/src/config.rs
+--- find
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+--- with
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            lock_wait: LOCK_WAIT,
+        }
+    }
+
+    /// The same store, waiting at most `wait` for another writer's lock.
+    pub fn with_lock_wait(mut self, wait: std::time::Duration) -> Self {
+        self.lock_wait = wait;
+        self
+    }
+=== replace crates/lightagent-core/src/config.rs
+--- find
+    pub fn load(&self) -> Result<Config, ConfigError> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
+            Err(err) => {
+                return Err(ConfigError::Unreadable {
+                    path: self.path.clone(),
+                    reason: err.to_string(),
+                });
+            }
+        };
+        let file: ConfigFile =
+            serde_json::from_slice(&bytes).map_err(|err| ConfigError::Unreadable {
+                path: self.path.clone(),
+                reason: err.to_string(),
+            })?;
+        Ok(file.config)
+    }
+
+    /// Validate, then write the config atomically and owner-only.
+    pub fn save(&self, config: &Config) -> Result<(), ConfigError> {
+        config.validate()?;
+--- with
+    pub fn load(&self) -> Result<Config, ConfigError> {
+        self.load_with_revision().map(|(config, _)| config)
+    }
+
+    /// Load the config with the revision of the exact bytes it came from.
+    pub fn load_with_revision(&self) -> Result<(Config, ConfigRevision), ConfigError> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((Config::default(), ConfigRevision::of(None)));
+            }
+            Err(err) => {
+                return Err(ConfigError::Unreadable {
+                    path: self.path.clone(),
+                    reason: err.to_string(),
+                });
+            }
+        };
+        let file: ConfigFile =
+            serde_json::from_slice(&bytes).map_err(|err| ConfigError::Unreadable {
+                path: self.path.clone(),
+                reason: err.to_string(),
+            })?;
+        Ok((file.config, ConfigRevision::of(Some(&bytes))))
+    }
+
+    /// The one way to change the config. Under the config lock, read the file
+    /// as it is now, refuse when `expected` names another revision, apply
+    /// `change`, validate, and write atomically. Nothing is written unless
+    /// every step succeeds, and no other writer's change is lost: each one
+    /// applies to what the last one wrote. Returns `change`'s value and the
+    /// new revision.
+    pub fn update<T, E>(
+        &self,
+        expected: Option<&ConfigRevision>,
+        change: impl FnOnce(&mut Config) -> Result<T, E>,
+    ) -> Result<(T, ConfigRevision), UpdateError<E>> {
+        let _lock = self.lock().map_err(UpdateError::Store)?;
+        let (mut config, current) = self.load_with_revision().map_err(UpdateError::Store)?;
+        if let Some(expected) = expected
+            && *expected != current
+        {
+            return Err(UpdateError::Store(ConfigError::Conflict {
+                expected: expected.0.clone(),
+                current: current.0,
+            }));
+        }
+        let value = change(&mut config).map_err(UpdateError::Change)?;
+        let revision = self.write(&config).map_err(UpdateError::Store)?;
+        Ok((value, revision))
+    }
+
+    /// Replace the config with `config`, only if the file is still at
+    /// `expected`: for an editor that changed a copy it read earlier, which
+    /// must not silently undo another writer's change.
+    pub fn replace(
+        &self,
+        expected: &ConfigRevision,
+        config: &Config,
+    ) -> Result<ConfigRevision, ConfigError> {
+        self.update(Some(expected), |current| {
+            *current = config.clone();
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .map(|((), revision)| revision)
+        .map_err(UpdateError::into_store)
+    }
+
+    /// Validate, then write the config atomically and owner-only, under the
+    /// lock. It replaces whatever is there; a writer that read the config
+    /// first uses [`ConfigStore::update`] or [`ConfigStore::replace`].
+    pub fn save(&self, config: &Config) -> Result<(), ConfigError> {
+        self.update(None, |current| {
+            *current = config.clone();
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .map(|_| ())
+        .map_err(UpdateError::into_store)
+    }
+
+    /// Hold the config's write lock: an exclusive OS lock on `<config>.lock`,
+    /// which every process takes. Waits up to the store's lock wait.
+    fn lock(&self) -> Result<std::fs::File, ConfigError> {
+        let mut name = self
+            .path
+            .file_name()
+            .map(std::ffi::OsStr::to_os_string)
+            .unwrap_or_default();
+        name.push(".lock");
+        let path = self.path.with_file_name(name);
+        let unwritable = |err: std::io::Error| ConfigError::Unwritable {
+            path: path.clone(),
+            reason: err.to_string(),
+        };
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(&unwritable)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(&unwritable)?;
+        let deadline = std::time::Instant::now() + self.lock_wait;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err(ConfigError::Busy {
+                        path: self.path.clone(),
+                    });
+                }
+                Err(std::fs::TryLockError::Error(err)) => return Err(unwritable(err)),
+            }
+        }
+    }
+
+    /// Validate and write `config`; the caller holds the lock.
+    fn write(&self, config: &Config) -> Result<ConfigRevision, ConfigError> {
+        config.validate()?;
+=== replace crates/lightagent-core/src/config.rs
+--- find
+        bytes.push(b'\n');
+        paths::write_private(&self.path, &bytes).map_err(|err| ConfigError::Unwritable {
+            path: self.path.clone(),
+            reason: err.to_string(),
+        })
+    }
+}
+--- with
+        bytes.push(b'\n');
+        paths::write_private(&self.path, &bytes).map_err(|err| ConfigError::Unwritable {
+            path: self.path.clone(),
+            reason: err.to_string(),
+        })?;
+        Ok(ConfigRevision::of(Some(&bytes)))
+    }
+}
+=== replace crates/lightagent-core/src/config.rs
+--- find
+    fn scratch() -> PathBuf {
+        std::env::temp_dir().join(format!("lightagent-config-{}", RunId::new().as_str()))
+    }
+--- with
+    fn scratch() -> PathBuf {
+        std::env::temp_dir().join(format!("lightagent-config-{}", RunId::new().as_str()))
+    }
+
+    type Never = std::convert::Infallible;
+
+    fn set_model(store: &ConfigStore, name: &str) -> ConfigRevision {
+        store
+            .update(None, |config| {
+                config.inference.model = Some(name.to_owned());
+                Ok::<(), Never>(())
+            })
+            .expect("write")
+            .1
+    }
+
+    #[test]
+    fn a_revision_names_the_exact_bytes() {
+        let dir = scratch();
+        let store = ConfigStore::new(dir.join("config.json"));
+        let (_, absent) = store.load_with_revision().expect("load");
+        assert_eq!(absent.as_str(), "absent");
+        let written = set_model(&store, "one");
+        assert!(written.as_str().starts_with("sha256:"), "{written:?}");
+        assert_eq!(store.load_with_revision().expect("load").1, written);
+        assert_ne!(set_model(&store, "two"), written);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_stale_update_writes_nothing() {
+        let dir = scratch();
+        let store = ConfigStore::new(dir.join("config.json"));
+        let first = set_model(&store, "one");
+        let second = set_model(&store, "two");
+        let before = std::fs::read(store.path()).expect("read");
+        let stale = store.update(Some(&first), |config| {
+            config.inference.model = Some("three".to_owned());
+            Ok::<(), Never>(())
+        });
+        assert!(
+            matches!(
+                &stale,
+                Err(UpdateError::Store(ConfigError::Conflict { expected, current }))
+                    if expected == first.as_str() && current == second.as_str()
+            ),
+            "{stale:?}"
+        );
+        assert_eq!(std::fs::read(store.path()).expect("read"), before);
+        // The current revision is accepted.
+        store
+            .update(Some(&second), |_| Ok::<(), Never>(()))
+            .expect("current revision");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_refused_change_and_an_invalid_result_write_nothing() {
+        let dir = scratch();
+        let store = ConfigStore::new(dir.join("config.json"));
+        set_model(&store, "one");
+        let before = std::fs::read(store.path()).expect("read");
+        let refused = store.update(None, |_| Err::<(), _>("no"));
+        assert!(matches!(refused, Err(UpdateError::Change("no"))), "{refused:?}");
+        let invalid = store.update(None, |config| {
+            config.platform.github_actions.repository = Some("no-slash".to_owned());
+            Ok::<(), Never>(())
+        });
+        assert!(
+            matches!(invalid, Err(UpdateError::Store(ConfigError::Invalid(_)))),
+            "{invalid:?}"
+        );
+        assert_eq!(std::fs::read(store.path()).expect("read"), before);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_writer_waits_for_the_lock_then_keeps_what_the_holder_wrote() {
+        let dir = scratch();
+        let path = dir.join("config.json");
+        let store = ConfigStore::new(&path);
+        set_model(&store, "one");
+        let held = store.lock().expect("lock");
+        let waiting = ConfigStore::new(&path);
+        let writer = std::thread::spawn(move || {
+            waiting
+                .update(None, |config| {
+                    config.memory.top_k = 9;
+                    Ok::<(), Never>(())
+                })
+                .map(|_| ())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!writer.is_finished(), "the writer did not wait for the lock");
+        // The holder writes while the other waits.
+        let mut config = store.load().expect("load");
+        config.inference.model = Some("held".to_owned());
+        store.write(&config).expect("write under the lock");
+        drop(held);
+        writer.join().expect("join").expect("update");
+        let config = store.load().expect("load");
+        assert_eq!(config.inference.model.as_deref(), Some("held"));
+        assert_eq!(config.memory.top_k, 9);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_lock_held_too_long_is_reported_as_busy() {
+        let dir = scratch();
+        let store = ConfigStore::new(dir.join("config.json"))
+            .with_lock_wait(std::time::Duration::from_millis(50));
+        let held = store.lock().expect("lock");
+        let busy = store.update(None, |_| Ok::<(), Never>(()));
+        assert!(
+            matches!(busy, Err(UpdateError::Store(ConfigError::Busy { .. }))),
+            "{busy:?}"
+        );
+        drop(held);
+        store
+            .update(None, |_| Ok::<(), Never>(()))
+            .expect("free again");
+        std::fs::remove_dir_all(dir).ok();
+    }
+=== replace crates/lightagent-core/src/lib.rs
+--- find
+pub mod config;
+pub mod credentials;
+--- with
+pub mod config;
+pub mod config_keys;
+pub mod credentials;
+=== replace crates/lightagent-core/src/lib.rs
+--- find
+    AdaptiveAllocation, AgentConfig, AllowedWorkflow, ApprovalPolicy, Config, ConfigError,
+    ConfigStore,
+--- with
+    AdaptiveAllocation, AgentConfig, AllowedWorkflow, ApprovalPolicy, Config, ConfigError,
+    ConfigRevision, ConfigStore,
+=== replace crates/lightagent-core/src/lib.rs
+--- find
+    SubagentsConfig, ToolNameMode, ToolPolicyMode, ToolsConfig, WebConfig, WebSearchConfig,
+    WorkerResolution,
+};
+--- with
+    SubagentsConfig, ToolNameMode, ToolPolicyMode, ToolsConfig, UpdateError, WebConfig,
+    WebSearchConfig, WorkerResolution,
+};
+=== write crates/lightagent-core/src/config_keys.rs
+//! Config keys by dotted name: the reading and parsing behind
+//! `lightagent config get|set`, shared by the CLI and the HTTP API so both
+//! accept and refuse exactly the same keys and values. Secret keys read as
+//! their redacted reference, never as a value.
+
+use crate::config::{Config, SecretRef};
+
+/// Read a small, fixed set of dotted keys.
+pub fn get_key(config: &Config, key: &str) -> Option<String> {
+    match key {
+        "inference.provider" => Some(config.inference.provider.clone()),
+        "inference.base_url" => Some(config.inference.base_url.clone()),
+        "inference.model" => Some(config.inference.model.clone().unwrap_or_default()),
+        "inference.api_key" => Some(
+            config
+                .inference
+                .api_key
+                .as_ref()
+                .map(SecretRef::redacted)
+                .unwrap_or_default(),
+        ),
+        "inference.device" => Some(config.inference.device.clone()),
+        key if key.starts_with("inference.model_catalog.") => config
+            .inference
+            .model_catalog
+            .get(&key["inference.model_catalog.".len()..])
+            .cloned(),
+        key if key.starts_with("inference.model_alias.") => config
+            .inference
+            .model_aliases
+            .get(&key["inference.model_alias.".len()..])
+            .cloned(),
+        "agent.max_turns" => Some(config.agent.max_turns.to_string()),
+        "agent.max_tool_calls" => Some(config.agent.max_tool_calls.to_string()),
+        // Empty means no time limit.
+        "agent.wall_clock_secs" => Some(
+            config
+                .agent
+                .wall_clock_secs
+                .map(|secs| secs.to_string())
+                .unwrap_or_default(),
+        ),
+        "extensions.enabled" => Some(config.extensions.enabled.to_string()),
+        "memory.auto_capture" => Some(config.memory.auto_capture.to_string()),
+        "memory.inject_recent" => Some(config.memory.inject_recent.to_string()),
+        "memory.top_k" => Some(config.memory.top_k.to_string()),
+        "web.enabled" => Some(config.web.enabled.to_string()),
+        "web.search.endpoint" => Some(config.web.search.endpoint.clone().unwrap_or_default()),
+        "web.search.query_param" => Some(config.web.search.query_param.clone()),
+        "web.search.max_results" => Some(config.web.search.max_results.to_string()),
+        "web.max_fetch_bytes" => Some(config.web.max_fetch_bytes.to_string()),
+        "web.timeout_secs" => Some(config.web.timeout_secs.to_string()),
+        "rag.realtime_enabled" => Some(config.rag.realtime_enabled.to_string()),
+        "tools.profile_policy" => Some(config.tools.profile_policy.as_str().to_owned()),
+        "platform.jev.enabled" => Some(config.platform.jev.endpoint.enabled.to_string()),
+        "platform.jev.base_url" => Some(
+            config
+                .platform
+                .jev
+                .endpoint
+                .base_url
+                .clone()
+                .unwrap_or_default(),
+        ),
+        "platform.jev.model" => Some(config.platform.jev.model.clone()),
+        "platform.jev.confidence_threshold" => {
+            Some(config.platform.jev.confidence_threshold.to_string())
+        }
+        "platform.jev.allowed_models" => Some(config.platform.jev.allowed_models.join(",")),
+        "platform.jev.allowed_profiles" => Some(config.platform.jev.allowed_profiles.join(",")),
+        "platform.jev.timeout_secs" => Some(config.platform.jev.timeout_secs.to_string()),
+        "platform.jev.routing_input" => Some(config.platform.jev.routing_input.as_str().to_owned()),
+        "platform.jev.routing_permission" => {
+            Some(config.platform.jev.routing_permission.as_str().to_owned())
+        }
+        "platform.jev.routing_allowed_profiles" => {
+            Some(config.platform.jev.routing_allowed_profiles.join(","))
+        }
+        "platform.jev.classification.workflow_guidance" => Some(
+            config
+                .platform
+                .jev
+                .classification
+                .workflow_guidance
+                .to_string(),
+        ),
+        "platform.jev.classification.mode" => {
+            Some(config.platform.jev.classification.mode.as_str().to_owned())
+        }
+        "subagents.selection" => Some(config.subagents.selection.as_str().to_owned()),
+        "inference.tool_names" => Some(config.inference.tool_names.as_str().to_owned()),
+        "subagents.selection_profiles" => Some(config.subagents.selection_profiles.join(",")),
+        "platform.jev.classification.allowed_profiles" => Some(
+            config
+                .platform
+                .jev
+                .classification
+                .allowed_profiles
+                .join(","),
+        ),
+        "platform.jev.classification.max_input_chars" => Some(
+            config
+                .platform
+                .jev
+                .classification
+                .max_input_chars
+                .to_string(),
+        ),
+        "platform.jev.classification.default_threshold" => Some(
+            config
+                .platform
+                .jev
+                .classification
+                .default_threshold
+                .to_string(),
+        ),
+        "platform.jev.classification.version_thresholds" => Some(
+            config
+                .platform
+                .jev
+                .classification
+                .version_thresholds
+                .iter()
+                .map(|(version, threshold)| format!("{version}={threshold}"))
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        "platform.qdrant.enabled" => Some(config.platform.qdrant.endpoint.enabled.to_string()),
+        "platform.qdrant.base_url" => Some(
+            config
+                .platform
+                .qdrant
+                .endpoint
+                .base_url
+                .clone()
+                .unwrap_or_default(),
+        ),
+        "platform.qdrant.collection" => Some(config.platform.qdrant.collection.clone()),
+        "platform.qdrant.timeout_secs" => Some(config.platform.qdrant.timeout_secs.to_string()),
+        "platform.infinity.enabled" => Some(config.platform.infinity.endpoint.enabled.to_string()),
+        "platform.infinity.base_url" => Some(
+            config
+                .platform
+                .infinity
+                .endpoint
+                .base_url
+                .clone()
+                .unwrap_or_default(),
+        ),
+        "platform.infinity.embedding_model" => {
+            Some(config.platform.infinity.embedding_model.clone())
+        }
+        "platform.infinity.rerank_model" => Some(config.platform.infinity.rerank_model.clone()),
+        "platform.infinity.timeout_secs" => Some(config.platform.infinity.timeout_secs.to_string()),
+        "platform.open_terminal.enabled" => {
+            Some(config.platform.open_terminal.endpoint.enabled.to_string())
+        }
+        "platform.open_terminal.base_url" => Some(
+            config
+                .platform
+                .open_terminal
+                .endpoint
+                .base_url
+                .clone()
+                .unwrap_or_default(),
+        ),
+        "platform.open_terminal.request_timeout_secs" => Some(
+            config
+                .platform
+                .open_terminal
+                .request_timeout_secs
+                .to_string(),
+        ),
+        "platform.open_terminal.execution_timeout_secs" => Some(
+            config
+                .platform
+                .open_terminal
+                .execution_timeout_secs
+                .to_string(),
+        ),
+        "platform.open_terminal.poll_interval_ms" => {
+            Some(config.platform.open_terminal.poll_interval_ms.to_string())
+        }
+        "platform.open_terminal.max_output_bytes" => {
+            Some(config.platform.open_terminal.max_output_bytes.to_string())
+        }
+        "tui.show_reasoning" => Some(config.tui.show_reasoning.to_string()),
+        "runtime.preferred_device" => Some(config.runtime.preferred_device.clone()),
+        "runtime.allow_cpu_fallback" => Some(config.runtime.allow_cpu_fallback.to_string()),
+        "runtime.n_ctx" => config.runtime.n_ctx.map(|v| v.to_string()),
+        "runtime.threads" => config.runtime.threads.map(|v| v.to_string()),
+        "runtime.kv_type" => config.runtime.kv_type.clone(),
+        "runtime.load_mode" => config.runtime.load_mode.clone(),
+        "runtime.ubatch" => config.runtime.ubatch.map(|v| v.to_string()),
+        "generation.max_output_tokens" => {
+            config.generation.max_output_tokens.map(|v| v.to_string())
+        }
+        "generation.reserve_answer_tokens" => config
+            .generation
+            .reserve_answer_tokens
+            .map(|v| v.to_string()),
+        "generation.context_window" => config.generation.context_window.map(|v| v.to_string()),
+        "generation.reasoning_effort" => config.generation.reasoning_effort.clone(),
+        "generation.unknown_capacity_turn_tokens" => config
+            .generation
+            .unknown_capacity_turn_tokens
+            .map(|v| v.to_string()),
+        "generation.max_run_output_tokens" => config
+            .generation
+            .max_run_output_tokens
+            .map(|v| v.to_string()),
+        "generation.continuations" => config.generation.continuations.map(|v| v.to_string()),
+        "generation.adaptive_allocation" => {
+            Some(config.generation.adaptive_allocation.as_str().to_owned())
+        }
+        _ => None,
+    }
+}
+
+/// Write a small, fixed set of dotted keys.
+pub fn set_key(config: &mut Config, key: &str, value: &str) -> Result<(), String> {
+    match key {
+        "inference.base_url" => config.inference.base_url = value.to_string(),
+        "inference.model" => config.inference.model = Some(value.to_string()),
+        // The value is an environment-variable name, never the secret itself.
+        // An empty value clears the reference.
+        "inference.api_key" => {
+            config.inference.api_key = parse_opt_string(value).map(SecretRef::env);
+        }
+        "inference.device" => config.inference.device = value.to_string(),
+        key if key.starts_with("inference.model_catalog.") => {
+            let model_id = key["inference.model_catalog.".len()..].trim();
+            if model_id.is_empty() {
+                return Err("model catalog entry needs a model id".to_owned());
+            }
+            let label = value.trim();
+            if label.is_empty() {
+                config.inference.model_catalog.remove(model_id);
+            } else {
+                config
+                    .inference
+                    .model_catalog
+                    .insert(model_id.to_owned(), label.to_owned());
+            }
+        }
+        key if key.starts_with("inference.model_alias.") => {
+            let model_id = key["inference.model_alias.".len()..].trim();
+            if model_id.is_empty() {
+                return Err("model alias needs a model id".to_owned());
+            }
+            let label = value.trim();
+            if label.is_empty() {
+                config.inference.model_aliases.remove(model_id);
+            } else {
+                config
+                    .inference
+                    .model_aliases
+                    .insert(model_id.to_owned(), label.to_owned());
+            }
+        }
+        "agent.max_turns" => {
+            config.agent.max_turns = parse_u32(value, "agent.max_turns")?;
+        }
+        "agent.max_tool_calls" => {
+            config.agent.max_tool_calls = parse_u32(value, "agent.max_tool_calls")?;
+        }
+        // An empty value (or `none`) removes the time limit.
+        "agent.wall_clock_secs" => {
+            config.agent.wall_clock_secs = match value.trim() {
+                "" | "none" => None,
+                _ => Some(parse_u64(value, "agent.wall_clock_secs")?),
+            };
+        }
+        "extensions.enabled" => {
+            config.extensions.enabled = parse_bool(value)?;
+        }
+        "memory.auto_capture" => config.memory.auto_capture = parse_bool(value)?,
+        "memory.inject_recent" => {
+            config.memory.inject_recent = parse_usize(value, "memory.inject_recent")?;
+        }
+        "memory.top_k" => {
+            let top_k = parse_usize(value, "memory.top_k")?;
+            if top_k == 0 {
+                return Err("memory.top_k must be at least 1".to_owned());
+            }
+            config.memory.top_k = top_k;
+        }
+        "web.enabled" => config.web.enabled = parse_bool(value)?,
+        "web.search.endpoint" => config.web.search.endpoint = parse_opt_string(value),
+        "web.search.query_param" => config.web.search.query_param = value.trim().to_owned(),
+        "web.search.max_results" => {
+            config.web.search.max_results = parse_usize(value, "web.search.max_results")?;
+        }
+        "web.max_fetch_bytes" => {
+            config.web.max_fetch_bytes = parse_usize(value, "web.max_fetch_bytes")?;
+        }
+        "web.timeout_secs" => {
+            config.web.timeout_secs = parse_u64(value, "web.timeout_secs")?;
+        }
+        "rag.realtime_enabled" => config.rag.realtime_enabled = parse_bool(value)?,
+        "tools.profile_policy" => config.tools.profile_policy = value.parse()?,
+        "platform.jev.enabled" => config.platform.jev.endpoint.enabled = parse_bool(value)?,
+        "platform.jev.base_url" => config.platform.jev.endpoint.base_url = parse_opt_string(value),
+        "platform.jev.model" => config.platform.jev.model = value.trim().to_owned(),
+        "platform.jev.confidence_threshold" => {
+            config.platform.jev.confidence_threshold = value
+                .trim()
+                .parse()
+                .map_err(|_| "platform.jev.confidence_threshold must be a number".to_owned())?;
+        }
+        "platform.jev.allowed_models" => {
+            config.platform.jev.allowed_models = value
+                .split(',')
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+        "platform.jev.timeout_secs" => {
+            config.platform.jev.timeout_secs = parse_u64(value, "platform.jev.timeout_secs")?;
+        }
+        "platform.jev.routing_input" => config.platform.jev.routing_input = value.parse()?,
+        "platform.jev.routing_permission" => {
+            config.platform.jev.routing_permission = value.parse()?;
+        }
+        "platform.jev.routing_allowed_profiles" => {
+            config.platform.jev.routing_allowed_profiles = value
+                .split(',')
+                .map(str::trim)
+                .filter(|profile| !profile.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+        "platform.jev.classification.workflow_guidance" => {
+            config.platform.jev.classification.workflow_guidance = parse_bool(value)?;
+        }
+        "platform.jev.classification.mode" => {
+            config.platform.jev.classification.mode = value.parse()?;
+        }
+        "subagents.selection" => {
+            config.subagents.selection = value.parse()?;
+        }
+        "inference.tool_names" => {
+            config.inference.tool_names = value.parse()?;
+        }
+        "subagents.selection_profiles" => {
+            config.subagents.selection_profiles = value
+                .split(',')
+                .map(str::trim)
+                .filter(|profile| !profile.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+        "platform.jev.classification.allowed_profiles" => {
+            config.platform.jev.classification.allowed_profiles = value
+                .split(',')
+                .map(str::trim)
+                .filter(|profile| !profile.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+        "platform.jev.classification.max_input_chars" => {
+            config.platform.jev.classification.max_input_chars = parse_usize(value, key)?;
+        }
+        "platform.jev.classification.default_threshold" => {
+            config.platform.jev.classification.default_threshold = value
+                .trim()
+                .parse()
+                .map_err(|_| format!("{key} must be a number"))?;
+        }
+        "platform.jev.classification.version_thresholds" => {
+            config.platform.jev.classification.version_thresholds =
+                parse_version_thresholds(value)?;
+        }
+        "platform.jev.allowed_profiles" => {
+            config.platform.jev.allowed_profiles = value
+                .split(',')
+                .map(str::trim)
+                .filter(|profile| !profile.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+        "platform.qdrant.enabled" => config.platform.qdrant.endpoint.enabled = parse_bool(value)?,
+        "platform.qdrant.base_url" => {
+            config.platform.qdrant.endpoint.base_url = parse_opt_string(value)
+        }
+        "platform.qdrant.collection" => config.platform.qdrant.collection = value.trim().to_owned(),
+        "platform.qdrant.timeout_secs" => {
+            config.platform.qdrant.timeout_secs = parse_u64(value, key)?
+        }
+        "platform.infinity.enabled" => {
+            config.platform.infinity.endpoint.enabled = parse_bool(value)?
+        }
+        "platform.infinity.base_url" => {
+            config.platform.infinity.endpoint.base_url = parse_opt_string(value)
+        }
+        "platform.infinity.embedding_model" => {
+            config.platform.infinity.embedding_model = value.trim().to_owned()
+        }
+        "platform.infinity.rerank_model" => {
+            config.platform.infinity.rerank_model = value.trim().to_owned()
+        }
+        "platform.infinity.timeout_secs" => {
+            config.platform.infinity.timeout_secs = parse_u64(value, key)?
+        }
+        "platform.open_terminal.enabled" => {
+            config.platform.open_terminal.endpoint.enabled = parse_bool(value)?
+        }
+        "platform.open_terminal.base_url" => {
+            config.platform.open_terminal.endpoint.base_url = parse_opt_string(value)
+        }
+        "platform.open_terminal.request_timeout_secs" => {
+            config.platform.open_terminal.request_timeout_secs = parse_u64(value, key)?
+        }
+        "platform.open_terminal.execution_timeout_secs" => {
+            config.platform.open_terminal.execution_timeout_secs = parse_u64(value, key)?
+        }
+        "platform.open_terminal.poll_interval_ms" => {
+            config.platform.open_terminal.poll_interval_ms = parse_u64(value, key)?
+        }
+        "platform.open_terminal.max_output_bytes" => {
+            config.platform.open_terminal.max_output_bytes = value
+                .parse()
+                .map_err(|_| format!("{key} must be a nonnegative integer"))?
+        }
+        "tui.show_reasoning" => config.tui.show_reasoning = parse_bool(value)?,
+        "runtime.preferred_device" => config.runtime.preferred_device = value.to_string(),
+        "runtime.allow_cpu_fallback" => {
+            config.runtime.allow_cpu_fallback = parse_bool(value)?;
+        }
+        "runtime.n_ctx" => config.runtime.n_ctx = parse_opt_u32(value)?,
+        "runtime.threads" => config.runtime.threads = parse_opt_u32(value)?,
+        "runtime.ubatch" => config.runtime.ubatch = parse_opt_u32(value)?,
+        "runtime.kv_type" => config.runtime.kv_type = parse_opt_string(value),
+        "runtime.load_mode" => config.runtime.load_mode = parse_opt_string(value),
+        "generation.max_output_tokens" => {
+            config.generation.max_output_tokens = parse_opt_u32(value)?
+        }
+        "generation.reserve_answer_tokens" => {
+            config.generation.reserve_answer_tokens = parse_opt_u32(value)?
+        }
+        "generation.context_window" => config.generation.context_window = parse_opt_u32(value)?,
+        "generation.reasoning_effort" => {
+            config.generation.reasoning_effort = parse_opt_string(value)
+        }
+        "generation.max_run_output_tokens" => {
+            config.generation.max_run_output_tokens = parse_opt_u32(value)?
+        }
+        "generation.unknown_capacity_turn_tokens" => {
+            config.generation.unknown_capacity_turn_tokens = parse_opt_u32(value)?
+        }
+        "generation.continuations" => config.generation.continuations = parse_opt_u32(value)?,
+        "generation.adaptive_allocation" => {
+            config.generation.adaptive_allocation = value.parse()?;
+        }
+        _ => return Err(format!("unknown or read-only config key '{key}'")),
+    }
+    Ok(())
+}
+
+/// Parse an optional string key: an empty value clears it.
+/// `jev-1.13.0=0.8,jev-1.14.0=0.85`; an empty value clears every entry.
+fn parse_version_thresholds(
+    value: &str,
+) -> Result<std::collections::BTreeMap<String, f32>, String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (version, threshold) = entry
+                .split_once('=')
+                .ok_or_else(|| format!("{entry:?} must be written version=threshold"))?;
+            let threshold = threshold
+                .trim()
+                .parse::<f32>()
+                .map_err(|_| format!("{entry:?} needs a numeric threshold"))?;
+            Ok((version.trim().to_owned(), threshold))
+        })
+        .collect()
+}
+
+fn parse_opt_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Parse an optional `u32` key: an empty value clears it.
+fn parse_opt_u32(value: &str) -> Result<Option<u32>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
+        .parse::<u32>()
+        .map(Some)
+        .map_err(|_| format!("expected a non-negative integer, got '{value}'"))
+}
+
+fn parse_u32(value: &str, key: &str) -> Result<u32, String> {
+    value
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| format!("{key} expects a non-negative integer, got '{value}'"))
+}
+
+fn parse_usize(value: &str, key: &str) -> Result<usize, String> {
+    value
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| format!("{key} expects a non-negative integer, got '{value}'"))
+}
+
+fn parse_u64(value: &str, key: &str) -> Result<u64, String> {
+    value
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| format!("{key} expects a non-negative integer, got '{value}'"))
+}
+
+/// Parse a boolean config value, accepting the usual spellings.
+fn parse_bool(value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => Err(format!("expected a boolean, got '{value}'")),
+    }
+}
+=== replace crates/lightagent/src/lib.rs
+--- find
+/// Read a small, fixed set of dotted keys.
+fn get_key(config: &Config, key: &str) -> Option<String> {
+    match key {
+        "inference.provider" => Some(config.inference.provider.clone()),
+        "inference.base_url" => Some(config.inference.base_url.clone()),
+        "inference.model" => Some(config.inference.model.clone().unwrap_or_default()),
+        "inference.api_key" => Some(
+            config
+                .inference
+                .api_key
+                .as_ref()
+                .map(SecretRef::redacted)
+                .unwrap_or_default(),
+        ),
+        "inference.device" => Some(config.inference.device.clone()),
+        key if key.starts_with("inference.model_catalog.") => config
+            .inference
+            .model_catalog
+            .get(&key["inference.model_catalog.".len()..])
+            .cloned(),
+        key if key.starts_with("inference.model_alias.") => config
+            .inference
+            .model_aliases
+            .get(&key["inference.model_alias.".len()..])
+            .cloned(),
+        "agent.max_turns" => Some(config.agent.max_turns.to_string()),
+        "agent.max_tool_calls" => Some(config.agent.max_tool_calls.to_string()),
+        // Empty means no time limit.
+        "agent.wall_clock_secs" => Some(
+            config
+                .agent
+                .wall_clock_secs
+                .map(|secs| secs.to_string())
+                .unwrap_or_default(),
+        ),
+        "extensions.enabled" => Some(config.extensions.enabled.to_string()),
+        "memory.auto_capture" => Some(config.memory.auto_capture.to_string()),
+        "memory.inject_recent" => Some(config.memory.inject_recent.to_string()),
+        "memory.top_k" => Some(config.memory.top_k.to_string()),
+        "web.enabled" => Some(config.web.enabled.to_string()),
+        "web.search.endpoint" => Some(config.web.search.endpoint.clone().unwrap_or_default()),
+        "web.search.query_param" => Some(config.web.search.query_param.clone()),
+        "web.search.max_results" => Some(config.web.search.max_results.to_string()),
+        "web.max_fetch_bytes" => Some(config.web.max_fetch_bytes.to_string()),
+        "web.timeout_secs" => Some(config.web.timeout_secs.to_string()),
+        "rag.realtime_enabled" => Some(config.rag.realtime_enabled.to_string()),
+        "tools.profile_policy" => Some(config.tools.profile_policy.as_str().to_owned()),
+        "platform.jev.enabled" => Some(config.platform.jev.endpoint.enabled.to_string()),
+        "platform.jev.base_url" => Some(
+            config
+                .platform
+                .jev
+                .endpoint
+                .base_url
+                .clone()
+                .unwrap_or_default(),
+        ),
+        "platform.jev.model" => Some(config.platform.jev.model.clone()),
+        "platform.jev.confidence_threshold" => {
+            Some(config.platform.jev.confidence_threshold.to_string())
+        }
+        "platform.jev.allowed_models" => Some(config.platform.jev.allowed_models.join(",")),
+        "platform.jev.allowed_profiles" => Some(config.platform.jev.allowed_profiles.join(",")),
+        "platform.jev.timeout_secs" => Some(config.platform.jev.timeout_secs.to_string()),
+        "platform.jev.routing_input" => Some(config.platform.jev.routing_input.as_str().to_owned()),
+        "platform.jev.routing_permission" => {
+            Some(config.platform.jev.routing_permission.as_str().to_owned())
+        }
+        "platform.jev.routing_allowed_profiles" => {
+            Some(config.platform.jev.routing_allowed_profiles.join(","))
+        }
+        "platform.jev.classification.workflow_guidance" => Some(
+            config
+                .platform
+                .jev
+                .classification
+                .workflow_guidance
+                .to_string(),
+        ),
+        "platform.jev.classification.mode" => {
+            Some(config.platform.jev.classification.mode.as_str().to_owned())
+        }
+        "subagents.selection" => Some(config.subagents.selection.as_str().to_owned()),
+        "inference.tool_names" => Some(config.inference.tool_names.as_str().to_owned()),
+        "subagents.selection_profiles" => Some(config.subagents.selection_profiles.join(",")),
+        "platform.jev.classification.allowed_profiles" => Some(
+            config
+                .platform
+                .jev
+                .classification
+                .allowed_profiles
+                .join(","),
+        ),
+        "platform.jev.classification.max_input_chars" => Some(
+            config
+                .platform
+                .jev
+                .classification
+                .max_input_chars
+                .to_string(),
+        ),
+        "platform.jev.classification.default_threshold" => Some(
+            config
+                .platform
+                .jev
+                .classification
+                .default_threshold
+                .to_string(),
+        ),
+        "platform.jev.classification.version_thresholds" => Some(
+            config
+                .platform
+                .jev
+                .classification
+                .version_thresholds
+                .iter()
+                .map(|(version, threshold)| format!("{version}={threshold}"))
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        "platform.qdrant.enabled" => Some(config.platform.qdrant.endpoint.enabled.to_string()),
+        "platform.qdrant.base_url" => Some(
+            config
+                .platform
+                .qdrant
+                .endpoint
+                .base_url
+                .clone()
+                .unwrap_or_default(),
+        ),
+        "platform.qdrant.collection" => Some(config.platform.qdrant.collection.clone()),
+        "platform.qdrant.timeout_secs" => Some(config.platform.qdrant.timeout_secs.to_string()),
+        "platform.infinity.enabled" => Some(config.platform.infinity.endpoint.enabled.to_string()),
+        "platform.infinity.base_url" => Some(
+            config
+                .platform
+                .infinity
+                .endpoint
+                .base_url
+                .clone()
+                .unwrap_or_default(),
+        ),
+        "platform.infinity.embedding_model" => {
+            Some(config.platform.infinity.embedding_model.clone())
+        }
+        "platform.infinity.rerank_model" => Some(config.platform.infinity.rerank_model.clone()),
+        "platform.infinity.timeout_secs" => Some(config.platform.infinity.timeout_secs.to_string()),
+        "platform.open_terminal.enabled" => {
+            Some(config.platform.open_terminal.endpoint.enabled.to_string())
+        }
+        "platform.open_terminal.base_url" => Some(
+            config
+                .platform
+                .open_terminal
+                .endpoint
+                .base_url
+                .clone()
+                .unwrap_or_default(),
+        ),
+        "platform.open_terminal.request_timeout_secs" => Some(
+            config
+                .platform
+                .open_terminal
+                .request_timeout_secs
+                .to_string(),
+        ),
+        "platform.open_terminal.execution_timeout_secs" => Some(
+            config
+                .platform
+                .open_terminal
+                .execution_timeout_secs
+                .to_string(),
+        ),
+        "platform.open_terminal.poll_interval_ms" => {
+            Some(config.platform.open_terminal.poll_interval_ms.to_string())
+        }
+        "platform.open_terminal.max_output_bytes" => {
+            Some(config.platform.open_terminal.max_output_bytes.to_string())
+        }
+        "tui.show_reasoning" => Some(config.tui.show_reasoning.to_string()),
+        "runtime.preferred_device" => Some(config.runtime.preferred_device.clone()),
+        "runtime.allow_cpu_fallback" => Some(config.runtime.allow_cpu_fallback.to_string()),
+        "runtime.n_ctx" => config.runtime.n_ctx.map(|v| v.to_string()),
+        "runtime.threads" => config.runtime.threads.map(|v| v.to_string()),
+        "runtime.kv_type" => config.runtime.kv_type.clone(),
+        "runtime.load_mode" => config.runtime.load_mode.clone(),
+        "runtime.ubatch" => config.runtime.ubatch.map(|v| v.to_string()),
+        "generation.max_output_tokens" => {
+            config.generation.max_output_tokens.map(|v| v.to_string())
+        }
+        "generation.reserve_answer_tokens" => config
+            .generation
+            .reserve_answer_tokens
+            .map(|v| v.to_string()),
+        "generation.context_window" => config.generation.context_window.map(|v| v.to_string()),
+        "generation.reasoning_effort" => config.generation.reasoning_effort.clone(),
+        "generation.unknown_capacity_turn_tokens" => config
+            .generation
+            .unknown_capacity_turn_tokens
+            .map(|v| v.to_string()),
+        "generation.max_run_output_tokens" => config
+            .generation
+            .max_run_output_tokens
+            .map(|v| v.to_string()),
+        "generation.continuations" => config.generation.continuations.map(|v| v.to_string()),
+        "generation.adaptive_allocation" => {
+            Some(config.generation.adaptive_allocation.as_str().to_owned())
+        }
+        _ => None,
+    }
+}
+
+/// Write a small, fixed set of dotted keys.
+fn set_key(config: &mut Config, key: &str, value: &str) -> Result<(), String> {
+    match key {
+        "inference.base_url" => config.inference.base_url = value.to_string(),
+        "inference.model" => config.inference.model = Some(value.to_string()),
+        // The value is an environment-variable name, never the secret itself.
+        // An empty value clears the reference.
+        "inference.api_key" => {
+            config.inference.api_key = parse_opt_string(value).map(SecretRef::env);
+        }
+        "inference.device" => config.inference.device = value.to_string(),
+        key if key.starts_with("inference.model_catalog.") => {
+            let model_id = key["inference.model_catalog.".len()..].trim();
+            if model_id.is_empty() {
+                return Err("model catalog entry needs a model id".to_owned());
+            }
+            let label = value.trim();
+            if label.is_empty() {
+                config.inference.model_catalog.remove(model_id);
+            } else {
+                config
+                    .inference
+                    .model_catalog
+                    .insert(model_id.to_owned(), label.to_owned());
+            }
+        }
+        key if key.starts_with("inference.model_alias.") => {
+            let model_id = key["inference.model_alias.".len()..].trim();
+            if model_id.is_empty() {
+                return Err("model alias needs a model id".to_owned());
+            }
+            let label = value.trim();
+            if label.is_empty() {
+                config.inference.model_aliases.remove(model_id);
+            } else {
+                config
+                    .inference
+                    .model_aliases
+                    .insert(model_id.to_owned(), label.to_owned());
+            }
+        }
+        "agent.max_turns" => {
+            config.agent.max_turns = parse_u32(value, "agent.max_turns")?;
+        }
+        "agent.max_tool_calls" => {
+            config.agent.max_tool_calls = parse_u32(value, "agent.max_tool_calls")?;
+        }
+        // An empty value (or `none`) removes the time limit.
+        "agent.wall_clock_secs" => {
+            config.agent.wall_clock_secs = match value.trim() {
+                "" | "none" => None,
+                _ => Some(parse_u64(value, "agent.wall_clock_secs")?),
+            };
+        }
+        "extensions.enabled" => {
+            config.extensions.enabled = parse_bool(value)?;
+        }
+        "memory.auto_capture" => config.memory.auto_capture = parse_bool(value)?,
+        "memory.inject_recent" => {
+            config.memory.inject_recent = parse_usize(value, "memory.inject_recent")?;
+        }
+        "memory.top_k" => {
+            let top_k = parse_usize(value, "memory.top_k")?;
+            if top_k == 0 {
+                return Err("memory.top_k must be at least 1".to_owned());
+            }
+            config.memory.top_k = top_k;
+        }
+        "web.enabled" => config.web.enabled = parse_bool(value)?,
+        "web.search.endpoint" => config.web.search.endpoint = parse_opt_string(value),
+        "web.search.query_param" => config.web.search.query_param = value.trim().to_owned(),
+        "web.search.max_results" => {
+            config.web.search.max_results = parse_usize(value, "web.search.max_results")?;
+        }
+        "web.max_fetch_bytes" => {
+            config.web.max_fetch_bytes = parse_usize(value, "web.max_fetch_bytes")?;
+        }
+        "web.timeout_secs" => {
+            config.web.timeout_secs = parse_u64(value, "web.timeout_secs")?;
+        }
+        "rag.realtime_enabled" => config.rag.realtime_enabled = parse_bool(value)?,
+        "tools.profile_policy" => config.tools.profile_policy = value.parse()?,
+        "platform.jev.enabled" => config.platform.jev.endpoint.enabled = parse_bool(value)?,
+        "platform.jev.base_url" => config.platform.jev.endpoint.base_url = parse_opt_string(value),
+        "platform.jev.model" => config.platform.jev.model = value.trim().to_owned(),
+        "platform.jev.confidence_threshold" => {
+            config.platform.jev.confidence_threshold = value
+                .trim()
+                .parse()
+                .map_err(|_| "platform.jev.confidence_threshold must be a number".to_owned())?;
+        }
+        "platform.jev.allowed_models" => {
+            config.platform.jev.allowed_models = value
+                .split(',')
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+        "platform.jev.timeout_secs" => {
+            config.platform.jev.timeout_secs = parse_u64(value, "platform.jev.timeout_secs")?;
+        }
+        "platform.jev.routing_input" => config.platform.jev.routing_input = value.parse()?,
+        "platform.jev.routing_permission" => {
+            config.platform.jev.routing_permission = value.parse()?;
+        }
+        "platform.jev.routing_allowed_profiles" => {
+            config.platform.jev.routing_allowed_profiles = value
+                .split(',')
+                .map(str::trim)
+                .filter(|profile| !profile.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+        "platform.jev.classification.workflow_guidance" => {
+            config.platform.jev.classification.workflow_guidance = parse_bool(value)?;
+        }
+        "platform.jev.classification.mode" => {
+            config.platform.jev.classification.mode = value.parse()?;
+        }
+        "subagents.selection" => {
+            config.subagents.selection = value.parse()?;
+        }
+        "inference.tool_names" => {
+            config.inference.tool_names = value.parse()?;
+        }
+        "subagents.selection_profiles" => {
+            config.subagents.selection_profiles = value
+                .split(',')
+                .map(str::trim)
+                .filter(|profile| !profile.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+        "platform.jev.classification.allowed_profiles" => {
+            config.platform.jev.classification.allowed_profiles = value
+                .split(',')
+                .map(str::trim)
+                .filter(|profile| !profile.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+        "platform.jev.classification.max_input_chars" => {
+            config.platform.jev.classification.max_input_chars = parse_usize(value, key)?;
+        }
+        "platform.jev.classification.default_threshold" => {
+            config.platform.jev.classification.default_threshold = value
+                .trim()
+                .parse()
+                .map_err(|_| format!("{key} must be a number"))?;
+        }
+        "platform.jev.classification.version_thresholds" => {
+            config.platform.jev.classification.version_thresholds =
+                parse_version_thresholds(value)?;
+        }
+        "platform.jev.allowed_profiles" => {
+            config.platform.jev.allowed_profiles = value
+                .split(',')
+                .map(str::trim)
+                .filter(|profile| !profile.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+        "platform.qdrant.enabled" => config.platform.qdrant.endpoint.enabled = parse_bool(value)?,
+        "platform.qdrant.base_url" => {
+            config.platform.qdrant.endpoint.base_url = parse_opt_string(value)
+        }
+        "platform.qdrant.collection" => config.platform.qdrant.collection = value.trim().to_owned(),
+        "platform.qdrant.timeout_secs" => {
+            config.platform.qdrant.timeout_secs = parse_u64(value, key)?
+        }
+        "platform.infinity.enabled" => {
+            config.platform.infinity.endpoint.enabled = parse_bool(value)?
+        }
+        "platform.infinity.base_url" => {
+            config.platform.infinity.endpoint.base_url = parse_opt_string(value)
+        }
+        "platform.infinity.embedding_model" => {
+            config.platform.infinity.embedding_model = value.trim().to_owned()
+        }
+        "platform.infinity.rerank_model" => {
+            config.platform.infinity.rerank_model = value.trim().to_owned()
+        }
+        "platform.infinity.timeout_secs" => {
+            config.platform.infinity.timeout_secs = parse_u64(value, key)?
+        }
+        "platform.open_terminal.enabled" => {
+            config.platform.open_terminal.endpoint.enabled = parse_bool(value)?
+        }
+        "platform.open_terminal.base_url" => {
+            config.platform.open_terminal.endpoint.base_url = parse_opt_string(value)
+        }
+        "platform.open_terminal.request_timeout_secs" => {
+            config.platform.open_terminal.request_timeout_secs = parse_u64(value, key)?
+        }
+        "platform.open_terminal.execution_timeout_secs" => {
+            config.platform.open_terminal.execution_timeout_secs = parse_u64(value, key)?
+        }
+        "platform.open_terminal.poll_interval_ms" => {
+            config.platform.open_terminal.poll_interval_ms = parse_u64(value, key)?
+        }
+        "platform.open_terminal.max_output_bytes" => {
+            config.platform.open_terminal.max_output_bytes = value
+                .parse()
+                .map_err(|_| format!("{key} must be a nonnegative integer"))?
+        }
+        "tui.show_reasoning" => config.tui.show_reasoning = parse_bool(value)?,
+        "runtime.preferred_device" => config.runtime.preferred_device = value.to_string(),
+        "runtime.allow_cpu_fallback" => {
+            config.runtime.allow_cpu_fallback = parse_bool(value)?;
+        }
+        "runtime.n_ctx" => config.runtime.n_ctx = parse_opt_u32(value)?,
+        "runtime.threads" => config.runtime.threads = parse_opt_u32(value)?,
+        "runtime.ubatch" => config.runtime.ubatch = parse_opt_u32(value)?,
+        "runtime.kv_type" => config.runtime.kv_type = parse_opt_string(value),
+        "runtime.load_mode" => config.runtime.load_mode = parse_opt_string(value),
+        "generation.max_output_tokens" => {
+            config.generation.max_output_tokens = parse_opt_u32(value)?
+        }
+        "generation.reserve_answer_tokens" => {
+            config.generation.reserve_answer_tokens = parse_opt_u32(value)?
+        }
+        "generation.context_window" => config.generation.context_window = parse_opt_u32(value)?,
+        "generation.reasoning_effort" => {
+            config.generation.reasoning_effort = parse_opt_string(value)
+        }
+        "generation.max_run_output_tokens" => {
+            config.generation.max_run_output_tokens = parse_opt_u32(value)?
+        }
+        "generation.unknown_capacity_turn_tokens" => {
+            config.generation.unknown_capacity_turn_tokens = parse_opt_u32(value)?
+        }
+        "generation.continuations" => config.generation.continuations = parse_opt_u32(value)?,
+        "generation.adaptive_allocation" => {
+            config.generation.adaptive_allocation = value.parse()?;
+        }
+        _ => return Err(format!("unknown or read-only config key '{key}'")),
+    }
+    Ok(())
+}
+
+/// Parse an optional string key: an empty value clears it.
+/// `jev-1.13.0=0.8,jev-1.14.0=0.85`; an empty value clears every entry.
+fn parse_version_thresholds(
+    value: &str,
+) -> Result<std::collections::BTreeMap<String, f32>, String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (version, threshold) = entry
+                .split_once('=')
+                .ok_or_else(|| format!("{entry:?} must be written version=threshold"))?;
+            let threshold = threshold
+                .trim()
+                .parse::<f32>()
+                .map_err(|_| format!("{entry:?} needs a numeric threshold"))?;
+            Ok((version.trim().to_owned(), threshold))
+        })
+        .collect()
+}
+
+fn parse_opt_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Parse an optional `u32` key: an empty value clears it.
+fn parse_opt_u32(value: &str) -> Result<Option<u32>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
+        .parse::<u32>()
+        .map(Some)
+        .map_err(|_| format!("expected a non-negative integer, got '{value}'"))
+}
+
+fn parse_u32(value: &str, key: &str) -> Result<u32, String> {
+    value
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| format!("{key} expects a non-negative integer, got '{value}'"))
+}
+
+fn parse_usize(value: &str, key: &str) -> Result<usize, String> {
+    value
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| format!("{key} expects a non-negative integer, got '{value}'"))
+}
+
+fn parse_u64(value: &str, key: &str) -> Result<u64, String> {
+    value
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| format!("{key} expects a non-negative integer, got '{value}'"))
+}
+
+/// Parse a boolean config value, accepting the usual spellings.
+fn parse_bool(value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => Err(format!("expected a boolean, got '{value}'")),
+    }
+}
+--- with
+=== replace crates/lightagent/src/lib.rs
+--- find
+use lightagent_core::{
+    AgentProfile, Config, ConfigStore, LightagentPaths, ProfileError, ProfileId, ProfileStore,
+    SecretRef,
+};
+--- with
+use lightagent_core::config_keys::{get_key, set_key};
+use lightagent_core::{
+    AgentProfile, Config, ConfigStore, LightagentPaths, ProfileError, ProfileId, ProfileStore,
+};
+=== replace crates/lightagent/src/lib.rs
+--- find
+        ConfigAction::Set { key, value } => {
+            let mut config = store.load().map_err(|error| error.to_string())?;
+            set_key(&mut config, &key, &value)?;
+            store.save(&config).map_err(|error| error.to_string())?;
+--- with
+        ConfigAction::Set { key, value } => {
+            // One locked read-modify-write, the one `PUT /config/{key}`
+            // performs: no other writer's change is lost.
+            store
+                .update(None, |config| set_key(config, &key, &value))
+                .map_err(|error| error.to_string())?;
+=== replace crates/lightagent/src/lib.rs
+--- find
+    let mut config = ConfigStore::at(&paths)
+        .load()
+        .map_err(|error| error.to_string())?;
+    if let Some(base_url) = base_url {
+        config.inference.base_url = base_url;
+    }
+    if let Some(model) = &model {
+        config.inference.model = Some(model.clone());
+    }
+    ConfigStore::at(&paths)
+        .save(&config)
+        .map_err(|error| error.to_string())?;
+--- with
+    let (config, _) = ConfigStore::at(&paths)
+        .update(None, |config| {
+            if let Some(base_url) = base_url {
+                config.inference.base_url = base_url;
+            }
+            if let Some(model) = &model {
+                config.inference.model = Some(model.clone());
+            }
+            Ok::<_, String>(config.clone())
+        })
+        .map_err(|error| error.to_string())?;
+=== replace crates/lightagent/src/extensions.rs
+--- find
+    let config_store = ConfigStore::at(&paths);
+    let mut config = config_store.load().map_err(|e| e.to_string())?;
+    config.extensions.enabled = true;
+    config.extensions.disabled.retain(|name| name != &ext.name);
+    if !ext.mcp_servers.is_empty() {
+        config.mcp.enabled = true;
+    }
+    if let Err(error) = config_store.save(&config) {
+--- with
+    let saved = ConfigStore::at(&paths).update(None, |config| {
+        config.extensions.enabled = true;
+        config.extensions.disabled.retain(|name| name != &ext.name);
+        if !ext.mcp_servers.is_empty() {
+            config.mcp.enabled = true;
+        }
+        Ok::<(), String>(())
+    });
+    if let Err(error) = saved {
+=== replace crates/lightagent/src/extensions.rs
+--- find
+    let config_store = ConfigStore::at(&paths);
+    let mut config = config_store.load().map_err(|error| error.to_string())?;
+
+--- with
+    let config_store = ConfigStore::at(&paths);
+
+=== replace crates/lightagent/src/extensions.rs
+--- find
+    let was_disabled = config.extensions.disabled.iter().any(|n| n == name);
+    if disable {
+        if !was_disabled {
+            config.extensions.disabled.push(name.to_owned());
+            config.extensions.disabled.sort();
+        }
+    } else {
+        config.extensions.disabled.retain(|n| n != name);
+    }
+    config_store
+        .save(&config)
+        .map_err(|error| error.to_string())?;
+
+    let active = config.extensions.enabled && !disable;
+--- with
+    let (enabled, _) = config_store
+        .update(None, |config| {
+            let was_disabled = config.extensions.disabled.iter().any(|n| n == name);
+            if disable {
+                if !was_disabled {
+                    config.extensions.disabled.push(name.to_owned());
+                    config.extensions.disabled.sort();
+                }
+            } else {
+                config.extensions.disabled.retain(|n| n != name);
+            }
+            Ok::<_, String>(config.extensions.enabled)
+        })
+        .map_err(|error| error.to_string())?;
+
+    let active = enabled && !disable;
+=== replace crates/lightagent/src/extensions.rs
+--- find
+    } else if config.extensions.enabled {
+        println!("Enabled '{name}'.");
+--- with
+    } else if enabled {
+        println!("Enabled '{name}'.");
+=== replace crates/lightagent/src/chat.rs
+--- find
+                            let config_store = ConfigStore::at(&paths);
+                            let mut updated = config_store.load().map_err(|e| e.to_string())?;
+                            updated.extensions.enabled = true;
+                            updated
+                                .extensions
+                                .disabled
+                                .retain(|name| name != "user-onboarding");
+                            config_store.save(&updated).map_err(|e| e.to_string())?;
+--- with
+                            ConfigStore::at(&paths)
+                                .update(None, |updated| {
+                                    updated.extensions.enabled = true;
+                                    updated
+                                        .extensions
+                                        .disabled
+                                        .retain(|name| name != "user-onboarding");
+                                    Ok::<(), String>(())
+                                })
+                                .map_err(|e| e.to_string())?;
+=== replace crates/lightagent/src/setup.rs
+--- find
+    AgentProfile, ApprovalPolicy, Config, ConfigStore, DUCKDUCKGO_SEARCH_ENDPOINT, LightagentPaths,
+--- with
+    AgentProfile, ApprovalPolicy, Config, ConfigError, ConfigRevision, ConfigStore,
+    DUCKDUCKGO_SEARCH_ENDPOINT, LightagentPaths,
+=== replace crates/lightagent/src/setup.rs
+--- find
+    let store = ConfigStore::at(paths);
+    let mut config = store.load().map_err(|error| error.to_string())?;
+    let profiles = ProfileStore::new(paths.root());
+    crate::ensure_default_profile(&profiles, &config)?;
+    let theme = ColorfulTheme::default();
+--- with
+    let store = ConfigStore::at(paths);
+    let (mut config, mut revision) = store
+        .load_with_revision()
+        .map_err(|error| error.to_string())?;
+    let profiles = ProfileStore::new(paths.root());
+    crate::ensure_default_profile(&profiles, &config)?;
+    let theme = ColorfulTheme::default();
+=== replace crates/lightagent/src/setup.rs
+--- find
+            store.save(&config).map_err(|error| error.to_string())?;
+            eprintln!("Saved.\n");
+--- with
+            revision = save_setup(&store, &revision, &config)?;
+            eprintln!("Saved.\n");
+=== replace crates/lightagent/src/setup.rs
+--- find
+    let store = ConfigStore::at(paths);
+    let mut config = store.load().map_err(|error| error.to_string())?;
+    let profiles = ProfileStore::new(paths.root());
+    crate::ensure_default_profile(&profiles, &config)?;
+    let mut prompt = Prompt { reader, writer };
+--- with
+    let store = ConfigStore::at(paths);
+    let (mut config, revision) = store
+        .load_with_revision()
+        .map_err(|error| error.to_string())?;
+    let profiles = ProfileStore::new(paths.root());
+    crate::ensure_default_profile(&profiles, &config)?;
+    let mut prompt = Prompt { reader, writer };
+=== replace crates/lightagent/src/setup.rs
+--- find
+    store.save(&config).map_err(|error| error.to_string())?;
+    writeln!(
+--- with
+    save_setup(&store, &revision, &config)?;
+    writeln!(
+=== replace crates/lightagent/src/setup.rs
+--- find
+/// Full-screen-style selectors for a real terminal. Dialoguer redraws the
+--- with
+/// Save what setup edited, only if nobody else wrote the config since setup
+/// read it: saving its older copy would silently undo that change.
+fn save_setup(
+    store: &ConfigStore,
+    read_at: &ConfigRevision,
+    config: &Config,
+) -> Result<ConfigRevision, String> {
+    store.replace(read_at, config).map_err(|error| match error {
+        ConfigError::Conflict { .. } => "the configuration changed while setup was open \
+             (another lightagent command, the desktop app or the Web UI wrote it); \
+             nothing was saved. Run setup again to start from the current settings."
+            .to_owned(),
+        other => other.to_string(),
+    })
+}
+
+/// Full-screen-style selectors for a real terminal. Dialoguer redraws the
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+    AgentEvent, ApprovalPolicy, ConfigStore, LightagentPaths, PlatformEndpointConfig, ProfileId,
+--- with
+    AgentEvent, ApprovalPolicy, ConfigError, ConfigRevision, ConfigStore, LightagentPaths,
+    PlatformEndpointConfig, ProfileId, UpdateError,
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+            "/api/lightagent/v1/settings",
+            get(get_settings).put(save_settings),
+        )
+--- with
+            "/api/lightagent/v1/settings",
+            get(get_settings).put(save_settings),
+        )
+        .route("/api/lightagent/v1/config", get(get_config))
+        .route(
+            "/api/lightagent/v1/config/{key}",
+            get(get_config_key).put(set_config_key),
+        )
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+    open_terminal: UiOpenTerminalSettings,
+}
+--- with
+    open_terminal: UiOpenTerminalSettings,
+    /// The config revision these values were read at; responses only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revision: Option<String>,
+    /// On a save: refused with 409 unless the config is still at this
+    /// revision. Absent, the save applies to the config as it is now.
+    #[serde(default, skip_serializing)]
+    expected_revision: Option<String>,
+}
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+            max_output_bytes: Some(config.platform.open_terminal.max_output_bytes),
+        },
+    }
+}
+--- with
+            max_output_bytes: Some(config.platform.open_terminal.max_output_bytes),
+        },
+        revision: None,
+        expected_revision: None,
+    }
+}
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+    let config = match store.load() {
+        Ok(config) => config,
+        Err(error) => return internal(&error.to_string()),
+    };
+    let mut settings = ui_settings(&config);
+--- with
+    let (config, revision) = match store.load_with_revision() {
+        Ok(loaded) => loaded,
+        Err(error) => return internal(&error.to_string()),
+    };
+    let mut settings = ui_settings(&config);
+    settings.revision = Some(revision.as_str().to_owned());
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+    let mut config = match store.load() {
+        Ok(config) => config,
+        Err(error) => return internal(&error.to_string()),
+    };
+    config.agent.max_turns = settings.max_turns;
+    config.agent.max_tool_calls = settings.max_tool_calls;
+    config.agent.wall_clock_secs = settings.wall_clock_secs;
+    let profile = match active_profile(store, &state.session_profile) {
+        Ok(profile) => profile,
+        Err(error) => return internal(&error),
+    };
+    config.security.approval_policy = settings.approval_policy;
+--- with
+    let profile = match active_profile(store, &state.session_profile) {
+        Ok(profile) => profile,
+        Err(error) => return internal(&error),
+    };
+    let expected = settings
+        .expected_revision
+        .as_deref()
+        .map(ConfigRevision::parse);
+    // Kept for the active profile, which is written after the config.
+    let (approval_policy, max_turns, max_tool_calls, wall_clock_secs) = (
+        settings.approval_policy,
+        settings.max_turns,
+        settings.max_tool_calls,
+        settings.wall_clock_secs,
+    );
+    // One locked read-modify-write: the values apply to the config as it is
+    // now, so a concurrent change to any other key is kept.
+    let updated = store.update(expected.as_ref(), |config| {
+        apply_ui_settings(config, store, settings)
+    });
+    let revision = match updated {
+        Ok(((), revision)) => revision,
+        Err(UpdateError::Change(error)) => return internal(&error),
+        Err(UpdateError::Store(error)) => return config_error(error),
+    };
+    if let Some((profiles, mut profile)) = profile {
+        profile.approval_policy = approval_policy;
+        profile.limits.max_turns = max_turns;
+        profile.limits.max_tool_calls = max_tool_calls;
+        profile.limits.wall_clock_secs = wall_clock_secs;
+        if let Err(error) = profiles.save(&profile) {
+            return internal(&error.to_string());
+        }
+    }
+    let config = match store.load() {
+        Ok(config) => config,
+        Err(error) => return internal(&error.to_string()),
+    };
+    let mut saved = ui_settings(&config);
+    saved.revision = Some(revision.as_str().to_owned());
+    Json(saved).into_response()
+}
+
+/// Apply the Settings screen's values to `config`.
+fn apply_ui_settings(
+    config: &mut lightagent_core::Config,
+    store: &ConfigStore,
+    settings: UiSettings,
+) -> Result<(), String> {
+    config.agent.max_turns = settings.max_turns;
+    config.agent.max_tool_calls = settings.max_tool_calls;
+    config.agent.wall_clock_secs = settings.wall_clock_secs;
+    config.security.approval_policy = settings.approval_policy;
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+    if let Err(error) = apply_jev_api_key(&mut config, store, settings.jev.api_key) {
+        return internal(&error);
+    }
+--- with
+    apply_jev_api_key(config, store, settings.jev.api_key)?;
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+    if let Err(error) = config.validate() {
+        return bad_request(&error.to_string());
+    }
+    if let Some((profiles, mut profile)) = profile {
+        profile.approval_policy = settings.approval_policy;
+        profile.limits.max_turns = settings.max_turns;
+        profile.limits.max_tool_calls = settings.max_tool_calls;
+        profile.limits.wall_clock_secs = settings.wall_clock_secs;
+        if let Err(error) = profiles.save(&profile) {
+            return internal(&error.to_string());
+        }
+    }
+    match store.save(&config) {
+        Ok(()) => Json(ui_settings(&config)).into_response(),
+        Err(error) => internal(&error.to_string()),
+    }
+}
+--- with
+    Ok(())
+}
+
+/// A key write, as `lightagent config set <key> <value>` takes it.
+#[derive(Deserialize)]
+struct ConfigWrite {
+    value: String,
+    /// When set, refused with 409 unless the config is still at it.
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// `lightagent config path` and `show`: where the config lives, its
+/// revision, and its content with secrets redacted.
+async fn get_config(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => Json(json!({
+            "path": store.path().display().to_string(),
+            "revision": revision.as_str(),
+            "config": config.redacted_json(),
+        }))
+        .into_response(),
+        Err(error) => config_error(error),
+    }
+}
+
+/// `lightagent config get <key>`: the same keys, the same redaction.
+async fn get_config_key(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => match lightagent_core::config_keys::get_key(&config, &key) {
+            Some(value) => {
+                Json(json!({ "key": key, "value": value, "revision": revision.as_str() }))
+                    .into_response()
+            }
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("unknown or unreadable config key '{key}'") })),
+            )
+                .into_response(),
+        },
+        Err(error) => config_error(error),
+    }
+}
+
+/// `lightagent config set <key> <value>`, the same locked write. With
+/// `expected_revision`, only when nothing changed since it was read.
+async fn set_config_key(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+    Json(body): Json<ConfigWrite>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let expected = body.expected_revision.as_deref().map(ConfigRevision::parse);
+    let written = store.update(expected.as_ref(), |config| {
+        lightagent_core::config_keys::set_key(config, &key, &body.value)?;
+        Ok::<_, String>(lightagent_core::config_keys::get_key(config, &key).unwrap_or_default())
+    });
+    match written {
+        Ok((value, revision)) => {
+            Json(json!({ "key": key, "value": value, "revision": revision.as_str() }))
+                .into_response()
+        }
+        Err(UpdateError::Change(message)) => bad_request(&message),
+        Err(UpdateError::Store(error)) => config_error(error),
+    }
+}
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+fn bad_request(message: &str) -> Response {
+    (StatusCode::BAD_REQUEST, Json(json!({"error": message}))).into_response()
+}
+--- with
+fn bad_request(message: &str) -> Response {
+    (StatusCode::BAD_REQUEST, Json(json!({"error": message}))).into_response()
+}
+
+/// The answer for a config write that did not happen: an invalid result is
+/// the caller's (400), a stale revision is a conflict that names the current
+/// one (409), and a lock held elsewhere is temporary (503).
+fn config_error(error: ConfigError) -> Response {
+    match &error {
+        ConfigError::Invalid(_) => bad_request(&error.to_string()),
+        ConfigError::Conflict { current, .. } => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": error.to_string(), "revision": current })),
+        )
+            .into_response(),
+        ConfigError::Busy { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+        _ => internal(&error.to_string()),
+    }
+}
+=== replace docs/desktop/contract/operations.json
+--- find
+  {
+   "id": "settings.put",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/settings"
+  },
+--- with
+  {
+   "id": "settings.put",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/settings"
+  },
+  {
+   "id": "config.show",
+   "method": "GET",
+   "path": "/api/lightagent/v1/config"
+  },
+  {
+   "id": "config.get",
+   "method": "GET",
+   "path": "/api/lightagent/v1/config/{key}"
+  },
+  {
+   "id": "config.set",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/config/{key}"
+  },
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "total_rows": 314,
+--- with
+  "total_rows": 317,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "api": 32,
+--- with
+   "api": 35,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "applicable": 278,
+--- with
+   "applicable": 281,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "ui": "Conversations: attach file (already in WebUI)",
+   "backend": "api: POST /sessions/{id}/attachments",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+--- with
+   "ui": "Conversations: attach file (already in WebUI)",
+   "backend": "api: POST /sessions/{id}/attachments",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.config",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/config",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "The config's path, revision and redacted content (lightagent config path/show)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/config"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: GET /config",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.config.key",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/config/{key}",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "One config key, redacted as lightagent config get reads it",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/config/{key}"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: GET /config/{key}",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.put.config.key",
+   "kind": "api",
+   "surface": "PUT /api/lightagent/v1/config/{key}",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "Set one config key under the config lock, as lightagent config set; 409 when expected_revision is stale",
+   "tree_key": null,
+   "tokens": [
+    "PUT /api/lightagent/v1/config/{key}"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: PUT /config/{key}",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Total rows: 314
+--- with
+- Total rows: 317
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| api | 32 |
+--- with
+| api | 35 |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| applicable | 278 |
+--- with
+| applicable | 281 |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.post.sessions.id.attachments` | `POST /api/lightagent/v1/sessions/{id}/attachments` | applicable | yes | Conversations: attach file (already in WebUI) | api: POST /sessions/{id}/attachments | not-started | `crates/lightagent-api/src/lib.rs:105` |
+--- with
+| `api.post.sessions.id.attachments` | `POST /api/lightagent/v1/sessions/{id}/attachments` | applicable | yes | Conversations: attach file (already in WebUI) | api: POST /sessions/{id}/attachments | not-started | `crates/lightagent-api/src/lib.rs:105` |
+| `api.get.config` | `GET /api/lightagent/v1/config` | applicable | no | (backend reuse) | api: GET /config | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.get.config.key` | `GET /api/lightagent/v1/config/{key}` | applicable | no | (backend reuse) | api: GET /config/{key} | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.put.config.key` | `PUT /api/lightagent/v1/config/{key}` | applicable | no | (backend reuse) | api: PUT /config/{key} | not-started | `crates/lightagent-api/src/lib.rs` |
+=== replace frontend/src/api/agent.ts
+--- find
+export interface LightagentSettings {
+  max_turns: number;
+--- with
+export interface LightagentSettings {
+  /** The config revision these values were read at; responses only. */
+  revision?: string;
+  /** Sent on a save: refused with 409 unless the config is still at it. */
+  expected_revision?: string;
+  max_turns: number;
+=== replace frontend/src/api/agent.ts
+--- find
+export const agentApi = {
+--- with
+/** `lightagent config path|show`: where the config lives, its revision, and its redacted content. */
+export interface ConfigView {
+  path: string;
+  revision: string;
+  config: Record<string, unknown>;
+}
+
+/** One config key as `lightagent config get` reads it (secrets redacted). */
+export interface ConfigValue {
+  key: string;
+  value: string;
+  revision: string;
+}
+
+export const agentApi = {
+=== replace frontend/src/api/agent.ts
+--- find
+  saveSettings: (settings: LightagentSettings) =>
+    jsonRequest<LightagentSettings>("/settings", {
+      method: "PUT",
+      body: JSON.stringify(settings),
+    }),
+--- with
+  saveSettings: (settings: LightagentSettings) =>
+    jsonRequest<LightagentSettings>("/settings", {
+      method: "PUT",
+      body: JSON.stringify(settings),
+    }),
+  config: () => jsonRequest<ConfigView>("/config"),
+  configKey: (key: string) => jsonRequest<ConfigValue>(`/config/${encodeURIComponent(key)}`),
+  /** `lightagent config set`; refused with 409 when `expectedRevision` is stale. */
+  setConfigKey: (key: string, value: string, expectedRevision?: string) =>
+    jsonRequest<ConfigValue>(`/config/${encodeURIComponent(key)}`, {
+      method: "PUT",
+      body: JSON.stringify({ value, expected_revision: expectedRevision }),
+    }),
+=== replace frontend/src/screens/SettingsScreen.tsx
+--- find
+import { Card } from "../components/Card";
+--- with
+import { Card } from "../components/Card";
+import { ConfigEditorCard } from "../components/ConfigEditor";
+=== replace frontend/src/screens/SettingsScreen.tsx
+--- find
+      const saved = await agentApi.saveSettings({ ...current, ...patch });
+--- with
+      // Saved against the revision these values were loaded at: a change
+      // made meanwhile elsewhere is never silently overwritten.
+      const saved = await agentApi.saveSettings({ ...current, ...patch, expected_revision: current.revision });
+=== replace frontend/src/screens/SettingsScreen.tsx
+--- find
+      jev.refresh();
+    } catch (cause) {
+      setMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+--- with
+      jev.refresh();
+    } catch (cause) {
+      const text = cause instanceof Error ? cause.message : String(cause);
+      if (text.startsWith("409:")) {
+        setMessage("These settings were changed elsewhere (another window, the CLI or the desktop app), so nothing was saved. The current values are shown now; apply your change again.");
+        settings.refresh();
+      } else {
+        setMessage(text);
+      }
+    } finally {
+=== replace frontend/src/screens/SettingsScreen.tsx
+--- find
+          <Card title="Appearance">
+--- with
+          <ConfigEditorCard />
+
+          <Card title="Appearance">
+=== write frontend/src/components/ConfigEditor.tsx
+import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
+
+import { agentApi, type ConfigView } from "../api/agent";
+import { Card } from "./Card";
+import "./config-editor.css";
+
+function message(cause: unknown): string {
+  const text = cause instanceof Error ? cause.message : String(cause);
+  return text.replace(/^\d{3}: /, "");
+}
+
+/**
+ * The CLI's `lightagent config path|show|get|set`, on the same file: the
+ * server reads and writes it with the same key rules, under the same lock.
+ * A write names the revision it was made against; if the file changed in
+ * the meantime it is refused, nothing is written, and the editor reloads.
+ */
+export function ConfigEditorCard() {
+  const keyId = useId();
+  const valueId = useId();
+  const [view, setView] = useState<ConfigView | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [key, setKey] = useState("");
+  const [value, setValue] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setView(await agentApi.config());
+      setLoadError(null);
+    } catch (cause) {
+      setLoadError(message(cause));
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function read() {
+    const name = key.trim();
+    if (!name) {
+      setFormError("Enter a key, such as agent.max_turns.");
+      return;
+    }
+    setBusy(true);
+    setFormError(null);
+    setNotice(null);
+    try {
+      const current = await agentApi.configKey(name);
+      setValue(current.value);
+      setNotice(`${current.key} = ${current.value || "(empty)"}`);
+    } catch (cause) {
+      setFormError(message(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function write(event: FormEvent) {
+    event.preventDefault();
+    const name = key.trim();
+    if (!name || !view) {
+      setFormError("Enter a key, such as agent.max_turns.");
+      return;
+    }
+    setBusy(true);
+    setFormError(null);
+    setNotice(null);
+    try {
+      const saved = await agentApi.setConfigKey(name, value, view.revision);
+      setNotice(`Set ${saved.key} = ${saved.value || "(empty)"}. New runs use it.`);
+      await load();
+    } catch (cause) {
+      const text = cause instanceof Error ? cause.message : String(cause);
+      if (text.startsWith("409:")) {
+        setFormError("The configuration changed since it was loaded (another window, the CLI or the desktop app). Nothing was written; the current configuration is loaded now. Check it, then set the key again.");
+        await load();
+      } else {
+        setFormError(message(cause));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card title="Advanced configuration">
+      <p className="card__note">
+        The keys of <code>lightagent config get</code> and <code>set</code>, on the same file
+        {view ? <>: <code>{view.path}</code></> : null}. Secrets are never shown.
+      </p>
+      {loadError && (
+        <p className="config-editor__error" role="alert">
+          The configuration could not be loaded: {loadError}
+        </p>
+      )}
+      <form className="config-editor" onSubmit={(event) => void write(event)}>
+        <label htmlFor={keyId}>Key</label>
+        <input id={keyId} value={key} onChange={(event) => setKey(event.target.value)}
+          placeholder="agent.max_turns" autoComplete="off" spellCheck={false} />
+        <label htmlFor={valueId}>Value</label>
+        <input id={valueId} value={value} onChange={(event) => setValue(event.target.value)}
+          autoComplete="off" spellCheck={false} />
+        <div className="config-editor__actions">
+          <button type="button" className="btn" disabled={busy} onClick={() => void read()}>Read</button>
+          <button type="submit" className="btn btn--primary" disabled={busy || !view}>Set</button>
+        </div>
+      </form>
+      {formError && <p className="config-editor__error" role="alert">{formError}</p>}
+      {notice && <p className="notice notice--info" role="status">{notice}</p>}
+      {view && (
+        <details className="config-editor__show">
+          <summary>Current configuration (secrets redacted)</summary>
+          <pre>{JSON.stringify(view.config, null, 2)}</pre>
+        </details>
+      )}
+    </Card>
+  );
+}
+=== write frontend/src/components/config-editor.css
+/* The Settings screen's advanced configuration editor. */
+.config-editor {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-2) var(--space-3);
+  align-items: center;
+  margin-top: var(--space-3);
+}
+
+.config-editor input {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-quiet);
+  border-radius: var(--radius-sm);
+  background: var(--surface-solid);
+  color: var(--text);
+  font: inherit;
+}
+
+.config-editor__actions {
+  grid-column: 2;
+  display: flex;
+  gap: var(--space-2);
+}
+
+.config-editor__error {
+  margin: var(--space-2) 0 0;
+  color: var(--danger);
+}
+
+.config-editor__show {
+  margin-top: var(--space-3);
+}
+
+.config-editor__show pre {
+  max-height: 320px;
+  overflow: auto;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 560px) {
+  .config-editor {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .config-editor__actions {
+    grid-column: 1;
+  }
+}
+=== write e2e/config.mjs
+// The Settings screen's advanced configuration editor against the real
+// harness: a write lands in the file `lightagent config` uses, a write made
+// against an outdated revision is refused with nothing written, the editor
+// then works from the current revision, and an invalid value changes
+// nothing. crates/lightagent/tests/desktop_config.rs proves the API's
+// writes are the CLI's and that the lock holds across processes.
+
+export async function checkConfigEditor(browser, base, outDir) {
+  const failures = [];
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1100 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const valueOf = async (key) =>
+    (await (await fetch(`${base}/api/lightagent/v1/config/${key}`)).json()).value;
+  const set = page.getByRole("button", { name: "Set", exact: true });
+  const valueField = page.getByLabel("Value", { exact: true });
+  try {
+    await page.goto(`${base}/#/settings`);
+    await page.getByRole("heading", { name: "Advanced configuration" }).waitFor({ timeout: 15000 });
+
+    await page.getByLabel("Key", { exact: true }).fill("memory.top_k");
+    await page.getByRole("button", { name: "Read", exact: true }).click();
+    await page.getByText("memory.top_k = ", { exact: false }).first().waitFor({ timeout: 5000 });
+
+    await valueField.fill("7");
+    await set.click();
+    await page.getByText("Set memory.top_k = 7.", { exact: false }).waitFor({ timeout: 5000 });
+    if (await valueOf("memory.top_k") !== "7") failures.push("config: the editor's write did not reach the config file");
+
+    // Another writer changes the file; the editor still holds the older revision.
+    const other = await fetch(`${base}/api/lightagent/v1/config/memory.top_k`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: "8" }),
+    });
+    if (!other.ok) failures.push(`config: the direct write answered ${other.status}`);
+    await valueField.fill("9");
+    await set.click();
+    await page.getByText("changed since it was loaded", { exact: false }).waitFor({ timeout: 5000 });
+    if (await valueOf("memory.top_k") !== "8") failures.push("config: a stale write changed the config file");
+    await page.screenshot({ path: `${outDir}/settings-config-stale.png` });
+
+    // Reloaded, the same write now lands.
+    await set.click();
+    await page.getByText("Set memory.top_k = 9.", { exact: false }).waitFor({ timeout: 5000 });
+    if (await valueOf("memory.top_k") !== "9") failures.push("config: the write after reloading did not land");
+
+    // An invalid value is refused next to the form and writes nothing.
+    await valueField.fill("lots");
+    await set.click();
+    await page.locator(".config-editor__error").waitFor({ timeout: 5000 });
+    if (await valueOf("memory.top_k") !== "9") failures.push("config: an invalid value changed the config file");
+
+    if (errors.length) failures.push(`config: uncaught page error — ${errors[0]}`);
+    console.log(`  [${failures.length ? "FAIL" : "ok"}] settings advanced configuration`);
+  } finally {
+    await page.close();
+  }
+  return failures;
+}
+=== replace e2e/render.mjs
+--- find
+import { checkProfileStates } from "./profiles.mjs";
+--- with
+import { checkProfileStates } from "./profiles.mjs";
+import { checkConfigEditor } from "./config.mjs";
+=== replace e2e/render.mjs
+--- find
+  try {
+    failures.push(...(await checkProfileStates(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`profile states: ${err instanceof Error ? err.message : String(err)}`);
+  }
+--- with
+  try {
+    failures.push(...(await checkProfileStates(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`profile states: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Changes the config file.
+  try {
+    failures.push(...(await checkConfigEditor(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`config editor: ${err instanceof Error ? err.message : String(err)}`);
+  }
+=== write crates/lightagent/tests/desktop_config.rs
+//! Configuration writes through the desktop runtime's API are the CLI's
+//! `lightagent config set`: the same keys, values and errors on the same file,
+//! one lock that every process takes, and a stale write refused rather than
+//! lost. A secret written through Settings never appears in what either shows.
+
+use std::fs::OpenOptions;
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const KEY: &str = "9a8b7c6d5e4f30211203f4e5d6c7b8a99a8b7c6d5e4f30211203f4e5d6c7b8a9";
+const SECRET: &str = "sk-desktop-config-secret-7f3a91";
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-config-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: serde_json::Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+/// One authenticated request: the status, the raw body and its JSON.
+fn call(
+    runtime: &Runtime,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> (u16, String, serde_json::Value) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    let json = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    (status, raw, json)
+}
+
+fn cli(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent")
+}
+
+/// What a successful CLI command printed.
+fn cli_ok(home: &Path, args: &[&str]) -> String {
+    let output = cli(home, args);
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn key_path(key: &str) -> String {
+    format!("/api/lightagent/v1/config/{key}")
+}
+
+#[test]
+fn api_config_reads_and_writes_are_the_cli_config_reads_and_writes() {
+    let home = scratch_home("same");
+    let runtime = start(&home);
+
+    // A CLI write is what the API reads, and the other way round; neither
+    // loses the other's change.
+    cli_ok(&home, &["config", "set", "agent.max_turns", "7"]);
+    let (status, _, read) = call(&runtime, "GET", &key_path("agent.max_turns"), None);
+    assert_eq!((status, read["value"].as_str()), (200, Some("7")), "{read}");
+    let body = serde_json::json!({ "value": "9" }).to_string();
+    let (status, _, written) = call(&runtime, "PUT", &key_path("memory.top_k"), Some(&body));
+    assert_eq!(status, 200, "{written}");
+    assert_eq!(written["value"], "9");
+    assert_eq!(cli_ok(&home, &["config", "get", "memory.top_k"]), "9");
+    assert_eq!(cli_ok(&home, &["config", "get", "agent.max_turns"]), "7");
+
+    // `config show` and GET /config show the same redacted configuration.
+    let (status, _, shown) = call(&runtime, "GET", "/api/lightagent/v1/config", None);
+    assert_eq!(status, 200, "{shown}");
+    let cli_shown: serde_json::Value =
+        serde_json::from_str(&cli_ok(&home, &["config", "show"])).expect("config show JSON");
+    assert_eq!(shown["config"], cli_shown);
+    assert_eq!(
+        shown["path"].as_str().map(PathBuf::from),
+        Some(PathBuf::from(cli_ok(&home, &["config", "path"])))
+    );
+
+    // The same invalid value and unknown key are refused with the same words.
+    let output = cli(&home, &["config", "set", "memory.top_k", "lots"]);
+    assert!(!output.status.success());
+    let body = serde_json::json!({ "value": "lots" }).to_string();
+    let (status, _, refused) = call(&runtime, "PUT", &key_path("memory.top_k"), Some(&body));
+    assert_eq!(status, 400, "{refused}");
+    let api_error = refused["error"].as_str().expect("error");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(api_error),
+        "CLI: {} API: {api_error}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = cli(&home, &["config", "get", "no.such.key"]);
+    assert!(!output.status.success());
+    let (status, _, missing) = call(&runtime, "GET", &key_path("no.such.key"), None);
+    assert_eq!(status, 404, "{missing}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains(missing["error"].as_str().expect("error")),
+        "{missing}"
+    );
+    assert_eq!(cli_ok(&home, &["config", "get", "memory.top_k"]), "9");
+}
+
+#[test]
+fn a_stale_write_is_refused_with_409_and_writes_nothing() {
+    let home = scratch_home("stale");
+    let runtime = start(&home);
+    let (_, _, first) = call(&runtime, "GET", "/api/lightagent/v1/config", None);
+    let read_at = first["revision"].as_str().expect("revision").to_owned();
+
+    // Another writer, after the revision was read.
+    cli_ok(&home, &["config", "set", "agent.max_turns", "11"]);
+    let config_file = home.join("config.json");
+    let before = std::fs::read(&config_file).expect("config");
+    let body = serde_json::json!({ "value": "3", "expected_revision": read_at }).to_string();
+    let (status, _, refused) = call(&runtime, "PUT", &key_path("memory.top_k"), Some(&body));
+    assert_eq!(status, 409, "{refused}");
+    let (_, _, now) = call(&runtime, "GET", "/api/lightagent/v1/config", None);
+    assert_eq!(refused["revision"], now["revision"]);
+    assert_eq!(std::fs::read(&config_file).expect("config"), before);
+
+    // With the current revision it lands, and the other writer's change stays.
+    let body = serde_json::json!({ "value": "3", "expected_revision": now["revision"] }).to_string();
+    let (status, _, written) = call(&runtime, "PUT", &key_path("memory.top_k"), Some(&body));
+    assert_eq!(status, 200, "{written}");
+    assert_eq!(cli_ok(&home, &["config", "get", "agent.max_turns"]), "11");
+    assert_eq!(cli_ok(&home, &["config", "get", "memory.top_k"]), "3");
+
+    // The Settings screen's save is checked the same way.
+    let (status, _, settings) = call(&runtime, "GET", "/api/lightagent/v1/settings", None);
+    assert_eq!(status, 200, "{settings}");
+    cli_ok(&home, &["config", "set", "memory.top_k", "4"]);
+    let mut stale = settings.clone();
+    stale["expected_revision"] = settings["revision"].clone();
+    stale["max_turns"] = 5.into();
+    let (status, _, refused) = call(
+        &runtime,
+        "PUT",
+        "/api/lightagent/v1/settings",
+        Some(&stale.to_string()),
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(cli_ok(&home, &["config", "get", "agent.max_turns"]), "11");
+
+    // Without a revision, the save applies to the config as it is now and
+    // keeps the CLI's change made since the screen was loaded.
+    let mut fresh = settings.clone();
+    fresh["max_turns"] = 5.into();
+    let (status, _, saved) = call(
+        &runtime,
+        "PUT",
+        "/api/lightagent/v1/settings",
+        Some(&fresh.to_string()),
+    );
+    assert_eq!(status, 200, "{saved}");
+    assert_eq!(cli_ok(&home, &["config", "get", "agent.max_turns"]), "5");
+    assert_eq!(cli_ok(&home, &["config", "get", "memory.top_k"]), "4");
+}
+
+#[test]
+fn a_secret_saved_through_settings_never_appears_in_cli_or_api_output() {
+    let home = scratch_home("secret");
+    let runtime = start(&home);
+    let (_, _, mut settings) = call(&runtime, "GET", "/api/lightagent/v1/settings", None);
+    settings["jev"]["api_key"] = SECRET.into();
+    let (status, raw, _) = call(
+        &runtime,
+        "PUT",
+        "/api/lightagent/v1/settings",
+        Some(&settings.to_string()),
+    );
+    assert_eq!(status, 200, "{raw}");
+    assert!(!raw.contains(SECRET));
+
+    let (_, raw, shown) = call(&runtime, "GET", "/api/lightagent/v1/config", None);
+    assert!(!raw.contains(SECRET), "GET /config: {raw}");
+    // The secret was stored: the config refers to it.
+    assert!(
+        !shown["config"]["platform"]["jev"]["api_key"].is_null(),
+        "{shown}"
+    );
+    for path in [
+        "/api/lightagent/v1/settings".to_owned(),
+        key_path("inference.api_key"),
+    ] {
+        let (_, raw, _) = call(&runtime, "GET", &path, None);
+        assert!(!raw.contains(SECRET), "{path}: {raw}");
+    }
+    for args in [
+        vec!["config", "show"],
+        vec!["config", "get", "inference.api_key"],
+    ] {
+        let output = cli(&home, &args);
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).contains(SECRET)
+                && !String::from_utf8_lossy(&output.stderr).contains(SECRET),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn one_lock_holds_every_process_and_a_waiting_writer_keeps_the_holders_change() {
+    let home = scratch_home("lock");
+    cli_ok(&home, &["config", "set", "agent.max_turns", "7"]);
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(home.join("config.json.lock"))
+        .expect("lock file");
+    lock.lock().expect("hold the config lock");
+    let writer = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["config", "set", "agent.max_tool_calls", "11"])
+        .env("LIGHTAGENT_HOME", &home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the CLI writer");
+    let mut writer = writer;
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(
+        writer.try_wait().expect("poll").is_none(),
+        "the CLI wrote while another process held the config lock"
+    );
+    // Another writer, inside the lock: a change the waiting CLI must keep.
+    let path = home.join("config.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("config JSON");
+    value["memory"]["top_k"] = 9.into();
+    std::fs::write(&path, serde_json::to_vec_pretty(&value).expect("JSON")).expect("write");
+    lock.unlock().expect("release");
+    let output = writer.wait_with_output().expect("wait");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for (key, expected) in [
+        ("agent.max_turns", "7"),
+        ("agent.max_tool_calls", "11"),
+        ("memory.top_k", "9"),
+    ] {
+        assert_eq!(cli_ok(&home, &["config", "get", key]), expected, "{key}");
+    }
+}
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+| D4c–D10 | not started (D4c verified unstarted on 2026-11-01: no branch, PR or edit request) | — | — | — | — |
+--- with
+| D4c Configuration: one locked, revision-checked writer | **implemented**, awaiting hosted validation | `desktop/d4c-config` (stacked on D4b `7c3e988`) | opened with this commit | this commit | — |
+| D4d–D10 | not started | — | — | — | — |
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+## Artifacts and retention
+--- with
+## D4c — Configuration: one locked, revision-checked writer
+
+Prerequisite: D4b head `7c3e988` (tree `494dffb`) passed `check`
+https://github.com/dlroqa/Lightagent/actions/runs/41357376468 and `desktop`
+https://github.com/dlroqa/Lightagent/actions/runs/41357376560 on every job.
+
+- **One writer.** `ConfigStore::update(expected, change)` in
+  `lightagent-core`:
+  1. Takes an exclusive OS lock on `config.json.lock` (std
+     `File::try_lock`, so every process takes it, with no new dependency).
+  2. Reads the file as it is now.
+  3. Refuses an `expected` revision that no longer matches as `Conflict`. A
+     revision is `sha256:` plus the hash of the file's bytes, or `absent`.
+  4. Applies the change, validates the result, and writes atomically.
+
+  A lock held longer than 5 s reports `Busy`, so a writer never waits
+  indefinitely. `replace(expected, config)` is the revision-checked form for
+  an editor working on a copy. `save` keeps its signature but takes the lock.
+- **Every writer converted:**
+  - `lightagent config set` and `init`;
+  - extension install, enable and disable;
+  - chat Markdown onboarding;
+  - `setup`, which is revision-checked: it refuses to save over a change
+    made while it was open, and says so;
+  - `PUT /settings`, now a locked read-modify-write. With
+    `expected_revision`, a stale save gets 409.
+- **CLI = API.** The key rules of `config get|set` moved to
+  `lightagent_core::config_keys`. New routes:
+  - `GET /config`: the path, the revision, and the redacted config;
+  - `GET /config/{key}`;
+  - `PUT /config/{key}`, which takes `expected_revision` and gives 409 when
+    it is stale.
+
+  All three require the admin scope, like `/settings`. An invalid value gets
+  400 with the CLI's exact message, a busy lock gets 503, and a conflict
+  names the current revision.
+- **Settings UI.** A save sends the revision it loaded, and on 409 the
+  screen reloads and says so. A new "Advanced configuration" card reads and
+  sets keys and shows the redacted config. Contract operations
+  `config.show`, `config.get` and `config.set` are added, with inventory and
+  parity rows (backend, counted through `cli.config.*`).
+- **Tests (hosted):**
+  - core: revisions, a stale update, refused and invalid changes, waiting
+    for the lock and keeping what the holder wrote, and `Busy`;
+  - `crates/lightagent/tests/desktop_config.rs`: CLI/API equivalence
+    (values, `show`/`path`, errors), stale 409 on `/config` and `/settings`,
+    secret redaction across CLI and API, and a cross-process lock test;
+  - `e2e/config.mjs`: the editor's write, a stale refusal, and an invalid
+    value.
+- **Not done yet:** `jev-routing-report` has no API route or UI. The
+  `cli.config.*` rows are marked implemented only after this commit's runs
+  pass.
+
+## Artifacts and retention
+=== end
