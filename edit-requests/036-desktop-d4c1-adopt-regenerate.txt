@@ -1,0 +1,147 @@
+=== base 5665b8f88e803fd6547b8de4788308ed35649b07
+=== message
+Desktop: adopt sessions.regenerate (response actions delivery, row 9)
+
+The one adoption commit of the response actions delivery: #98's route
+joins the desktop operation contract, the host refuses it while a profile
+switch runs (it starts a run on the runtime being replaced, like
+runs.create), and the inventory and parity gain one applicable row,
+not-started on desktop (denominator 226 -> 227, implemented 22). This is
+the change #99 proved at D4b (b4a61c9), re-applied to D4c's counts; #99's
+commit itself is not merged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace docs/desktop/contract/operations.json
+--- find
+   "path": "/api/lightagent/v1/sessions/{id}/attachments",
+   "raw_body": true
+  },
+--- with
+   "path": "/api/lightagent/v1/sessions/{id}/attachments",
+   "raw_body": true
+  },
+  {
+   "id": "sessions.regenerate",
+   "method": "POST",
+   "path": "/api/lightagent/v1/sessions/{id}/regenerate"
+  },
+=== replace desktop/src-tauri/src/switch.rs
+--- find
+    matches!(operation, "runs.create" | "approvals.respond")
+--- with
+    matches!(
+        operation,
+        "runs.create" | "sessions.regenerate" | "approvals.respond"
+    )
+=== replace desktop/src-tauri/src/switch.rs
+--- find
+        assert!(blocked_while_switching("runs.create"));
+        assert!(blocked_while_switching("approvals.respond"));
+--- with
+        assert!(blocked_while_switching("runs.create"));
+        assert!(blocked_while_switching("sessions.regenerate"));
+        assert!(blocked_while_switching("approvals.respond"));
+=== replace desktop/src-tauri/src/contract.rs
+--- find
+            ("GET", "/api/lightagent/v1/sessions/abc-123", "sessions.get"),
+--- with
+            ("GET", "/api/lightagent/v1/sessions/abc-123", "sessions.get"),
+            (
+                "POST",
+                "/api/lightagent/v1/sessions/abc-123/regenerate",
+                "sessions.regenerate",
+            ),
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "total_rows": 317,
+--- with
+  "total_rows": 318,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "api": 35,
+--- with
+   "api": 36,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "applicable": 281,
+--- with
+   "applicable": 282,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "parity_denominator": 226,
+--- with
+  "parity_denominator": 227,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "ui": "Conversations: attach file (already in WebUI)",
+   "backend": "api: POST /sessions/{id}/attachments",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+--- with
+   "ui": "Conversations: attach file (already in WebUI)",
+   "backend": "api: POST /sessions/{id}/attachments",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.post.sessions.id.regenerate",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/sessions/{id}/regenerate",
+   "source": "crates/lightagent-api/src/lib.rs:122",
+   "behavior": "Replace the session's latest answer with a new run of its prompt; the saved answer is kept unless the new run completes with an answer (#98)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/sessions/{id}/regenerate"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: Try again under the final answer (WebUI, #98)",
+   "backend": "api: POST /sessions/{id}/regenerate",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Denominator: 226
+- Implemented: 22 of 226
+--- with
+- Denominator: 227
+- Implemented: 22 of 227
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Total rows: 317
+--- with
+- Total rows: 318
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| api | 35 |
+--- with
+| api | 36 |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| applicable | 281 |
+--- with
+| applicable | 282 |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.post.sessions.id.attachments` | `POST /api/lightagent/v1/sessions/{id}/attachments` | applicable | yes | Conversations: attach file (already in WebUI) | api: POST /sessions/{id}/attachments | not-started | `crates/lightagent-api/src/lib.rs:105` |
+--- with
+| `api.post.sessions.id.attachments` | `POST /api/lightagent/v1/sessions/{id}/attachments` | applicable | yes | Conversations: attach file (already in WebUI) | api: POST /sessions/{id}/attachments | not-started | `crates/lightagent-api/src/lib.rs:105` |
+| `api.post.sessions.id.regenerate` | `POST /api/lightagent/v1/sessions/{id}/regenerate` | applicable | yes | Conversations: Try again under the final answer (WebUI, #98) | api: POST /sessions/{id}/regenerate | not-started | `crates/lightagent-api/src/lib.rs:122` |
+=== end
