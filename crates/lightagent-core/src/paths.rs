@@ -207,10 +207,8 @@ impl ExclusiveLock {
     /// The open file, still locked, without the unlock on drop: the lock then
     /// lasts until every copy of the file is closed (tests use this as a
     /// control).
-    pub fn into_file(mut self) -> std::fs::File {
-        self.file
-            .take()
-            .expect("a lock holds its file until it is dropped")
+    pub fn into_file(mut self) -> Option<std::fs::File> {
+        self.file.take()
     }
 }
 

@@ -90,7 +90,8 @@ fn a_lease_dropped_while_a_child_is_starting_is_free_at_once() {
     let control = dir.join("control.lock");
     let held = paths::lock_exclusive(&control, Duration::ZERO)
         .expect("control lock")
-        .into_file();
+        .into_file()
+        .expect("the control lock's file");
     // A short write lock, as the config and session stores take it.
     let write = dir.join("write.lock");
     let writing = paths::lock_exclusive(&write, Duration::ZERO).expect("write lock");

@@ -137,10 +137,14 @@ class FakeProvider:
 
     def serve(self, handler, request):
         messages = request.get("messages") or []
-        users = [i for i, m in enumerate(messages) if m.get("role") == "user"]
-        last = users[-1] if users else -1
-        found = re.search(r"\[e2e:([a-z0-9-]+)\]", content_of(messages[last]) if users else "")
-        scenario = found.group(1) if found else "none"
+        # The latest user message with a scenario marker: a wrap-up turn adds
+        # an unmarked instruction after the tool results.
+        last, scenario = -1, "none"
+        for i in reversed([i for i, m in enumerate(messages) if m.get("role") == "user"]):
+            found = re.search(r"\[e2e:([a-z0-9-]+)\]", content_of(messages[i]))
+            if found:
+                last, scenario = i, found.group(1)
+                break
         turn = sum(1 for m in messages[last + 1:] if m.get("role") == "assistant")
         tools = {}
         for tool in request.get("tools") or []:

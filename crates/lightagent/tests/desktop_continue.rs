@@ -153,10 +153,9 @@ fn sse(chunks: &[Value]) -> String {
     response
 }
 
-/// A provider that, when the conversation ends with the user's prompt,
-/// asks for `datetime.now` and takes longer than the run's one-second time
-/// budget; when it ends with a tool result, it answers "Found it.". Every
-/// request body is kept.
+/// A provider that, until the conversation holds a tool result, asks for
+/// `datetime.now` and takes longer than the run's one-second time budget;
+/// once it does, it answers "Found it.". Every request body is kept.
 fn provider() -> (String, Arc<Mutex<Vec<Value>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
     let url = format!("http://{}", listener.local_addr().expect("address"));
@@ -180,12 +179,10 @@ fn provider() -> (String, Arc<Mutex<Vec<Value>>>) {
                 }
                 let request: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
                 kept.lock().expect("bodies").push(request.clone());
-                let last_role = request["messages"]
-                    .as_array()
-                    .and_then(|messages| messages.last())
-                    .map(|message| message["role"].as_str().unwrap_or("").to_owned())
-                    .unwrap_or_default();
-                if last_role == "tool" {
+                let has_result = request["messages"].as_array().is_some_and(|messages| {
+                    messages.iter().any(|message| message["role"] == "tool")
+                });
+                if has_result {
                     let answer = sse(&[
                         json!({"choices":[{"index":0,"delta":{"role":"assistant","content":"Found it."}}]}),
                         json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),

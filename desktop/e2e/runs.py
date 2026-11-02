@@ -290,7 +290,9 @@ def scenario_continue(host, provider, workspace):
             check.expect(f"{mode}: the run paused on its budget", paused and (info or {}).get("status") == "awaiting_continue", (stream.names(), info))
             check.expect(f"{mode}: nothing was sent while paused", waiting == 1, waiting)
             check.expect(f"{mode}: the continue was taken", status == 200 and (answered or {}).get("continued") is True, (status, answered))
-            check.expect(f"{mode}: the same execution carried on", len(requests) == 2 and requests[1]["roles"][-1:] == ["tool"], requests)
+            # The tool result the model had not read is in the next turn's
+            # conversation: the same execution went on, not a new turn.
+            check.expect(f"{mode}: the same execution carried on", len(requests) == 2 and "tool" in requests[1]["roles"], requests)
             if mode == "extend":
                 check.expect("extend: the tools are offered again", len(requests) == 2 and requests[1]["offered"] > 0, requests)
                 check.expect("extend: the run completed", final.get("reason") == "EndTurn", final)
