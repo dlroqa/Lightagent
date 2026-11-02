@@ -48,8 +48,8 @@ pub use config::{
     JevClassificationConfig, JevClassificationMode, JevConfig, JevRoutingGrant, JevRoutingInput,
     JevRoutingPermission, McpConfig, McpServerEntry, OpenTerminalConfig, PlatformConfig,
     PlatformEndpointConfig, QdrantConfig, SavedProvider, SecretLookup, SecretRef, SecurityConfig,
-    SubagentsConfig, ToolNameMode, ToolPolicyMode, ToolsConfig, UpdateError, WebConfig,
-    WebSearchConfig, WorkerResolution,
+    SubagentsConfig, ToolNameMode, ToolPolicyMode, ToolsConfig, UnreadableSecret, UpdateError,
+    WebConfig, WebSearchConfig, WorkerResolution,
 };
 pub use event::{
     AgentEvent, ClassificationDiagnostics, SpecialistRestriction, SpecialistSelection,

@@ -5,15 +5,15 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 ## Coverage
 
 - Denominator: 227
-- Implemented: 22 of 227
+- Implemented: 23 of 227
 - Pending D1 decision rows: 0
-- Total rows: 318
+- Total rows: 319
 
 | Kind | Rows |
 |---|---|
 | acp-method | 8 |
 | alias | 2 |
-| api | 36 |
+| api | 37 |
 | argument | 47 |
 | command | 86 |
 | config | 14 |
@@ -29,7 +29,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 
 | Applicability | Rows |
 |---|---|
-| applicable | 282 |
+| applicable | 283 |
 | host-owned | 7 |
 | not-applicable | 29 |
 
@@ -70,6 +70,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.config.set` | `0e46892` | Advanced configuration card Set: write, stale 409 with nothing written, invalid value refused (UI e2e); API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms); one cross-process lock (desktop_config.rs, core config tests); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41359276745), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41359276774) |
 | `cli.config.set.arg.key` | `0e46892` | Advanced configuration card Key field (UI e2e); API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41359276745), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41359276774) |
 | `cli.config.set.arg.value` | `0e46892` | Advanced configuration card Value field, invalid value refused with the CLI's words (UI e2e; API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms)); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41359276745), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41359276774) |
+| `cli.config.jev-routing-report` | `205f01b` | Settings dry-run table under the routing permission lists the server's report (UI e2e: e2e/settings.mjs); API = CLI `--json` report (crates/lightagent/tests/desktop_config.rs, all four platforms); desktop: contract operation jev.routing_report; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41370767535), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41370767531) |
 
 ## What the drift check cannot detect automatically
 
@@ -92,7 +93,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.config.path` | `lightagent config path` | applicable | yes | Settings/Diagnostics | extract: config_cmd(Path) | implemented | `crates/lightagent/src/lib.rs:197` |
 | `cli.config.get` | `lightagent config get` | applicable | yes | Settings: advanced key editor (typed) | extract: config_cmd(Get) | implemented | `crates/lightagent/src/lib.rs:199` |
 | `cli.config.set` | `lightagent config set` | applicable | yes | Settings: advanced key editor (typed, validated) | api: PUT /settings (subset); extract: config_cmd(Set) | implemented | `crates/lightagent/src/lib.rs:201` |
-| `cli.config.jev-routing-report` | `lightagent config jev-routing-report` | applicable | yes | Settings/Diagnostics: Jev routing report | extract: jev_routing_report() | not-started | `crates/lightagent/src/lib.rs:203` |
+| `cli.config.jev-routing-report` | `lightagent config jev-routing-report` | applicable | yes | Settings/Diagnostics: Jev routing report | shared: lightagent_core::config_keys::jev_routing_report; api: GET /jev/routing-report | implemented | `crates/lightagent/src/lib.rs:203` |
 | `cli.models` | `lightagent models` | applicable | yes | Providers/Models | extract: lib.rs models(); api: GET /provider (capabilities only) | not-started | `crates/lightagent/src/lib.rs:99` |
 | `cli.tools` | `lightagent tools` | applicable | dup→`cli.tools.list` | Tools/MCP/Extensions | api: GET /tools | not-started | `crates/lightagent/src/lib.rs:101` |
 | `cli.tools.list` | `lightagent tools list` | applicable | yes | Tools/MCP/Extensions: tool catalog | api: GET /tools | not-started | `crates/lightagent/src/lib.rs:211` |
@@ -465,6 +466,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `api.post.sessions.id.regenerate` | `POST /api/lightagent/v1/sessions/{id}/regenerate` | applicable | yes | Conversations: Try again under the final answer (WebUI, #98) | api: POST /sessions/{id}/regenerate | not-started | `crates/lightagent-api/src/lib.rs:122` |
 | `api.get.config` | `GET /api/lightagent/v1/config` | applicable | no | (backend reuse) | api: GET /config | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.get.config.key` | `GET /api/lightagent/v1/config/{key}` | applicable | no | (backend reuse) | api: GET /config/{key} | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.get.jev.routing-report` | `GET /api/lightagent/v1/jev/routing-report` | applicable | no | (backend reuse) | api: GET /jev/routing-report | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.put.config.key` | `PUT /api/lightagent/v1/config/{key}` | applicable | no | (backend reuse) | api: PUT /config/{key} | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.get.approvals` | `GET /api/lightagent/v1/approvals` | applicable | no | (backend reuse) | api: GET /approvals | not-started | `crates/lightagent-api/src/lib.rs:109` |
 | `api.post.approvals.run` | `POST /api/lightagent/v1/approvals/{run}` | applicable | no | (backend reuse) | api: POST /approvals/{run} | not-started | `crates/lightagent-api/src/lib.rs:110` |

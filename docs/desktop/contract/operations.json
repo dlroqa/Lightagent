@@ -34,6 +34,11 @@
    "path": "/api/lightagent/v1/jev/verify"
   },
   {
+   "id": "jev.routing_report",
+   "method": "GET",
+   "path": "/api/lightagent/v1/jev/routing-report"
+  },
+  {
    "id": "skills.list",
    "method": "GET",
    "path": "/api/lightagent/v1/skills"

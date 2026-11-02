@@ -93,11 +93,11 @@
   }
  ],
  "summary": {
-  "total_rows": 318,
+  "total_rows": 319,
   "by_kind": {
    "acp-method": 8,
    "alias": 2,
-   "api": 36,
+   "api": 37,
    "argument": 47,
    "command": 86,
    "config": 14,
@@ -112,12 +112,12 @@
    "value": 6
   },
   "by_applicability": {
-   "applicable": 282,
+   "applicable": 283,
    "host-owned": 7,
    "not-applicable": 29
   },
   "parity_denominator": 227,
-  "parity_implemented": 22,
+  "parity_implemented": 23,
   "pending_decision_rows": 0,
   "not_counted_duplicates": 26
  },
@@ -708,13 +708,13 @@
    "counts_toward_parity": true,
    "duplicate_of": null,
    "ui": "Settings/Diagnostics: Jev routing report",
-   "backend": "extract: jev_routing_report()",
+   "backend": "shared: lightagent_core::config_keys::jev_routing_report; api: GET /jev/routing-report",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Settings dry-run table under the routing permission lists the server's report (UI e2e: e2e/settings.mjs in the standalone Web UI render job); API = CLI --json report (crates/lightagent/tests/desktop_config.rs, all four platforms); desktop: contract operation jev.routing_report; native WebView automation pending D8 (not claimed)",
+   "tested_sha": "205f01b731e0a3149ff465bc894aa97605284c76",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41370767535 (check); https://github.com/dlroqa/Lightagent/actions/runs/41370767531 (desktop)"
   },
   {
    "id": "cli.models",
@@ -7195,6 +7195,30 @@
    "backend": "api: GET /config/{key}",
    "permission": "local-operator",
    "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.jev.routing-report",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/jev/routing-report",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "The Jev routing-permission dry run, read-only (lightagent config jev-routing-report)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/jev/routing-report"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: GET /jev/routing-report",
+   "permission": "local-operator",
+   "data_scope": "home",
    "desktop_status": "not-started",
    "verification": null,
    "tested_sha": null,
