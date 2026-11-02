@@ -220,7 +220,8 @@ pub fn get_key(config: &Config, key: &str) -> Option<String> {
 /// Write a small, fixed set of dotted keys.
 pub fn set_key(config: &mut Config, key: &str, value: &str) -> Result<(), String> {
     match key {
-        "inference.base_url" => config.inference.base_url = value.to_string(),
+        // A key bound to the previous endpoint is never carried to a new one.
+        "inference.base_url" => crate::provider_keys::select_endpoint(config, value),
         "inference.model" => config.inference.model = Some(value.to_string()),
         // The value is an environment-variable name, never the secret itself.
         // An empty value clears the reference.

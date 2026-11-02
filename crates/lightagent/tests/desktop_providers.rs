@@ -178,8 +178,20 @@ fn contacted(listener: &TcpListener) -> bool {
     }
 }
 
-fn use_endpoint(home: &Path, url: &str) {
+/// Point the configuration at `url` and save the provider key for it. A key
+/// saved for one endpoint is never carried to another, so each new endpoint
+/// starts with none and gets the key saved again.
+fn use_endpoint(runtime: &Runtime, home: &Path, url: &str) {
     cli_ok(home, &["config", "set", "inference.base_url", url]);
+    let (_, _, status) = call(runtime, "GET", CREDENTIAL, None);
+    assert_eq!(
+        status["state"], "absent",
+        "a key was carried to {url}: {status}"
+    );
+    let body = serde_json::json!({ "key": PROVIDER_KEY, "expected_revision": status["revision"] })
+        .to_string();
+    let (status, raw, _) = call(runtime, "PUT", CREDENTIAL, Some(&body));
+    assert_eq!(status, 200, "{raw}");
 }
 
 fn sends_key(request: &str) -> bool {
@@ -202,7 +214,7 @@ fn an_endpoint_check_is_explicit_bounded_and_sends_the_key_to_that_endpoint_only
 
     // Reachable: the key goes to this endpoint, and the API's models are the CLI's.
     let (url, endpoint) = fake(Some(http_response("200 OK", "", MODELS)));
-    use_endpoint(&home, &url);
+    use_endpoint(&runtime, &home, &url);
     let (status, raw, check) = call(&runtime, "POST", CHECK, Some(r#"{"timeout_secs":5}"#));
     assert_eq!(status, 200, "{raw}");
     assert!(!raw.contains(PROVIDER_KEY), "{raw}");
@@ -213,7 +225,7 @@ fn an_endpoint_check_is_explicit_bounded_and_sends_the_key_to_that_endpoint_only
     assert!(request.starts_with("GET /v1/models "), "{request}");
     assert!(sends_key(&request), "the check did not send the saved key");
     let (url, endpoint) = fake(Some(http_response("200 OK", "", MODELS)));
-    use_endpoint(&home, &url);
+    use_endpoint(&runtime, &home, &url);
     assert_eq!(cli_ok(&home, &["--json", "models"]), r#"["m1","m2"]"#);
     assert!(sends_key(&endpoint.join().expect("endpoint")));
 
@@ -224,7 +236,7 @@ fn an_endpoint_check_is_explicit_bounded_and_sends_the_key_to_that_endpoint_only
             "",
             r#"{"error":"no"}"#,
         )));
-        use_endpoint(&home, &url);
+        use_endpoint(&runtime, &home, &url);
         let text = if runner == "api" {
             let (_, _, check) = call(&runtime, "POST", CHECK, Some(r#"{"timeout_secs":5}"#));
             assert_eq!(check["ok"], false, "{check}");
@@ -247,7 +259,7 @@ fn an_endpoint_check_is_explicit_bounded_and_sends_the_key_to_that_endpoint_only
             &format!("Location: {target_url}/v1/models\r\n"),
             "",
         )));
-        use_endpoint(&home, &url);
+        use_endpoint(&runtime, &home, &url);
         let text = if runner == "api" {
             let (_, _, check) = call(&runtime, "POST", CHECK, Some(r#"{"timeout_secs":5}"#));
             assert_eq!(check["ok"], false, "{check}");
@@ -265,7 +277,7 @@ fn an_endpoint_check_is_explicit_bounded_and_sends_the_key_to_that_endpoint_only
 
     // A silent endpoint is cut off at the requested bound.
     let (url, endpoint) = fake(None);
-    use_endpoint(&home, &url);
+    use_endpoint(&runtime, &home, &url);
     let started = Instant::now();
     let (status, raw, check) = call(&runtime, "POST", CHECK, Some(r#"{"timeout_secs":2}"#));
     let took = started.elapsed();
@@ -281,7 +293,7 @@ fn an_endpoint_check_is_explicit_bounded_and_sends_the_key_to_that_endpoint_only
 
     // A configured key that cannot be used sends nothing.
     let (silent, url) = untouched();
-    use_endpoint(&home, &url);
+    use_endpoint(&runtime, &home, &url);
     let config_file = home.join("config.json");
     let mut value: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&config_file).expect("read")).expect("config JSON");

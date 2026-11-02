@@ -37,10 +37,7 @@ pub(crate) async fn check_active(config: &Config, timeout: Duration) -> Endpoint
         key_sent,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
     };
-    let key = match config
-        .inference
-        .api_key
-        .as_ref()
+    let key = match lightagent_core::provider_keys::bound_key(config, &base_url)
         .map_or(Ok(None), SecretRef::for_request)
     {
         Ok(key) => key,

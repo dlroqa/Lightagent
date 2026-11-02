@@ -240,13 +240,11 @@ impl RunFactory for LightweightRunFactory {
         let model = model
             .map(str::to_owned)
             .unwrap_or_else(|| configured_model(&profile.routing.model, &config));
-        let mut provider_config =
-            ProviderConfig::new(base_url, model).with_tool_names(config.inference.tool_names);
+        let mut provider_config = ProviderConfig::new(base_url.clone(), model)
+            .with_tool_names(config.inference.tool_names);
         // An unreadable key file: no probe without the credential it names.
-        if let Some(key) = config
-            .inference
-            .api_key
-            .as_ref()
+        // Only this endpoint's own key, never another endpoint's.
+        if let Some(key) = lightagent_core::provider_keys::bound_key(&config, &base_url)
             .map_or(Ok(None), lightagent_core::SecretRef::for_request)
             .ok()?
         {
@@ -280,10 +278,8 @@ impl RunFactory for LightweightRunFactory {
             .base_url
             .unwrap_or_else(|| config.inference.base_url.clone());
         let configured_model = configured_model(&profile.routing.model, &config);
-        let api_key = config
-            .inference
-            .api_key
-            .as_ref()
+        // The profile's endpoint takes only the key bound to it.
+        let api_key = lightagent_core::provider_keys::bound_key(&config, &base_url)
             .map_or(Ok(None), lightagent_core::SecretRef::for_request)
             .map_err(|error| format!("inference: {error}"))?;
         let mut provider_config = ProviderConfig::new(base_url.clone(), configured_model.clone());
@@ -454,10 +450,8 @@ impl LightweightRunFactory {
         }
         // A key file that cannot be read fails the run before any request:
         // never a request without the credential it was configured with.
-        let api_key = match config
-            .inference
-            .api_key
-            .as_ref()
+        // The key is the one bound to this run's endpoint, never another's.
+        let api_key = match lightagent_core::provider_keys::bound_key(&config, &base_url)
             .map_or(Ok(None), lightagent_core::SecretRef::for_request)
         {
             Ok(key) => key,
