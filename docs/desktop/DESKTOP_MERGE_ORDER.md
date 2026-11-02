@@ -34,7 +34,9 @@ tree are recorded here.
 | 20 | D5b follow-through: a dropped run lease is free at once | https://github.com/dlroqa/Lightagent/pull/114 | `desktop/d5b2-lease-release` | `desktop/d5b-run-admission` (`db44a46`) | `e5363fc` | `e5363fc` |
 | 21 | D5a-1 the host relay resumes a broken stream; runs through the host (R1) | https://github.com/dlroqa/Lightagent/pull/115 | `desktop/d5a1-host-runs` | `desktop/d5b2-lease-release` | `64d632f` | `64d632f` |
 | 22 | D5a-2 a turn its runtime did not live to record is Interrupted, never rerun | https://github.com/dlroqa/Lightagent/pull/116 | `desktop/d5a2-interrupted` | `desktop/d5a1-host-runs` | `c6fd6ac` | `c6fd6ac` |
-| 23+ | D5a-3 (time-budget continue, steering), then D6 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+| 23 | D5a-3 time-budget pause and Continue over the API; steering semantics; every OS lock unlocks on drop | https://github.com/dlroqa/Lightagent/pull/117 | `desktop/d5a3-continue` | `desktop/d5a2-interrupted` (`da950d1`) | `0d37299` | `0d37299` |
+| 24 | D5a-4 Continue card, Stop in the conversation, browser coverage of the run controls | https://github.com/dlroqa/Lightagent/pull/118 | `desktop/d5a4-run-controls-ui` | `desktop/d5a3-continue` (via merge commit `3bd001c`) | `e164dde` | `e164dde` |
+| 25+ | D6, then D7-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
 
 D5b (rows 19-20) comes before D5a (rows 21-23) because D5a depends on it,
 not the reverse. D5b uses no D5a operation, and the owner ordered it next
