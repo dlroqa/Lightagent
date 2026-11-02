@@ -317,11 +317,11 @@ const LOCK_FILE: &str = ".lock";
 /// `.json` file, so a listing or a search never reads it as a session.
 const RUNS_DIR: &str = ".runs";
 
-/// How long taking a run lease retries before the session is busy. On Linux
-/// a released lease can read as held for an instant, while a child another
-/// thread is starting still has a copy of the lock file open (until its
-/// exec closes it). A turn that holds the lease is never waited for beyond
-/// this.
+/// How long taking a run lease retries before the session is busy: a margin
+/// for a lease its holder is releasing at that moment. A turn that holds the
+/// lease is never waited for beyond this. A released lease does not stay
+/// held while a child that another thread is starting keeps a copy of the
+/// lock file: [`RunLease`] unlocks before it closes.
 const RUN_LEASE_GRACE: Duration = Duration::from_millis(500);
 
 /// The right to run one turn on a session, held across processes: an
@@ -330,7 +330,17 @@ const RUN_LEASE_GRACE: Duration = Duration::from_millis(500);
 /// the store's short write lock, which is never held while a turn runs.
 #[derive(Debug)]
 pub struct RunLease {
-    _file: std::fs::File,
+    file: std::fs::File,
+}
+
+impl Drop for RunLease {
+    // Unlock, then close. The lock belongs to the open file, which a child
+    // that another thread is starting shares until its exec closes its copy;
+    // closing only this handle would keep the lease held until then.
+    // Unlocking releases it at once, whoever else still has the file open.
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
 }
 
 /// Why [`SessionStore::update`] wrote nothing.
@@ -542,7 +552,7 @@ impl SessionStore {
         })?;
         let path = directory.join(format!("{}.lock", id.as_str()));
         match paths::lock_exclusive(&path, RUN_LEASE_GRACE) {
-            Ok(file) => Ok(RunLease { _file: file }),
+            Ok(file) => Ok(RunLease { file }),
             Err(paths::LockError::Busy) => Err(StoreError::Busy { path: directory }),
             Err(paths::LockError::Io(err)) => Err(StoreError::Directory {
                 path,
