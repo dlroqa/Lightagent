@@ -9,6 +9,7 @@ import { checkDeliveryStates } from "./delivery.mjs";
 import { checkJevStates } from "./jev.mjs";
 import { checkProfileStates } from "./profiles.mjs";
 import { checkConfigEditor } from "./config.mjs";
+import { checkSettingsStates } from "./settings.mjs";
 
 const BASE = (process.env.PANEL_BASE ?? "http://127.0.0.1:8735").replace(/\/+$/, "");
 const OUT_DIR = process.env.OUT_DIR ?? "screens";
@@ -379,6 +380,12 @@ async function main() {
     failures.push(...(await checkConfigEditor(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`config editor: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Changes the config file and saves a test secret: last.
+  try {
+    failures.push(...(await checkSettingsStates(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`settings states: ${err instanceof Error ? err.message : String(err)}`);
   }
   await browser.close();
 

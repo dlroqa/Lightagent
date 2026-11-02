@@ -102,6 +102,19 @@ impl SecretRef {
             Self::File { path } => format!("${{file:{}}}", path.display()),
         }
     }
+
+    /// The value to send with a request about to be made. A file reference
+    /// that cannot be read is refused, so the request is never made without
+    /// the credential it was configured with. Every other case is exactly
+    /// [`Self::resolve`]: an unset variable or an empty value sends none, as
+    /// before.
+    pub fn for_request(&self) -> Result<Option<String>, UnreadableSecret> {
+        match self.lookup() {
+            SecretLookup::Value(value) => Ok(Some(value)),
+            SecretLookup::Unreadable => Err(UnreadableSecret),
+            SecretLookup::Unresolved | SecretLookup::Empty => Ok(self.resolve()),
+        }
+    }
 }
 
 /// What a [`SecretRef`] holds right now, for a caller that must tell a
@@ -131,6 +144,19 @@ impl std::fmt::Debug for SecretLookup {
         })
     }
 }
+
+/// A configured secret file that cannot be read. Its message names neither
+/// the path nor anything the file holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnreadableSecret;
+
+impl std::fmt::Display for UnreadableSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the configured secret file cannot be read")
+    }
+}
+
+impl std::error::Error for UnreadableSecret {}
 
 /// Which provider backend answers, and where.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

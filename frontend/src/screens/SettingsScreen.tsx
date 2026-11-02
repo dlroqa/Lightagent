@@ -30,33 +30,48 @@ export function SettingsScreen() {
   const [current, setCurrent] = useState<LightagentSettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  // A change refused because the settings changed elsewhere: kept, with the
+  // values saved now, until it is applied to them or discarded.
+  const [conflict, setConflict] = useState<{
+    patch: Partial<LightagentSettings>;
+    latest: LightagentSettings | null;
+  } | null>(null);
 
   useEffect(() => {
     if (settings.data) setCurrent(settings.data);
   }, [settings.data]);
 
-  async function persist(patch: Partial<LightagentSettings>) {
-    if (!current || saving) return;
+  async function persist(patch: Partial<LightagentSettings>, base: LightagentSettings | null = current) {
+    if (!base || saving) return;
     setSaving(true);
     setMessage(null);
     try {
       // Saved against the revision these values were loaded at: a change
       // made meanwhile elsewhere is never silently overwritten.
-      const saved = await agentApi.saveSettings({ ...current, ...patch, expected_revision: current.revision });
+      const saved = await agentApi.saveSettings({ ...base, ...patch, expected_revision: base.revision });
       setCurrent(saved);
+      setConflict(null);
       setMessage("Saved. New runs use these settings.");
       jev.refresh();
     } catch (cause) {
       const text = cause instanceof Error ? cause.message : String(cause);
       if (text.startsWith("409:")) {
-        setMessage("These settings were changed elsewhere (another window, the CLI or the desktop app), so nothing was saved. The current values are shown now; apply your change again.");
-        settings.refresh();
+        // Nothing was saved. The change stays here, with what is saved now.
+        const latest = await agentApi.settings().catch(() => null);
+        setConflict((earlier) => ({ patch: { ...earlier?.patch, ...patch }, latest }));
       } else {
         setMessage(text);
       }
     } finally {
       setSaving(false);
     }
+  }
+
+  function discard() {
+    if (conflict?.latest) setCurrent(conflict.latest);
+    else settings.refresh();
+    setConflict(null);
+    setMessage("Your change was discarded. The values saved now are shown.");
   }
 
   const value = current ?? settings.data;
@@ -99,6 +114,31 @@ export function SettingsScreen() {
           </div>
         )}
         {message && <div className="notice notice--info">{message}</div>}
+        {conflict && (
+          <div className="notice notice--warn" role="alert" data-testid="settings-conflict">
+            <p style={{ margin: 0 }}>
+              These settings were changed elsewhere (another window, the CLI or the desktop app) after this
+              screen loaded, so your change was not saved. It is kept here until you apply or discard it.
+            </p>
+            <ul style={{ margin: "8px 0" }}>
+              {Object.entries(conflict.patch).map(([key, mine]) => (
+                <li key={key}>
+                  <strong>{readableKey(key)}</strong>: your change {shown(mine)}; saved now{" "}
+                  {conflict.latest ? shown(conflict.latest[key as keyof LightagentSettings]) : "could not be read"}
+                </li>
+              ))}
+            </ul>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button type="button" className="btn" disabled={saving || !conflict.latest}
+                onClick={() => void persist(conflict.patch, conflict.latest)}>
+                Apply my change to the current settings
+              </button>
+              <button type="button" className="btn" disabled={saving} onClick={discard}>
+                Discard my change
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))" }}>
           <Card title="Agent runtime">
@@ -255,6 +295,18 @@ export function SettingsScreen() {
       </div>
     </>
   );
+}
+
+/** A settings field's name as the conflict notice shows it. */
+function readableKey(key: string): string {
+  return key.replace(/_/g, " ");
+}
+
+/** A value as the conflict notice shows it. A section of settings (Jev, an endpoint) is named, never shown: it can hold a key typed into it. */
+function shown(value: unknown): string {
+  if (value === null || value === undefined) return "none";
+  if (typeof value === "object") return "(an edited section)";
+  return String(value);
 }
 
 function NumberSetting({ label, value, min = 1, max, disabled, onSave }: {

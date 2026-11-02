@@ -93,11 +93,11 @@
   }
  ],
  "summary": {
-  "total_rows": 318,
+  "total_rows": 319,
   "by_kind": {
    "acp-method": 8,
    "alias": 2,
-   "api": 36,
+   "api": 37,
    "argument": 47,
    "command": 86,
    "config": 14,
@@ -112,7 +112,7 @@
    "value": 6
   },
   "by_applicability": {
-   "applicable": 282,
+   "applicable": 283,
    "host-owned": 7,
    "not-applicable": 29
   },
@@ -7195,6 +7195,30 @@
    "backend": "api: GET /config/{key}",
    "permission": "local-operator",
    "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.jev.routing-report",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/jev/routing-report",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "The Jev routing-permission dry run, read-only (lightagent config jev-routing-report)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/jev/routing-report"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: GET /jev/routing-report",
+   "permission": "local-operator",
+   "data_scope": "home",
    "desktop_status": "not-started",
    "verification": null,
    "tested_sha": null,

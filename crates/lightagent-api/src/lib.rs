@@ -86,6 +86,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/lightagent/v1/jev", get(get_jev_status))
         .route("/api/lightagent/v1/jev/verify", post(verify_jev))
+        .route(
+            "/api/lightagent/v1/jev/routing-report",
+            get(get_jev_routing_report),
+        )
         .route("/api/lightagent/v1/skills", get(list_skills))
         .route(
             "/api/lightagent/v1/profiles",
@@ -1273,6 +1277,32 @@ struct ConfigWrite {
 
 /// `lightagent config path` and `show`: where the config lives, its
 /// revision, and its content with secrets redacted.
+/// `lightagent config jev-routing-report`: the same dry run, from the same
+/// shared operation. It reads the config and the profile list and changes
+/// nothing.
+async fn get_jev_routing_report(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (Some(store), Some(root)) = (&state.config_store, home(&state)) else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let config = match store.load() {
+        Ok(config) => config,
+        Err(error) => return config_error(error),
+    };
+    match ProfileStore::new(&root).list() {
+        Ok(profiles) => Json(lightagent_core::config_keys::jev_routing_report(
+            &config, &profiles,
+        ))
+        .into_response(),
+        Err(error) => internal(&error.to_string()),
+    }
+}
+
 async fn get_config(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
         return rejection;

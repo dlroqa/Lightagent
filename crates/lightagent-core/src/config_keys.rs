@@ -530,3 +530,58 @@ fn parse_bool(value: &str) -> Result<bool, String> {
         _ => Err(format!("expected a boolean, got '{value}'")),
     }
 }
+
+/// `lightagent config jev-routing-report`, shared by the CLI and the HTTP
+/// API: the routing-permission dry run. For every profile on disk (and the
+/// built-in `default`), whether it may route now and under `strict`. Profile
+/// ids and fixed vocabulary only; no message, session or key is read, and
+/// nothing is changed.
+pub fn jev_routing_report(config: &Config, profiles: &[crate::ProfileId]) -> serde_json::Value {
+    let jev = &config.platform.jev;
+    let strict = crate::JevConfig {
+        routing_permission: crate::JevRoutingPermission::Strict,
+        ..jev.clone()
+    };
+    let mut ids: Vec<String> = profiles.iter().map(|id| id.as_str().to_owned()).collect();
+    if !ids.iter().any(|id| id == "default") {
+        ids.push("default".to_owned());
+    }
+    ids.sort();
+    ids.dedup();
+    let rows: Vec<serde_json::Value> = ids
+        .iter()
+        .map(|id| {
+            serde_json::json!({
+                "profile": id,
+                "now": jev.routing_grant(id).as_str(),
+                "under_strict": strict.routing_grant(id).as_str(),
+            })
+        })
+        .collect();
+    let denied: Vec<&String> = ids
+        .iter()
+        .filter(|id| !strict.routing_grant(id).permits())
+        .collect();
+    let unknown: Vec<&String> = jev
+        .routing_allowed_profiles
+        .iter()
+        .filter(|allowed| !ids.contains(allowed))
+        .collect();
+    let routing_active = jev.endpoint.enabled
+        && (jev
+            .allowed_models
+            .iter()
+            .any(|model| !model.trim().is_empty())
+            || !jev.allowed_profiles.is_empty());
+    serde_json::json!({
+        "report": "jev-routing-permission-dry-run",
+        "changes_made": false,
+        "routing_enabled": routing_active,
+        "routing_input": jev.routing_input.as_str(),
+        "permission_policy": jev.routing_permission.as_str(),
+        "compatibility": jev.routing_permission == crate::JevRoutingPermission::LegacyAllProfiles,
+        "profiles": rows,
+        "denied_under_strict": denied,
+        "allowed_profiles_not_found": unknown,
+    })
+}

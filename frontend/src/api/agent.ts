@@ -364,6 +364,19 @@ export interface ConfigView {
   config: Record<string, unknown>;
 }
 
+/** `lightagent config jev-routing-report`: the routing-permission dry run. It changes nothing. */
+export interface JevRoutingReport {
+  report: string;
+  changes_made: boolean;
+  routing_enabled: boolean;
+  routing_input: string;
+  permission_policy: string;
+  compatibility: boolean;
+  profiles: { profile: string; now: string; under_strict: string }[];
+  denied_under_strict: string[];
+  allowed_profiles_not_found: string[];
+}
+
 /** One config key as `lightagent config get` reads it (secrets redacted). */
 export interface ConfigValue {
   key: string;
@@ -391,6 +404,7 @@ export const agentApi = {
     }),
   provider: () => jsonRequest<ProviderCapabilities>("/provider"),
   jevStatus: () => jsonRequest<JevStatus>("/jev"),
+  jevRoutingReport: () => jsonRequest<JevRoutingReport>("/jev/routing-report"),
   verifyJev: () => jsonRequest<JevVerification>("/jev/verify", { method: "POST", body: "{}" }),
   profiles: () => jsonRequest<ProfileCatalog>("/profiles"),
   profile: (id: string) => jsonRequest<AgentProfileDetail>(`/profiles/${encodeURIComponent(id)}`),

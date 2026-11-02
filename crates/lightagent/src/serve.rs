@@ -242,11 +242,13 @@ impl RunFactory for LightweightRunFactory {
             .unwrap_or_else(|| configured_model(&profile.routing.model, &config));
         let mut provider_config =
             ProviderConfig::new(base_url, model).with_tool_names(config.inference.tool_names);
+        // An unreadable key file: no probe without the credential it names.
         if let Some(key) = config
             .inference
             .api_key
             .as_ref()
-            .and_then(|secret| secret.resolve())
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+            .ok()?
         {
             provider_config = provider_config.with_api_key(key);
         }
@@ -270,7 +272,8 @@ impl RunFactory for LightweightRunFactory {
             .inference
             .api_key
             .as_ref()
-            .and_then(|secret| secret.resolve());
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+            .map_err(|error| format!("inference: {error}"))?;
         let mut provider_config = ProviderConfig::new(base_url.clone(), configured_model.clone());
         if let Some(key) = api_key.clone() {
             provider_config = provider_config.with_api_key(key);
@@ -437,11 +440,20 @@ impl LightweightRunFactory {
                 fallback: preflight.routing_fallback.map(str::to_owned),
             });
         }
-        let api_key = config
+        // A key file that cannot be read fails the run before any request:
+        // never a request without the credential it was configured with.
+        let api_key = match config
             .inference
             .api_key
             .as_ref()
-            .and_then(|secret| secret.resolve());
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+        {
+            Ok(key) => key,
+            Err(error) => {
+                fail(&sink, &format!("inference: {error}; the run was not sent"));
+                return RunStatus::Failed;
+            }
+        };
 
         let mut provider_config = ProviderConfig::new(base_url.clone(), model)
             .with_tool_names(config.inference.tool_names);

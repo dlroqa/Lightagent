@@ -7,13 +7,13 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 - Denominator: 227
 - Implemented: 22 of 227
 - Pending D1 decision rows: 0
-- Total rows: 318
+- Total rows: 319
 
 | Kind | Rows |
 |---|---|
 | acp-method | 8 |
 | alias | 2 |
-| api | 36 |
+| api | 37 |
 | argument | 47 |
 | command | 86 |
 | config | 14 |
@@ -29,7 +29,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 
 | Applicability | Rows |
 |---|---|
-| applicable | 282 |
+| applicable | 283 |
 | host-owned | 7 |
 | not-applicable | 29 |
 
@@ -465,6 +465,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `api.post.sessions.id.regenerate` | `POST /api/lightagent/v1/sessions/{id}/regenerate` | applicable | yes | Conversations: Try again under the final answer (WebUI, #98) | api: POST /sessions/{id}/regenerate | not-started | `crates/lightagent-api/src/lib.rs:122` |
 | `api.get.config` | `GET /api/lightagent/v1/config` | applicable | no | (backend reuse) | api: GET /config | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.get.config.key` | `GET /api/lightagent/v1/config/{key}` | applicable | no | (backend reuse) | api: GET /config/{key} | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.get.jev.routing-report` | `GET /api/lightagent/v1/jev/routing-report` | applicable | no | (backend reuse) | api: GET /jev/routing-report | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.put.config.key` | `PUT /api/lightagent/v1/config/{key}` | applicable | no | (backend reuse) | api: PUT /config/{key} | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.get.approvals` | `GET /api/lightagent/v1/approvals` | applicable | no | (backend reuse) | api: GET /approvals | not-started | `crates/lightagent-api/src/lib.rs:109` |
 | `api.post.approvals.run` | `POST /api/lightagent/v1/approvals/{run}` | applicable | no | (backend reuse) | api: POST /approvals/{run} | not-started | `crates/lightagent-api/src/lib.rs:110` |
