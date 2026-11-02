@@ -587,6 +587,14 @@ export function Agent() {
       if (selected.current === id && generation === loadGeneration.current) {
         setSession(loaded);
         setError(null);
+        // A turn this page is not following (paused, or waiting on an
+        // approval, when an earlier page closed): follow it, so its card
+        // comes back with its controls.
+        const active = loaded.active_run;
+        if (active) {
+          backgroundRuns.current.set(id, active.id);
+          setRunId(active.id);
+        }
       }
     } catch (cause) {
       if (selected.current === id && generation === loadGeneration.current) {
@@ -875,7 +883,18 @@ export function Agent() {
       sessions.refresh();
     } catch (cause) {
       setDraft(message);
-      setError(cause instanceof Error ? cause.message : String(cause));
+      const text = cause instanceof Error ? cause.message : String(cause);
+      setError(text);
+      // The session already has a turn this page is not following (a paused
+      // run a closed page left): follow it, so it can be continued or stopped.
+      if (activeId && text.startsWith("409: session already has an active run")) {
+        const active = await agentApi.session(activeId).then((loaded) => loaded.active_run).catch(() => undefined);
+        if (active && selected.current === activeId) {
+          backgroundRuns.current.set(activeId, active.id);
+          setRunId(active.id);
+          setError("This conversation already has a run in progress. Continue, answer or stop it, then send again.");
+        }
+      }
     } finally {
       setBusy(false);
     }

@@ -2247,11 +2247,15 @@ async fn start_run(
             .await;
         let mut busy = state.busy_sessions.lock().await;
         if !busy.insert(id.clone()) {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({"error": "session already has an active run"})),
-            )
-                .into_response();
+            drop(busy);
+            // Named when this process runs it and the caller may see it (a
+            // paused run a closed page left), so it can be continued or
+            // stopped.
+            let mut refusal = json!({"error": "session already has an active run"});
+            if let Some(active) = session_active_run(&state, &headers, &session_store, &id).await {
+                refusal["active_run"] = active;
+            }
+            return (StatusCode::CONFLICT, Json(refusal)).into_response();
         }
         // One turn at a time on this session across every process that
         // shares this home (another server, a terminal chat, an editor): its
@@ -2618,6 +2622,27 @@ async fn cancel_run(
     }
 }
 
+/// The turn of session `id` this process is running, as `{id, status}`, if
+/// the caller may see that run: a run paused on its time budget or waiting
+/// on an approval stays reachable from its session after the page that
+/// started it is gone. A journal another process wrote names no run here.
+async fn session_active_run(
+    state: &AppState,
+    headers: &HeaderMap,
+    sessions: &SessionStore,
+    id: &SessionId,
+) -> Option<serde_json::Value> {
+    let run_id = sessions.journaled_run(id)?;
+    let (run, _) = authorized_run(state, headers, &run_id, Scope::RunsRead)
+        .await
+        .ok()?;
+    let status = run.status().await;
+    if status.is_terminal() {
+        return None;
+    }
+    Some(json!({ "id": run.id(), "status": status }))
+}
+
 /// Continue a run paused on its time budget. The same execution carries on
 /// from where it stopped (its conversation, the tool results the model has
 /// not read, its turn and tool-call counts): this is not a new turn. 409
@@ -2889,18 +2914,44 @@ async fn get_session(
         }
     };
     if let Some(user) = user {
-        return match user.sessions(&state).load(&id) {
-            Ok(session) if user.owns(&session) => Json(session).into_response(),
+        let sessions = user.sessions(&state);
+        return match sessions.load(&id) {
+            Ok(session) if user.owns(&session) => {
+                session_view(&state, &headers, &sessions, &id, session).await
+            }
             _ => no_session(),
         };
     }
     match state.sessions.load(&id) {
-        Ok(session) => Json(session).into_response(),
+        Ok(session) => session_view(&state, &headers, &state.sessions, &id, session).await,
         Err(error) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": error.to_string() })),
         )
             .into_response(),
+    }
+}
+
+/// A saved session as `GET /sessions/{id}` shows it: with `active_run` while
+/// this process runs one of its turns that the caller may see.
+async fn session_view(
+    state: &AppState,
+    headers: &HeaderMap,
+    sessions: &SessionStore,
+    id: &SessionId,
+    session: Session,
+) -> Response {
+    let Some(active) = session_active_run(state, headers, sessions, id).await else {
+        return Json(session).into_response();
+    };
+    match serde_json::to_value(&session) {
+        Ok(mut view) => {
+            if let Some(fields) = view.as_object_mut() {
+                fields.insert("active_run".to_owned(), active);
+            }
+            Json(view).into_response()
+        }
+        Err(error) => internal(&error.to_string()),
     }
 }
 

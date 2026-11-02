@@ -88,6 +88,15 @@ const PLANS = [
     push(run, "run.started", { run: run.id, parent: null });
     finish(run, "Second steer done.");
   },
+  // Paused again; the page is reloaded and must find it from its session.
+  (run) => {
+    push(run, "run.started", { run: run.id, parent: null });
+    push(run, "tool.requested", { id: "call_d", name: "datetime.now", arguments: "{}" });
+    push(run, "tool.started", { id: "call_d", name: "datetime.now" });
+    push(run, "tool.output", { id: "call_d", is_error: false, content: "12:01" });
+    push(run, "run.paused", { reason: "time_budget", elapsed_secs: 1 });
+    run.status = "awaiting_continue";
+  },
 ];
 
 async function scriptedProxy(base, record) {
@@ -182,6 +191,14 @@ async function scriptedProxy(base, record) {
         body: ["GET", "HEAD"].includes(request.method ?? "GET") ? undefined : payload,
         redirect: "manual",
       });
+      // The session as the server shows it while one of its turns is paused:
+      // with `active_run`, which a page that lost the run follows.
+      const paused = [...runs.values()].find((candidate) => candidate.status === "awaiting_continue");
+      if (paused && request.method === "GET" && parts[0] === "sessions" && parts.length === 2 && upstream.ok) {
+        const view = await upstream.json();
+        record.found.push(paused.id);
+        return json(200, { ...view, active_run: { id: paused.id, status: paused.status } });
+      }
       const kept = {};
       upstream.headers.forEach((value, name) => {
         if (!DROP_RESPONSE.has(name)) kept[name] = value;
@@ -214,7 +231,7 @@ export async function checkRunControls(browser, base, outDir) {
   const dir = `${outDir}/runs`;
   await mkdir(dir, { recursive: true });
   const failures = [];
-  const record = { created: [], approvals: [], cancels: [], continues: [] };
+  const record = { created: [], approvals: [], cancels: [], continues: [], found: [] };
   const title = "run controls probe";
   await seededSession(base, title);
   const proxy = await scriptedProxy(base, record);
@@ -309,6 +326,24 @@ export async function checkRunControls(browser, base, outDir) {
       if (JSON.stringify(steers) !== JSON.stringify(["First steer.", "Second steer."])) {
         throw new Error(`the steers were sent as ${JSON.stringify(steers)}`);
       }
+    });
+
+    await step("a paused run survives a reload", async () => {
+      if (!(await idle())) throw new Error("the steers did not finish");
+      await send("Look up the time again.");
+      if (!(await until(async () => (await pausedCard.count()) === 1))) throw new Error("no card for the second paused run");
+      await page.reload({ waitUntil: "domcontentloaded" });
+      // The reloaded page opens on its welcome screen; the conversation is
+      // picked from the list, as a person would.
+      await page.getByText(title, { exact: true }).first().click({ timeout: 15000 });
+      if (!(await until(async () => (await pausedCard.count()) === 1))) throw new Error("the reloaded page did not find the paused run");
+      await page.screenshot({ path: `${dir}/paused-after-reload.png` });
+      if (record.created.length !== 8) throw new Error(`the reload created runs (${record.created.length} created)`);
+      await pausedCard.getByRole("button", { name: "Answer now" }).click({ timeout: 10000 });
+      if (!(await until(() => record.continues.length === 2))) throw new Error("Answer now sent nothing");
+      const sent = record.continues[1];
+      if (sent.mode !== "answer" || sent.run !== proxy.run(7)?.id) throw new Error(`Answer now sent ${JSON.stringify(sent)}`);
+      if (!(await idle())) throw new Error("the answered run did not finish");
     });
 
     const notPausing = record.created.filter((created) => created.on_time_budget !== "pause");

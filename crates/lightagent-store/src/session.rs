@@ -601,6 +601,16 @@ impl SessionStore {
         let _ = std::fs::remove_file(self.journal_path(id));
     }
 
+    /// The run id of session `id`'s journaled turn, if one is journaled. The
+    /// turn may be live in this process or another, or its process may be
+    /// gone: the caller decides which.
+    pub fn journaled_run(&self, id: &SessionId) -> Option<String> {
+        let bytes = std::fs::read(self.journal_path(id)).ok()?;
+        serde_json::from_slice::<RunJournal>(&bytes)
+            .ok()
+            .map(|journal| journal.run_id)
+    }
+
     /// Record session `id`'s interrupted turn, if a journal outlived the
     /// process that wrote it. An appended turn gets a run record with stop
     /// reason [`INTERRUPTED`] and no answer; an interrupted regeneration
@@ -957,6 +967,21 @@ mod tests {
         assert_eq!(store.recover_all_interrupted(), vec![id.clone()]);
         assert_eq!(store.load(&id).expect("load"), before);
         assert!(store.recover_all_interrupted().is_empty());
+    }
+
+    #[test]
+    fn a_journaled_turn_names_its_run_until_it_is_recorded() {
+        let store = SessionStore::new(scratch_dir());
+        let session = Session::new("profile", "title");
+        let id = session.id.clone();
+        store.save(&session).expect("save");
+        assert_eq!(store.journaled_run(&id), None);
+        let lease = store.lease_run(&id).expect("lease");
+        store.journal_run(&id, "run-4", false).expect("journal");
+        assert_eq!(store.journaled_run(&id).as_deref(), Some("run-4"));
+        store.clear_run_journal(&id);
+        assert_eq!(store.journaled_run(&id), None);
+        drop(lease);
     }
 
     #[test]
