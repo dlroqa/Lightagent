@@ -79,7 +79,7 @@ async function checkToolsRecovery(context) {
   ]) {
     const page = await context.newPage();
     try {
-      const endpoint = "**/api/lightagent/v1/tools";
+      const endpoint = /\/api\/lightagent\/v1\/tools(\?.*)?$/;
       await page.route(endpoint, (route) => route.fulfill(failure));
       await page.goto(`${BASE}/#/agent/tools`);
       await page.getByRole("alert").getByText(failure.expected, { exact: false }).waitFor();
