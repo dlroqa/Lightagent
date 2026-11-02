@@ -44,6 +44,9 @@ struct Session {
     cwd: Option<String>,
     active: Option<Arc<RunState>>,
     busy: bool,
+    /// The session's run lease while a prompt runs: no other process runs a
+    /// turn on this session meanwhile.
+    lease: Option<lightagent_store::RunLease>,
     stored: StoredSession,
     store: Option<SessionStore>,
 }
@@ -259,6 +262,7 @@ impl AcpServer {
                             cwd,
                             active: None,
                             busy: false,
+                            lease: None,
                             stored,
                             store,
                         },
@@ -314,6 +318,7 @@ impl AcpServer {
                         cwd,
                         active: None,
                         busy: false,
+                        lease: None,
                         stored: stored.clone(),
                         store: Some(store),
                     },
@@ -378,6 +383,26 @@ impl AcpServer {
                         return;
                     }
                     Some(session) => {
+                        // One prompt at a time on this session across every
+                        // process (the desktop app, a server, a terminal chat).
+                        let lease = match &session.store {
+                            Some(store) => match store.lease_run(&session.stored.id) {
+                                Ok(lease) => Some(lease),
+                                Err(error) => {
+                                    let message = match error {
+                                        lightagent_store::StoreError::Busy { .. } => format!(
+                                            "session is running a turn in another Lightagent process: {session_id}"
+                                        ),
+                                        other => format!(
+                                            "could not take the session's run lease: {other}"
+                                        ),
+                                    };
+                                    let _ = outbound.send(protocol::error(id, -32602, &message));
+                                    return;
+                                }
+                            },
+                            None => None,
+                        };
                         // Appended to the session as it is saved now, under
                         // the store's lock, so a change another client made
                         // since (a rename, a turn) is kept.
@@ -403,6 +428,7 @@ impl AcpServer {
                         };
                         session.stored = updated;
                         session.busy = true;
+                        session.lease = lease;
                         (session.profile.clone(), session.cwd.clone(), history)
                     }
                     None => {
@@ -542,6 +568,7 @@ impl PromptTask {
             }
             session.active = None;
             session.busy = false;
+            session.lease = None;
         }
         if let Some(error) = save_error {
             let _ = self.outbound.send(protocol::error(

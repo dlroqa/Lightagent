@@ -313,6 +313,19 @@ const LOCK_WAIT: Duration = Duration::from_secs(5);
 /// or a search never reads it as a session.
 const LOCK_FILE: &str = ".lock";
 
+/// Where run leases live, one empty file per session that ran a turn. Not a
+/// `.json` file, so a listing or a search never reads it as a session.
+const RUNS_DIR: &str = ".runs";
+
+/// The right to run one turn on a session, held across processes: an
+/// exclusive OS lock on the session's lease file. Dropping it, or the end of
+/// the holder's process (a crash included), releases it. It is separate from
+/// the store's short write lock, which is never held while a turn runs.
+#[derive(Debug)]
+pub struct RunLease {
+    _file: std::fs::File,
+}
+
 /// Why [`SessionStore::update`] wrote nothing.
 #[derive(Debug)]
 pub enum SessionUpdateError<E> {
@@ -507,6 +520,27 @@ impl SessionStore {
                 reason: err.to_string(),
             },
         })
+    }
+
+    /// Take session `id`'s run lease without waiting. A turn running on it in
+    /// any process that shares this store (the desktop runtime, another
+    /// server, a terminal chat, an editor over ACP) refuses this one with
+    /// [`StoreError::Busy`]; it never queues behind it.
+    pub fn lease_run(&self, id: &SessionId) -> Result<RunLease, StoreError> {
+        let directory = self.directory.join(RUNS_DIR);
+        paths::create_private_dir(&directory).map_err(|err| StoreError::Directory {
+            path: directory.clone(),
+            reason: err.to_string(),
+        })?;
+        let path = directory.join(format!("{}.lock", id.as_str()));
+        match paths::lock_exclusive(&path, Duration::ZERO) {
+            Ok(file) => Ok(RunLease { _file: file }),
+            Err(paths::LockError::Busy) => Err(StoreError::Busy { path: directory }),
+            Err(paths::LockError::Io(err)) => Err(StoreError::Directory {
+                path,
+                reason: err.to_string(),
+            }),
+        }
     }
 
     /// Write `session` atomically and owner-only; the caller holds the lock.
@@ -710,6 +744,26 @@ mod tests {
             "lightagent-store-{}",
             SessionId::generate().as_str()
         ))
+    }
+
+    #[test]
+    fn a_run_lease_admits_one_turn_per_session_and_frees_on_drop() {
+        let store = SessionStore::new(scratch_dir());
+        let (one, two) = (SessionId::generate(), SessionId::generate());
+        let held = store.lease_run(&one).expect("lease");
+        assert!(matches!(
+            store.lease_run(&one),
+            Err(StoreError::Busy { .. })
+        ));
+        // Another session runs at the same time.
+        let other = store.lease_run(&two).expect("another session");
+        // The write lock is separate: a save goes through while a turn runs.
+        store
+            .save(&Session::new("profile", "title"))
+            .expect("a save while a turn runs");
+        drop(held);
+        let again = store.lease_run(&one).expect("freed on drop");
+        drop((again, other));
     }
 
     #[test]
