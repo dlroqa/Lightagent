@@ -1,0 +1,47 @@
+=== base f2f2b883431ea71f015aea412f2f55be2f42d0c6
+=== message
+D5b: a lease being released is waited for briefly, a held one never
+
+On Linux a released lease can still read as held for an instant: a
+process that starts a child (fork or clone, then exec) gives the child
+copies of its open files until the exec closes them, and an OS file lock
+is released only when every copy is closed. The API test that regenerates
+right after the previous run was recorded hit that window on Linux only
+(check run 41405132318); macOS and Windows passed, and the new
+separate-process tests passed on all four platforms.
+
+`lease_run` now retries for up to 500 ms before reporting the session
+busy. A turn that really holds the lease is still refused, after at most
+that grace; nothing ever queues behind another process's turn.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-store/src/session.rs
+--- find
+const RUNS_DIR: &str = ".runs";
+--- with
+const RUNS_DIR: &str = ".runs";
+
+/// How long taking a run lease retries before the session is busy. On Linux
+/// a released lease can read as held for an instant, while a child another
+/// thread is starting still has a copy of the lock file open (until its
+/// exec closes it). A turn that holds the lease is never waited for beyond
+/// this.
+const RUN_LEASE_GRACE: Duration = Duration::from_millis(500);
+=== replace crates/lightagent-store/src/session.rs
+--- find
+    /// Take session `id`'s run lease without waiting. A turn running on it in
+    /// any process that shares this store (the desktop runtime, another
+    /// server, a terminal chat, an editor over ACP) refuses this one with
+    /// [`StoreError::Busy`]; it never queues behind it.
+--- with
+    /// Take session `id`'s run lease. A turn running on it in any process
+    /// that shares this store (the desktop runtime, another server, a
+    /// terminal chat, an editor over ACP) refuses this one with
+    /// [`StoreError::Busy`] after at most [`RUN_LEASE_GRACE`]; it never
+    /// queues behind that turn.
+=== replace crates/lightagent-store/src/session.rs
+--- find
+        match paths::lock_exclusive(&path, Duration::ZERO) {
+--- with
+        match paths::lock_exclusive(&path, RUN_LEASE_GRACE) {
+=== end
