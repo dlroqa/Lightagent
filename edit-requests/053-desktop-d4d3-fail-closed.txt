@@ -1,0 +1,431 @@
+=== base bb76e74454e91f91f09a3a1c4c53dbf5458905dd
+=== message
+D4d-3: every configured remote credential fails closed
+
+A configured credential that cannot be used (an unreadable file, an unset
+variable, an empty value, a value with a control character) used to be
+dropped by `resolve()`, and the request went out without it. Every
+remaining path now uses `SecretRef::for_request`, so nothing is sent:
+
+- Web search: the query is withheld, never sent anonymously in place of
+  the key. The tool's refusal says the credential is not granted or
+  cannot be used, and that nothing was sent.
+- Open Terminal and the GitHub Actions broker: no connection is built.
+- The remote index (Qdrant and Infinity) and the semantic embedder (Infinity
+  or rag.semantic): not used.
+- Jev: `JevClient::from_config` refuses with the new
+  `JevError::CredentialUnavailable` (`credential_unavailable`), so
+  classification, routing and the connection check fall back with nothing
+  sent. The Jev status's `api_key_resolvable` uses the same rule.
+
+An intentionally absent credential is unchanged: no key, and requests go
+out without one where the service allows it. Errors carry a stable code or
+the reason, never the file, the variable or the value.
+
+Audit note: crates/lightagent/src/runtime.rs is not compiled (no `mod
+runtime`, no `lightagent runtime` command) and is left unchanged; the live
+control-plane path, the provider view's runtime catalog, already takes the
+endpoint's bound key and fails closed (D4d-2b).
+
+Hosted tests: chat unit test (web search withheld and Open Terminal not
+connected for an unusable key, with usable-key controls), rag unit test
+(remote index and embedder unused for an unusable key, used with none),
+and crates/lightagent/tests/desktop_fail_closed.rs (the desktop runtime's
+Jev check refuses with `credential_unavailable` for each unusable kind,
+names no file or variable, and the configured endpoint receives no
+connection).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent/src/chat.rs
+--- find
+        _ => {
+            let granted = access.may_use(&config.web.search.credential_profiles);
+            (
+                // Resolved only for a run allowed to use it.
+                config
+                    .web
+                    .search
+                    .api_key
+                    .as_ref()
+                    .filter(|_| granted)
+                    .and_then(|key| key.resolve()),
+                None,
+                !granted && config.web.search.api_key.is_some(),
+            )
+        }
+--- with
+        _ => {
+            let granted = access.may_use(&config.web.search.credential_profiles);
+            // Resolved only for a run allowed to use it. A configured key
+            // that cannot be used withholds search: the query is never sent
+            // anonymously in its place.
+            match config
+                .web
+                .search
+                .api_key
+                .as_ref()
+                .filter(|_| granted)
+                .map(lightagent_core::SecretRef::for_request)
+            {
+                Some(Ok(key)) => (key, None, false),
+                Some(Err(_)) => (None, None, true),
+                None => (
+                    None,
+                    None,
+                    !granted && config.web.search.api_key.is_some(),
+                ),
+            }
+        }
+=== replace crates/lightagent/src/chat.rs
+--- find
+            api_key: endpoint.api_key.as_ref().and_then(|key| key.resolve()),
+--- with
+            // A configured key that cannot be used: no connection without it.
+            api_key: endpoint
+                .api_key
+                .as_ref()
+                .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+                .ok()?,
+=== replace crates/lightagent/src/chat.rs
+--- find
+        token: actions
+            .endpoint
+            .api_key
+            .as_ref()
+            .and_then(|key| key.resolve()),
+--- with
+        // A configured token that cannot be used: no broker without it.
+        token: actions
+            .endpoint
+            .api_key
+            .as_ref()
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+            .ok()?,
+=== replace crates/lightagent/src/chat.rs
+--- find
+    fn the_web_context_grants_search_credentials_and_destinations_per_profile() {
+--- with
+    fn a_remote_credential_that_cannot_be_used_sends_nothing() {
+        let dir = std::env::temp_dir().join(format!(
+            "lightagent-unusable-remote-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let readable = dir.join("key");
+        std::fs::write(&readable, "synthetic-remote-key-not-a-secret").unwrap();
+        let usable = Some(lightagent_core::SecretRef::File { path: readable });
+        let unusable = Some(lightagent_core::SecretRef::File {
+            path: dir.join("missing"),
+        });
+        let mut config = Config::default();
+        config.web.enabled = true;
+        config.web.search.endpoint = Some("https://search.example.com/q".to_owned());
+        config.web.search.api_key = usable.clone();
+        let web = web_context_for(&config, RemoteAccess::Operator).unwrap();
+        assert!(web.policy.search_api_key.is_some());
+        assert!(!web.policy.search_credential_withheld);
+        // Search is withheld, never sent anonymously in place of the key.
+        config.web.search.api_key = unusable.clone();
+        let web = web_context_for(&config, RemoteAccess::Operator).unwrap();
+        assert!(web.policy.search_api_key.is_none());
+        assert!(web.policy.search_credential_withheld);
+        // Open Terminal: no connection without its key.
+        config.platform.open_terminal.endpoint.enabled = true;
+        config.platform.open_terminal.endpoint.base_url = Some("https://terminal.example".to_owned());
+        config.platform.open_terminal.endpoint.api_key = usable;
+        assert!(open_terminal_context(&config).is_some());
+        config.platform.open_terminal.endpoint.api_key = unusable;
+        assert!(open_terminal_context(&config).is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_web_context_grants_search_credentials_and_destinations_per_profile() {
+=== replace crates/lightagent-tools/src/builtins/web.rs
+--- find
+        return Err("the search credential is not granted to this profile".to_owned());
+--- with
+        return Err(
+            "the search credential is not granted to this profile, or it cannot be used; nothing was sent"
+                .to_owned(),
+        );
+=== replace crates/lightagent/src/rag.rs
+--- find
+            qdrant_key: qdrant
+                .endpoint
+                .api_key
+                .as_ref()
+                .and_then(|key| key.resolve()),
+--- with
+            // A configured key that cannot be used: the remote index is not
+            // used, so nothing is sent without it.
+            qdrant_key: qdrant
+                .endpoint
+                .api_key
+                .as_ref()
+                .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+                .ok()?,
+=== replace crates/lightagent/src/rag.rs
+--- find
+            infinity_key: infinity
+                .endpoint
+                .api_key
+                .as_ref()
+                .and_then(|key| key.resolve()),
+--- with
+            infinity_key: infinity
+                .endpoint
+                .api_key
+                .as_ref()
+                .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+                .ok()?,
+=== replace crates/lightagent/src/rag.rs
+--- find
+        let api_key = infinity
+            .endpoint
+            .api_key
+            .as_ref()
+            .and_then(|secret| secret.resolve());
+--- with
+        // A configured key that cannot be used: no embedder without it.
+        let api_key = infinity
+            .endpoint
+            .api_key
+            .as_ref()
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+            .ok()?;
+=== replace crates/lightagent/src/rag.rs
+--- find
+    let api_key = semantic
+        .api_key
+        .as_ref()
+        .and_then(|secret| secret.resolve());
+--- with
+    let api_key = semantic
+        .api_key
+        .as_ref()
+        .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+        .ok()?;
+=== replace crates/lightagent/src/rag.rs
+--- find
+    fn remote(qdrant_url: String, infinity_url: String) -> RemoteRag {
+--- with
+    #[test]
+    fn a_remote_index_key_that_cannot_be_used_sends_nothing() {
+        let mut config = Config::default();
+        config.platform.qdrant.endpoint.enabled = true;
+        config.platform.qdrant.endpoint.base_url = Some("http://127.0.0.1:9".to_owned());
+        config.platform.infinity.endpoint.enabled = true;
+        config.platform.infinity.endpoint.base_url = Some("http://127.0.0.1:9".to_owned());
+        // No key configured: used, without one.
+        assert!(RemoteRag::from_config(&config, "profile-a").is_some());
+        assert!(semantic_embedder(&config).is_some());
+        // A configured key that cannot be used: neither is used.
+        config.platform.infinity.endpoint.api_key = Some(lightagent_core::SecretRef::env(
+            "LIGHTAGENT_TEST_RAG_UNSET_KEY",
+        ));
+        assert!(RemoteRag::from_config(&config, "profile-a").is_none());
+        assert!(semantic_embedder(&config).is_none());
+    }
+
+    fn remote(qdrant_url: String, infinity_url: String) -> RemoteRag {
+=== replace crates/lightagent-jev/src/client.rs
+--- find
+        let api_key = config
+            .endpoint
+            .api_key
+            .as_ref()
+            .and_then(|secret| secret.resolve());
+--- with
+        // A configured key that cannot be used fails closed: no client, so
+        // nothing is sent without it.
+        let api_key = config
+            .endpoint
+            .api_key
+            .as_ref()
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+            .map_err(|_| JevError::CredentialUnavailable)?;
+=== replace crates/lightagent-jev/src/error.rs
+--- find
+    NotConfigured,
+--- with
+    NotConfigured,
+    /// The configured API key cannot be used (unreadable, unset, empty or
+    /// not sendable); nothing was sent.
+    #[error("the configured Jev API key cannot be used; nothing was sent")]
+    CredentialUnavailable,
+=== replace crates/lightagent-jev/src/error.rs
+--- find
+            Self::NotConfigured => "not_configured",
+--- with
+            Self::NotConfigured => "not_configured",
+            Self::CredentialUnavailable => "credential_unavailable",
+=== replace crates/lightagent/src/coordinator/tool.rs
+--- find
+        .is_some_and(|secret| secret.resolve().is_some());
+--- with
+        .is_some_and(|secret| matches!(secret.for_request(), Ok(Some(_))));
+=== write crates/lightagent/tests/desktop_fail_closed.rs
+//! Every configured credential fails closed (D4d-3): a key that is
+//! configured but cannot be used (an unreadable file, an unset variable,
+//! an empty value, a value with a control character) stops the operation
+//! before anything is sent, with an answer that names neither the file nor
+//! the variable. Shown here for the desktop runtime's Jev connection check,
+//! in a separate process, against an endpoint that records any connection.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+
+const KEY: &str = "708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f";
+const UNSET: &str = "LIGHTAGENT_TEST_FAIL_CLOSED_UNSET";
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-fail-closed-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+/// One authenticated request: the status and the raw body.
+fn call(runtime: &Runtime, method: &str, path: &str, body: &str) -> (u16, String) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, raw)
+}
+
+/// An endpoint that only records whether anything connected to it.
+fn untouched() -> (TcpListener, String) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    listener.set_nonblocking(true).expect("non-blocking");
+    let url = format!("http://{}", listener.local_addr().expect("address"));
+    (listener, url)
+}
+
+fn contacted(listener: &TcpListener) -> bool {
+    match listener.accept() {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+        Err(error) => panic!("accept: {error}"),
+    }
+}
+
+fn edit_config(home: &Path, change: impl FnOnce(&mut Value)) {
+    let path = home.join("config.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("config JSON");
+    change(&mut value);
+    std::fs::write(&path, serde_json::to_vec_pretty(&value).expect("JSON")).expect("write");
+}
+
+/// Each kind of configured reference that cannot be used.
+fn unusable(home: &Path) -> Vec<Value> {
+    let empty = home.join("empty-fail-closed-key");
+    std::fs::write(&empty, " \n").expect("empty key");
+    let control = home.join("control-fail-closed-key");
+    std::fs::write(&control, "abc\u{7}def").expect("control key");
+    vec![
+        json!({ "kind": "file", "path": home.join("missing-fail-closed-key") }),
+        json!({ "kind": "env", "var": UNSET }),
+        json!({ "kind": "file", "path": empty }),
+        json!({ "kind": "file", "path": control }),
+    ]
+}
+
+#[test]
+fn a_jev_check_with_an_unusable_key_sends_nothing() {
+    let home = scratch_home("jev");
+    let (listener, url) = untouched();
+    let runtime = start(&home);
+    for reference in unusable(&home) {
+        edit_config(&home, |config| {
+            config["platform"]["jev"]["base_url"] = json!(url);
+            config["platform"]["jev"]["api_key"] = reference.clone();
+        });
+        let (status, raw) = call(&runtime, "POST", "/api/lightagent/v1/jev/verify", "{}");
+        assert_eq!(status, 200, "{reference}: {raw}");
+        assert!(raw.contains("credential_unavailable"), "{reference}: {raw}");
+        assert!(
+            !raw.contains("fail-closed-key") && !raw.contains(UNSET),
+            "the answer names the key's location: {raw}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !contacted(&listener),
+            "{reference}: Jev was contacted without its key"
+        );
+    }
+}
+=== end
