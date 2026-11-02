@@ -12,6 +12,10 @@ pub enum JevError {
     /// No endpoint is configured.
     #[error("Jev endpoint is not configured")]
     NotConfigured,
+    /// The configured API key cannot be used (unreadable, unset, empty or
+    /// not sendable); nothing was sent.
+    #[error("the configured Jev API key cannot be used; nothing was sent")]
+    CredentialUnavailable,
     /// The request would be refused by TypeSafe; nothing was sent.
     #[error("Jev request is invalid: {0}")]
     InvalidRequest(&'static str),
@@ -62,6 +66,7 @@ impl JevError {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::NotConfigured => "not_configured",
+            Self::CredentialUnavailable => "credential_unavailable",
             Self::InvalidRequest(_) => "invalid_request",
             Self::RequestTooLarge { .. } => "request_too_large",
             Self::Cancelled => "cancelled",

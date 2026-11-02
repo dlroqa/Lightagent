@@ -239,18 +239,21 @@ pub(crate) fn web_context_for(config: &Config, access: RemoteAccess<'_>) -> Opti
         }
         _ => {
             let granted = access.may_use(&config.web.search.credential_profiles);
-            (
-                // Resolved only for a run allowed to use it.
-                config
-                    .web
-                    .search
-                    .api_key
-                    .as_ref()
-                    .filter(|_| granted)
-                    .and_then(|key| key.resolve()),
-                None,
-                !granted && config.web.search.api_key.is_some(),
-            )
+            // Resolved only for a run allowed to use it. A configured key
+            // that cannot be used withholds search: the query is never sent
+            // anonymously in its place.
+            match config
+                .web
+                .search
+                .api_key
+                .as_ref()
+                .filter(|_| granted)
+                .map(lightagent_core::SecretRef::for_request)
+            {
+                Some(Ok(key)) => (key, None, false),
+                Some(Err(_)) => (None, None, true),
+                None => (None, None, !granted && config.web.search.api_key.is_some()),
+            }
         }
     };
     let policy = WebPolicy {
@@ -351,7 +354,12 @@ pub(crate) fn open_terminal_context(config: &Config) -> Option<OpenTerminalConte
         client,
         policy: Arc::new(OpenTerminalPolicy {
             base_url: base_url.to_owned(),
-            api_key: endpoint.api_key.as_ref().and_then(|key| key.resolve()),
+            // A configured key that cannot be used: no connection without it.
+            api_key: endpoint
+                .api_key
+                .as_ref()
+                .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+                .ok()?,
             poll_interval: Duration::from_millis(config.platform.open_terminal.poll_interval_ms),
             request_timeout: Duration::from_secs(
                 config.platform.open_terminal.request_timeout_secs,
@@ -450,11 +458,13 @@ pub(crate) fn actions_context(config: &Config) -> Option<ActionsContext> {
     let policy = ActionsPolicy {
         api_base,
         repository: actions.repository.clone()?,
+        // A configured token that cannot be used: no broker without it.
         token: actions
             .endpoint
             .api_key
             .as_ref()
-            .and_then(|key| key.resolve()),
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+            .ok()?,
         workflows: actions.workflows.clone(),
         commit_refs: actions.commit_refs.clone(),
         poll_interval: Duration::from_secs(actions.poll_interval_secs.max(1)),
@@ -4747,6 +4757,40 @@ for line in sys.stdin:
         assert!(tools.is_empty());
         assert_eq!(broken_log.lock().unwrap().len(), contacted);
         assert_eq!(open_log.lock().unwrap().len(), opened);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_remote_credential_that_cannot_be_used_sends_nothing() {
+        let dir =
+            std::env::temp_dir().join(format!("lightagent-unusable-remote-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let readable = dir.join("key");
+        std::fs::write(&readable, "synthetic-remote-key-not-a-secret").unwrap();
+        let usable = Some(lightagent_core::SecretRef::File { path: readable });
+        let unusable = Some(lightagent_core::SecretRef::File {
+            path: dir.join("missing"),
+        });
+        let mut config = Config::default();
+        config.web.enabled = true;
+        config.web.search.endpoint = Some("https://search.example.com/q".to_owned());
+        config.web.search.api_key = usable.clone();
+        let web = web_context_for(&config, RemoteAccess::Operator).unwrap();
+        assert!(web.policy.search_api_key.is_some());
+        assert!(!web.policy.search_credential_withheld);
+        // Search is withheld, never sent anonymously in place of the key.
+        config.web.search.api_key = unusable.clone();
+        let web = web_context_for(&config, RemoteAccess::Operator).unwrap();
+        assert!(web.policy.search_api_key.is_none());
+        assert!(web.policy.search_credential_withheld);
+        // Open Terminal: no connection without its key.
+        config.platform.open_terminal.endpoint.enabled = true;
+        config.platform.open_terminal.endpoint.base_url =
+            Some("https://terminal.example".to_owned());
+        config.platform.open_terminal.endpoint.api_key = usable;
+        assert!(open_terminal_context(&config).is_some());
+        config.platform.open_terminal.endpoint.api_key = unusable;
+        assert!(open_terminal_context(&config).is_none());
         std::fs::remove_dir_all(dir).ok();
     }
 
