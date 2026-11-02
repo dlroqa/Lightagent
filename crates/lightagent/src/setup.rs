@@ -853,7 +853,9 @@ async fn configure_gateway<R: BufRead, W: Write>(
     prompt: &mut Prompt<R, W>,
 ) -> Result<(), String> {
     let base_url = prompt.input("Gateway URL", &config.inference.base_url)?;
-    config.inference.base_url = base_url.clone();
+    // The endpoint's own key only: a key saved for another endpoint is never
+    // carried to this one.
+    lightagent_core::provider_keys::select_endpoint(config, &base_url);
 
     let mut provider_config = ProviderConfig::new(base_url, "default");
     // A configured key that cannot be used: nothing is sent without it.

@@ -1347,7 +1347,8 @@ fn init(
     let (config, _) = ConfigStore::at(&paths)
         .update(None, |config| {
             if let Some(base_url) = base_url {
-                config.inference.base_url = base_url;
+                // The endpoint's own key only, never the previous endpoint's.
+                lightagent_core::provider_keys::select_endpoint(config, &base_url);
             }
             if let Some(model) = &model {
                 config.inference.model = Some(model.clone());

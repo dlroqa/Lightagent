@@ -104,6 +104,39 @@ pub fn use_key(config: &mut Config, secret: Option<SecretRef>) {
     config.inference.api_key = secret;
 }
 
+/// The key reference bound to `base_url`, the only key a request to that
+/// endpoint may carry: the active endpoint's (`inference.api_key`) when
+/// `base_url` is the active endpoint, a saved provider's when it is that
+/// provider's endpoint, and otherwise none. A profile that overrides the
+/// endpoint therefore never receives another endpoint's key.
+pub fn bound_key<'a>(config: &'a Config, base_url: &str) -> Option<&'a SecretRef> {
+    if same_url(&config.inference.base_url, base_url) {
+        return config.inference.api_key.as_ref();
+    }
+    config
+        .inference
+        .saved_providers
+        .iter()
+        .find(|saved| same_url(&saved.base_url, base_url))
+        .and_then(|saved| saved.api_key.as_ref())
+}
+
+/// Make `base_url` the active endpoint, with the key bound to it: the same
+/// endpoint keeps its key, a saved provider's endpoint takes that
+/// provider's key, and any other endpoint has none. The previous
+/// endpoint's key is never carried to a different endpoint.
+pub fn select_endpoint(config: &mut Config, base_url: &str) {
+    if !same_url(&config.inference.base_url, base_url) {
+        config.inference.api_key = config
+            .inference
+            .saved_providers
+            .iter()
+            .find(|saved| same_url(&saved.base_url, base_url))
+            .and_then(|saved| saved.api_key.clone());
+    }
+    config.inference.base_url = base_url.to_owned();
+}
+
 /// Remove the key stored for `provider_id`. Returns whether a file was
 /// removed. The config's references are the caller's to clear first.
 pub fn remove_key(paths: &LightagentPaths, provider_id: &str) -> Result<bool, String> {
@@ -164,6 +197,42 @@ mod tests {
         assert_eq!(config.inference.api_key, Some(SecretRef::env("LAB_KEY")));
         use_key(&mut config, None);
         assert_eq!(config.inference.saved_providers[0].api_key, None);
+        assert_eq!(config.inference.api_key, None);
+    }
+
+    #[test]
+    fn a_key_is_bound_to_its_endpoint_and_never_carried_to_another() {
+        let mut config = Config::default();
+        config.inference.base_url = "https://a.example/v1".to_owned();
+        config.inference.api_key = Some(SecretRef::env("A_KEY"));
+        config.inference.saved_providers.push(SavedProvider {
+            name: "Lab".to_owned(),
+            base_url: "https://lab.example/v1/".to_owned(),
+            api_key: Some(SecretRef::env("LAB_KEY")),
+        });
+        // A request takes its own endpoint's key, or none.
+        assert_eq!(
+            bound_key(&config, "https://a.example/v1/"),
+            Some(&SecretRef::env("A_KEY"))
+        );
+        assert_eq!(
+            bound_key(&config, "https://lab.example/v1"),
+            Some(&SecretRef::env("LAB_KEY"))
+        );
+        assert_eq!(bound_key(&config, "https://elsewhere.example/v1"), None);
+        // The same endpoint keeps its key.
+        select_endpoint(&mut config, "https://a.example/v1/");
+        assert_eq!(config.inference.api_key, Some(SecretRef::env("A_KEY")));
+        // Another endpoint does not take the previous one's key.
+        select_endpoint(&mut config, "https://elsewhere.example/v1");
+        assert_eq!(config.inference.base_url, "https://elsewhere.example/v1");
+        assert_eq!(config.inference.api_key, None);
+        // A saved provider's endpoint takes that provider's key.
+        select_endpoint(&mut config, "https://lab.example/v1");
+        assert_eq!(config.inference.api_key, Some(SecretRef::env("LAB_KEY")));
+        // A saved provider without a key leaves the endpoint without one.
+        config.inference.saved_providers[0].api_key = None;
+        select_endpoint(&mut config, "https://a.example/v1");
         assert_eq!(config.inference.api_key, None);
     }
 

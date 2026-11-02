@@ -987,11 +987,9 @@ async fn build_chat_runtime(
         .clone()
         .unwrap_or_else(|| config.inference.base_url.clone());
     // A configured key that cannot be used stops the chat before it starts
-    // (see `run`), so none is sent from here either.
-    let api_key = config
-        .inference
-        .api_key
-        .as_ref()
+    // (see `run`), so none is sent from here either. Only the key bound to
+    // this endpoint, never another endpoint's.
+    let api_key = lightagent_core::provider_keys::bound_key(config, &base_url)
         .and_then(|secret| secret.for_request().ok().flatten());
     let mut registry =
         configured_registry(config, profile_dir, &extensions, !skills.is_empty()).await;
@@ -1186,10 +1184,8 @@ pub async fn run(
     // A configured key that cannot be used fails closed: the chat does not
     // start, so nothing is ever sent without it. No key configured is not
     // that: it sends none, as local providers expect.
-    let api_key = config
-        .inference
-        .api_key
-        .as_ref()
+    // The key is the one bound to this profile's endpoint, never another's.
+    let api_key = lightagent_core::provider_keys::bound_key(&config, &base_url)
         .map_or(Ok(None), lightagent_core::SecretRef::for_request)
         .map_err(|error| {
             format!("inference: {error}; replace or remove the key (lightagent setup provider)")
@@ -1576,11 +1572,9 @@ pub async fn run(
                     let mut routed_config =
                         ProviderConfig::new(url.clone(), candidate_model.clone())
                             .with_tool_names(config.inference.tool_names);
-                    // Never a routed request without the configured key.
-                    let Ok(routed_key) = config
-                        .inference
-                        .api_key
-                        .as_ref()
+                    // Never a routed request without the configured key, and
+                    // only the key bound to the routed endpoint.
+                    let Ok(routed_key) = lightagent_core::provider_keys::bound_key(&config, &url)
                         .map_or(Ok(None), lightagent_core::SecretRef::for_request)
                     else {
                         continue;
