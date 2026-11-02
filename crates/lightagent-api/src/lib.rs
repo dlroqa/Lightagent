@@ -41,7 +41,9 @@ use lightagent_core::{
     PlatformEndpointConfig, ProfileId, ProfileStore, SecretRef, SkillStore, UpdateError,
     skill_dirs,
 };
-use lightagent_store::{Session, SessionId, SessionStore, StoredMessage, model_history};
+use lightagent_store::{
+    Session, SessionId, SessionStore, SessionUpdateError, StoreError, StoredMessage, model_history,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -303,6 +305,7 @@ enum Access {
 }
 
 /// A user authorized, from server-side ownership, for one profile.
+#[derive(Clone)]
 struct UserAccess {
     principal: PrincipalId,
     profile: ProfileId,
@@ -1439,6 +1442,94 @@ fn take_latest_answer(session: &mut Session, run_id: &str) -> Option<String> {
     Some(prompt)
 }
 
+/// Why a session run was not admitted.
+enum Refused {
+    /// The session is missing or could not be read.
+    Missing(String),
+    /// The session belongs to another profile than the run's.
+    ProfileMismatch,
+    /// A regeneration named an answer that is not the session's latest.
+    NotLatest,
+    /// The prompt could not be saved.
+    Unsaved(String),
+}
+
+impl IntoResponse for Refused {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Missing(error) => not_found(&error),
+            Self::ProfileMismatch => bad_request("session profile does not match"),
+            Self::NotLatest => (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "only the latest answer can be regenerated"})),
+            )
+                .into_response(),
+            Self::Unsaved(error) => internal(&error),
+        }
+    }
+}
+
+/// Whether a store error means the session cannot be read (missing,
+/// malformed or damaged) rather than that it could not be written.
+fn is_missing(error: &StoreError) -> bool {
+    matches!(
+        error,
+        StoreError::NotFound(_) | StoreError::Unreadable { .. } | StoreError::MalformedId(_)
+    )
+}
+
+/// Admit a run of session `id` for the profile `expected` (and `named`, when
+/// the caller named one): the history the model sees and the prompt to run.
+/// A new prompt is appended, under the store's lock, to the session as it is
+/// saved now. A regeneration only reads: nothing is saved until its run has
+/// finished with an answer (`record_run_in_session`).
+fn admit(
+    store: &SessionStore,
+    id: &SessionId,
+    expected: &str,
+    named: Option<&str>,
+    message: &str,
+    replacing: Option<&str>,
+    history_limit: usize,
+) -> Result<(Vec<lightagent_core::provider::ProviderMessage>, String), Refused> {
+    let check = |session: &Session| {
+        if session.profile != expected || named.is_some_and(|value| value != session.profile) {
+            Err(Refused::ProfileMismatch)
+        } else {
+            Ok(())
+        }
+    };
+    let Some(run_id) = replacing else {
+        return store
+            .update(id, |session| {
+                check(&*session)?;
+                let history = model_history(session, message, history_limit);
+                if session.messages.is_empty() && session.title == "agent session" {
+                    session.title = session_title(message);
+                }
+                session.push_message(StoredMessage::new("user", message));
+                Ok((history, message.to_owned()))
+            })
+            .map(|(admitted, _)| admitted)
+            .map_err(|error| match error {
+                SessionUpdateError::Change(refused) => refused,
+                SessionUpdateError::Store(error) if is_missing(&error) => {
+                    Refused::Missing(error.to_string())
+                }
+                SessionUpdateError::Store(error) => Refused::Unsaved(error.to_string()),
+            });
+    };
+    let mut earlier = store
+        .load(id)
+        .map_err(|error| Refused::Missing(error.to_string()))?;
+    check(&earlier)?;
+    let prompt = take_latest_answer(&mut earlier, run_id).ok_or(Refused::NotLatest)?;
+    // The model sees what preceded the prompt, as it did on the prompt's
+    // first run.
+    earlier.messages.pop();
+    Ok((model_history(&earlier, &prompt, history_limit), prompt))
+}
+
 async fn start_run(
     state: Arc<AppState>,
     headers: HeaderMap,
@@ -1555,56 +1646,47 @@ async fn start_run(
             )
                 .into_response();
         }
-        let mut session = match session_store.load(&id) {
-            Ok(session) => session,
-            Err(error) => {
-                busy.remove(&id);
-                return not_found(&error.to_string());
-            }
+        // Checked, and for a new prompt saved, on the session as it is saved
+        // now, under the store's lock: a change another writer made since is
+        // kept. The busy entry above stays the rule for admitting runs.
+        let admitted = {
+            let store = session_store.clone();
+            let id = id.clone();
+            let expected = session_profile.clone();
+            let named = profile.clone();
+            let message = body.message.clone();
+            let replacing = match &turn {
+                Turn::Append => None,
+                Turn::Regenerate { run_id } => Some(run_id.clone()),
+            };
+            tokio::task::spawn_blocking(move || {
+                admit(
+                    &store,
+                    &id,
+                    &expected,
+                    named.as_deref(),
+                    &message,
+                    replacing.as_deref(),
+                    history_limit,
+                )
+            })
+            .await
         };
-        if session.profile != session_profile
-            || profile
-                .as_ref()
-                .is_some_and(|value| value != &session.profile)
-        {
-            busy.remove(&id);
-            return bad_request("session profile does not match");
-        }
-        match &turn {
-            Turn::Append => {
-                history = model_history(&session, &body.message, history_limit);
-                profile = Some(session.profile.clone());
-                if session.messages.is_empty() && session.title == "agent session" {
-                    session.title = session_title(&body.message);
-                }
-                session.push_message(StoredMessage::new("user", &body.message));
-            }
-            Turn::Regenerate { run_id } => {
-                // Checked on a copy: nothing is saved until the new run has
-                // finished with an answer (`record_run_in_session`).
-                let mut earlier = session.clone();
-                let Some(prompt) = take_latest_answer(&mut earlier, run_id) else {
-                    busy.remove(&id);
-                    return (
-                        StatusCode::CONFLICT,
-                        Json(json!({"error": "only the latest answer can be regenerated"})),
-                    )
-                        .into_response();
-                };
-                // The model sees what preceded the prompt, as it did on the
-                // prompt's first run.
-                earlier.messages.pop();
-                history = model_history(&earlier, &prompt, history_limit);
-                profile = Some(session.profile.clone());
+        match admitted {
+            Ok(Ok((admitted, prompt))) => {
+                history = admitted;
                 body.message = prompt;
             }
+            Ok(Err(refused)) => {
+                busy.remove(&id);
+                return refused.into_response();
+            }
+            Err(error) => {
+                busy.remove(&id);
+                return internal(&error.to_string());
+            }
         }
-        if matches!(turn, Turn::Append)
-            && let Err(error) = session_store.save(&session)
-        {
-            busy.remove(&id);
-            return internal(&error.to_string());
-        }
+        profile = Some(session_profile.clone());
         session_id = Some(id);
     }
     let request = StartRun {
@@ -1688,28 +1770,35 @@ async fn record_run_in_session(
         let (events, status) = run.wait_from(seen).await;
         seen += events.len();
         if status.is_terminal() {
-            match sessions.load(&id) {
-                Ok(mut session) => {
-                    let events = run.events().await;
-                    // The stop reason, as the terminal saves it, so a
-                    // reloaded session still says why a run ended.
-                    let stop = stop_reason_of(&events).unwrap_or_else(|| format!("{status:?}"));
-                    let record = match &replacing {
-                        None => true,
-                        Some(old) => {
-                            status == RunStatus::Completed
-                                && answered(&events)
-                                && take_latest_answer(&mut session, old).is_some()
-                        }
-                    };
-                    if record {
-                        session.record_run_events(&events, &stop);
-                        if let Err(error) = sessions.save(&session) {
-                            eprintln!("could not save agent session {id:?}: {error}");
-                        }
+            let events = run.events().await;
+            // The stop reason, as the terminal saves it, so a
+            // reloaded session still says why a run ended.
+            let stop = stop_reason_of(&events).unwrap_or_else(|| format!("{status:?}"));
+            let has_answer = status == RunStatus::Completed && answered(&events);
+            let (store, session, replacing) = (sessions.clone(), id.clone(), replacing.clone());
+            // Recorded, under the store's lock, into the session as it is
+            // saved now, so a change another writer made during the run is
+            // kept.
+            let recorded = tokio::task::spawn_blocking(move || {
+                store.update(&session, |saved| {
+                    // Only a finished answer replaces the saved one; a
+                    // failed, cancelled or empty run leaves it as it was.
+                    if let Some(old) = &replacing
+                        && (!has_answer || take_latest_answer(saved, old).is_none())
+                    {
+                        return Err(());
                     }
+                    saved.record_run_events(&events, &stop);
+                    Ok(())
+                })
+            })
+            .await;
+            match recorded {
+                Ok(Ok(_)) | Ok(Err(SessionUpdateError::Change(()))) => {}
+                Ok(Err(SessionUpdateError::Store(error))) => {
+                    eprintln!("could not save agent session {id:?}: {error}");
                 }
-                Err(error) => eprintln!("could not read agent session {id:?}: {error}"),
+                Err(error) => eprintln!("could not save agent session {id:?}: {error}"),
             }
             busy.lock().await.remove(&id);
             break;
@@ -2227,31 +2316,44 @@ async fn update_session(
         )
             .into_response();
     }
-    let mut session = match (store.load(&id), &user) {
-        (Ok(session), None) => session,
-        (Ok(session), Some(user)) if user.owns(&session) => session,
-        (_, Some(_)) => return no_session(),
-        (Err(error), None) => return not_found(&error.to_string()),
-    };
-    if let Some(value) = title {
-        session.title = value;
-    }
-    if let Some(value) = body.pinned {
-        session.pinned = value;
-    }
-    if let Some(value) = body.archived {
-        session.archived = value;
-    }
-    if let Some(value) = project {
-        session.project = value;
-    }
-    session.touch();
-    let summary = lightagent_store::SessionSummary::of(&session);
-    let result = store.save(&session);
+    // Applied, under the store's lock, to the session as it is saved now, so
+    // a change another process made since (a turn from the terminal or an
+    // editor) is kept.
+    let pinned = body.pinned;
+    let archived = body.archived;
+    let owner = user.clone();
+    let updated = tokio::task::spawn_blocking(move || {
+        store.update(&id, |session| {
+            if owner.as_ref().is_some_and(|user| !user.owns(session)) {
+                return Err(());
+            }
+            if let Some(value) = title {
+                session.title = value;
+            }
+            if let Some(value) = pinned {
+                session.pinned = value;
+            }
+            if let Some(value) = archived {
+                session.archived = value;
+            }
+            if let Some(value) = project {
+                session.project = value;
+            }
+            session.touch();
+            Ok(lightagent_store::SessionSummary::of(session))
+        })
+    })
+    .await;
     drop(busy);
-    match result {
-        Ok(()) => Json(summary).into_response(),
-        Err(error) => internal(&error.to_string()),
+    match (updated, &user) {
+        (Ok(Ok((summary, _))), _) => Json(summary).into_response(),
+        (Ok(Err(SessionUpdateError::Change(()))), _) => no_session(),
+        (Ok(Err(SessionUpdateError::Store(error))), Some(_)) if is_missing(&error) => no_session(),
+        (Ok(Err(SessionUpdateError::Store(error))), None) if is_missing(&error) => {
+            not_found(&error.to_string())
+        }
+        (Ok(Err(SessionUpdateError::Store(error))), _) => internal(&error.to_string()),
+        (Err(error), _) => internal(&error.to_string()),
     }
 }
 

@@ -2468,36 +2468,15 @@ impl ConfigStore {
             .unwrap_or_default();
         name.push(".lock");
         let path = self.path.with_file_name(name);
-        let unwritable = |err: std::io::Error| ConfigError::Unwritable {
-            path: path.clone(),
-            reason: err.to_string(),
-        };
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent).map_err(&unwritable)?;
-        }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-            .map_err(&unwritable)?;
-        let deadline = std::time::Instant::now() + self.lock_wait;
-        loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(file),
-                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    return Err(ConfigError::Busy {
-                        path: self.path.clone(),
-                    });
-                }
-                Err(std::fs::TryLockError::Error(err)) => return Err(unwritable(err)),
-            }
-        }
+        paths::lock_exclusive(&path, self.lock_wait).map_err(|error| match error {
+            paths::LockError::Busy => ConfigError::Busy {
+                path: self.path.clone(),
+            },
+            paths::LockError::Io(err) => ConfigError::Unwritable {
+                path: path.clone(),
+                reason: err.to_string(),
+            },
+        })
     }
 
     /// Validate and write `config`; the caller holds the lock.

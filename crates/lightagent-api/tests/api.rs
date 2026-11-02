@@ -1817,3 +1817,388 @@ async fn regenerating_needs_session_write_access_as_well_as_run_access() {
     .await
     .unwrap();
 }
+
+// --- session writes: one locked writer for every process (#100) ------------
+
+/// A server state whose session store is in a directory the test knows, so
+/// the test can hold the store's lock as another process's writer would.
+fn state_with_store(factory: GateFactory) -> (AppState, std::path::PathBuf) {
+    let mut state = app_state(AuthConfig::open());
+    let dir = std::env::temp_dir().join(format!(
+        "lightagent-api-writes-{}",
+        lightagent_core::RunId::new().as_str()
+    ));
+    state.sessions = SessionStore::new(&dir);
+    state.manager = RunManager::new(Arc::new(factory));
+    (state, dir)
+}
+
+/// Hold the session store's write lock, as another process's writer would.
+fn hold_store_lock(dir: &std::path::Path) -> std::fs::File {
+    std::fs::create_dir_all(dir).unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(".lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    lock
+}
+
+/// The writer process of the session-write tests: this test binary, run
+/// again with `LIGHTAGENT_TEST_RENAME_*` naming a store, a session and a
+/// title. It marks that it started, then renames the session through the
+/// store, waiting for the store's lock as every writer does. Run any other
+/// way it does nothing.
+#[test]
+#[ignore = "run only as the writer process of the session-write tests"]
+fn rename_writer_process() {
+    let (Ok(dir), Ok(id), Ok(title)) = (
+        std::env::var("LIGHTAGENT_TEST_RENAME_DIR"),
+        std::env::var("LIGHTAGENT_TEST_RENAME_ID"),
+        std::env::var("LIGHTAGENT_TEST_RENAME_TITLE"),
+    ) else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let id = lightagent_store::SessionId::parse(&id).unwrap();
+    std::fs::write(dir.join("writer.started"), b"").unwrap();
+    SessionStore::new(&dir)
+        .update(&id, |session| {
+            session.title = title;
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .unwrap();
+}
+
+/// Start the writer process renaming session `id` to `title`, while the test
+/// holds the store's lock, and return once it is waiting for that lock.
+fn rename_in_another_process(dir: &std::path::Path, id: &str, title: &str) -> std::process::Child {
+    let started = dir.join("writer.started");
+    let _ = std::fs::remove_file(&started);
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "rename_writer_process", "--ignored"])
+        .env("LIGHTAGENT_TEST_RENAME_DIR", dir)
+        .env("LIGHTAGENT_TEST_RENAME_ID", id)
+        .env("LIGHTAGENT_TEST_RENAME_TITLE", title)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !started.exists() {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the writer process ended before writing"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the writer process never started"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the writer wrote while the store's lock was held"
+    );
+    child
+}
+
+/// Wait for the writer process to finish its write.
+async fn finish(writer: std::process::Child) {
+    let status = tokio::task::spawn_blocking(move || {
+        let mut writer = writer;
+        writer.wait().unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(status.success(), "the writer process failed: {status}");
+}
+
+fn run_id(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Wait until run `run` reports `status`.
+async fn ended(addr: &str, run: &str, status: &str) {
+    loop {
+        let (_, body) = http(
+            addr,
+            "GET",
+            &format!("/api/lightagent/v1/runs/{run}"),
+            &[],
+            None,
+        )
+        .await;
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+        if value["status"] == status {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn start_session_run(addr: &str, id: &str, message: &str) -> (u16, String) {
+    let payload = serde_json::json!({ "message": message, "session_id": id }).to_string();
+    http(addr, "POST", "/api/lightagent/v1/runs", &[], Some(&payload)).await
+}
+
+fn transcript(session: &lightagent_store::Session) -> Vec<(String, String)> {
+    session
+        .messages
+        .iter()
+        .map(|message| (message.role.clone(), message.content.clone()))
+        .collect()
+}
+
+fn pair(role: &str, content: &str) -> (String, String) {
+    (role.to_owned(), content.to_owned())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_finished_run_and_a_rename_from_another_process_are_both_kept() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let factory = GateFactory::new(GateMode::Answer);
+        let (state, dir) = state_with_store(factory.clone());
+        let store = state.sessions.clone();
+        let busy = Arc::clone(&state.busy_sessions);
+        let session = lightagent_store::Session::new("default", "Draft");
+        store.save(&session).unwrap();
+        let id = session.id.as_str().to_owned();
+        let addr = spawn_server(state).await;
+
+        let (status, body) = start_session_run(&addr, &id, "what time is it").await;
+        assert_eq!(status, 202, "{body}");
+        let run = run_id(&body);
+        while factory.started() < 1 {
+            tokio::task::yield_now().await;
+        }
+        // The run finishes while another process holds the store's lock and
+        // waits to rename the session: the recorder waits too.
+        let lock = hold_store_lock(&dir);
+        let writer = rename_in_another_process(&dir, &id, "Renamed elsewhere");
+        factory.release();
+        ended(&addr, &run, "completed").await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            transcript(&store.load(&session.id).unwrap()),
+            [pair("user", "what time is it")],
+            "the run was recorded while another process held the lock"
+        );
+        drop(lock);
+        finish(writer).await;
+        released(&busy, &session.id).await;
+
+        let saved = store.load(&session.id).unwrap();
+        assert_eq!(saved.title, "Renamed elsewhere");
+        assert_eq!(
+            transcript(&saved),
+            [
+                pair("user", "what time is it"),
+                pair("assistant", "The time is now.")
+            ]
+        );
+        assert_eq!(saved.runs.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_regenerated_answer_and_a_rename_from_another_process_are_both_kept() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let factory = GateFactory::new(GateMode::Answer);
+        let (state, dir) = state_with_store(factory.clone());
+        let store = state.sessions.clone();
+        let busy = Arc::clone(&state.busy_sessions);
+        let saved = answered_session(&store);
+        let id = saved.id.as_str().to_owned();
+        let addr = spawn_server(state).await;
+
+        let (status, body) = regenerate(&addr, &id, "run-old", &[]).await;
+        assert_eq!(status, 202, "{body}");
+        let run = run_id(&body);
+        while factory.started() < 1 {
+            tokio::task::yield_now().await;
+        }
+        let lock = hold_store_lock(&dir);
+        let writer = rename_in_another_process(&dir, &id, "Renamed elsewhere");
+        factory.release();
+        ended(&addr, &run, "completed").await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            store.load(&saved.id).unwrap(),
+            saved,
+            "the answer was replaced while another process held the lock"
+        );
+        drop(lock);
+        finish(writer).await;
+        released(&busy, &saved.id).await;
+
+        let after = store.load(&saved.id).unwrap();
+        assert_eq!(after.title, "Renamed elsewhere");
+        assert_eq!(
+            transcript(&after),
+            [
+                pair("user", "what time is it"),
+                pair("assistant", "The time is now.")
+            ]
+        );
+        assert_eq!(after.runs.len(), 1);
+        assert_ne!(after.runs[0].run_id, "run-old");
+        std::fs::remove_dir_all(&dir).ok();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_or_cancelled_regeneration_keeps_the_answer_and_another_processs_rename() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let factory = GateFactory::new(GateMode::Fail);
+        let (state, dir) = state_with_store(factory.clone());
+        let store = state.sessions.clone();
+        let busy = Arc::clone(&state.busy_sessions);
+        let saved = answered_session(&store);
+        let id = saved.id.as_str().to_owned();
+        let addr = spawn_server(state).await;
+
+        for (round, ending) in [(1, "failed"), (2, "cancelled")] {
+            let (status, body) = regenerate(&addr, &id, "run-old", &[]).await;
+            assert_eq!(status, 202, "{body}");
+            let run = run_id(&body);
+            while factory.started() < round {
+                tokio::task::yield_now().await;
+            }
+            let lock = hold_store_lock(&dir);
+            let title = format!("Renamed while the run {ending}");
+            let writer = rename_in_another_process(&dir, &id, &title);
+            if ending == "failed" {
+                // A provider failure after part of a new answer streamed.
+                factory.release();
+            } else {
+                let (status, _) = http(
+                    &addr,
+                    "POST",
+                    &format!("/api/lightagent/v1/runs/{run}/cancel"),
+                    &[],
+                    Some("{}"),
+                )
+                .await;
+                assert_eq!(status, 200);
+            }
+            ended(&addr, &run, ending).await;
+            drop(lock);
+            finish(writer).await;
+            released(&busy, &saved.id).await;
+            let after = store.load(&saved.id).unwrap();
+            assert_eq!(after.title, title);
+            assert_eq!(after.messages, saved.messages, "{ending}");
+            assert_eq!(after.runs, saved.runs, "{ending}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_whose_record_cannot_be_written_leaves_the_saved_session_whole() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let factory = GateFactory::new(GateMode::Answer);
+        let (state, dir) = state_with_store(factory.clone());
+        let store = state.sessions.clone();
+        let busy = Arc::clone(&state.busy_sessions);
+        let session = lightagent_store::Session::new("default", "Draft");
+        store.save(&session).unwrap();
+        let id = session.id.as_str().to_owned();
+        let addr = spawn_server(state).await;
+
+        let (status, body) = start_session_run(&addr, &id, "what time is it").await;
+        assert_eq!(status, 202, "{body}");
+        while factory.started() < 1 {
+            tokio::task::yield_now().await;
+        }
+        // The atomic write's temporary file cannot be created.
+        let path = dir.join(format!("{id}.json"));
+        let temporary = dir.join(format!("{id}.json.tmp"));
+        std::fs::create_dir(&temporary).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        factory.release();
+        released(&busy, &session.id).await;
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            transcript(&store.load(&session.id).unwrap()),
+            [pair("user", "what time is it")]
+        );
+
+        // Once writes work again, the next run is admitted and recorded.
+        std::fs::remove_dir(&temporary).unwrap();
+        let (status, body) = start_session_run(&addr, &id, "and now?").await;
+        assert_eq!(status, 202, "{body}");
+        factory.release();
+        released(&busy, &session.id).await;
+        assert_eq!(
+            transcript(&store.load(&session.id).unwrap()),
+            [
+                pair("user", "what time is it"),
+                pair("user", "and now?"),
+                pair("assistant", "The time is now.")
+            ]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_prompts_to_one_session_admit_one_and_save_its_prompt_once() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let factory = GateFactory::new(GateMode::Answer);
+        let (state, dir) = state_with_store(factory.clone());
+        let store = state.sessions.clone();
+        let busy = Arc::clone(&state.busy_sessions);
+        let session = lightagent_store::Session::new("default", "Draft");
+        store.save(&session).unwrap();
+        let id = session.id.as_str().to_owned();
+        let addr = spawn_server(state).await;
+
+        let (first, second) = tokio::join!(
+            start_session_run(&addr, &id, "first"),
+            start_session_run(&addr, &id, "second"),
+        );
+        let mut statuses = [first.0, second.0];
+        statuses.sort_unstable();
+        assert_eq!(statuses, [202, 409], "{first:?} {second:?}");
+        // A rename in this server is still refused while the run is active.
+        let (status, _) = http(
+            &addr,
+            "PATCH",
+            &format!("/api/lightagent/v1/sessions/{id}"),
+            &[],
+            Some(r#"{"title":"Renamed"}"#),
+        )
+        .await;
+        assert_eq!(status, 409);
+        factory.release();
+        released(&busy, &session.id).await;
+        assert_eq!(factory.started(), 1);
+
+        let saved = store.load(&session.id).unwrap();
+        assert_eq!(saved.title, "Draft");
+        let roles: Vec<&str> = saved.messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, ["user", "assistant"]);
+        assert!(["first", "second"].contains(&saved.messages[0].content.as_str()));
+        assert_eq!(saved.runs.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    })
+    .await
+    .unwrap();
+}
