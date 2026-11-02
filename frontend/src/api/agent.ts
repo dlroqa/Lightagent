@@ -373,6 +373,16 @@ export interface ProviderCredentialStatus {
   revision: string;
 }
 
+/** What an explicit endpoint check found (`lightagent models`). It never holds a key. */
+export interface EndpointCheck {
+  base_url: string;
+  ok: boolean;
+  models: string[];
+  error: string | null;
+  key_sent: boolean;
+  elapsed_ms: number;
+}
+
 /** `lightagent config jev-routing-report`: the routing-permission dry run. It changes nothing. */
 export interface JevRoutingReport {
   report: string;
@@ -423,6 +433,12 @@ export const agentApi = {
     }),
   removeProviderCredential: () =>
     jsonRequest<ProviderCredentialStatus>("/provider/credential", { method: "DELETE" }),
+  /** An explicit, bounded check of the active endpoint; it follows no redirect. */
+  checkProvider: (timeoutSecs?: number) =>
+    jsonRequest<EndpointCheck>("/provider/check", {
+      method: "POST",
+      body: JSON.stringify({ timeout_secs: timeoutSecs }),
+    }),
   verifyJev: () => jsonRequest<JevVerification>("/jev/verify", { method: "POST", body: "{}" }),
   profiles: () => jsonRequest<ProfileCatalog>("/profiles"),
   profile: (id: string) => jsonRequest<AgentProfileDetail>(`/profiles/${encodeURIComponent(id)}`),

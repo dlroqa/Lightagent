@@ -7,13 +7,13 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 - Denominator: 227
 - Implemented: 24 of 227
 - Pending D1 decision rows: 0
-- Total rows: 322
+- Total rows: 323
 
 | Kind | Rows |
 |---|---|
 | acp-method | 8 |
 | alias | 2 |
-| api | 40 |
+| api | 41 |
 | argument | 47 |
 | command | 86 |
 | config | 14 |
@@ -29,7 +29,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 
 | Applicability | Rows |
 |---|---|
-| applicable | 286 |
+| applicable | 287 |
 | host-owned | 7 |
 | not-applicable | 29 |
 
@@ -468,6 +468,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `api.get.config` | `GET /api/lightagent/v1/config` | applicable | no | (backend reuse) | api: GET /config | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.get.config.key` | `GET /api/lightagent/v1/config/{key}` | applicable | no | (backend reuse) | api: GET /config/{key} | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.get.jev.routing-report` | `GET /api/lightagent/v1/jev/routing-report` | applicable | no | (backend reuse) | api: GET /jev/routing-report | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.post.provider.check` | `POST /api/lightagent/v1/provider/check` | applicable | no | (backend reuse) | api: POST /provider/check | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.get.provider.credential` | `GET /api/lightagent/v1/provider/credential` | applicable | no | (backend reuse) | api: GET /provider/credential | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.put.provider.credential` | `PUT /api/lightagent/v1/provider/credential` | applicable | no | (backend reuse) | api: PUT /provider/credential | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.delete.provider.credential` | `DELETE /api/lightagent/v1/provider/credential` | applicable | no | (backend reuse) | api: DELETE /provider/credential | not-started | `crates/lightagent-api/src/lib.rs` |

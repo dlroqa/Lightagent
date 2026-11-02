@@ -406,6 +406,15 @@ pub trait RunFactory: Send + Sync + 'static {
         Err("provider capability discovery is not available in this embedding".to_owned())
     }
 
+    /// An explicit check of the active provider endpoint, ending within
+    /// `timeout`: what it answered, never a key. The default refuses.
+    async fn check_provider(
+        &self,
+        _timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        Err("provider endpoint checks are not available in this embedding".to_owned())
+    }
+
     /// The window to pack a session's history against before a run of
     /// `profile` (the active one when `None`) with `model`, resolved as the
     /// run itself resolves its budget. `None`, the default, leaves the
@@ -834,6 +843,14 @@ impl RunManager {
     /// Discover the selected provider's current model catalog and capabilities.
     pub async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
         self.factory.provider_capabilities().await
+    }
+
+    /// An explicit, bounded check of the active provider endpoint.
+    pub async fn check_provider(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        self.factory.check_provider(timeout).await
     }
 
     /// The token limit to pack a session's history with before a run of

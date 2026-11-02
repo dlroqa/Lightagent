@@ -114,6 +114,14 @@ export async function checkSettingsStates(browser, base, outDir) {
       if (credential.state !== "absent") failures.push(`settings: after removing, the key is ${credential.state}`);
     }
 
+    // The endpoint check runs only when asked, and says what the endpoint answered.
+    await page.getByRole("button", { name: "Check connection", exact: true }).click();
+    const checked = page.getByTestId("provider-check").getByRole("status");
+    await checked.waitFor({ timeout: 40000 });
+    const checkText = await checked.innerText();
+    if (!/^(Reachable in|Not reachable:)/.test(checkText)) failures.push(`settings: the endpoint check showed "${checkText}"`);
+    if (checkText.includes(PROVIDER_KEY) || checkText.includes(PROVIDER_KEY_2)) failures.push("settings: the endpoint check shows a key");
+
     // A saved secret is in none of the renderer's state.
     const current = await settingsNow(base);
     const saved = await put(base, "/settings", { ...current, jev: { ...current.jev, api_key: SECRET } });

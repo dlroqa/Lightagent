@@ -87,6 +87,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/lightagent/v1/jev", get(get_jev_status))
         .route("/api/lightagent/v1/jev/verify", post(verify_jev))
         .route(
+            "/api/lightagent/v1/provider/check",
+            post(post_provider_check),
+        )
+        .route(
             "/api/lightagent/v1/provider/credential",
             get(get_provider_credential)
                 .put(put_provider_credential)
@@ -1305,6 +1309,35 @@ fn credential_view(
         "source": source,
         "revision": revision.as_str(),
     })
+}
+
+/// How long an endpoint check may take, in seconds.
+#[derive(Deserialize)]
+struct CheckBody {
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+/// An explicit check of the active provider endpoint (`lightagent models`):
+/// it sends the configured key to that endpoint only, follows no redirect,
+/// and ends within `timeout_secs` (1-30, default 10).
+async fn post_provider_check(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<CheckBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let seconds = body.timeout_secs.unwrap_or(10).clamp(1, 30);
+    match state
+        .manager
+        .check_provider(std::time::Duration::from_secs(seconds))
+        .await
+    {
+        Ok(check) => Json(check).into_response(),
+        Err(error) => unavailable(&error),
+    }
 }
 
 /// A provider key typed into Settings. Write-only: no `Debug`, and never

@@ -256,6 +256,18 @@ impl RunFactory for LightweightRunFactory {
         Some(crate::generation::resolve(&config, &provider).await.history)
     }
 
+    async fn check_provider(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let config = ConfigStore::at(&paths)
+            .load()
+            .map_err(|error| error.to_string())?;
+        let check = crate::providers::check_active(&config, timeout).await;
+        serde_json::to_value(check).map_err(|error| error.to_string())
+    }
+
     async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
         let paths = LightagentPaths::rooted_at(&self.root);
         let config = ConfigStore::at(&paths)

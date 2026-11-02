@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { agentApi, type ProviderCredentialStatus } from "../api/agent";
+import { agentApi, type EndpointCheck, type ProviderCredentialStatus } from "../api/agent";
 import { Pill } from "./Bits";
 import { Card } from "./Card";
 
@@ -51,6 +51,8 @@ export function ProviderCredentialCard() {
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [check, setCheck] = useState<EndpointCheck | null>(null);
+  const [checking, setChecking] = useState(false);
 
   async function load() {
     try {
@@ -103,6 +105,19 @@ export function ProviderCredentialCard() {
     }
   }
 
+  // Only when asked: a check sends the saved key to the endpoint.
+  async function runCheck() {
+    setChecking(true);
+    try {
+      setCheck(await agentApi.checkProvider());
+    } catch (cause) {
+      const text = cause instanceof Error ? cause.message : String(cause);
+      setCheck({ base_url: status?.base_url ?? "", ok: false, models: [], error: text, key_sent: false, elapsed_ms: 0 });
+    } finally {
+      setChecking(false);
+    }
+  }
+
   const view = status ? STATE[status.state] ?? { label: status.state, tone: "neutral" as Tone, hint: "" } : null;
   const configured = status !== null && status.state !== "absent";
   return (
@@ -144,6 +159,19 @@ export function ProviderCredentialCard() {
               Keep the API key
             </button>
           </>
+        )}
+      </div>
+      <div data-testid="provider-check" style={{ marginTop: 14 }}>
+        <button type="button" className="btn" disabled={checking} aria-busy={checking || undefined}
+          onClick={() => void runCheck()}>
+          {checking ? "Checking the connection…" : "Check connection"}
+        </button>
+        {check && (
+          <p role="status" className="muted" style={{ marginTop: 8 }}>
+            {check.ok
+              ? `Reachable in ${check.elapsed_ms} ms, ${check.key_sent ? "with the saved key" : "without a key"}: ${check.models.length ? check.models.join(", ") : "no model is loaded"}.`
+              : `Not reachable: ${check.error ?? "no answer"}`}
+          </p>
         )}
       </div>
     </Card>
