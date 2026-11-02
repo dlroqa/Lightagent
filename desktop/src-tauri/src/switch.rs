@@ -72,11 +72,18 @@ pub fn plan(active_runs: usize, stop_runs: bool) -> Plan {
 }
 
 /// Operations the host refuses while a switch is in progress: each would
-/// start or resume work on the runtime that is about to be replaced.
+/// start or resume work on the runtime that is about to be replaced, or
+/// change the extensions of a profile while the active profile changes.
 pub fn blocked_while_switching(operation: &str) -> bool {
     matches!(
         operation,
-        "runs.create" | "sessions.regenerate" | "approvals.respond" | "runs.continue"
+        "runs.create"
+            | "sessions.regenerate"
+            | "approvals.respond"
+            | "runs.continue"
+            | "extensions.install"
+            | "extensions.uninstall"
+            | "extensions.set_enabled"
     )
 }
 
@@ -430,7 +437,12 @@ mod tests {
         assert!(blocked_while_switching("sessions.regenerate"));
         assert!(blocked_while_switching("approvals.respond"));
         assert!(blocked_while_switching("runs.continue"));
+        assert!(blocked_while_switching("extensions.install"));
+        assert!(blocked_while_switching("extensions.uninstall"));
+        assert!(blocked_while_switching("extensions.set_enabled"));
         for reading in [
+            "extensions.list",
+            "extensions.show",
             "runs.get",
             "runs.events",
             "sessions.list",
