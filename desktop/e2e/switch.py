@@ -14,6 +14,13 @@ All scenarios share one isolated LIGHTAGENT_HOME (set by the caller):
               write must create, so the commit fails for real: nothing changes,
               and the unused new runtime is stopped
   concurrent  two switches at once: one switches, the other is refused as busy
+  pending     (driven host, fake provider; harness.py) a run waits for approval
+              of a file write. While a switch holds its gate, starting a run,
+              regenerating and answering the approval are refused. A switch
+              that does not stop runs is blocked and the approval stays
+              pending; one that stops them rejects it explicitly, and the new
+              profile's runtime knows nothing of that run or its approval.
+              The file is never written
 
 After every scenario exactly one runtime may remain under the host. Writes
 switch.json; exits non-zero when any expectation fails.
@@ -74,6 +81,87 @@ def has(lines, *parts):
     return any(line.startswith("SWITCH_RESULT") and all(part in line for part in parts) for line in lines)
 
 
+def pending_approval(out, cli, command, home):
+    """A pending approval across a profile switch (see the module docstring)."""
+    import harness
+    from harness import API
+
+    provider = harness.FakeProvider()
+    provider.scripts["switch-approve"] = lambda p, turn, index: (
+        [("tool", "fs.write", {"path": "switch.txt", "content": "written across a switch\n", "append": True}),
+         ("finish", "tool_calls")]
+        if turn == 0 else [("text", "After the decision."), ("finish", "stop")]
+    )
+    harness.prepare_home(cli, home, provider)
+    report = os.path.join(out, "report-switch-pending.txt")
+    env = dict(
+        os.environ,
+        LIGHTAGENT_DESKTOP_E2E_DRIVER="1",
+        LIGHTAGENT_DESKTOP_E2E_SWITCH_GATE="1",
+        LIGHTAGENT_DESKTOP_E2E_REPORT=report,
+    )
+    host = harness.Host(command, env, os.path.join(out, "driver-switch-pending.log"))
+    check = harness.Checks("pending")
+    seen = {}
+    try:
+        status = host.ready()
+        check.expect("starts on default", status.get("profile") == "default", status.get("profile"))
+        path = os.path.join(host.workspace(), "switch.txt")
+        session = host.new_session()
+        run = host.start_run(session, "[e2e:switch-approve] Write the file.")
+        stream = harness.Stream(host, run)
+        check.expect("the run waits for approval", stream.until(lambda s: s.has("approval.required")), stream.names())
+
+        switching = host.send("switch", profile="work", cancel_runs=False)
+        host.wait_event("switch_held")
+        during = {
+            "runs.create": host.try_fetch("POST", f"{API}/runs", {"message": "[e2e:switch-approve] Again.", "session_id": session}),
+            "sessions.regenerate": host.try_fetch("POST", f"{API}/sessions/{session}/regenerate", {"run_id": "r-any"}),
+            "approvals.respond": host.try_fetch("POST", f"{API}/approvals/{run}", {"approve": True}),
+        }
+        host.call("release_switch")
+        blocked = host.answer(switching)
+        seen["during"] = during
+        for operation, answer in during.items():
+            check.expect(f"{operation} is refused during the switch", answer[0] == "refused" and "switch is in progress" in answer[1], answer)
+        check.expect("without stopping runs the switch is blocked", blocked.get("status") == "blocked" and any(r.get("id") == run for r in blocked.get("runs", [])), blocked)
+        status = host.call("status")
+        _, approvals = host.fetch("GET", f"{API}/approvals")
+        check.expect("still serving default", status.get("profile") == "default", status.get("profile"))
+        check.expect("the approval is still pending", any(r.get("run") == run and r.get("pending") for r in approvals.get("approvals", [])), approvals)
+        check.expect("nothing written while blocked", harness.read(path) is None, harness.read(path))
+
+        switching = host.send("switch", profile="work", cancel_runs=True)
+        host.wait_event("switch_held")
+        host.call("release_switch")
+        switched = host.answer(switching)
+        stream.finish()
+        status = host.call("status")
+        check.expect("stopping the runs lets the switch happen", switched.get("status") == "switched", switched)
+        check.expect("now serving work", status.get("profile") == "work", status.get("profile"))
+        denied = [o for o in stream.data("tool.output") + stream.data("tool.failed") if "denied" in json.dumps(o)]
+        check.expect("the approval was rejected explicitly", bool(denied), stream.names())
+
+        _, approvals = host.fetch("GET", f"{API}/approvals")
+        crossed = host.fetch("POST", f"{API}/approvals/{run}", {"approve": True})
+        old = host.fetch("GET", f"{API}/runs/{run}")
+        check.expect("work's runtime has no pending approval", approvals.get("approvals") == [], approvals)
+        check.expect("the old approval cannot be answered in work", crossed[0] == 404, crossed)
+        check.expect("work's runtime does not know the old run", old[0] == 404, old)
+        check.expect("the file was never written", harness.read(path) is None, harness.read(path))
+        saved = harness.wait_until(lambda: (lambda s: s if s and s.get("runs") else None)(harness.session_file(home, session)), timeout=15)
+        seen["saved_runs"] = (saved or {}).get("runs")
+        check.expect("default's session records the stopped run", bool(saved), saved)
+    except Exception as error:
+        check.failures.append(f"pending: {error!r}")
+    finally:
+        host.stop()
+        provider.close()
+    seen["checks"] = check.results
+    seen["provider"] = provider.log
+    return seen, check.failures
+
+
 def main():
     out = os.path.abspath(sys.argv[1])
     cli = sys.argv[2]
@@ -125,6 +213,9 @@ def main():
         entry = results.get(name)
         if isinstance(entry, dict) and entry["runtimes_left"] != 1:
             failures.append(f"{name}: {entry['runtimes_left']} runtimes remain under the host, expected exactly 1")
+
+    results["pending"], pending_failures = pending_approval(out, cli, command, home)
+    failures.extend(pending_failures)
 
     results["failures"] = failures
     with open(os.path.join(out, "switch.json"), "w", encoding="utf-8") as handle:

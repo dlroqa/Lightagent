@@ -302,7 +302,7 @@ jobs:
             desktop/target/release/bundle/**/*.AppImage
 
   switch:
-    name: desktop profile switch (linux, e2e hooks)
+    name: desktop profile switch and runs (linux, e2e hooks)
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
@@ -345,14 +345,22 @@ jobs:
           cargo clippy --locked --manifest-path desktop/Cargo.toml -p lightagent-desktop --features e2e-hooks -- -D warnings
           cargo build --locked --manifest-path desktop/Cargo.toml -p lightagent-desktop --features "e2e-hooks tauri/custom-protocol"
           [ -x desktop/target/debug/lightagent-sidecar ] || cp target/debug/lightagent desktop/target/debug/lightagent-sidecar
-      - name: Switch scenarios (ok, start failure, commit failure, concurrent)
+      - name: Switch scenarios (ok, start failure, commit failure, concurrent, pending approval)
         run: |
           export LIGHTAGENT_HOME="$RUNNER_TEMP/switch-home"
           xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- \
             python desktop/e2e/switch.py "$RUNNER_TEMP/switch-e2e" target/debug/lightagent -- desktop/target/debug/lightagent-desktop
+      - name: Run scenarios (streaming and a tool, approvals, cancel, relay drop, regenerate)
+        if: success() || failure()
+        run: |
+          export LIGHTAGENT_HOME="$RUNNER_TEMP/runs-home"
+          xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- \
+            python desktop/e2e/runs.py "$RUNNER_TEMP/runs-e2e" target/debug/lightagent -- desktop/target/debug/lightagent-desktop
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: desktop-switch-e2e
           retention-days: 30
-          path: ${{ runner.temp }}/switch-e2e/
+          path: |
+            ${{ runner.temp }}/switch-e2e/
+            ${{ runner.temp }}/runs-e2e/
