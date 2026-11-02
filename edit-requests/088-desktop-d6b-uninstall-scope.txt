@@ -1,0 +1,32 @@
+=== base 9b7707b67141fd4ae0009b92565a6b15c0a61dee
+=== message
+D6-2: the desktop host accepts the scope of an extension uninstall
+
+The Extensions card sends `DELETE /extensions/{name}?scope=…`, and the
+desktop host refuses any query parameter its contract does not list for
+the operation, so every uninstall from the desktop app was refused. Found
+by the row 30 host run (a parameter refused for tools.list). The contract
+lists `scope` for extensions.uninstall, and the host scenario now
+uninstalls with `?scope=global`, as the card does.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace docs/desktop/contract/operations.json
+--- find
+   "id": "extensions.uninstall",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/extensions/{name}"
+  },
+--- with
+   "id": "extensions.uninstall",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/extensions/{name}",
+   "query": [
+    "scope"
+   ]
+  },
+=== replace desktop/e2e/runs.py
+--- find
+        status, removed = host.fetch("DELETE", f"{API}/extensions/host-probe")
+--- with
+        status, removed = host.fetch("DELETE", f"{API}/extensions/host-probe?scope=global")
+=== end
