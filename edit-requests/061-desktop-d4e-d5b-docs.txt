@@ -1,0 +1,209 @@
+=== base 1e657e5b5ee471e9ee2dc9817deb176919ddaede
+=== message
+Desktop docs: rows 18-19 (D4e workspaces, D5b run admission); parity 29 of 227
+
+- DESKTOP_PROGRESS.md: row 18 (#112, the workspace through one shared,
+  validated operation) and row 19 (#113, one turn at a time per session
+  across every process), with every head, tree and run, the release-order
+  and Linux lease-release failures and their fixes, the docs commit's
+  macOS dmg-eject failure and the recurring live-broker failure (recorded,
+  not re-run); the local sync; next stage D5a.
+- DESKTOP_MERGE_ORDER.md: rows 18 and 19. D5b is row 19, based on row
+  18: it needs no D5a operation, and the owner ordered it next.
+- Parity: setup.tools.workspace implemented at ec1fc4e (Settings card,
+  browser e2e; shared operation for setup and the API, all four
+  platforms): 29 of 227.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+| D4e–D10 | not started | — | — | — | — |
+--- with
+| Row 18: D4e the tools workspace through one shared, validated operation | **CI-validated** at `ec1fc4e` (check, desktop, jev evaluation, subagents; first run) | `desktop/d4e-workspaces` (stacked on row 17's documentation commit `bf5e56d`) | https://github.com/dlroqa/Lightagent/pull/112 | `ec1fc4e1eab9428e6f8afd5e38b1b2de97c8846b` | `ec1fc4e` / tree `34e2aa7c0253a236e90394a7c6401d6faaec0c27` |
+| Row 19: D5b one turn at a time per session across every process (#105) | **CI-validated** at `1e657e5` (check, desktop, jev evaluation, subagents) after two fixes (see "Row 19") | `desktop/d5b-run-admission` (stacked on row 18) | https://github.com/dlroqa/Lightagent/pull/113 | `1e657e5b5ee471e9ee2dc9817deb176919ddaede`, plus this documentation commit | `1e657e5` / tree `686bf3a3acd773fca3b60f12704fa95ada0ec699` |
+| D5a, D6–D10 | not started | — | — | — | — |
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+D4d is complete with rows 12-17: shared write-only keys, the bounded
+check, endpoint-bound keys, saved providers and the model, the Settings
+card, and fail-closed credentials on every live path.
+--- with
+D4d is complete with rows 12-17: shared write-only keys, the bounded
+check, endpoint-bound keys, saved providers and the model, the Settings
+card, and fail-closed credentials on every live path.
+
+The documentation commit `bf5e56d` (this section's first version):
+`check`, `jev evaluation` and `subagents` passed; `desktop` **failed** on
+one job, `desktop shell (macos-x64)`, because macOS `hdiutil` could not
+eject the disk image (`couldn't eject "disk2" - Resource busy`), a variant
+the workflow's bounded retry does not match (it retries only `create
+failed - Resource busy`). The commit changes documentation only; the same
+tree plus row 18's code passed `desktop` on every target at `ec1fc4e`.
+Not re-run. Finding: the retry could also match the eject variant (a
+workflow change, not made here). Runs:
+https://github.com/dlroqa/Lightagent/actions/runs/41401954966 (check),
+https://github.com/dlroqa/Lightagent/actions/runs/41401955176 (desktop).
+
+## Row 18 — D4e: the tools workspace through one shared, validated operation
+
+The workspace was a free string: setup stored whatever was typed, a
+relative path meant a different folder in each process (the terminal's
+working directory, the desktop runtime's), and a run created whatever
+directory it named. `lightagent_core::workspaces` is now the one way to
+read and set it, shared by `lightagent setup tools` and the API:
+
+- validate / set: an absolute path without control characters that is an
+  existing folder, or a new folder whose parent exists (the next run
+  creates it); blank clears it, so runs use the active profile's own
+  `workspace/`.
+- view: the configured and effective folder for the next run of the
+  active profile (it follows a profile switch when none is set), whether
+  it exists, and whether file and terminal tools are on.
+- Applies to the next run; a run in progress keeps its folder; an ACP
+  session keeps the editor's folder.
+- Setup: the full-screen prompt validates as it is typed; line mode
+  refuses an invalid new folder and leaves an unchanged existing value as
+  it is, so an older relative value keeps working until it is changed.
+- API (admin): `GET|PUT /workspace`, revision-checked; contract
+  operations `workspace.get` / `workspace.set`; backend inventory rows (333
+  rows). Settings: a Workspace card (browser evidence; native WebView is
+  D8). A native folder picker is a host feature, not built here.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Edit request `056` (24 edits, 12 files); branch `desktop/d4e-workspaces`; draft PR #112 | `ec1fc4e` / `34e2aa7` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41402272857 |
+| 2026-11-02 | `check`: **success**, every job, including `workspaces::tests`, the setup line-mode tests and `desktop_workspace.rs` (effective folder follows the active profile; relative, file and missing-parent refusals with config.json unchanged; a stale revision refused after a CLI write; set and clear), and the render e2e (stale save refused with the entry kept, relative refused, saved, cleared) | `ec1fc4e` | https://github.com/dlroqa/Lightagent/actions/runs/41402353290 |
+| 2026-11-02 | `desktop`, `jev evaluation`, `subagents`: **success** | `ec1fc4e` | https://github.com/dlroqa/Lightagent/actions/runs/41402353271, https://github.com/dlroqa/Lightagent/actions/runs/41402353347, https://github.com/dlroqa/Lightagent/actions/runs/41402353376 |
+| 2026-11-02 | Parity: `setup.tools.workspace` implemented: **29 of 227** | — | DESKTOP_CLI_PARITY.md |
+
+## Row 19 — D5b: one turn at a time per session across every process (#105)
+
+Session writes were already safe across processes (#103); turn admission
+was per process. Now:
+
+- `SessionStore::lease_run(id)`: an exclusive OS lock on
+  `sessions/.runs/<id>.lock`. Another holder in any process refuses the
+  turn with `StoreError::Busy`. Dropping the lease, or the holder's process
+  ending (a crash included), releases it; the file holds nothing. It is
+  separate from the short `sessions/.lock` write lock, which is never held
+  during a turn. Taking it retries for up to 500 ms, because on Linux a
+  released lease can read as held for an instant while a child another
+  thread is starting still has a copy of the file open; a held lease is
+  never waited for beyond that, and nothing queues behind a turn.
+- API (runs and regenerate): taken right after the in-process busy check,
+  held until the run is recorded, and released **before** the busy entry
+  on every path; a lease held elsewhere gets the same 409 body.
+- Terminal chat: held while a turn runs and while a time-budget-paused run
+  may be continued; none between turns. A refused turn says so, sends
+  nothing and keeps the chat open.
+- ACP: taken with the prompt, released when it completes, is cancelled or
+  fails; a refusal is a JSON-RPC error naming the cause.
+- Different sessions still run at the same time.
+
+**D5 gate.** This meets the gate's first sentence (one turn at a time per
+session across the desktop runtime, `serve`, CLI chat and ACP; a crashed
+holder releases it; the write lock is not held during inference). The rest
+of the D5 gate (the deterministic fake-provider run, relay reconnect,
+profile switch with a pending approval, sidecar crash mid-run) and R1 are
+D5a and are not claimed.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Edit requests `057` and `058` (the ACP guard field named `_lease`, which is held, never read); branch `desktop/d5b-run-admission`; draft PR #113 | `88aafcb` → `cee3379` / `46fa507` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41402811557, https://github.com/dlroqa/Lightagent/actions/runs/41402894827 |
+| 2026-11-02 | `check`: **failure** (linux-x64, macos-x64): the existing `a_failed_or_cancelled_regeneration_keeps_the_saved_answer` got 409. The recorder released the lease after the busy entry, so a caller that saw the entry go could still find the lease held. `desktop`, `jev evaluation`, `subagents`: **success** | `cee3379` | https://github.com/dlroqa/Lightagent/actions/runs/41402975656 |
+| 2026-11-02 | `059`: the lease is released before the busy entry on every path; the branch moved without force | `f2f2b88` / `a3eedd7` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41405029314 |
+| 2026-11-02 | `check`: **failure** on linux-x64 only, the same test after a cancelled run; the new separate-process tests passed on all four platforms. Cause: on Linux a released lease reads as held while a child that another test thread is starting keeps a copy of the file until its exec. `subagents`: **failure**, the live broker's `dispatched_unlocated` again (recorded, not re-run). `desktop`, `jev evaluation`: **success** | `f2f2b88` | https://github.com/dlroqa/Lightagent/actions/runs/41405132318, https://github.com/dlroqa/Lightagent/actions/runs/41405132450 |
+| 2026-11-02 | `060`: a 500 ms grace when taking the lease; the branch moved without force | `1e657e5` / `686bf3a` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41406894786 |
+| 2026-11-02 | `check`: **success**, every job: the store's lease test, `desktop_run_admission.rs` (a lease held by the test process refuses an API run, a regenerate, a CLI chat turn with the session unchanged and an ACP prompt, and admits after release; a real CLI chat caught mid-turn holds the lease, the runtime refuses that session, renames it while the turn runs and runs another session; killing the chat releases the lease and the next run is admitted) on all four platforms, and the existing regenerate tests | `1e657e5` | https://github.com/dlroqa/Lightagent/actions/runs/41406983621 |
+| 2026-11-02 | `desktop`, `jev evaluation`, `subagents`: **success** | `1e657e5` | https://github.com/dlroqa/Lightagent/actions/runs/41406983578, https://github.com/dlroqa/Lightagent/actions/runs/41406983582, https://github.com/dlroqa/Lightagent/actions/runs/41406983640 |
+
+**Recurring infrastructure failure.** The `subagents` job `Tester broker
+(live GitHub Actions)` failed twice (rows 16 and 19) with
+`dispatched_unlocated`: a dispatch GitHub accepted but did not list within
+the broker's window while many workflows were starting. It passed on every
+other head. It is a live GitHub test and is not re-run; a later change
+could widen that window.
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+  | 2026-11-02T06:42:55Z | `d4c3-config-acceptance` `597604d`, `d4d1-credentials` `8f0717d`, `d4d2-endpoint-check` `2bed55c`, `d4d2b-key-binding` `8e3919b`, `d4d2b2-saved-providers` `108dac6`, `d4d2b3-providers-ui` `bb76e74`, `d4d3-fail-closed` `c15e249`, `tools/source-edit` `4cc32f9` (lower slices unchanged) | rows 14-17 validated; fetch only (remote-tracking refs), working tree `master` `12582a0` clean |
+--- with
+  | 2026-11-02T06:42:55Z | `d4c3-config-acceptance` `597604d`, `d4d1-credentials` `8f0717d`, `d4d2-endpoint-check` `2bed55c`, `d4d2b-key-binding` `8e3919b`, `d4d2b2-saved-providers` `108dac6`, `d4d2b3-providers-ui` `bb76e74`, `d4d3-fail-closed` `c15e249`, `tools/source-edit` `4cc32f9` (lower slices unchanged) | rows 14-17 validated; fetch only (remote-tracking refs), working tree `master` `12582a0` clean |
+  | 2026-11-02T07:45:56Z | `d4d3-fail-closed` `bf5e56d`, `d4e-workspaces` `ec1fc4e`, `d5b-run-admission` `1e657e5`, `tools/source-edit` `c082884` (lower slices unchanged) | rows 18-19 validated; fetch only, working tree `master` `12582a0` clean. Local copies of the governing documents refreshed from `bf5e56d` at 07:08:20Z, earlier copies kept as `*.prev-2026-11-02c.*` |
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+1. D4d-2b and the fail-closed conversion are done (rows 14-17).
+2. **D4e, workspaces (row 18):** one shared, validated operation for the
+   tools workspace (absolute, an existing folder or one whose parent
+   exists) behind setup, `GET|PUT /workspace` and a Settings card; the
+   effective folder follows the active profile when none is set; applies
+   to the next run.
+3. **D5, including D5b (#105):** cross-process per-session run admission,
+   released by the OS when its holder dies, separate from the short
+   session-file write lock.
+4. D6-D10 in dependency order.
+--- with
+1. D4d-2b and the fail-closed conversion are done (rows 14-17).
+2. D4e, workspaces, is done (row 18).
+3. D5b (#105), cross-process run admission, is done (row 19).
+4. **D5a (next):** the rest of the D5 gate and R1: a deterministic
+   fake-provider run through the desktop host (streaming, a tool call,
+   approval granted and denied, cancel, continue after a time-budget
+   pause, steering); relay reconnect with no duplicated or missing event
+   ids; a profile switch with a pending approval records an explicit
+   rejection; a sidecar crash mid-run is visible as failed and never
+   re-executed; regenerate through the host keeps the saved answer on
+   failure or cancel.
+5. D6-D10 in dependency order.
+=== replace docs/desktop/DESKTOP_MERGE_ORDER.md
+--- find
+| 18+ | D4e workspaces, then D5 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+| D5b | Cross-process run admission (https://github.com/dlroqa/Lightagent/issues/105): a per-session run lease across processes, released when its holder dies | opened in D5, before the D10 gate | — | the D5a slice | — | — |
+--- with
+| 18 | D4e the tools workspace through one shared, validated operation | https://github.com/dlroqa/Lightagent/pull/112 | `desktop/d4e-workspaces` | `desktop/d4d3-fail-closed` (`bf5e56d`) | `ec1fc4e` | `ec1fc4e` |
+| 19 | D5b one turn at a time per session across every process (https://github.com/dlroqa/Lightagent/issues/105) | https://github.com/dlroqa/Lightagent/pull/113 | `desktop/d5b-run-admission` | `desktop/d4e-workspaces` | `1e657e5` | `1e657e5` |
+| 20+ | D5a (deterministic run, relay reconnect, approvals across a profile switch, sidecar crash, R1), then D6 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+
+D5b is row 19, before D5a: it uses no D5a operation, and the owner ordered
+it next (DESKTOP_CLAUDE_PROMPT.md §5).
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Implemented: 28 of 227
+--- with
+- Implemented: 29 of 227
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `setup.tools.workspace` | `lightagent setup → tools` | applicable | yes | Profiles/Workspaces: workspace folder (picker) | api: PUT /settings (partial) | not-started | `crates/lightagent/src/setup.rs:920` |
+--- with
+| `setup.tools.workspace` | `lightagent setup → tools` | applicable | yes | Profiles/Workspaces: workspace folder (picker) | shared: lightagent_core::workspaces; api: GET\|PUT /workspace | implemented | `crates/lightagent/src/setup.rs:920` |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+## What the drift check cannot detect automatically
+--- with
+| `setup.tools.workspace` | `ec1fc4e` | Settings Workspace card: stale save refused with the entry kept, relative folder refused, absolute folder saved, cleared to the profile's own folder (UI e2e, browser only); one shared operation for setup and the API: absolute, an existing folder or one inside an existing folder, revision-checked, effective folder follows the active profile (workspaces unit tests, setup line-mode tests, crates/lightagent/tests/desktop_workspace.rs, all four platforms); desktop: contract operations workspace.get/set; a native folder picker and native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41402353290), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41402353271) |
+
+## What the drift check cannot detect automatically
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "parity_implemented": 28,
+--- with
+  "parity_implemented": 29,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "ui": "Profiles/Workspaces: workspace folder (picker)",
+   "backend": "api: PUT /settings (partial)",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "ui": "Profiles/Workspaces: workspace folder (picker)",
+   "backend": "shared: lightagent_core::workspaces (view, validate, set); api: GET|PUT /workspace",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "implemented",
+   "verification": "Settings Workspace card: stale save refused with the entry kept, relative folder refused, absolute folder saved, cleared to the profile's own folder (UI e2e: e2e/settings.mjs, browser only); one shared operation for setup and the API: absolute, an existing folder or one inside an existing folder, revision-checked, effective folder follows the active profile (workspaces unit tests, setup line-mode tests, crates/lightagent/tests/desktop_workspace.rs, all four platforms); desktop: contract operations workspace.get/set; a native folder picker and native WebView automation pending D8 (not claimed)",
+   "tested_sha": "ec1fc4e1eab9428e6f8afd5e38b1b2de97c8846b",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41402353290 (check); https://github.com/dlroqa/Lightagent/actions/runs/41402353271 (desktop)"
+=== end
