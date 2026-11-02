@@ -46,6 +46,7 @@ const EVENT_NAMES = [
   "tool.output",
   "tool.failed",
   "approval.required",
+  "run.paused",
   "turn.completed",
   "run.completed",
   "run.cancelled",
