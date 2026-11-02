@@ -93,11 +93,11 @@
   }
  ],
  "summary": {
-  "total_rows": 319,
+  "total_rows": 322,
   "by_kind": {
    "acp-method": 8,
    "alias": 2,
-   "api": 37,
+   "api": 40,
    "argument": 47,
    "command": 86,
    "config": 14,
@@ -112,7 +112,7 @@
    "value": 6
   },
   "by_applicability": {
-   "applicable": 283,
+   "applicable": 286,
    "host-owned": 7,
    "not-applicable": 29
   },
@@ -7219,6 +7219,78 @@
    "backend": "api: GET /jev/routing-report",
    "permission": "local-operator",
    "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.provider.credential",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/provider/credential",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "The active endpoint's provider API key as status only (absent, ready, or why it cannot be used); never the key",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/provider/credential"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: GET /provider/credential",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.put.provider.credential",
+   "kind": "api",
+   "surface": "PUT /api/lightagent/v1/provider/credential",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "Save or replace the active endpoint's provider API key (write-only, revision-checked) in the shared secrets store",
+   "tree_key": null,
+   "tokens": [
+    "PUT /api/lightagent/v1/provider/credential"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: PUT /provider/credential",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.delete.provider.credential",
+   "kind": "api",
+   "surface": "DELETE /api/lightagent/v1/provider/credential",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "Remove the active endpoint's provider API key from the config and the shared secrets store",
+   "tree_key": null,
+   "tokens": [
+    "DELETE /api/lightagent/v1/provider/credential"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: DELETE /provider/credential",
+   "permission": "local-operator",
+   "data_scope": "installation",
    "desktop_status": "not-started",
    "verification": null,
    "tested_sha": null,

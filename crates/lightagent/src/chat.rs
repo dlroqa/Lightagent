@@ -986,11 +986,13 @@ async fn build_chat_runtime(
         .base_url
         .clone()
         .unwrap_or_else(|| config.inference.base_url.clone());
+    // A configured key that cannot be used stops the chat before it starts
+    // (see `run`), so none is sent from here either.
     let api_key = config
         .inference
         .api_key
         .as_ref()
-        .and_then(|secret| secret.resolve());
+        .and_then(|secret| secret.for_request().ok().flatten());
     let mut registry =
         configured_registry(config, profile_dir, &extensions, !skills.is_empty()).await;
     let jev_budget =
@@ -1181,11 +1183,17 @@ pub async fn run(
         .unwrap_or_else(|| config.inference.base_url.clone());
     let model = configured_model(&profile.routing.model, &config);
     let mut current_route_model = model.clone();
+    // A configured key that cannot be used fails closed: the chat does not
+    // start, so nothing is ever sent without it. No key configured is not
+    // that: it sends none, as local providers expect.
     let api_key = config
         .inference
         .api_key
         .as_ref()
-        .and_then(|secret| secret.resolve());
+        .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+        .map_err(|error| {
+            format!("inference: {error}; replace or remove the key (lightagent setup provider)")
+        })?;
 
     let mut provider_config = ProviderConfig::new(base_url.clone(), model.clone())
         .with_tool_names(config.inference.tool_names);
@@ -1568,12 +1576,16 @@ pub async fn run(
                     let mut routed_config =
                         ProviderConfig::new(url.clone(), candidate_model.clone())
                             .with_tool_names(config.inference.tool_names);
-                    if let Some(key) = config
+                    // Never a routed request without the configured key.
+                    let Ok(routed_key) = config
                         .inference
                         .api_key
                         .as_ref()
-                        .and_then(|secret| secret.resolve())
-                    {
+                        .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+                    else {
+                        continue;
+                    };
+                    if let Some(key) = routed_key {
                         routed_config = routed_config.with_api_key(key);
                     }
                     let Ok(candidate) = LightweightProvider::new(routed_config) else {

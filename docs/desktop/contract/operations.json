@@ -39,6 +39,21 @@
    "path": "/api/lightagent/v1/jev/routing-report"
   },
   {
+   "id": "provider.credential.get",
+   "method": "GET",
+   "path": "/api/lightagent/v1/provider/credential"
+  },
+  {
+   "id": "provider.credential.set",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/provider/credential"
+  },
+  {
+   "id": "provider.credential.remove",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/provider/credential"
+  },
+  {
    "id": "skills.list",
    "method": "GET",
    "path": "/api/lightagent/v1/skills"

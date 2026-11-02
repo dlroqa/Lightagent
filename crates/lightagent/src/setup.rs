@@ -456,12 +456,20 @@ async fn configure_gateway_tui(
 async fn provider_models(
     base_url: &str,
     api_key: Option<&SecretRef>,
-) -> Result<Vec<String>, lightagent_core::ProviderError> {
+) -> Result<Vec<String>, String> {
     let mut config = ProviderConfig::new(base_url, "default");
-    if let Some(key) = api_key.and_then(SecretRef::resolve) {
+    // A configured key that cannot be used: nothing is sent without it.
+    if let Some(key) = api_key
+        .map_or(Ok(None), SecretRef::for_request)
+        .map_err(|error| format!("{error}; nothing was sent"))?
+    {
         config = config.with_api_key(key);
     }
-    LightweightProvider::new(config)?.models().await
+    LightweightProvider::new(config)
+        .map_err(|error| error.to_string())?
+        .models()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 fn store_provider_key_tui(
@@ -473,31 +481,12 @@ fn store_provider_key_tui(
         .with_prompt("Provider API key")
         .interact()
         .map_err(dialog_error)?;
-    if key.trim().is_empty() {
-        return Err("provider API key cannot be empty".to_owned());
-    }
-    let path = paths.provider_key_file(provider_id);
-    lightagent_core::paths::write_private(&path, key.as_bytes()).map_err(io_error)?;
-    Ok(SecretRef::file(path))
+    // The one shared store, as the HTTP API and the desktop write it.
+    lightagent_core::provider_keys::store_key(paths, provider_id, &key)
 }
 
 fn provider_key_id(name: &str) -> String {
-    let id = name
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    let id = id.trim_matches('-');
-    if id.is_empty() {
-        "provider".to_owned()
-    } else {
-        id.to_owned()
-    }
+    lightagent_core::provider_keys::key_id(name)
 }
 
 fn configure_tools_tui(config: &mut Config, theme: &ColorfulTheme) -> Result<bool, String> {
@@ -867,16 +856,25 @@ async fn configure_gateway<R: BufRead, W: Write>(
     config.inference.base_url = base_url.clone();
 
     let mut provider_config = ProviderConfig::new(base_url, "default");
-    if let Some(key) = config
+    // A configured key that cannot be used: nothing is sent without it.
+    let key = config
         .inference
         .api_key
         .as_ref()
-        .and_then(|key| key.resolve())
-    {
-        provider_config = provider_config.with_api_key(key);
+        .map_or(Ok(None), SecretRef::for_request);
+    if let Ok(Some(key)) = &key {
+        provider_config = provider_config.with_api_key(key.clone());
     }
-    let models = match LightweightProvider::new(provider_config) {
-        Ok(provider) => match provider.models().await {
+    let models = match key.map(|_| LightweightProvider::new(provider_config)) {
+        Err(problem) => {
+            writeln!(
+                prompt.writer,
+                "Could not list models: {problem}; nothing was sent. Automatic selection remains available."
+            )
+            .map_err(io_error)?;
+            Vec::new()
+        }
+        Ok(Ok(provider)) => match provider.models().await {
             Ok(models) => models,
             Err(error) => {
                 writeln!(
@@ -887,7 +885,7 @@ async fn configure_gateway<R: BufRead, W: Write>(
                 Vec::new()
             }
         },
-        Err(error) => {
+        Ok(Err(error)) => {
             writeln!(prompt.writer, "Could not open the gateway: {error}").map_err(io_error)?;
             Vec::new()
         }
