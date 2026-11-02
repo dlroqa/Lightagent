@@ -1834,18 +1834,20 @@ async fn put_workspace(
 }
 
 /// Where the extension operations act: this runtime's Lightagent home.
-fn extension_paths(state: &AppState) -> Result<LightagentPaths, Response> {
-    home(state)
-        .map(LightagentPaths::rooted_at)
-        .ok_or_else(|| internal("Lightagent settings are unavailable in this embedding"))
+fn extension_paths(state: &AppState) -> Result<LightagentPaths, Box<Response>> {
+    home(state).map(LightagentPaths::rooted_at).ok_or_else(|| {
+        Box::new(internal(
+            "Lightagent settings are unavailable in this embedding",
+        ))
+    })
 }
 
-fn extension_config(state: &AppState) -> Result<lightagent_core::Config, Response> {
+fn extension_config(state: &AppState) -> Result<lightagent_core::Config, Box<Response>> {
     match &state.config_store {
-        Some(store) => store.load().map_err(config_error),
-        None => Err(internal(
+        Some(store) => store.load().map_err(|error| Box::new(config_error(error))),
+        None => Err(Box::new(internal(
             "Lightagent settings are unavailable in this embedding",
-        )),
+        ))),
     }
 }
 
@@ -1868,7 +1870,7 @@ async fn list_extensions(State(state): State<Arc<AppState>>, headers: HeaderMap)
     }
     let (paths, config) = match (extension_paths(&state), extension_config(&state)) {
         (Ok(paths), Ok(config)) => (paths, config),
-        (Err(response), _) | (_, Err(response)) => return response,
+        (Err(response), _) | (_, Err(response)) => return *response,
     };
     match extension_ops::list(&paths, &config) {
         Ok(listing) => Json(listing).into_response(),
@@ -1888,7 +1890,7 @@ async fn show_extension(
     }
     let (paths, config) = match (extension_paths(&state), extension_config(&state)) {
         (Ok(paths), Ok(config)) => (paths, config),
-        (Err(response), _) | (_, Err(response)) => return response,
+        (Err(response), _) | (_, Err(response)) => return *response,
     };
     match extension_ops::show(&paths, &config, &name) {
         Ok(detail) => Json(detail).into_response(),
@@ -1913,7 +1915,7 @@ async fn set_extension_enabled(
     }
     let paths = match extension_paths(&state) {
         Ok(paths) => paths,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match extension_ops::set_enabled(&paths, &name, body.enabled) {
         Ok(toggled) => Json(toggled).into_response(),
@@ -1944,7 +1946,7 @@ async fn install_extension(
     }
     let paths = match extension_paths(&state) {
         Ok(paths) => paths,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     // The server's working folder means nothing to a client, so a relative
     // path is refused rather than resolved against it.
@@ -1985,7 +1987,7 @@ async fn uninstall_extension(
     }
     let paths = match extension_paths(&state) {
         Ok(paths) => paths,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let scope = query.scope.unwrap_or(extension_ops::Scope::Global);
     match tokio::task::spawn_blocking(move || extension_ops::uninstall(&paths, &name, scope)).await
