@@ -1,0 +1,19 @@
+=== base 76506c2afba69eb930e64390ca1d35c25563047b
+=== message
+D5a-4: the run stream listens for run.paused
+
+An EventSource delivers a named event only to a listener for that name,
+and the hook's list did not have `run.paused`, so a paused run showed no
+card (check run 41449559908; the steering step then failed behind the
+still-paused run).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace frontend/src/hooks/useRunEvents.ts
+--- find
+  "approval.required",
+  "turn.completed",
+--- with
+  "approval.required",
+  "run.paused",
+  "turn.completed",
+=== end
