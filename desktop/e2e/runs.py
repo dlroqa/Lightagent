@@ -458,7 +458,7 @@ def scenario_extensions(host, cli):
                      (status, toggled, by_cli))
         status, refused = host.fetch("POST", f"{API}/extensions", {"source": "relative/folder"})
         check.expect("a relative source is refused", status == 400, (status, refused))
-        status, removed = host.fetch("DELETE", f"{API}/extensions/host-probe")
+        status, removed = host.fetch("DELETE", f"{API}/extensions/host-probe?scope=global")
         left = cli_list().get("extensions")
         check.expect("uninstalled through the host, gone for the CLI", status == 200 and left == [],
                      (status, removed, left))
