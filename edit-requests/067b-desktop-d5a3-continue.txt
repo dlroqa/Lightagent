@@ -1,0 +1,1531 @@
+=== base da950d1cc40bcb6ec231a4340e5bdfa5c00fa547
+=== message
+D5a-3: a run paused on its time budget continues over the API; steering
+
+Time budget, as it was: an API run wraps up (one final tool-less turn,
+then WallClockExceeded) and keeps nothing to resume. Only the terminal
+paused, holding the loop's suspended state (the conversation with the tool
+results the model has not read, and the turn and tool-call counts) in
+memory, and `/continue` resumed that same execution. A new turn on the
+session is not that: it starts a new execution from the saved transcript,
+which does not hold unread tool results.
+
+Now an API run may ask for the terminal's behavior:
+- `POST /runs` takes `on_time_budget: "pause"` (default `wrap_up`, as
+  before). Such a run pauses when its budget runs out with unread tool
+  results: event `run.paused` {reason, elapsed_secs}, status
+  `awaiting_continue`. It keeps its session lease and journal meanwhile.
+- `POST /runs/{id}/continue` {mode: `extend` | `answer`} resumes the same
+  execution: `extend` renews only the clock (turn and tool-call budgets
+  still count) and carries on with tools; `answer` takes the final
+  tool-less turn. 409 unless the run is paused. A revoked run takes none.
+  A cancel ends a paused run (`run.cancelled`).
+- The desktop contract gains `runs.continue`, refused during a profile
+  switch like `runs.create`. The inventory gains its API row (not counted;
+  it serves `slash.continue`, still not started until its UI is verified).
+- The run factory trait gains `run_controlled` with a default that runs as
+  before, so factories that cannot pause never do.
+
+Steering: kept as it is, a FIFO queue held by the client (the terminal
+process, the Web UI page) that sends each queued instruction as the
+session's next turn once the session is free. Nothing is applied inside a
+running turn; the queue does not survive its client; duplicate or
+concurrent submissions are settled by the server's one-turn-per-session
+admission. No backend queue is added (inventory `key.steer` updated).
+
+OS locks: every `paths::lock_exclusive` lock (config, session writes, run
+leases) is now an `ExclusiveLock` that unlocks before it closes, so none
+stays held while a child is between fork and exec (row 20 fixed only the
+run lease).
+
+Evidence:
+- crates/lightagent/tests/desktop_continue.rs (separate processes, all
+  platforms): a paused run is `awaiting_continue` with one provider
+  request; `extend` sends the next turn with the unread tool result and
+  the tools; a second continue is refused; cancel while paused releases
+  the session; a run that did not ask to pause wraps up.
+- crates/lightagent/tests/desktop_interrupted.rs: a second runtime
+  started while the first is mid-turn does not mark that turn
+  Interrupted; it records it only after the first process is gone.
+- run_lease.rs: a write lock dropped while a child is starting is free at
+  once.
+- desktop/e2e/runs.py `continue` (extend, answer, cancel, default
+  wrap-up) and `steering` (busy refusal, two concurrent submissions with
+  exactly one admitted, queued turns run in order) through the host.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-core/src/paths.rs
+--- find
+/// Hold an exclusive OS lock on the file at `path`, creating the file and its
+/// directory when missing. Every process takes the same lock, and the OS
+/// releases it when the returned file is dropped or its process ends, so a
+/// holder that crashed never leaves it stuck. Waits up to `wait` for another
+/// holder, then reports [`LockError::Busy`].
+pub fn lock_exclusive(path: &Path, wait: std::time::Duration) -> Result<std::fs::File, LockError> {
+--- with
+/// An exclusive OS lock on a file, from [`lock_exclusive`]. Dropping it
+/// unlocks, then closes. The lock belongs to the open file, which a child
+/// that another thread is starting shares until its exec closes its copy, so
+/// closing only this handle would keep the lock held until then; unlocking
+/// releases it at once, whoever else still has the file open.
+#[derive(Debug)]
+pub struct ExclusiveLock {
+    file: Option<std::fs::File>,
+}
+
+impl ExclusiveLock {
+    /// The open file, still locked, without the unlock on drop: the lock then
+    /// lasts until every copy of the file is closed (tests use this as a
+    /// control).
+    pub fn into_file(mut self) -> std::fs::File {
+        self.file
+            .take()
+            .expect("a lock holds its file until it is dropped")
+    }
+}
+
+impl Drop for ExclusiveLock {
+    fn drop(&mut self) {
+        if let Some(file) = &self.file {
+            let _ = file.unlock();
+        }
+    }
+}
+
+/// Hold an exclusive OS lock on the file at `path`, creating the file and its
+/// directory when missing. Every process takes the same lock, and it is
+/// released when the returned lock is dropped or its process ends, so a
+/// holder that crashed never leaves it stuck. Waits up to `wait` for another
+/// holder, then reports [`LockError::Busy`].
+pub fn lock_exclusive(path: &Path, wait: std::time::Duration) -> Result<ExclusiveLock, LockError> {
+=== replace crates/lightagent-core/src/paths.rs
+--- find
+            Ok(()) => return Ok(file),
+--- with
+            Ok(()) => return Ok(ExclusiveLock { file: Some(file) }),
+=== replace crates/lightagent-core/src/config.rs
+--- find
+    fn lock(&self) -> Result<std::fs::File, ConfigError> {
+--- with
+    fn lock(&self) -> Result<paths::ExclusiveLock, ConfigError> {
+=== replace crates/lightagent-store/src/session.rs
+--- find
+    fn lock(&self) -> Result<std::fs::File, StoreError> {
+--- with
+    fn lock(&self) -> Result<paths::ExclusiveLock, StoreError> {
+=== replace crates/lightagent-store/src/session.rs
+--- find
+/// held while a child that another thread is starting keeps a copy of the
+/// lock file: [`RunLease`] unlocks before it closes.
+--- with
+/// held while a child that another thread is starting keeps a copy of the
+/// lock file: the lock unlocks before it closes ([`paths::ExclusiveLock`]).
+=== replace crates/lightagent-store/src/session.rs
+--- find
+#[derive(Debug)]
+pub struct RunLease {
+    file: std::fs::File,
+}
+
+impl Drop for RunLease {
+    // Unlock, then close. The lock belongs to the open file, which a child
+    // that another thread is starting shares until its exec closes its copy;
+    // closing only this handle would keep the lease held until then.
+    // Unlocking releases it at once, whoever else still has the file open.
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+--- with
+#[derive(Debug)]
+pub struct RunLease {
+    _lock: paths::ExclusiveLock,
+}
+=== replace crates/lightagent-store/src/session.rs
+--- find
+            Ok(file) => Ok(RunLease { file }),
+--- with
+            Ok(lock) => Ok(RunLease { _lock: lock }),
+=== replace crates/lightagent-store/tests/run_lease.rs
+--- find
+//! closes. A held lease is refused within the store's documented bound, and
+//! different sessions take their leases at the same time.
+--- with
+//! closes. The short write locks (`paths::lock_exclusive`, as the config and
+//! session stores take them) are released the same way. A held lease is
+//! refused within the store's documented bound, and different sessions take
+//! their leases at the same time.
+=== replace crates/lightagent-store/tests/run_lease.rs
+--- find
+    let held = paths::lock_exclusive(&control, Duration::ZERO).expect("control lock");
+--- with
+    let held = paths::lock_exclusive(&control, Duration::ZERO)
+        .expect("control lock")
+        .into_file();
+    // A short write lock, as the config and session stores take it.
+    let write = dir.join("write.lock");
+    let writing = paths::lock_exclusive(&write, Duration::ZERO).expect("write lock");
+=== replace crates/lightagent-store/tests/run_lease.rs
+--- find
+    drop(lease);
+    drop(held);
+    let lease_free = free_now(&lease_file(&dir, &id));
+--- with
+    drop(lease);
+    drop(held);
+    drop(writing);
+    let lease_free = free_now(&lease_file(&dir, &id));
+    let write_free = free_now(&write);
+=== replace crates/lightagent-store/tests/run_lease.rs
+--- find
+        "a dropped lease stayed held by a child that was still starting"
+    );
+--- with
+        "a dropped lease stayed held by a child that was still starting"
+    );
+    assert!(
+        write_free,
+        "a dropped write lock stayed held by a child that was still starting"
+    );
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    AgentEvent, AgentEventSink, AgentLoop, AgentProvider, ApprovalDecision, ApprovalId, ProfileId,
+    RunId, RunOutcome, StopReason, ToolInvoker,
+--- with
+    AgentEvent, AgentEventSink, AgentLoop, AgentProvider, ApprovalDecision, ApprovalId,
+    Continuation, ProfileId, RunId, RunOutcome, StopReason, ToolInvoker, WallClockPolicy,
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    /// The run is paused, waiting on an approval decision.
+    AwaitingApproval,
+--- with
+    /// The run is paused, waiting on an approval decision.
+    AwaitingApproval,
+    /// The run is paused on its time budget, waiting to be continued
+    /// ([`RunState::continue_with`]) or cancelled. Only a run started with
+    /// [`RunOptions::pause_on_time_budget`] pauses.
+    AwaitingContinue,
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+/// Who started a run and as which profile, fixed when the run is created.
+--- with
+/// How a run is started, beyond its request.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunOptions {
+    /// Pause when the time budget runs out with tool results the model has
+    /// not read yet, instead of wrapping up, until the run is continued or
+    /// cancelled. The default wraps up, as every run did before.
+    pub pause_on_time_budget: bool,
+}
+
+/// What a factory needs to honor [`RunOptions`]: the time-budget policy and
+/// where continuations arrive.
+pub struct RunControls {
+    pub on_wall_clock: WallClockPolicy,
+    pub continues: UnboundedReceiver<Continuation>,
+}
+
+/// Who started a run and as which profile, fixed when the run is created.
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    decisions: mpsc::UnboundedSender<ApprovalDecision>,
+    authorization: RunAuthorization,
+--- with
+    decisions: mpsc::UnboundedSender<ApprovalDecision>,
+    continues: mpsc::UnboundedSender<Continuation>,
+    authorization: RunAuthorization,
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+        self.decisions.send(decision).is_ok()
+    }
+--- with
+        self.decisions.send(decision).is_ok()
+    }
+
+    /// Continue a run paused on its time budget: the same execution carries
+    /// on from where it stopped. Returns whether the run was paused and took
+    /// the continuation; a revoked run takes none.
+    pub async fn continue_with(&self, how: Continuation) -> bool {
+        if self.authorization.revoked().is_some() {
+            return false;
+        }
+        let mut status = self.status.lock().await;
+        if *status != RunStatus::AwaitingContinue || self.continues.send(how).is_err() {
+            return false;
+        }
+        *status = RunStatus::Running;
+        drop(status);
+        self.notify.notify_waiters();
+        true
+    }
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+        if let Err(denial) = authorization.verify() {
+            return revoked(&sink, denial);
+        }
+        self.run_as(request, trust, sink, cancel, decisions).await
+    }
+}
+--- with
+        if let Err(denial) = authorization.verify() {
+            return revoked(&sink, denial);
+        }
+        self.run_as(request, trust, sink, cancel, decisions).await
+    }
+
+    /// Drive a run started with [`RunOptions`]; `controls` carries the
+    /// time-budget policy and the continuations. The default ignores them
+    /// and runs as before (supervised when `authorization` is set), so a
+    /// factory that cannot pause never does.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_controlled(
+        &self,
+        request: StartRun,
+        trust: RunTrust,
+        authorization: Option<RunAuthorization>,
+        controls: RunControls,
+        sink: AgentEventSink,
+        cancel: CancellationToken,
+        decisions: UnboundedReceiver<ApprovalDecision>,
+    ) -> RunStatus {
+        drop(controls);
+        match authorization {
+            Some(authorization) => {
+                self.run_supervised(request, trust, authorization, sink, cancel, decisions)
+                    .await
+            }
+            None => self.run_as(request, trust, sink, cancel, decisions).await,
+        }
+    }
+}
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+pub async fn drive_supervised<P: AgentProvider, I: ToolInvoker>(
+    agent: AgentLoop<P, I>,
+    history: Vec<ProviderMessage>,
+    message: String,
+    sink: AgentEventSink,
+    cancel: CancellationToken,
+    mut decisions: UnboundedReceiver<ApprovalDecision>,
+    authorization: RunAuthorization,
+) -> RunStatus {
+--- with
+pub async fn drive_supervised<P: AgentProvider, I: ToolInvoker>(
+    agent: AgentLoop<P, I>,
+    history: Vec<ProviderMessage>,
+    message: String,
+    sink: AgentEventSink,
+    cancel: CancellationToken,
+    decisions: UnboundedReceiver<ApprovalDecision>,
+    authorization: RunAuthorization,
+) -> RunStatus {
+    drive_controlled(
+        agent,
+        history,
+        message,
+        sink,
+        cancel,
+        decisions,
+        authorization,
+        None,
+    )
+    .await
+}
+
+/// [`drive_supervised`] for a run that may pause on its time budget (its
+/// loop built with [`WallClockPolicy::Pause`]): a pause waits for a
+/// continuation from `continues` or a cancel, and the authorization is
+/// checked again before a continuation is acted on. With `continues` `None`
+/// a pause ends the run, as before.
+#[allow(clippy::too_many_arguments)]
+pub async fn drive_controlled<P: AgentProvider, I: ToolInvoker>(
+    agent: AgentLoop<P, I>,
+    history: Vec<ProviderMessage>,
+    message: String,
+    sink: AgentEventSink,
+    cancel: CancellationToken,
+    mut decisions: UnboundedReceiver<ApprovalDecision>,
+    authorization: RunAuthorization,
+    mut continues: Option<UnboundedReceiver<Continuation>>,
+) -> RunStatus {
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+            // Only a `WallClockPolicy::Pause` run pauses out of time, and the API
+            // keeps the default wrap-up policy; should one arrive anyway, the
+            // time budget is spent and the run is over.
+            RunOutcome::OutOfTime { .. } => {
+                let _ = sink.send(AgentEvent::RunCompleted {
+                    reason: StopReason::WallClockExceeded,
+                });
+                return RunStatus::Completed;
+            }
+--- with
+            // Only a `WallClockPolicy::Pause` run pauses out of time. With no
+            // way to be continued, the time budget is spent and the run is over.
+            RunOutcome::OutOfTime { suspended, .. } => {
+                let Some(continues) = continues.as_mut() else {
+                    let _ = sink.send(AgentEvent::RunCompleted {
+                        reason: StopReason::WallClockExceeded,
+                    });
+                    return RunStatus::Completed;
+                };
+                tokio::select! {
+                    () = cancel.cancelled() => {
+                        return match authorization.revoked() {
+                            Some(denial) => revoked(&sink, denial),
+                            None => {
+                                let _ = sink.send(AgentEvent::RunCompleted { reason: StopReason::Cancelled });
+                                RunStatus::Cancelled
+                            }
+                        };
+                    }
+                    how = continues.recv() => match how {
+                        Some(how) => {
+                            if let Err(denial) = authorization.verify() {
+                                return revoked(&sink, denial);
+                            }
+                            outcome = match agent.continue_out_of_time(suspended, how, cancel.clone()).await {
+                                Ok(outcome) => outcome,
+                                Err(error) => {
+                                    let _ = sink.send(AgentEvent::Error { message: error.to_string() });
+                                    let _ = sink.send(AgentEvent::RunCompleted { reason: StopReason::Error });
+                                    return RunStatus::Failed;
+                                }
+                            };
+                        }
+                        None => return RunStatus::Cancelled,
+                    }
+                }
+            }
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    pub async fn start_as(&self, request: StartRun, owner: RunOwner) -> Arc<RunState> {
+        self.launch(request, owner, None).await
+    }
+--- with
+    pub async fn start_as(&self, request: StartRun, owner: RunOwner) -> Arc<RunState> {
+        self.launch(request, owner, None, RunOptions::default())
+            .await
+    }
+
+    /// [`start_as`](Self::start_as), with `options`.
+    pub async fn start_as_with(
+        &self,
+        request: StartRun,
+        owner: RunOwner,
+        options: RunOptions,
+    ) -> Arc<RunState> {
+        self.launch(request, owner, None, options).await
+    }
+
+    /// [`start_supervised`](Self::start_supervised), with `options`.
+    pub async fn start_supervised_with(
+        &self,
+        request: StartRun,
+        owner: RunOwner,
+        check: RevocationCheck,
+        generation: Option<u64>,
+        options: RunOptions,
+    ) -> Result<Arc<RunState>, Denial> {
+        check()?;
+        Ok(self
+            .launch(request, owner, Some((check, generation)), options)
+            .await)
+    }
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+        check()?;
+        Ok(self.launch(request, owner, Some((check, generation))).await)
+    }
+
+    async fn launch(
+        &self,
+        request: StartRun,
+        owner: RunOwner,
+        revocable: Option<(RevocationCheck, Option<u64>)>,
+    ) -> Arc<RunState> {
+        let id = new_run_id();
+        let trust = owner.trust();
+        let (decisions_tx, decisions_rx) = mpsc::unbounded_channel();
+--- with
+        check()?;
+        Ok(self
+            .launch(
+                request,
+                owner,
+                Some((check, generation)),
+                RunOptions::default(),
+            )
+            .await)
+    }
+
+    async fn launch(
+        &self,
+        request: StartRun,
+        owner: RunOwner,
+        revocable: Option<(RevocationCheck, Option<u64>)>,
+        options: RunOptions,
+    ) -> Arc<RunState> {
+        let id = new_run_id();
+        let trust = owner.trust();
+        let (decisions_tx, decisions_rx) = mpsc::unbounded_channel();
+        let (continues_tx, continues_rx) = mpsc::unbounded_channel();
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+            decisions: decisions_tx,
+            authorization,
+--- with
+            decisions: decisions_tx,
+            continues: continues_tx,
+            authorization,
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+                        AgentEvent::ToolCallStarted { .. } | AgentEvent::Content { .. } => {
+--- with
+                        AgentEvent::WallClockPaused { .. } => {
+                            forward_state
+                                .set_status(RunStatus::AwaitingContinue)
+                                .await;
+                        }
+                        AgentEvent::ToolCallStarted { .. } | AgentEvent::Content { .. } => {
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+            let status = if supervised {
+                let authorization = run_state.authorization.clone();
+                factory
+                    .run_supervised(request, trust, authorization, sink_tx, cancel, decisions_rx)
+                    .await
+            } else {
+--- with
+            let status = if options.pause_on_time_budget {
+                let controls = RunControls {
+                    on_wall_clock: WallClockPolicy::Pause,
+                    continues: continues_rx,
+                };
+                let authorization = supervised.then(|| run_state.authorization.clone());
+                factory
+                    .run_controlled(
+                        request,
+                        trust,
+                        authorization,
+                        controls,
+                        sink_tx,
+                        cancel,
+                        decisions_rx,
+                    )
+                    .await
+            } else if supervised {
+                let authorization = run_state.authorization.clone();
+                factory
+                    .run_supervised(request, trust, authorization, sink_tx, cancel, decisions_rx)
+                    .await
+            } else {
+=== replace crates/lightagent-api/src/sse.rs
+--- find
+        AgentEvent::Error { .. } => "error",
+        _ => "event",
+--- with
+        AgentEvent::Error { .. } => "error",
+        AgentEvent::WallClockPaused { .. } => "run.paused",
+        _ => "event",
+=== replace crates/lightagent-api/src/sse.rs
+--- find
+        AgentEvent::Error { message } => json!({ "message": message }),
+        _ => json!({}),
+--- with
+        AgentEvent::Error { message } => json!({ "message": message }),
+        AgentEvent::WallClockPaused { elapsed_secs } => json!({
+            "reason": "time_budget",
+            "elapsed_secs": elapsed_secs,
+        }),
+        _ => json!({}),
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+pub use manager::{RunFactory, RunManager, RunOwner, RunState, RunStatus, StartRun};
+--- with
+pub use manager::{
+    RunFactory, RunManager, RunOptions, RunOwner, RunState, RunStatus, StartRun,
+};
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+        .route("/api/lightagent/v1/runs/{id}/cancel", post(cancel_run))
+--- with
+        .route("/api/lightagent/v1/runs/{id}/cancel", post(cancel_run))
+        .route("/api/lightagent/v1/runs/{id}/continue", post(continue_run))
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+#[derive(Deserialize)]
+struct CreateRunBody {
+    message: String,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+--- with
+#[derive(Deserialize)]
+struct CreateRunBody {
+    message: String,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    on_time_budget: OnTimeBudget,
+}
+
+/// What a run does when its time budget runs out while tool results the
+/// model has not read are waiting.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum OnTimeBudget {
+    /// Answer from what it gathered, without tools, and end (as before).
+    #[default]
+    WrapUp,
+    /// Pause until continued (`POST /runs/{id}/continue`) or cancelled.
+    Pause,
+}
+
+/// How to continue a run paused on its time budget.
+#[derive(Deserialize)]
+struct ContinueBody {
+    #[serde(default)]
+    mode: ContinueMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ContinueMode {
+    /// Renew the time budget and carry on, with tools, where it stopped.
+    #[default]
+    Extend,
+    /// Answer now from what it gathered, without tools, and end.
+    Answer,
+}
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+        session_id: Some(id),
+        model: body.model,
+    };
+    let turn = Turn::Regenerate {
+--- with
+        session_id: Some(id),
+        model: body.model,
+        on_time_budget: OnTimeBudget::WrapUp,
+    };
+    let turn = Turn::Regenerate {
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+    let request = StartRun {
+        message: body.message,
+        history,
+        profile,
+        cwd: None,
+        model: body.model,
+    };
+--- with
+    let options = RunOptions {
+        pause_on_time_budget: body.on_time_budget == OnTimeBudget::Pause,
+    };
+    let request = StartRun {
+        message: body.message,
+        history,
+        profile,
+        cwd: None,
+        model: body.model,
+    };
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+                        .start_supervised(request, owner, check, identity.generation())
+                        .await;
+--- with
+                        .start_supervised_with(
+                            request,
+                            owner,
+                            check,
+                            identity.generation(),
+                            options,
+                        )
+                        .await;
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+                None => state.manager.start_as(request, owner).await,
+            }
+        }
+        None => state.manager.start(request).await,
+    };
+--- with
+                None => state.manager.start_as_with(request, owner, options).await,
+            }
+        }
+        None => {
+            state
+                .manager
+                .start_as_with(request, RunOwner::operator_only(), options)
+                .await
+        }
+    };
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+async fn list_sessions(
+--- with
+/// Continue a run paused on its time budget. The same execution carries on
+/// from where it stopped (its conversation, the tool results the model has
+/// not read, its turn and tool-call counts): this is not a new turn. 409
+/// unless the run is paused.
+async fn continue_run(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<ContinueBody>,
+) -> Response {
+    match authorized_run(&state, &headers, &id, Scope::RunsWrite).await {
+        Ok((run, _)) => {
+            let how = match body.mode {
+                ContinueMode::Extend => lightagent_core::Continuation::Extend,
+                ContinueMode::Answer => lightagent_core::Continuation::WrapUp,
+            };
+            if run.continue_with(how).await {
+                Json(json!({ "id": run.id(), "continued": true })).into_response()
+            } else {
+                (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "run is not paused on its time budget" })),
+                )
+                    .into_response()
+            }
+        }
+        Err(response) => *response,
+    }
+}
+
+async fn list_sessions(
+=== replace crates/lightagent/src/serve.rs
+--- find
+        self.run_with(request, trust, None, sink, cancel, decisions)
+            .await
+--- with
+        self.run_with(request, trust, None, sink, cancel, decisions, None)
+            .await
+=== replace crates/lightagent/src/serve.rs
+--- find
+        self.run_with(request, trust, Some(authorization), sink, cancel, decisions)
+            .await
+    }
+}
+--- with
+        self.run_with(
+            request,
+            trust,
+            Some(authorization),
+            sink,
+            cancel,
+            decisions,
+            None,
+        )
+        .await
+    }
+
+    /// A run that may pause on its time budget and be continued.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_controlled(
+        &self,
+        request: StartRun,
+        trust: RunTrust,
+        authorization: Option<RunAuthorization>,
+        controls: manager::RunControls,
+        sink: AgentEventSink,
+        cancel: CancellationToken,
+        decisions: UnboundedReceiver<ApprovalDecision>,
+    ) -> RunStatus {
+        self.run_with(
+            request,
+            trust,
+            authorization,
+            sink,
+            cancel,
+            decisions,
+            Some(controls),
+        )
+        .await
+    }
+}
+=== replace crates/lightagent/src/serve.rs
+--- find
+    /// The run itself. `authorization` is `None` for a run that is not
+    /// revocable, which then behaves exactly as it always has.
+    async fn run_with(
+        &self,
+        request: StartRun,
+        trust: RunTrust,
+        authorization: Option<RunAuthorization>,
+        sink: AgentEventSink,
+        cancel: CancellationToken,
+        decisions: UnboundedReceiver<ApprovalDecision>,
+    ) -> RunStatus {
+--- with
+    /// The run itself. `authorization` is `None` for a run that is not
+    /// revocable, which then behaves exactly as it always has. `controls`,
+    /// when set, makes the run pause on its time budget until continued.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_with(
+        &self,
+        request: StartRun,
+        trust: RunTrust,
+        authorization: Option<RunAuthorization>,
+        sink: AgentEventSink,
+        cancel: CancellationToken,
+        decisions: UnboundedReceiver<ApprovalDecision>,
+        controls: Option<manager::RunControls>,
+    ) -> RunStatus {
+=== replace crates/lightagent/src/serve.rs
+--- find
+        let agent = AgentLoop::from_profile(provider, executor, &profile)
+            .with_generation(generation.budget);
+        manager::drive_supervised(
+            agent,
+            request.history,
+            request.message,
+            sink,
+            cancel,
+            decisions,
+            authorization,
+        )
+        .await
+--- with
+        let agent = AgentLoop::from_profile(provider, executor, &profile)
+            .with_generation(generation.budget);
+        let (agent, continues) = match controls {
+            Some(controls) => (
+                agent.with_wall_clock_policy(controls.on_wall_clock),
+                Some(controls.continues),
+            ),
+            None => (agent, None),
+        };
+        manager::drive_controlled(
+            agent,
+            request.history,
+            request.message,
+            sink,
+            cancel,
+            decisions,
+            authorization,
+            continues,
+        )
+        .await
+=== replace desktop/src-tauri/src/switch.rs
+--- find
+        "runs.create" | "sessions.regenerate" | "approvals.respond"
+--- with
+        "runs.create" | "sessions.regenerate" | "approvals.respond" | "runs.continue"
+=== replace desktop/src-tauri/src/switch.rs
+--- find
+        assert!(blocked_while_switching("approvals.respond"));
+--- with
+        assert!(blocked_while_switching("approvals.respond"));
+        assert!(blocked_while_switching("runs.continue"));
+=== replace docs/desktop/contract/operations.json
+--- find
+   "id": "runs.cancel",
+   "method": "POST",
+   "path": "/api/lightagent/v1/runs/{id}/cancel"
+  },
+--- with
+   "id": "runs.cancel",
+   "method": "POST",
+   "path": "/api/lightagent/v1/runs/{id}/cancel"
+  },
+  {
+   "id": "runs.continue",
+   "method": "POST",
+   "path": "/api/lightagent/v1/runs/{id}/continue"
+  },
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "total_rows": 333,
+--- with
+  "total_rows": 334,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "api": 51,
+--- with
+   "api": 52,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "applicable": 297,
+--- with
+   "applicable": 298,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "backend": "MISSING in API: no continue operation (new backend operation required, D5)",
+--- with
+   "backend": "api: POST /runs/{id}/continue, for a run started with on_time_budget pause (D5a-3); resumes the same execution",
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "backend": "MISSING in API: no steering operation (new backend operation required, D5)",
+--- with
+   "backend": "client-held FIFO queue over api: POST /runs, as the terminal holds it; no backend queue (D5a-3)",
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  {
+   "id": "api.get.sessions",
+--- with
+  {
+   "id": "api.post.runs.id.continue",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/runs/{id}/continue",
+   "source": "crates/lightagent-api/src/lib.rs:160",
+   "behavior": "Continue a run paused on its time budget (extend or answer now): the same execution resumes (D5a-3)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/runs/{id}/continue"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: POST /runs/{id}/continue",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.sessions",
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Total rows: 333
+--- with
+- Total rows: 334
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| api | 51 |
+--- with
+| api | 52 |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| applicable | 297 |
+--- with
+| applicable | 298 |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `slash.continue` | `/continue` | applicable | yes | Conversations: continue | MISSING in API: no continue operation (new backend operation required, D5) | not-started | `crates/lightagent/src/slash.rs:86` |
+--- with
+| `slash.continue` | `/continue` | applicable | yes | Conversations: continue | api: POST /runs/{id}/continue, for a run started with on_time_budget pause (D5a-3); resumes the same execution | not-started | `crates/lightagent/src/slash.rs:86` |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `key.steer` | `chat key: steer` | applicable | yes | Conversations: composer stays enabled during a run → queued steer | MISSING in API: no steering operation (new backend operation required, D5) | not-started | `crates/lightagent/src/chat.rs:2955` |
+--- with
+| `key.steer` | `chat key: steer` | applicable | yes | Conversations: composer stays enabled during a run → queued steer | client-held FIFO queue over api: POST /runs, as the terminal holds it; no backend queue (D5a-3) | not-started | `crates/lightagent/src/chat.rs:2955` |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.post.runs.id.cancel` | `POST /api/lightagent/v1/runs/{id}/cancel` | applicable | no | (backend reuse) | api: POST /runs/{id}/cancel | not-started | `crates/lightagent-api/src/lib.rs:93` |
+--- with
+| `api.post.runs.id.cancel` | `POST /api/lightagent/v1/runs/{id}/cancel` | applicable | no | (backend reuse) | api: POST /runs/{id}/cancel | not-started | `crates/lightagent-api/src/lib.rs:93` |
+| `api.post.runs.id.continue` | `POST /api/lightagent/v1/runs/{id}/continue` | applicable | no | (backend reuse) | api: POST /runs/{id}/continue | not-started | `crates/lightagent-api/src/lib.rs:160` |
+=== replace crates/lightagent/tests/desktop_interrupted.rs
+--- find
+#[test]
+fn an_interrupted_regeneration_keeps_the_saved_answer() {
+--- with
+#[test]
+fn a_second_runtime_leaves_a_live_turn_alone() {
+    let home = scratch_home("live");
+    let (url, chats) = provider(0);
+    cli_ok(&home, &["config", "set", "inference.base_url", &url]);
+    let first = start(&home);
+    let id = new_session(&first);
+    let (status, raw) = run_on(&first, &id, "hello");
+    assert_eq!(status, 202, "{raw}");
+    wait_until("the turn to reach the provider", || {
+        chats.load(Ordering::SeqCst) == 1
+    });
+    // Another runtime starts on the same home while that turn runs: its
+    // process still holds the session's lease, so the turn is not
+    // interrupted, at startup or when the session is asked for a turn.
+    let second = start(&home);
+    let saved = session(&second, &id);
+    assert_eq!(saved["runs"].as_array().map(Vec::len), Some(0), "{saved}");
+    let (status, raw) = run_on(&second, &id, "again");
+    assert_eq!(status, 409, "the live turn still holds the session: {raw}");
+    let saved = session(&second, &id);
+    assert_eq!(saved["runs"].as_array().map(Vec::len), Some(0), "{saved}");
+    // Once its process is gone, the next turn records it, and only the new
+    // turn is sent.
+    drop(first);
+    let (status, raw) = run_on(&second, &id, "again");
+    assert_eq!(status, 202, "{raw}");
+    let saved = session(&second, &id);
+    let runs = saved["runs"].as_array().expect("runs");
+    assert_eq!(runs.len(), 1, "{saved}");
+    assert_eq!(runs[0]["stop_reason"], "Interrupted", "{saved}");
+    wait_until("the new turn to reach the provider", || {
+        chats.load(Ordering::SeqCst) == 2
+    });
+}
+
+#[test]
+fn an_interrupted_regeneration_keeps_the_saved_answer() {
+=== write crates/lightagent/tests/desktop_continue.rs
+//! A run paused on its time budget continues over the API (D5a-3): a run
+//! started with `on_time_budget: "pause"` pauses when its budget runs out
+//! with a tool result the model has not read, sends nothing while paused,
+//! and `continue` resumes the same execution: the next model turn carries
+//! that unread tool result. A paused run can be cancelled, which frees the
+//! session, and a run that did not ask to pause wraps up as before. Every
+//! process here is separate: the runtime, the provider and this test.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+
+const KEY: &str = "92a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081";
+const MODELS: &str = r#"{"object":"list","data":[{"id":"m1"}]}"#;
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-continue-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+/// One authenticated request: the status and the raw body.
+fn call(runtime: &Runtime, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, raw)
+}
+
+fn cli_ok(home: &Path, args: &[&str]) {
+    let output: Output = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent");
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Read one request; return its head and body.
+fn read_request(stream: &mut TcpStream) -> Option<(String, String)> {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&bytes[..end]).into_owned();
+            let length = head
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|value| value.trim().parse::<usize>().unwrap_or(0))
+                })
+                .unwrap_or(0);
+            if bytes.len() >= end + 4 + length {
+                let body = String::from_utf8_lossy(&bytes[end + 4..end + 4 + length]).into_owned();
+                return Some((head, body));
+            }
+        }
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => return None,
+            Ok(read) => bytes.extend_from_slice(&buffer[..read]),
+        }
+    }
+}
+
+fn sse(chunks: &[Value]) -> String {
+    let mut response =
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n".to_owned();
+    for chunk in chunks {
+        response.push_str(&format!("data: {chunk}\n\n"));
+    }
+    response.push_str("data: [DONE]\n\n");
+    response
+}
+
+/// A provider that, when the conversation ends with the user's prompt,
+/// asks for `datetime.now` and takes longer than the run's one-second time
+/// budget; when it ends with a tool result, it answers "Found it.". Every
+/// request body is kept.
+fn provider() -> (String, Arc<Mutex<Vec<Value>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let url = format!("http://{}", listener.local_addr().expect("address"));
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::clone(&bodies);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let kept = Arc::clone(&kept);
+            std::thread::spawn(move || {
+                let Some((head, body)) = read_request(&mut stream) else {
+                    return;
+                };
+                if head.starts_with("GET") {
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{MODELS}",
+                        MODELS.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    return;
+                }
+                let request: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                kept.lock().expect("bodies").push(request.clone());
+                let last_role = request["messages"]
+                    .as_array()
+                    .and_then(|messages| messages.last())
+                    .map(|message| message["role"].as_str().unwrap_or("").to_owned())
+                    .unwrap_or_default();
+                if last_role == "tool" {
+                    let answer = sse(&[
+                        json!({"choices":[{"index":0,"delta":{"role":"assistant","content":"Found it."}}]}),
+                        json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+                    ]);
+                    let _ = stream.write_all(answer.as_bytes());
+                    return;
+                }
+                let tool = request["tools"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|tool| tool["function"]["name"].as_str())
+                    .find(|name| {
+                        name.chars()
+                            .filter(char::is_ascii_alphanumeric)
+                            .collect::<String>()
+                            .eq_ignore_ascii_case("datetimenow")
+                    })
+                    .unwrap_or("datetime.now")
+                    .to_owned();
+                std::thread::sleep(Duration::from_millis(1500));
+                let call = sse(&[
+                    json!({"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":tool,"arguments":"{}"}}]}}]}),
+                    json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}),
+                ]);
+                let _ = stream.write_all(call.as_bytes());
+            });
+        }
+    });
+    (url, bodies)
+}
+
+fn wait_until(what: &str, mut probe: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !probe() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A runtime whose runs have one second and the tools enabled.
+fn setup(label: &str) -> (Runtime, Arc<Mutex<Vec<Value>>>) {
+    let home = scratch_home(label);
+    let (url, bodies) = provider();
+    cli_ok(&home, &["config", "set", "inference.base_url", &url]);
+    cli_ok(&home, &["config", "set", "agent.wall_clock_secs", "1"]);
+    let path = home.join("config.json");
+    let mut config: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("config")).expect("JSON");
+    config["tools"]["enabled"] = json!(true);
+    std::fs::write(&path, serde_json::to_string_pretty(&config).expect("JSON")).expect("write");
+    (start(&home), bodies)
+}
+
+fn new_session(runtime: &Runtime) -> String {
+    let (status, raw) = call(runtime, "POST", "/api/lightagent/v1/sessions", Some("{}"));
+    assert_eq!(status, 201, "{raw}");
+    let created: Value = serde_json::from_str(&raw).expect("session JSON");
+    created["id"].as_str().expect("session id").to_owned()
+}
+
+fn start_run(runtime: &Runtime, session: &str, pause: bool) -> String {
+    let mut body = json!({ "message": "What time is it?", "session_id": session });
+    if pause {
+        body["on_time_budget"] = json!("pause");
+    }
+    let (status, raw) = call(
+        runtime,
+        "POST",
+        "/api/lightagent/v1/runs",
+        Some(&body.to_string()),
+    );
+    assert_eq!(status, 202, "{raw}");
+    let created: Value = serde_json::from_str(&raw).expect("run JSON");
+    created["id"].as_str().expect("run id").to_owned()
+}
+
+fn run_info(runtime: &Runtime, run: &str) -> Value {
+    let (status, raw) = call(
+        runtime,
+        "GET",
+        &format!("/api/lightagent/v1/runs/{run}"),
+        None,
+    );
+    assert_eq!(status, 200, "{raw}");
+    serde_json::from_str(&raw).expect("run JSON")
+}
+
+fn continue_run(runtime: &Runtime, run: &str, mode: &str) -> (u16, String) {
+    call(
+        runtime,
+        "POST",
+        &format!("/api/lightagent/v1/runs/{run}/continue"),
+        Some(&json!({ "mode": mode }).to_string()),
+    )
+}
+
+#[test]
+fn a_run_paused_on_its_time_budget_continues_the_same_execution() {
+    let (runtime, bodies) = setup("extend");
+    let session = new_session(&runtime);
+    let run = start_run(&runtime, &session, true);
+    wait_until("the run to pause", || {
+        run_info(&runtime, &run)["status"] == "awaiting_continue"
+    });
+    assert_eq!(
+        bodies.lock().expect("bodies").len(),
+        1,
+        "nothing is sent while the run is paused"
+    );
+    let (status, raw) = continue_run(&runtime, &run, "extend");
+    assert_eq!(status, 200, "{raw}");
+    wait_until("the run to finish", || {
+        run_info(&runtime, &run)["status"] == "completed"
+    });
+    let bodies = bodies.lock().expect("bodies").clone();
+    assert_eq!(bodies.len(), 2, "{bodies:?}");
+    let messages = bodies[1]["messages"].as_array().expect("messages");
+    assert_eq!(
+        messages.last().map(|message| message["role"].clone()),
+        Some(json!("tool")),
+        "the continued turn carries the tool result the model had not read"
+    );
+    assert!(
+        bodies[1]["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty()),
+        "extend carries on with the tools"
+    );
+    assert_eq!(run_info(&runtime, &run)["stop_reason"], "EndTurn");
+    let (status, raw) = continue_run(&runtime, &run, "extend");
+    assert_eq!(status, 409, "a finished run cannot be continued: {raw}");
+}
+
+#[test]
+fn a_paused_run_can_be_cancelled_and_runs_that_did_not_ask_wrap_up() {
+    let (runtime, bodies) = setup("cancel");
+    let session = new_session(&runtime);
+    let run = start_run(&runtime, &session, true);
+    wait_until("the run to pause", || {
+        run_info(&runtime, &run)["status"] == "awaiting_continue"
+    });
+    let (status, raw) = call(
+        &runtime,
+        "POST",
+        &format!("/api/lightagent/v1/runs/{run}/cancel"),
+        Some("{}"),
+    );
+    assert_eq!(status, 200, "{raw}");
+    wait_until("the run to be cancelled", || {
+        run_info(&runtime, &run)["status"] == "cancelled"
+    });
+    assert_eq!(bodies.lock().expect("bodies").len(), 1);
+
+    // The session is free again; a run that did not ask to pause answers
+    // from what it has, without tools, once its budget runs out.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let next = loop {
+        let body = json!({ "message": "What time is it?", "session_id": session }).to_string();
+        let (status, raw) = call(&runtime, "POST", "/api/lightagent/v1/runs", Some(&body));
+        if status == 202 {
+            let created: Value = serde_json::from_str(&raw).expect("run JSON");
+            break created["id"].as_str().expect("run id").to_owned();
+        }
+        assert!(
+            status == 409 && Instant::now() < deadline,
+            "{status}: {raw}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    wait_until("the run to finish", || {
+        run_info(&runtime, &next)["status"] == "completed"
+    });
+    let info = run_info(&runtime, &next);
+    assert_eq!(info["stop_reason"], "WallClockExceeded", "{info}");
+    let bodies = bodies.lock().expect("bodies").clone();
+    assert_eq!(bodies.len(), 3, "{bodies:?}");
+    assert!(
+        bodies[2]["tools"]
+            .as_array()
+            .is_none_or(|tools| tools.is_empty()),
+        "the wrap-up turn offers no tools"
+    );
+}
+=== replace desktop/e2e/harness.py
+--- find
+        self.record(event="request", scenario=scenario, turn=turn, index=index, tools=sorted(tools.values()))
+--- with
+        self.record(
+            event="request", scenario=scenario, turn=turn, index=index, tools=sorted(tools.values()),
+            roles=[m.get("role") for m in messages], offered=len(request.get("tools") or []),
+        )
+=== replace desktop/e2e/harness.py
+--- find
+                elif kind == "finish":
+                    self.chunk(handler, {}, finish=step[1])
+--- with
+                elif kind == "sleep":
+                    # Only for the time budget, which is measured in time.
+                    time.sleep(step[1])
+                elif kind == "finish":
+                    self.chunk(handler, {}, finish=step[1])
+=== replace desktop/e2e/runs.py
+--- find
+  crash       an approved write runs, then the runtime is killed while the
+--- with
+  continue    with a one-second budget set through the host, a run started
+              with on_time_budget pause pauses (run.paused, awaiting_continue)
+              and sends nothing; continue resumes the same execution (the next
+              turn carries the unread tool result): extend offers the tools,
+              answer does not and ends on the budget; a second continue and a
+              cancel while paused behave; a run that did not ask wraps up
+  steering    the server side of the client-held steering queue: a steer sent
+              while the session is busy is refused and not saved; two clients
+              sending at once get exactly one admitted; queued turns then run
+              in order
+  crash       an approved write runs, then the runtime is killed while the
+=== replace desktop/e2e/runs.py
+--- find
+        "regen": lambda p, turn, index: {
+--- with
+        "steer-hold": lambda p, turn, index: [("text", "Working"), ("gate", "steer-hold"), ("text", " done."), ("finish", "stop")],
+        "regen": lambda p, turn, index: {
+=== replace desktop/e2e/runs.py
+--- find
+def scripts(provider):
+    def write(name, content):
+        return ("tool", "fs.write", {"path": name, "content": content, "append": True})
+--- with
+def scripts(provider):
+    def write(name, content):
+        return ("tool", "fs.write", {"path": name, "content": content, "append": True})
+
+    def slow_lookup(p, turn, index):
+        # The tool's turn outlasts a one-second budget, so the budget runs
+        # out with its result unread.
+        if turn == 0:
+            return [("tool", "datetime.now", {}), ("sleep", 1.5), ("finish", "tool_calls")]
+        return [("text", "Found it."), ("finish", "stop")]
+
+    for name in ("continue-extend", "continue-answer", "continue-cancel", "continue-default"):
+        provider.scripts[name] = slow_lookup
+=== replace desktop/e2e/runs.py
+--- find
+def scenario_crash(host, provider, workspace, report):
+--- with
+def scenario_continue(host, provider, workspace):
+    check = Checks("continue")
+    status, body = host.fetch("PUT", f"{API}/config/agent.wall_clock_secs", {"value": "1"})
+    check.expect("a one-second time budget is set through the host", status == 200, (status, body))
+    try:
+        for mode in ("extend", "answer"):
+            name = f"continue-{mode}"
+            session = host.new_session()
+            status, created = host.fetch(
+                "POST", f"{API}/runs",
+                {"message": f"[e2e:{name}] Look it up.", "session_id": session, "on_time_budget": "pause"},
+            )
+            check.expect(f"{mode}: the run starts", status == 202, (status, created))
+            if status != 202:
+                continue
+            run = created["id"]
+            stream = Stream(host, run)
+            paused = stream.until(lambda s: s.has("run.paused"))
+            _, info = host.fetch("GET", f"{API}/runs/{run}")
+            waiting = len(provider.requests(name))
+            status, answered = host.fetch("POST", f"{API}/runs/{run}/continue", {"mode": mode})
+            stream.finish()
+            again = host.fetch("POST", f"{API}/runs/{run}/continue", {"mode": mode})
+            requests = provider.requests(name)
+            final = (stream.data("run.completed") or [{}])[-1]
+            check.expect(f"{mode}: the run paused on its budget", paused and (info or {}).get("status") == "awaiting_continue", (stream.names(), info))
+            check.expect(f"{mode}: nothing was sent while paused", waiting == 1, waiting)
+            check.expect(f"{mode}: the continue was taken", status == 200 and (answered or {}).get("continued") is True, (status, answered))
+            check.expect(f"{mode}: the same execution carried on", len(requests) == 2 and requests[1]["roles"][-1:] == ["tool"], requests)
+            if mode == "extend":
+                check.expect("extend: the tools are offered again", len(requests) == 2 and requests[1]["offered"] > 0, requests)
+                check.expect("extend: the run completed", final.get("reason") == "EndTurn", final)
+            else:
+                check.expect("answer: the final turn has no tools", len(requests) == 2 and requests[1]["offered"] == 0, requests)
+                check.expect("answer: it ended on the budget", final.get("reason") == "WallClockExceeded", final)
+            check.expect(f"{mode}: the answer arrived", "Found it." in stream.text(), stream.text())
+            check.expect(f"{mode}: a second continue is refused", again[0] == 409, again)
+
+        session = host.new_session()
+        status, created = host.fetch(
+            "POST", f"{API}/runs",
+            {"message": "[e2e:continue-cancel] Look it up.", "session_id": session, "on_time_budget": "pause"},
+        )
+        if status == 202:
+            run = created["id"]
+            stream = Stream(host, run)
+            stream.until(lambda s: s.has("run.paused"))
+            host.fetch("POST", f"{API}/runs/{run}/cancel", {})
+            stream.finish()
+            _, info = host.fetch("GET", f"{API}/runs/{run}")
+            check.expect("cancel: a paused run is cancelled", (info or {}).get("status") == "cancelled" and stream.has("run.cancelled"), (info, stream.names()))
+            check.expect("cancel: nothing more was sent", len(provider.requests("continue-cancel")) == 1, provider.requests("continue-cancel"))
+        else:
+            check.expect("cancel: the run starts", False, (status, created))
+
+        session = host.new_session()
+        stream = Stream(host, host.start_run(session, "[e2e:continue-default] Look it up.")).finish()
+        requests = provider.requests("continue-default")
+        final = (stream.data("run.completed") or [{}])[-1]
+        check.expect("default: a run that did not ask never pauses", not stream.has("run.paused"), stream.names())
+        check.expect("default: it wraps up without tools", final.get("reason") == "WallClockExceeded" and len(requests) == 2 and requests[1]["offered"] == 0, (final, requests))
+    finally:
+        host.fetch("PUT", f"{API}/config/agent.wall_clock_secs", {"value": ""})
+    return check
+
+
+def scenario_steering(host, provider, workspace):
+    check = Checks("steering")
+    session = host.new_session()
+    first = host.start_run(session, "[e2e:steer-hold] Start.")
+    stream = Stream(host, first)
+    stream.until(lambda s: "Working" in s.text())
+    busy = host.fetch("POST", f"{API}/runs", {"message": "[e2e:steer] Too early.", "session_id": session})
+    provider.open("steer-hold")
+    stream.finish()
+    recorded(host, session, 1)
+    check.expect("a steer sent while the session is busy is refused", busy[0] == 409, busy)
+
+    # Two clients send their queued steer at once: exactly one is admitted.
+    deadline = time.time() + 10
+    while True:
+        sent = [
+            host.send("fetch", method="POST", target=f"{API}/runs",
+                      body=json.dumps({"message": f"[e2e:steer] Steer {n}.", "session_id": session}))
+            for n in (1, 2)
+        ]
+        answers = [host.answer(ident) for ident in sent]
+        statuses = sorted(answer["status"] for answer in answers)
+        if statuses != [409, 409] or time.time() > deadline:
+            break
+        time.sleep(0.1)
+    check.expect("two clients at once: exactly one is admitted", statuses == [202, 409], statuses)
+    if statuses == [202, 409]:
+        won = 0 if answers[0]["status"] == 202 else 1
+        Stream(host, json.loads(answers[won]["body"])["id"]).finish()
+        recorded(host, session, 2)
+        other = f"[e2e:steer] Steer {2 - won}."
+        deadline, follow = time.time() + 10, None
+        while time.time() < deadline:
+            follow = host.fetch("POST", f"{API}/runs", {"message": other, "session_id": session})
+            if follow[0] != 409:
+                break
+            time.sleep(0.1)
+        if follow and follow[0] == 202:
+            Stream(host, follow[1]["id"]).finish()
+        saved = recorded(host, session, 3)
+        prompts = [m.get("content") for m in saved.get("messages", []) if m.get("role") == "user"]
+        expected = ["[e2e:steer-hold] Start.", f"[e2e:steer] Steer {won + 1}.", other]
+        check.expect("the queued turns ran in the order admitted, the refused one never saved", prompts == expected, prompts)
+    return check
+
+
+def scenario_crash(host, provider, workspace, report):
+=== replace desktop/e2e/runs.py
+--- find
+            # Last: it kills the runtime, and the host restarts one at most once a minute.
+--- with
+            ("continue", lambda: scenario_continue(host, provider, workspace)),
+            ("steering", lambda: scenario_steering(host, provider, workspace)),
+            # Last: it kills the runtime, and the host restarts one at most once a minute.
+=== end
