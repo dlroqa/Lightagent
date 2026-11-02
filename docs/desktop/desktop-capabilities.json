@@ -117,7 +117,7 @@
    "not-applicable": 29
   },
   "parity_denominator": 227,
-  "parity_implemented": 29,
+  "parity_implemented": 34,
   "pending_decision_rows": 0,
   "not_counted_duplicates": 26
  },
@@ -4984,10 +4984,10 @@
    "backend": "api: POST /approvals/{run}",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Approval card Allow once sends approve true (UI e2e: e2e/runs.mjs in the standalone Web UI render job, browser only); through the desktop host a granted write runs exactly once (desktop/e2e/runs.py approve, host-level), and a pending approval is refused during a profile switch and rejected explicitly when runs are stopped (switch.py pending); native WebView automation pending D8 (not claimed)",
+   "tested_sha": "e164dde7b172b1c74d84b423cadd9479ee1d7cdc",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41451624446 (check, standalone Web UI render: e2e/runs.mjs); https://github.com/dlroqa/Lightagent/actions/runs/41451624678 (desktop: desktop/e2e/runs.py, switch.py)"
   },
   {
    "id": "slash.reject",
@@ -5010,10 +5010,10 @@
    "backend": "api: POST /approvals/{run}",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Approval card Deny, operated from the keyboard, sends approve false (UI e2e: e2e/runs.mjs, browser only); through the desktop host a denied write never runs and the model is told (runs.py deny, host-level); native WebView automation pending D8 (not claimed)",
+   "tested_sha": "e164dde7b172b1c74d84b423cadd9479ee1d7cdc",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41451624446 (check, standalone Web UI render: e2e/runs.mjs); https://github.com/dlroqa/Lightagent/actions/runs/41451624678 (desktop: desktop/e2e/runs.py, switch.py)"
   },
   {
    "id": "slash.stop",
@@ -5034,10 +5034,10 @@
    "backend": "api: POST /runs/{id}/cancel",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Stop in the conversation composer sends the cancel for the working run (UI e2e: e2e/runs.mjs, browser only; the test found Stop unreachable in the chat layout, fixed in row 24); through the desktop host a cancelled run ends cancelled, is saved as Cancelled and frees the session (runs.py cancel); native WebView automation pending D8 (not claimed)",
+   "tested_sha": "e164dde7b172b1c74d84b423cadd9479ee1d7cdc",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41451624446 (check, standalone Web UI render: e2e/runs.mjs); https://github.com/dlroqa/Lightagent/actions/runs/41451624678 (desktop: desktop/e2e/runs.py, switch.py)"
   },
   {
    "id": "slash.continue",
@@ -5059,10 +5059,10 @@
    "backend": "api: POST /runs/{id}/continue, for a run started with on_time_budget pause (D5a-3); resumes the same execution",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "A paused run shows a card whose Continue sends mode extend (UI e2e: e2e/runs.mjs, browser only); the API resumes the same execution with the unread tool result, answer ends without tools, cancel while paused and the wrap-up default behave (crates/lightagent/tests/desktop_continue.rs, all four platforms; runs.py continue through the desktop host); native WebView automation pending D8 (not claimed)",
+   "tested_sha": "e164dde7b172b1c74d84b423cadd9479ee1d7cdc",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41451624446 (check, standalone Web UI render: e2e/runs.mjs); https://github.com/dlroqa/Lightagent/actions/runs/41451624678 (desktop: desktop/e2e/runs.py, switch.py); https://github.com/dlroqa/Lightagent/actions/runs/41445389177 (check at 0d37299: desktop_continue.rs, all four platforms)"
   },
   {
    "id": "slash.update",
@@ -5233,10 +5233,10 @@
    "backend": "client-held FIFO queue over api: POST /runs, as the terminal holds it; no backend queue (D5a-3)",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Two steers typed during a run are queued and sent in order once it ends, nothing sent meanwhile (UI e2e: e2e/runs.mjs, browser only); server side through the desktop host: a busy steer is refused and not saved, concurrent submissions admit exactly one, queued turns run in order (runs.py steering). The queue is held by the page and does not survive it, as the terminal queue does not survive its process; native WebView automation pending D8 (not claimed)",
+   "tested_sha": "e164dde7b172b1c74d84b423cadd9479ee1d7cdc",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41451624446 (check, standalone Web UI render: e2e/runs.mjs); https://github.com/dlroqa/Lightagent/actions/runs/41451624678 (desktop: desktop/e2e/runs.py, switch.py)"
   },
   {
    "id": "key.approval-answer",

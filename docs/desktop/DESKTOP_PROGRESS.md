@@ -40,7 +40,9 @@ next update names its run.
 | Row 20: D5b follow-through, a dropped run lease is free at once | **CI-validated** at `e5363fc` (check, desktop, jev evaluation, subagents; first run) | `desktop/d5b2-lease-release` (stacked on row 19 `db44a46`) | https://github.com/dlroqa/Lightagent/pull/114 | `e5363fc9c875c6b83c1606b24542d247e25f0e3f` | `e5363fc` / tree `ce2f291600512e2105ccb47ced1895342ba44f0c` |
 | Row 21: D5a-1 the host relay resumes a broken stream; runs through the host | **CI-validated** at `64d632f` (check, desktop, jev evaluation, subagents; one macOS arm64 bundling job was never given a runner and was re-run once, passing) | `desktop/d5a1-host-runs` (stacked on row 20) | https://github.com/dlroqa/Lightagent/pull/115 | `64d632ff37f4033343baf3ce2ec663b0dae4b999` | `64d632f` / tree `169f76fb18559562563b792876203128e4f1b7e0` |
 | Row 22: D5a-2 a turn its runtime did not live to record is Interrupted, never rerun | **CI-validated** at `c6fd6ac` (check, desktop, jev evaluation, subagents; first run) | `desktop/d5a2-interrupted` (stacked on row 21) | https://github.com/dlroqa/Lightagent/pull/116 | `c6fd6aca300ca93bd276c8f4e879586c9747dd58`, plus this documentation commit | `c6fd6ac` / tree `c98ac0acbcd1f716f2a3610b111337158eddf3bd` |
-| D5a-3 (time-budget continue and steering), D6–D10 | not started | — | — | — | — |
+| Row 23: D5a-3 time-budget pause and Continue over the API; steering semantics; every OS lock unlocks on drop | **CI-validated** at `0d37299` (check, desktop, jev evaluation, subagents) after three fixes (see "Row 23") | `desktop/d5a3-continue` (stacked on row 22 `da950d1`) | https://github.com/dlroqa/Lightagent/pull/117 | `0d372994fb15bb2353af7291bbdaf50976a12809` | `0d37299` / tree `1a85dff15c8bfcef2cdfdca1034342ad711b489e` |
+| Row 24: D5a-4 the Continue card, Stop in the conversation view, browser coverage of the run controls | **CI-validated** at `e164dde` (check including the standalone Web UI render, desktop, jev evaluation, subagents) after two product fixes the test found (see "Row 24") | `desktop/d5a4-run-controls-ui` (stacked on row 23) | https://github.com/dlroqa/Lightagent/pull/118 | `e164dde7b172b1c74d84b423cadd9479ee1d7cdc`, plus this documentation commit | `e164dde` / tree `37b104da3779c007d1f65b8b70db1b72e377b4be` |
+| D6–D10 | not started | — | — | — | — |
 
 The latest progress record is the copy on the highest stacked desktop branch.
 Branches lower in the stack keep the record as of their own commit.
@@ -1171,6 +1173,125 @@ is a client-held FIFO queue that starts the next turn when the session is
 free. Whether it needs a backend operation (the inventory's current note) is
 decided in row 23.
 
+## Row 23 — D5a-3: time-budget pause and Continue over the API; steering
+
+**Audit: time-budget behavior before this row.**
+
+| Question | API runs (desktop runtime, `serve`) | Terminal chat |
+|---|---|---|
+| A run reaches its time budget with tool results the model has not read | wraps up: one final turn with tools withheld, then `WallClockExceeded`; the run finishes | pauses (`WallClockPolicy::Pause`) and asks |
+| Resumable execution state kept | none | the loop's suspended state in memory: the whole conversation including the unread tool results, the turn and tool-call counters, the remaining batch; plus the session lease |
+| What survives | the saved transcript (prompts and answers) and each tool's history excerpt; no pending approval (an approval wait is separate) | everything above until `/continue`, or until a new prompt drops it |
+| `/continue` | — | resumes the **same execution**: Extend renews only the clock (turn and tool budgets still count); Answer takes the tool-less turn |
+
+A new turn on the session (`runs.create`) is **not** a resume. It starts a
+new execution from the saved transcript, which holds no unread tool results
+and resets the run's counters. It is never labelled a continuation.
+
+**Change.**
+- `POST /runs` takes `on_time_budget: "pause"`. The default, `wrap_up`, is
+  unchanged.
+- A pausing run emits `run.paused` {reason, elapsed_secs} and shows status
+  `awaiting_continue`. It keeps its session lease and its interruption
+  journal while paused: a crash while paused records `Interrupted`.
+- `POST /runs/{id}/continue` {mode: `extend` | `answer`} resumes the same
+  execution. It returns 409 unless the run is paused; a revoked run takes
+  no continuation; a cancel ends a paused run with `run.cancelled`.
+- Desktop contract `runs.continue`, refused during a profile switch. A new
+  non-counted inventory row (`api.post.runs.id.continue`).
+- `RunFactory::run_controlled`, with a default that runs as before, so
+  embeddings that cannot pause never do.
+
+**Steering, defined (no backend operation needed).**
+
+| Aspect | Behavior |
+|---|---|
+| Kind | Queued follow-up instructions. Nothing is applied inside a running turn (the core loop has no mid-turn injection; the terminal queues too) |
+| Ordering | FIFO in the client; each is sent as the session's next turn once the session is free |
+| Ownership and permissions | Each is an ordinary `runs.create` on the session: the same ownership, `RunsWrite`/`SessionsWrite` and profile checks |
+| Cancellation | Stop cancels the running turn; the queue stays and can be cleared ("Clear queue") |
+| Profile switch | A switch is blocked while a turn runs; queued steers wait in the client |
+| Reconnect | The queue is in the page, unaffected by stream reconnects |
+| Crash | A runtime crash interrupts the running turn (row 22); the queue in the page is kept and sent once the restarted runtime admits the session |
+| Persistence | None: the queue disappears with its page, as the terminal queue does with its process |
+| Duplicates and several clients | The server admits one turn per session across every process: two clients sending at once get exactly one admitted, and the other is refused (409) and can resend |
+
+The inventory's earlier "backend operation required" note is withdrawn. The
+CLI semantics (a process-local queue) are met by the client-held queue.
+
+**Interruption recovery, reviewed.** A second runtime started while the
+first is mid-turn does not mark that turn Interrupted, at startup or when
+the session is asked for a turn: the live process holds the session's
+lease, so recovery skips it. It is recorded only once that process is gone
+(`desktop_interrupted.rs` `a_second_runtime_leaves_a_live_turn_alone`, all
+four platforms). Recovery never replays a provider request or a tool.
+
+**Short lock release, verified (the row 20 limitation).** Every
+`paths::lock_exclusive` lock (config, session writes, run leases) is now an
+`ExclusiveLock` that unlocks before it closes. `run_lease.rs` drops a write
+lock while a child is between fork and exec and takes it again at once,
+alongside the Linux control that shows the window is real. So a child that
+is still starting can no longer delay any of these locks, let alone run one
+into the 5 s busy timeout. A genuine holder can still make a writer wait up
+to 5 s, as designed.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Edit request `066`: its serve change held a placeholder line; the prepared commit `c5fc37e`'s run was never attached to a branch. `067` failed on a partial-line find (nothing was created). `067b` applied | `8717263` / `7400f1a` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41439662939 |
+| 2026-11-02 | `check`: **failure**, clippy denies `expect` in library code (`ExclusiveLock::into_file`). `desktop`: **failure** in run scenarios: a wrap-up turn adds an unmarked instruction, so the fake provider filed it as unmarked (harness) | `8717263` | https://github.com/dlroqa/Lightagent/actions/runs/41439783665, https://github.com/dlroqa/Lightagent/actions/runs/41439783419 |
+| 2026-11-02 | `068` (no `expect`; providers attribute wrap-up turns); the branch moved without force | `a398bfb` / `259309b` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41442426431 |
+| 2026-11-02 | `check`: **failure**, E0063, the test-only `RunState::detached` lacked the new field. `desktop`: **success** | `a398bfb` | https://github.com/dlroqa/Lightagent/actions/runs/41442503903, https://github.com/dlroqa/Lightagent/actions/runs/41442503498 |
+| 2026-11-02 | `070`; the branch moved without force | `0d37299` / `1a85dff` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41445292162 |
+| 2026-11-02 | `check`, `desktop`, `jev evaluation`, `subagents`: **success** (desktop_continue.rs and the live-turn test on all four platforms; runs.py continue and steering) | `0d37299` | https://github.com/dlroqa/Lightagent/actions/runs/41445389177, https://github.com/dlroqa/Lightagent/actions/runs/41445389192, https://github.com/dlroqa/Lightagent/actions/runs/41445389256, https://github.com/dlroqa/Lightagent/actions/runs/41445389257 |
+
+## Row 24 — D5a-4: the Continue card, Stop in the conversation view, browser coverage
+
+- The Web UI creates runs with `on_time_budget: "pause"`: interactive, like
+  the terminal.
+- A paused run shows a card in the approval card's pattern: Continue
+  (primary) and Answer now.
+- **Defects found by the new browser test, both fixed:**
+  - The only Stop button was in the top bar, which the chat shell hides, so
+    a working run could not be stopped from the conversation. Stop is now
+    in the composer while a run works.
+  - The stream hook did not listen for `run.paused`. A browser
+    `EventSource` delivers only the named events it listens for, so a
+    paused run showed nothing.
+- `e2e/runs.mjs` (browser UI evidence; scripted proxy in front of the live
+  harness; what each control sends is recorded):
+  - Allow once sends approve true;
+  - Deny, from the keyboard, sends approve false;
+  - Stop cancels the working run;
+  - Continue sends mode extend;
+  - two steers typed during a run are queued and sent in order after it,
+    with nothing sent meanwhile;
+  - every run created asks to pause.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | `069`; branch `desktop/d5a4-run-controls-ui`; draft PR #118. Row 23's fix was brought in by a merge commit (parents `2809f08`, `0d37299`) created through the git data API, so neither branch was rewritten | `2809f08` → `3bd001c` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41442836704 |
+| 2026-11-02 | `check`: **failure**, the render job timed out on Stop | `3bd001c` | https://github.com/dlroqa/Lightagent/actions/runs/41445394833 |
+| 2026-11-02 | `071` (each control a separate step, with diagnostics) → `d2a3708`: Allow once and Deny passed; Stop was not found in the conversation (the top bar is hidden in the chat shell) | `d2a3708` | https://github.com/dlroqa/Lightagent/actions/runs/41448883343 |
+| 2026-11-02 | `072` (Stop in the composer) → `76506c2`: Stop passed; no card for a paused run | `76506c2` | https://github.com/dlroqa/Lightagent/actions/runs/41449559908 |
+| 2026-11-02 | `073` (listen for `run.paused`): `check` (all render checks passed), `desktop`, `jev evaluation`, `subagents`: **success** | `e164dde` / `37b104d` | https://github.com/dlroqa/Lightagent/actions/runs/41451624446, https://github.com/dlroqa/Lightagent/actions/runs/41451624678, https://github.com/dlroqa/Lightagent/actions/runs/41451624448, https://github.com/dlroqa/Lightagent/actions/runs/41451624819 |
+
+**The D5 gate (DESKTOP_ACCEPTANCE.md), reviewed whole.**
+
+| Gate item | Evidence | Class |
+|---|---|---|
+| One turn at a time per session across processes; a crashed holder releases it; the write lock is not held during inference | rows 19-20 (`desktop_run_admission.rs`, `run_lease.rs`) | backend, separate processes |
+| Streaming, a tool call, approval granted and denied, cancel | row 21 runs.py; row 24 runs.mjs | host-level; browser |
+| Continue after a time-budget pause | row 23 desktop_continue.rs and runs.py; row 24 runs.mjs | backend; host-level; browser |
+| Steering | row 23 runs.py (server side); row 24 runs.mjs (the queue) | host-level; browser |
+| Reconnect with no duplicated or missing event ids | row 21 runs.py relay | host-level |
+| A profile switch with a pending approval records an explicit rejection | row 21 switch.py pending | host-level |
+| A sidecar crash mid-run is visible and never re-executed | row 22 runs.py crash, desktop_interrupted.rs | host-level; backend |
+| R1: regenerate through the host keeps the saved answer on failure or cancel | row 21 runs.py regenerate | host-level |
+
+**Native WebView interaction is not claimed for any of these (D8).** With
+that recorded, the D5 gate is met at backend, host and browser level.
+Coverage: **34 of 227**.
+
 ## Artifacts and retention
 
 | Artifact | Run | Retention |
@@ -1183,6 +1304,8 @@ decided in row 23.
 | `desktop-cargo-lock` | 40999470324 | 30 days |
 | `desktop-switch-e2e`: `switch-e2e/` (switch.json, reports, `driver-switch-pending.log`) and `runs-e2e/` (runs.json with the provider log, `report-runs.txt`, `driver-runs.log`) | 41431492257 (row 21), 41434134035 (row 22) | 30 days |
 | `prepared-062…`, `prepared-063…`, `prepared-064…` (commit, tree, diff) | 41429457355, 41431358008, 41433988154 | 30 days |
+| `desktop-switch-e2e` (runs.json with the continue and steering scenarios) | 41445389192 (row 23), 41451624678 (row 24) | 30 days |
+| `lightagent-web-screens`: `runs/` (approval, paused, steering screenshots, record.json of what each control sent) | 41451624446 | repository default |
 
 ## Local backup
 
@@ -1211,6 +1334,8 @@ decided in row 23.
 
   | 2026-11-02T11:24:27Z | `d5b-run-admission` `db44a46`, `d5b2-lease-release` `e5363fc`, `d5a1-host-runs` `64d632f`, `d5a2-interrupted` `c6fd6ac`, `tools/source-edit` `aef2d2e` (lower slices unchanged) | rows 20-22 validated; fetch only (remote-tracking refs), working tree `master` `12582a0` clean |
 
+  | 2026-11-02T13:26:47Z | `d5a2-interrupted` `da950d1`, `d5a3-continue` `0d37299`, `d5a4-run-controls-ui` `e164dde`, `tools/source-edit` `4c05f6e` (lower slices unchanged) | rows 23-24 validated; fetch only (remote-tracking refs), working tree `master` `12582a0` clean |
+
   A documentation commit cannot record itself. Each row names the heads
   that existed when the sync ran. The commit that carries a row is
   backed up by the next sync.
@@ -1223,11 +1348,14 @@ The owner's order of 2026-11-02 (fourth continuation, DESKTOP_CLAUDE_PROMPT.md �
 2. D5a is split by dependency: row 21 (host relay resume plus run
    scenarios, R1) and row 22 (sidecar crash: interrupted, never rerun) are
    done.
-3. **Row 23 (next), D5a-3:** continue after a time-budget pause (a new API
-   operation and run state, with host scenarios), and the steering decision
-   and evidence. Then the D5 gate is reviewed as a whole.
-4. D6-D10 in dependency order. D8 keeps the native WebView checks (Settings,
-   profile switching, close with active runs, response actions R2-R5).
+3. Row 23 (Continue over the API, steering semantics, locks) and row 24
+   (Continue card, Stop in the conversation, browser coverage) are done. The
+   D5 gate is met at backend, host and browser level; native WebView is D8.
+4. **Next: D6** (tools, MCP, extensions and skills), then D7-D10 in
+   dependency order. D8 keeps the native WebView checks (Settings, profile
+   switching, close with active runs, run controls, response actions
+   R2-R5). Before merge approval (D10), the exact candidate merge sequence is
+   simulated on hosted runners and every candidate tree validated.
 
 Previous order (DESKTOP_CLAUDE_PROMPT.md §5), kept for reference:
 

@@ -5,9 +5,9 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 ## Coverage
 
 - Denominator: 227
-- Implemented: 29 of 227
+- Implemented: 34 of 227
 - Pending D1 decision rows: 0
-- D5a note (2026-11-02, rows 21-22): the operations behind `slash.approve`, `slash.reject` and `slash.stop` (and #98's regenerate) now have host-level end-to-end evidence through the desktop host (desktop/e2e/runs.py, switch.py). They are not counted until a UI path is verified (browser UI e2e at least; native WebView in D8). `slash.continue` and `key.steer` remain not started (row 23)
+- D5a note (2026-11-02, rows 21-24): `slash.approve`, `slash.reject`, `slash.stop`, `slash.continue` and `key.steer` are implemented at `e164dde`: browser UI e2e (e2e/runs.mjs), host-level (desktop/e2e/runs.py, switch.py) and backend (desktop_continue.rs) evidence; native WebView interaction is D8 and not claimed. #98's regenerate (`api.post.sessions.id.regenerate`) has host-level R1 evidence and stays not counted until its browser and native checks (R1 is met at host level; R2-R5 are D8)
 - Total rows: 334
 
 | Kind | Rows |
@@ -342,10 +342,10 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `slash.onboard` | `/onboard` | applicable | yes | Profiles/Workspaces: guidance (file picker / drop) | extract: chat.rs onboard | not-started | `crates/lightagent/src/slash.rs:75` |
 | `slash.onboard-remove` | `/onboard remove` | applicable | yes | Profiles/Workspaces: guidance remove | extract: chat.rs onboard remove | not-started | `crates/lightagent/src/slash.rs:76` |
 | `slash.new` | `/new` | applicable | yes | Conversations: new | api: POST /sessions | not-started | `crates/lightagent/src/slash.rs:82` |
-| `slash.approve` | `/approve` | applicable | yes | Conversations: approval card | api: POST /approvals/{run} | not-started | `crates/lightagent/src/slash.rs:83` |
-| `slash.reject` | `/reject` | applicable | yes | Conversations: approval card | api: POST /approvals/{run} | not-started | `crates/lightagent/src/slash.rs:84` |
-| `slash.stop` | `/stop` | applicable | yes | Conversations: stop | api: POST /runs/{id}/cancel | not-started | `crates/lightagent/src/slash.rs:85` |
-| `slash.continue` | `/continue` | applicable | yes | Conversations: continue | api: POST /runs/{id}/continue, for a run started with on_time_budget pause (D5a-3); resumes the same execution | not-started | `crates/lightagent/src/slash.rs:86` |
+| `slash.approve` | `/approve` | applicable | yes | Conversations: approval card | api: POST /approvals/{run} | implemented | `crates/lightagent/src/slash.rs:83` |
+| `slash.reject` | `/reject` | applicable | yes | Conversations: approval card | api: POST /approvals/{run} | implemented | `crates/lightagent/src/slash.rs:84` |
+| `slash.stop` | `/stop` | applicable | yes | Conversations: stop | api: POST /runs/{id}/cancel | implemented | `crates/lightagent/src/slash.rs:85` |
+| `slash.continue` | `/continue` | applicable | yes | Conversations: continue | api: POST /runs/{id}/continue, for a run started with on_time_budget pause (D5a-3); resumes the same execution | implemented | `crates/lightagent/src/slash.rs:86` |
 | `slash.update` | `/update` | not-applicable (D1-Q2) | no | (decision D1-Q2) |  | not-started | `crates/lightagent/src/slash.rs:87` |
 | `slash.exit` | `/exit` | not-applicable | no | Window/session close is native |  | not-started | `crates/lightagent/src/slash.rs:88` |
 
@@ -357,7 +357,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `key.ctrl-c` | `chat key: ctrl-c` | not-applicable | no | Native window close / Stop button (slash.stop) |  | not-started | `crates/lightagent/src/chat.rs:1963` |
 | `key.ctrl-d` | `chat key: ctrl-d` | not-applicable | no | Native window close |  | not-started | `crates/lightagent/src/chat.rs:1964` |
 | `key.line-editing` | `chat key: line-editing` | not-applicable | no | Provided by the native text field |  | not-started | `crates/lightagent/src/chat.rs:1973` |
-| `key.steer` | `chat key: steer` | applicable | yes | Conversations: composer stays enabled during a run → queued steer | client-held FIFO queue over api: POST /runs, as the terminal holds it; no backend queue (D5a-3) | not-started | `crates/lightagent/src/chat.rs:2955` |
+| `key.steer` | `chat key: steer` | applicable | yes | Conversations: composer stays enabled during a run → queued steer | client-held FIFO queue over api: POST /runs, as the terminal holds it; no backend queue (D5a-3) | implemented | `crates/lightagent/src/chat.rs:2955` |
 | `key.approval-answer` | `chat key: approval-answer` | applicable | dup→`slash.approve` |  |  | not-started | `crates/lightagent/src/chat.rs:2031` |
 
 ## acp-method
