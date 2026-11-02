@@ -333,10 +333,9 @@ export async function checkRunControls(browser, base, outDir) {
       await send("Look up the time again.");
       if (!(await until(async () => (await pausedCard.count()) === 1))) throw new Error("no card for the second paused run");
       await page.reload({ waitUntil: "domcontentloaded" });
-      await composer.waitFor({ timeout: 15000 });
-      if (!(await until(async () => (await pausedCard.count()) === 1, 5000))) {
-        await page.getByText(title, { exact: true }).first().click({ timeout: 15000 });
-      }
+      // The reloaded page opens on its welcome screen; the conversation is
+      // picked from the list, as a person would.
+      await page.getByText(title, { exact: true }).first().click({ timeout: 15000 });
       if (!(await until(async () => (await pausedCard.count()) === 1))) throw new Error("the reloaded page did not find the paused run");
       await page.screenshot({ path: `${dir}/paused-after-reload.png` });
       if (record.created.length !== 8) throw new Error(`the reload created runs (${record.created.length} created)`);
