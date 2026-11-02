@@ -27,7 +27,8 @@ next update names its run.
 | D1 spike (evidence only, never merged) | runner evidence complete | `desktop/d1-spike` | https://github.com/dlroqa/Lightagent/pull/91 | `82896bcd63f3bd6786dcea12b603241e50a3a9ea` | `82896bc` / tree `d9cde26142a63a716a58f35dc33330be0e90d8b7` |
 | D4c Configuration: one locked, revision-checked writer | **CI-validated** at `0e46892` (check and desktop, every job); the D4 gate items listed under D4c remain | `desktop/d4c-config` (stacked on D4b `7c3e988`) | https://github.com/dlroqa/Lightagent/pull/101 | `0e4689232ae0ce0653367883222b40d41b62218d`, plus this documentation commit | `0e46892` / tree `dd1faa22ddd161d99de2407a312e8ed9d0789c54` |
 | Row 9: response actions delivery (#98 with its adoption) | **CI-validated** at `a51449c` (`desktop` after one re-run of an infrastructure-failed bundling job; see "Row 9") | `desktop/d4c1-response-actions` (stacked on D4c) | https://github.com/dlroqa/Lightagent/pull/102 | `a51449ce66790a1092459167545ac645cf226290`, plus this documentation commit | `a51449c` / tree `ab20d7eb19eecbc47a60a0a9e4a4df1bd85926aa` |
-| Row 10: session writes (#100) | **CI-validated** at `aebd5d6` (check and desktop, every job) | `desktop/d4c2-session-writes` (stacked on row 9 `fbd008c`) | https://github.com/dlroqa/Lightagent/pull/103 | `aebd5d631238b1b8a302df1ec1aa7bba27972369`, plus this documentation commit | `aebd5d6` / tree `e9066c30eac669165e9deb505ee67a0884659df8` |
+| Row 10: session writes (#100) | **CI-validated** at `aebd5d6` (check and desktop, every job) | `desktop/d4c2-session-writes` (stacked on row 9 `fbd008c`) | https://github.com/dlroqa/Lightagent/pull/103 | `aebd5d631238b1b8a302df1ec1aa7bba27972369`, plus the documentation commit `3310dfc` | `aebd5d6` / tree `e9066c30eac669165e9deb505ee67a0884659df8` |
+| Row 11: D4 acceptance (golden files, ordered concurrency, fail-closed keys, routing report, kept Settings edits) | **CI-validated** at `205f01b` (check and desktop, every job, first run). The D4c gate items are met, except those carried forward (see "Row 11") | `desktop/d4c3-config-acceptance` (stacked on row 10 `3310dfc`) | https://github.com/dlroqa/Lightagent/pull/104 | `205f01b731e0a3149ff465bc894aa97605284c76`, plus this documentation commit | `205f01b` / tree `b5bf552d9d4e75630b3c3ecda78c58071d15a87f` |
 | D4d–D10 | not started | — | — | — | — |
 
 The latest progress record is the copy on the highest stacked desktop branch.
@@ -703,6 +704,38 @@ Capability coverage is unchanged: **22 of 227**. Row 10 adds no capability.
   than 5 s, the recorder logs `Busy` and does not write. Nothing is
   overwritten.
 
+## Row 11 — D4 acceptance
+
+Edit request `042`, based on row 10's documentation head `3310dfc`, was
+applied as 32 edits to 15 files.
+
+| D4 gate item | Now | Evidence (all four platforms unless noted) |
+|---|---|---|
+| CLI and desktop write identical files (profile create/use/delete, config set) in isolated homes | **met** | `the_cli_and_the_desktop_write_the_same_files_in_isolated_homes`. Every file in the two homes is compared. The one normalization is the home's own path, which differs by construction. No file was excluded |
+| A Settings save on a revision loaded before a CLI write: 409, nothing written | **met** (D4c) | `a_stale_write_is_refused_with_409_and_writes_nothing` |
+| A Settings save, then a CLI write: both kept | **met** | `a_settings_save_then_a_cli_write_keeps_both` |
+| Unordered races: no lost update (no exact `409` count required) | **met** | D4c's cross-process lock test and core `config::tests` |
+| An unreadable secret file fails closed, with a redacted error | **met for the desktop runtime** | `an_unreadable_key_file_fails_the_run_closed_before_any_request`: the run fails, the error names no path, and the configured endpoint gets no connection. `SecretRef::for_request` is also used by the runtime's history probe and model listing |
+| No secret in the renderer state dump | **met in the browser harness** | `e2e/settings.mjs` checks the DOM, local and session storage, form fields, and the settings response. The native WebView repeats this in D8 |
+| No secret in the diagnostics bundle | **carried to D7** | The bundle does not exist until D7 (`/diagnostics`) adds it, with this test |
+| `jev-routing-report`: shared operation, API route, UI | **met** | `lightagent_core::config_keys::jev_routing_report`; `GET /jev/routing-report` (contract `jev.routing_report`, inventory `api.get.jev.routing-report`); Settings dry-run table. `the_api_routing_report_is_the_cli_routing_report`; e2e |
+| A Settings conflict keeps the unsaved input and offers review and refresh | **met** | e2e: conflict then apply (the other writer's change is kept), and conflict then discard (nothing saved, saved value shown) |
+
+**Carried forward:**
+- **D4d:** the terminal chat still resolves its key with `resolve`, so an
+  unreadable key file there sends no key rather than failing. It moves to
+  protected credentials, with its own test.
+- **D7:** the diagnostics bundle's redaction test.
+- **D8:** native WebView verification of these screens.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Branch `desktop/d4c3-config-acceptance` created at `3310dfc`; edit request `042`; branch moved without force; draft PR #104 | `205f01b` / `b5bf552` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41370688162 |
+| 2026-11-02 | `check` on `205f01b`: **success**, all 13 jobs. The four new `desktop_config.rs` tests ran on all four platforms. `standalone Web UI render` printed `[ok] settings conflict, routing dry run and renderer state` | `205f01b` | https://github.com/dlroqa/Lightagent/actions/runs/41370767535 |
+| 2026-11-02 | `desktop` on `205f01b`: **success**, all 7 jobs, including the inventory and contract checks with `jev.routing_report` | `205f01b` | https://github.com/dlroqa/Lightagent/actions/runs/41370767531 |
+| 2026-11-02 | `jev evaluation` and `subagents`: **success**. The fixture `fail` and `verify` dispatches failed by design, as on every earlier head | `205f01b` | https://github.com/dlroqa/Lightagent/actions/runs/41370767708, https://github.com/dlroqa/Lightagent/actions/runs/41370767658 |
+| 2026-11-02 | Parity: `cli.config.jev-routing-report` is implemented: **23 of 227**. The new `api.get.jev.routing-report` row is backend and not counted (319 rows) | — | DESKTOP_CLI_PARITY.md |
+
 ## Artifacts and retention
 
 | Artifact | Run | Retention |
@@ -745,8 +778,11 @@ Capability coverage is unchanged: **22 of 227**. Row 10 adds no capability.
 
 This is the order the owner set on 2026-11-02 (DESKTOP_CLAUDE_PROMPT.md §4):
 
-1. **Row 11:** the remaining D4 acceptance items, on branch
-   `desktop/d4c3-config-acceptance`, stacked on row 10.
+1. **Row 11** is done (see "Row 11"). Its carried items are listed there.
+   The next slice is **D4d**: providers, models, protected credentials
+   (including the terminal chat's key resolution) and endpoint checks.
+
+   The original row 11 scope, for reference:
    - CLI and desktop configuration and profile files compared byte for byte
      in isolated homes.
    - Ordered concurrency: a Settings save against a revision loaded before a

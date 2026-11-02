@@ -22,7 +22,7 @@ tree are recorded here.
 | 8 | D4c configuration: one locked, revision-checked writer | https://github.com/dlroqa/Lightagent/pull/101 | `desktop/d4c-config` | `desktop/d4b-profile-ui` | `0e46892` | `0e46892` |
 | 9 | Response actions delivery: #98's commits plus their desktop adoption, as one PR | https://github.com/dlroqa/Lightagent/pull/102 | `desktop/d4c1-response-actions` | `desktop/d4c-config` | `a51449c` | `a51449c` |
 | 10 | Session writes: one locked writer (#100) | https://github.com/dlroqa/Lightagent/pull/103 | `desktop/d4c2-session-writes` | `desktop/d4c1-response-actions` | `aebd5d6` | `aebd5d6` |
-| 11 | D4 acceptance: isolated-home golden files, ordered concurrency, secrets, Jev routing report, Settings conflict | opened when prepared | `desktop/d4c3-config-acceptance` | `desktop/d4c2-session-writes` | — | — |
+| 11 | D4 acceptance: isolated-home golden files, ordered concurrency, secrets, Jev routing report, Settings conflict | https://github.com/dlroqa/Lightagent/pull/104 | `desktop/d4c3-config-acceptance` | `desktop/d4c2-session-writes` | `205f01b` | `205f01b` |
 | 12+ | D4d onwards | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
 
 Heads change as slices receive fixes. DESKTOP_PROGRESS.md records every
