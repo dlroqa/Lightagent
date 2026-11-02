@@ -311,7 +311,10 @@ pub async fn search_results(
     // An installation-wide search key is never used, and the query never
     // sent anonymously in its place, for a profile not granted it.
     if policy.search_credential_withheld {
-        return Err("the search credential is not granted to this profile".to_owned());
+        return Err(
+            "the search credential is not granted to this profile, or it cannot be used; nothing was sent"
+                .to_owned(),
+        );
     }
     let mut url = reqwest::Url::parse(endpoint)
         .map_err(|error| format!("invalid search endpoint: {error}"))?;

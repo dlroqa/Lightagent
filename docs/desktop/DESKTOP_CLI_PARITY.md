@@ -5,7 +5,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 ## Coverage
 
 - Denominator: 227
-- Implemented: 25 of 227
+- Implemented: 28 of 227
 - Pending D1 decision rows: 0
 - Total rows: 331
 
@@ -73,6 +73,10 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.config.jev-routing-report` | `205f01b` | Settings dry-run table under the routing permission lists the server's report (UI e2e: e2e/settings.mjs); API = CLI `--json` report (crates/lightagent/tests/desktop_config.rs, all four platforms); desktop: contract operation jev.routing_report; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41370767535), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41370767531) |
 | `setup.provider.key` | `6988f6c` | Settings Provider API key card: save, stale save refused with the entry kept, replace, remove after confirmation, key gone from the page (UI e2e, browser only); API = CLI, write-only, unusable keys fail closed (crates/lightagent/tests/desktop_credentials.rs, all four platforms); desktop: contract operations provider.credential.*; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41378487660), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41378487692) |
 | `cli.models` | `e6f4506` | Settings Check connection, only when asked (UI e2e, browser only); API = CLI models through one bounded check: key to that endpoint only, redirect reported not followed, silent endpoint cut off, unusable key fails closed (crates/lightagent/tests/desktop_providers.rs, all four platforms); desktop: contract operation provider.check; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41380804834), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41380804835) |
+
+| `setup.provider.saved` | `bb76e74` | Settings Providers and models card: add, stale save refused with the entry kept, rename, remove after confirmation with a stale removal refused (UI e2e, browser only); one shared operation set for setup and the API: duplicates refused, rename keeps the key, a new endpoint releases it unless keep_key, removal releases it (saved_providers unit tests; crates/lightagent/tests/desktop_saved_providers.rs at 108dac6, all four platforms); desktop: contract operations providers.*; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41397533047), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41397532957) |
+| `setup.provider.url` | `bb76e74` | Settings Use selects a provider, the key card follows the new endpoint (UI e2e, browser only); the endpoint takes only its own key, never the previous one (crates/lightagent/tests/desktop_key_binding.rs at 8e3919b and desktop_saved_providers.rs at 108dac6, all four platforms); per-provider bounded check; desktop: contract operations provider.active.set, providers.check; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41397533047), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41397532957) |
+| `setup.provider.model` | `bb76e74` | Settings model field and List models (UI e2e, browser only); API = shared select_model with the active profile following, ordered concurrency against a CLI write (desktop_saved_providers.rs at 108dac6, all four platforms); desktop: contract operation provider.model.set; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41397533047), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41397532957) |
 
 ## What the drift check cannot detect automatically
 
@@ -311,10 +315,10 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | ID | Surface | Applicability | Counts | UI path | Backend | Status | Source |
 |---|---|---|---|---|---|---|---|
 | `setup.profiles.menu` | `lightagent setup → profiles` | applicable | dup→`cli.profile.create` | Profiles/Workspaces | same as cli.profile.* | not-started | `crates/lightagent/src/setup.rs:748` |
-| `setup.provider.saved` | `lightagent setup → provider` | applicable | yes | Providers/Models: saved providers | extract: setup.rs provider section | not-started | `crates/lightagent/src/setup.rs:326` |
-| `setup.provider.url` | `lightagent setup → provider` | applicable | yes | Providers/Models: endpoint + test connection | extract: setup.rs provider section; provider_models() | not-started | `crates/lightagent/src/setup.rs:67` |
+| `setup.provider.saved` | `lightagent setup → provider` | applicable | yes | Providers/Models: saved providers | shared: lightagent_core::saved_providers; api: GET\|POST /providers, GET\|PATCH\|DELETE /providers/{id} | implemented | `crates/lightagent/src/setup.rs:326` |
+| `setup.provider.url` | `lightagent setup → provider` | applicable | yes | Providers/Models: endpoint + test connection | shared: saved_providers::select + provider_keys::bound_key; api: PUT /provider/active, POST /providers/{id}/check | implemented | `crates/lightagent/src/setup.rs:67` |
 | `setup.provider.key` | `lightagent setup → provider` | applicable | yes | Providers/Models: key entry (write-only; host sends to backend; renderer shows redacted status) | shared: lightagent_core::provider_keys; api: GET\|PUT\|DELETE /provider/credential | implemented | `crates/lightagent/src/setup.rs:391` |
-| `setup.provider.model` | `lightagent setup → provider` | applicable | yes | Providers/Models: model picker | extract: setup.rs provider section | not-started | `crates/lightagent/src/setup.rs:97` |
+| `setup.provider.model` | `lightagent setup → provider` | applicable | yes | Providers/Models: model picker | shared: saved_providers::select_model; api: PUT /provider/model | implemented | `crates/lightagent/src/setup.rs:97` |
 | `setup.tools.mode` | `lightagent setup → tools` | applicable | yes | Tools/MCP/Extensions: local tools | api: PUT /settings (partial) | not-started | `crates/lightagent/src/setup.rs:910` |
 | `setup.tools.workspace` | `lightagent setup → tools` | applicable | yes | Profiles/Workspaces: workspace folder (picker) | api: PUT /settings (partial) | not-started | `crates/lightagent/src/setup.rs:920` |
 | `setup.web.mode` | `lightagent setup → web` | applicable | yes | Settings: web access | api: PUT /settings (partial) | not-started | `crates/lightagent/src/setup.rs:945` |

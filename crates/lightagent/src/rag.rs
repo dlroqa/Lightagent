@@ -114,17 +114,21 @@ impl RemoteRag {
             qdrant_timeout: Duration::from_secs(qdrant.timeout_secs),
             infinity_timeout: Duration::from_secs(infinity.timeout_secs),
             qdrant_url: qdrant_url.trim_end_matches('/').to_owned(),
+            // A configured key that cannot be used: the remote index is not
+            // used, so nothing is sent without it.
             qdrant_key: qdrant
                 .endpoint
                 .api_key
                 .as_ref()
-                .and_then(|key| key.resolve()),
+                .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+                .ok()?,
             infinity_url: infinity_url.trim_end_matches('/').to_owned(),
             infinity_key: infinity
                 .endpoint
                 .api_key
                 .as_ref()
-                .and_then(|key| key.resolve()),
+                .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+                .ok()?,
             collection: qdrant.collection.clone(),
             embedding_model: infinity.embedding_model.clone(),
             rerank_model: infinity.rerank_model.clone(),
@@ -394,11 +398,13 @@ pub(crate) fn semantic_embedder(config: &Config) -> Option<Arc<dyn SemanticEmbed
     if config.platform.infinity.endpoint.enabled {
         let infinity = &config.platform.infinity;
         let base_url = infinity.endpoint.base_url.clone()?;
+        // A configured key that cannot be used: no embedder without it.
         let api_key = infinity
             .endpoint
             .api_key
             .as_ref()
-            .and_then(|secret| secret.resolve());
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+            .ok()?;
         // The configured Infinity timeout bounds semantic ranking too, not
         // only the remote index.
         let client = EmbeddingClient::infinity(base_url, api_key)
@@ -418,7 +424,8 @@ pub(crate) fn semantic_embedder(config: &Config) -> Option<Arc<dyn SemanticEmbed
     let api_key = semantic
         .api_key
         .as_ref()
-        .and_then(|secret| secret.resolve());
+        .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+        .ok()?;
     let client = EmbeddingClient::new(base_url, api_key).ok()?;
     Some(Arc::new(ProviderSemanticEmbedder { client, model }))
 }
@@ -736,6 +743,24 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn a_remote_index_key_that_cannot_be_used_sends_nothing() {
+        let mut config = Config::default();
+        config.platform.qdrant.endpoint.enabled = true;
+        config.platform.qdrant.endpoint.base_url = Some("http://127.0.0.1:9".to_owned());
+        config.platform.infinity.endpoint.enabled = true;
+        config.platform.infinity.endpoint.base_url = Some("http://127.0.0.1:9".to_owned());
+        // No key configured: used, without one.
+        assert!(RemoteRag::from_config(&config, "profile-a").is_some());
+        assert!(semantic_embedder(&config).is_some());
+        // A configured key that cannot be used: neither is used.
+        config.platform.infinity.endpoint.api_key = Some(lightagent_core::SecretRef::env(
+            "LIGHTAGENT_TEST_RAG_UNSET_KEY",
+        ));
+        assert!(RemoteRag::from_config(&config, "profile-a").is_none());
+        assert!(semantic_embedder(&config).is_none());
+    }
 
     fn remote(qdrant_url: String, infinity_url: String) -> RemoteRag {
         lightagent_provider_lightweight::ensure_provider();

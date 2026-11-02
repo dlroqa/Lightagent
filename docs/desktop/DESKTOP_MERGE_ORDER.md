@@ -25,7 +25,11 @@ tree are recorded here.
 | 11 | D4 acceptance: isolated-home golden files, ordered concurrency, secrets, Jev routing report, Settings conflict | https://github.com/dlroqa/Lightagent/pull/104 | `desktop/d4c3-config-acceptance` | `desktop/d4c2-session-writes` | `205f01b` | `205f01b` |
 | 12 | D4d-1 provider credentials: one shared write-only operation; unusable keys fail closed | https://github.com/dlroqa/Lightagent/pull/106 | `desktop/d4d1-credentials` | `desktop/d4c3-config-acceptance` | `6988f6c` | `6988f6c` |
 | 13 | D4d-2a endpoint check: explicit, bounded, no redirect with the key | https://github.com/dlroqa/Lightagent/pull/107 | `desktop/d4d2-endpoint-check` | `desktop/d4d1-credentials` | `e6f4506` | `e6f4506` |
-| 14+ | D4d-2b provider/model selection and saved providers, then D4e workspaces | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+| 14 | D4d-2b-1 a provider key goes only to the endpoint it was saved for | https://github.com/dlroqa/Lightagent/pull/108 | `desktop/d4d2b-key-binding` | `desktop/d4d2-endpoint-check` | `8e3919b` | `8e3919b` |
+| 15 | D4d-2b-2 saved providers and the model through one shared operation set | https://github.com/dlroqa/Lightagent/pull/109 | `desktop/d4d2b2-saved-providers` | `desktop/d4d2b-key-binding` | `108dac6` | `108dac6` |
+| 16 | D4d-2b-3 Providers and models card in Settings | https://github.com/dlroqa/Lightagent/pull/110 | `desktop/d4d2b3-providers-ui` | `desktop/d4d2b2-saved-providers` | `bb76e74` | `bb76e74` (subagents: one live-broker job failed, not re-run; see DESKTOP_PROGRESS.md) |
+| 17 | D4d-3 every configured remote credential fails closed | https://github.com/dlroqa/Lightagent/pull/111 | `desktop/d4d3-fail-closed` | `desktop/d4d2b3-providers-ui` | `c15e249` | `c15e249` |
+| 18+ | D4e workspaces, then D5 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
 | D5b | Cross-process run admission (https://github.com/dlroqa/Lightagent/issues/105): a per-session run lease across processes, released when its holder dies | opened in D5, before the D10 gate | — | the D5a slice | — | — |
 
 Heads change as slices receive fixes. DESKTOP_PROGRESS.md records every
