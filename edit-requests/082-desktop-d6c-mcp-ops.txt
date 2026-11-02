@@ -1,0 +1,1157 @@
+=== base 9b7707b67141fd4ae0009b92565a6b15c0a61dee
+=== message
+D6-3: MCP server configuration through one shared operation set
+
+MCP servers were configured only by editing config.json by hand. The API
+and the desktop now act on the same `mcp` section through
+lightagent_core::mcp_servers.
+
+- view: the switch, the timeout and every configured server. Of a
+  server's environment and headers only the names are returned, of its
+  auth only the reference's kind (and an env variable's name), never a
+  value.
+- add, update, remove, set (enabled, timeout_secs 1-600). Every write is
+  checked whether MCP is on or off, by the rules Config::validate applies
+  once it is on (non-empty command, http(s) URL without credentials, valid
+  profile ids), plus a server name usable as the tool namespace. An edit
+  may send `null` for an env or header value, or auth `keep`, to keep the
+  saved one, so a client that never saw a value can still edit the
+  server; a value with nothing saved to keep is refused.
+- Writes go through ConfigStore::update on the revision the caller read
+  (stale: 409, nothing written).
+- API (operator): GET|PUT /mcp, POST /mcp/servers, PUT|DELETE
+  /mcp/servers/{name}; contract mcp.*; five backend inventory rows (not
+  counted). The explicit connection check and the card follow in row 29.
+- Tests (separate processes): what the API writes is the configuration
+  the CLI loads and saves unchanged; no secret value is ever returned;
+  withheld values are kept on edit and replaced when given; invalid
+  entries, duplicates, unknown names and a stale revision are refused with
+  the file unchanged byte for byte.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== write crates/lightagent-core/src/mcp_servers.rs
+//! MCP server configuration through one shared operation set (D6-3): the
+//! servers in `mcp.servers`, the `mcp.enabled` switch and
+//! `mcp.timeout_secs`, for the HTTP API and the desktop app, over the same
+//! configuration file the terminal reads.
+//!
+//! A view never carries an environment or header value or a secret: only
+//! their names, and the kind of an auth reference. An edit may leave a value
+//! out (`null`, or auth `keep`) to keep the one already saved, so a client
+//! that never saw a value can still edit the server.
+//!
+//! Every write is checked here, whether MCP is on or off, by the rules
+//! [`Config::validate`] applies once it is on, plus a server name usable as
+//! the tool namespace (`mcp.<server>.<tool>`). The operations change the
+//! configuration they are given; [`crate::ConfigStore::update`] saves it only
+//! when the operation succeeds.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::{Config, McpServerEntry, ProfileId, SecretRef};
+
+/// When a change applies.
+pub const EFFECT: &str =
+    "Runs started after this change use it; a running turn keeps the servers it connected.";
+
+/// The longest per-request timeout a write may set, in seconds.
+pub const MAX_TIMEOUT_SECS: u64 = 600;
+
+/// Why an MCP change was refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum McpConfigError {
+    /// No configured server has the name.
+    NotFound(String),
+    /// The entry cannot be used as given.
+    Invalid(String),
+    /// Another configured server already has the name.
+    Conflict(String),
+}
+
+impl std::fmt::Display for McpConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(message) | Self::Invalid(message) | Self::Conflict(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+
+impl std::error::Error for McpConfigError {}
+
+/// The `mcp` section as a client may see it.
+#[derive(Clone, Debug, Serialize)]
+pub struct McpView {
+    pub enabled: bool,
+    pub timeout_secs: u64,
+    pub servers: Vec<ServerView>,
+}
+
+/// An auth reference's kind; an environment variable's name is shown.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AuthView {
+    Env { var: String },
+    File,
+}
+
+/// One configured server, its environment and header values withheld.
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "transport", rename_all = "snake_case")]
+pub enum ServerView {
+    Stdio {
+        name: String,
+        command: String,
+        args: Vec<String>,
+        env: Vec<String>,
+    },
+    Http {
+        name: String,
+        url: String,
+        headers: Vec<String>,
+        auth: Option<AuthView>,
+        untrusted_profiles: Vec<String>,
+        credential_profiles: Vec<String>,
+    },
+}
+
+/// How an HTTP server authenticates, as a write states it.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AuthInput {
+    /// Connect without a bearer key.
+    #[default]
+    None,
+    /// Keep the auth reference already saved.
+    Keep,
+    /// Read the bearer key from this environment variable when connecting.
+    Env { var: String },
+}
+
+/// One server as a write states it. An environment or header value of
+/// `null` keeps the value saved under that name.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "transport", rename_all = "snake_case")]
+pub enum ServerInput {
+    Stdio {
+        name: String,
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: BTreeMap<String, Option<String>>,
+    },
+    Http {
+        name: String,
+        url: String,
+        #[serde(default)]
+        headers: BTreeMap<String, Option<String>>,
+        #[serde(default)]
+        auth: AuthInput,
+        #[serde(default)]
+        untrusted_profiles: Vec<String>,
+        #[serde(default)]
+        credential_profiles: Vec<String>,
+    },
+}
+
+/// The `mcp` section with every value withheld.
+pub fn view(config: &Config) -> McpView {
+    McpView {
+        enabled: config.mcp.enabled,
+        timeout_secs: config.mcp.timeout_secs,
+        servers: config.mcp.servers.iter().map(server_view).collect(),
+    }
+}
+
+fn server_view(entry: &McpServerEntry) -> ServerView {
+    match entry {
+        McpServerEntry::Stdio {
+            name,
+            command,
+            args,
+            env,
+        } => ServerView::Stdio {
+            name: name.clone(),
+            command: command.clone(),
+            args: args.clone(),
+            env: env.keys().cloned().collect(),
+        },
+        McpServerEntry::Http {
+            name,
+            url,
+            headers,
+            auth,
+            untrusted_profiles,
+            credential_profiles,
+        } => ServerView::Http {
+            name: name.clone(),
+            url: url.clone(),
+            headers: headers.keys().cloned().collect(),
+            auth: auth.as_ref().map(|auth| match auth {
+                SecretRef::Env { var } => AuthView::Env { var: var.clone() },
+                SecretRef::File { .. } => AuthView::File,
+            }),
+            untrusted_profiles: untrusted_profiles.clone(),
+            credential_profiles: credential_profiles.clone(),
+        },
+    }
+}
+
+/// Add a server. Its name must be new; nothing can be kept, so every value
+/// is given.
+pub fn add(config: &mut Config, input: ServerInput) -> Result<(), McpConfigError> {
+    let entry = build(input, None)?;
+    if config.mcp.servers.iter().any(|s| s.name() == entry.name()) {
+        return Err(McpConfigError::Conflict(format!(
+            "an MCP server named {:?} already exists",
+            entry.name()
+        )));
+    }
+    config.mcp.servers.push(entry);
+    Ok(())
+}
+
+/// Replace server `name` (it may be renamed to a name no other server
+/// has), keeping a withheld value wherever the input leaves it `null`.
+pub fn update(config: &mut Config, name: &str, input: ServerInput) -> Result<(), McpConfigError> {
+    let position = position(config, name)?;
+    let saved = config.mcp.servers.remove(position);
+    let entry = build(input, Some(&saved))?;
+    if config.mcp.servers.iter().any(|s| s.name() == entry.name()) {
+        return Err(McpConfigError::Conflict(format!(
+            "an MCP server named {:?} already exists",
+            entry.name()
+        )));
+    }
+    config.mcp.servers.insert(position, entry);
+    Ok(())
+}
+
+/// Remove server `name`.
+pub fn remove(config: &mut Config, name: &str) -> Result<(), McpConfigError> {
+    let position = position(config, name)?;
+    config.mcp.servers.remove(position);
+    Ok(())
+}
+
+/// Switch MCP on or off, and set its per-request timeout.
+pub fn set(
+    config: &mut Config,
+    enabled: Option<bool>,
+    timeout_secs: Option<u64>,
+) -> Result<(), McpConfigError> {
+    if let Some(timeout) = timeout_secs {
+        if timeout == 0 || timeout > MAX_TIMEOUT_SECS {
+            return Err(McpConfigError::Invalid(format!(
+                "the MCP timeout must be 1 to {MAX_TIMEOUT_SECS} seconds"
+            )));
+        }
+        config.mcp.timeout_secs = timeout;
+    }
+    if let Some(enabled) = enabled {
+        config.mcp.enabled = enabled;
+    }
+    Ok(())
+}
+
+fn position(config: &Config, name: &str) -> Result<usize, McpConfigError> {
+    config
+        .mcp
+        .servers
+        .iter()
+        .position(|s| s.name() == name)
+        .ok_or_else(|| McpConfigError::NotFound(format!("no configured MCP server named {name:?}")))
+}
+
+fn invalid(message: String) -> McpConfigError {
+    McpConfigError::Invalid(message)
+}
+
+/// The values a write names: each given value, or for `null` the one saved
+/// under that name.
+fn resolve(
+    kind: &str,
+    server: &str,
+    given: BTreeMap<String, Option<String>>,
+    saved: Option<&BTreeMap<String, String>>,
+) -> Result<BTreeMap<String, String>, McpConfigError> {
+    let mut values = BTreeMap::new();
+    for (key, value) in given {
+        if key.is_empty() || key.contains(['=', ':', '\0']) || key.chars().any(char::is_whitespace) {
+            return Err(invalid(format!(
+                "MCP server {server:?} has an invalid {kind} name {key:?}"
+            )));
+        }
+        let value = match value {
+            Some(value) => value,
+            None => saved
+                .and_then(|saved| saved.get(&key))
+                .cloned()
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "MCP server {server:?} has no saved {kind} value for {key:?} to keep"
+                    ))
+                })?,
+        };
+        values.insert(key, value);
+    }
+    Ok(values)
+}
+
+fn valid_variable(var: &str) -> bool {
+    var.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether an http(s) URL carries userinfo (`user:pass@`) in its authority.
+fn has_userinfo(url: &str) -> bool {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .contains('@')
+}
+
+fn build(input: ServerInput, saved: Option<&McpServerEntry>) -> Result<McpServerEntry, McpConfigError> {
+    let entry = match input {
+        ServerInput::Stdio {
+            name,
+            command,
+            args,
+            env,
+        } => {
+            let saved_env = match saved {
+                Some(McpServerEntry::Stdio { env, .. }) => Some(env),
+                _ => None,
+            };
+            let env = resolve("environment variable", &name, env, saved_env)?;
+            McpServerEntry::Stdio {
+                name,
+                command: command.trim().to_owned(),
+                args,
+                env,
+            }
+        }
+        ServerInput::Http {
+            name,
+            url,
+            headers,
+            auth,
+            untrusted_profiles,
+            credential_profiles,
+        } => {
+            let (saved_headers, saved_auth) = match saved {
+                Some(McpServerEntry::Http { headers, auth, .. }) => (Some(headers), auth.as_ref()),
+                _ => (None, None),
+            };
+            let headers = resolve("header", &name, headers, saved_headers)?;
+            let auth = match auth {
+                AuthInput::None => None,
+                AuthInput::Keep => Some(saved_auth.cloned().ok_or_else(|| {
+                    invalid(format!("MCP server {name:?} has no saved auth to keep"))
+                })?),
+                AuthInput::Env { var } => {
+                    if !valid_variable(&var) {
+                        return Err(invalid(format!(
+                            "MCP server {name:?} auth variable {var:?} is not an environment variable name"
+                        )));
+                    }
+                    Some(SecretRef::Env { var })
+                }
+            };
+            McpServerEntry::Http {
+                name,
+                url: url.trim().to_owned(),
+                headers,
+                auth,
+                untrusted_profiles,
+                credential_profiles,
+            }
+        }
+    };
+    check(&entry)?;
+    Ok(entry)
+}
+
+/// The rules [`Config::validate`] applies to an enabled `mcp` section, and a
+/// server name usable as a tool namespace.
+fn check(entry: &McpServerEntry) -> Result<(), McpConfigError> {
+    let name = entry.name();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(invalid(format!(
+            "MCP server name {name:?} must be ASCII letters, digits, '-' or '_'"
+        )));
+    }
+    match entry {
+        McpServerEntry::Stdio { command, .. } => {
+            if command.is_empty() {
+                return Err(invalid(format!("MCP server {name:?} has an empty command")));
+            }
+        }
+        McpServerEntry::Http {
+            url,
+            untrusted_profiles,
+            credential_profiles,
+            ..
+        } => {
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                return Err(invalid(format!(
+                    "MCP server {name:?} url must be an http(s) URL"
+                )));
+            }
+            if has_userinfo(url) {
+                return Err(invalid(format!(
+                    "MCP server {name:?} url must not carry credentials; use auth"
+                )));
+            }
+            for profile in untrusted_profiles.iter().chain(credential_profiles) {
+                if ProfileId::new(profile.clone()).is_err() {
+                    return Err(invalid(format!(
+                        "MCP server {name:?} names {profile:?}, which is not a valid profile id"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn http(name: &str, header: Option<&str>, auth: AuthInput) -> ServerInput {
+        let mut headers = BTreeMap::new();
+        headers.insert("X-Key".to_owned(), header.map(str::to_owned));
+        ServerInput::Http {
+            name: name.to_owned(),
+            url: "https://mcp.example.com/mcp".to_owned(),
+            headers,
+            auth,
+            untrusted_profiles: Vec::new(),
+            credential_profiles: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_view_withholds_every_value() {
+        let mut config = Config::default();
+        add(
+            &mut config,
+            http("docs", Some("header-value"), AuthInput::Env { var: "DOCS_KEY".to_owned() }),
+        )
+        .unwrap();
+        let shown = serde_json::to_string(&view(&config)).unwrap();
+        assert!(!shown.contains("header-value"), "{shown}");
+        assert!(shown.contains("X-Key") && shown.contains("DOCS_KEY"), "{shown}");
+    }
+
+    #[test]
+    fn an_edit_keeps_a_withheld_value_and_refuses_one_never_saved() {
+        let mut config = Config::default();
+        add(&mut config, http("docs", Some("kept"), AuthInput::Env { var: "K".to_owned() })).unwrap();
+        update(&mut config, "docs", http("docs", None, AuthInput::Keep)).unwrap();
+        match &config.mcp.servers[0] {
+            McpServerEntry::Http { headers, auth, .. } => {
+                assert_eq!(headers.get("X-Key").map(String::as_str), Some("kept"));
+                assert_eq!(auth, &Some(SecretRef::Env { var: "K".to_owned() }));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            add(&mut config, http("other", None, AuthInput::None)),
+            Err(McpConfigError::Invalid(_))
+        ));
+        assert!(matches!(
+            add(&mut config, http("docs", Some("v"), AuthInput::None)),
+            Err(McpConfigError::Conflict(_))
+        ));
+        assert!(matches!(
+            remove(&mut config, "missing"),
+            Err(McpConfigError::NotFound(_))
+        ));
+    }
+}
+=== replace crates/lightagent-core/src/lib.rs
+--- find
+pub mod loop_;
+--- with
+pub mod loop_;
+pub mod mcp_servers;
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+        .route(
+            "/api/lightagent/v1/extensions/{name}/enabled",
+            axum::routing::put(set_extension_enabled),
+        )
+--- with
+        .route(
+            "/api/lightagent/v1/extensions/{name}/enabled",
+            axum::routing::put(set_extension_enabled),
+        )
+        .route("/api/lightagent/v1/mcp", get(get_mcp).put(put_mcp))
+        .route("/api/lightagent/v1/mcp/servers", post(add_mcp_server))
+        .route(
+            "/api/lightagent/v1/mcp/servers/{name}",
+            axum::routing::put(update_mcp_server).delete(remove_mcp_server),
+        )
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+/// Where the extension operations act: this runtime's Lightagent home.
+--- with
+/// The `mcp` section with every value withheld, the revision a change must
+/// name, and when a change applies.
+fn mcp_view(config: &lightagent_core::Config, revision: &ConfigRevision) -> serde_json::Value {
+    json!({
+        "mcp": lightagent_core::mcp_servers::view(config),
+        "revision": revision.as_str(),
+        "effect": lightagent_core::mcp_servers::EFFECT,
+    })
+}
+
+/// A change the shared MCP operations refused, by kind.
+fn mcp_refusal(error: lightagent_core::mcp_servers::McpConfigError) -> Response {
+    use lightagent_core::mcp_servers::McpConfigError;
+    let status = match &error {
+        McpConfigError::NotFound(_) => StatusCode::NOT_FOUND,
+        McpConfigError::Invalid(_) => StatusCode::BAD_REQUEST,
+        McpConfigError::Conflict(_) => StatusCode::CONFLICT,
+    };
+    (status, Json(json!({ "error": error.to_string() }))).into_response()
+}
+
+/// One MCP change, on the revision the caller read when it names one: a
+/// stale revision gets 409 and writes nothing, and so does a refused change.
+fn mcp_change(
+    state: &AppState,
+    expected: Option<&str>,
+    created: bool,
+    change: impl FnOnce(
+        &mut lightagent_core::Config,
+    ) -> Result<(), lightagent_core::mcp_servers::McpConfigError>,
+) -> Response {
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let expected = expected.map(ConfigRevision::parse);
+    match store.update(expected.as_ref(), change) {
+        Ok(((), revision)) => match store.load() {
+            Ok(config) => {
+                let status = if created {
+                    StatusCode::CREATED
+                } else {
+                    StatusCode::OK
+                };
+                (status, Json(mcp_view(&config, &revision))).into_response()
+            }
+            Err(error) => config_error(error),
+        },
+        Err(UpdateError::Change(error)) => mcp_refusal(error),
+        Err(UpdateError::Store(error)) => config_error(error),
+    }
+}
+
+/// The MCP servers, switch and timeout, every value withheld.
+async fn get_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => Json(mcp_view(&config, &revision)).into_response(),
+        Err(error) => config_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct McpSettingsBody {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// Switch MCP on or off and set its timeout.
+async fn put_mcp(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<McpSettingsBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (enabled, timeout_secs) = (body.enabled, body.timeout_secs);
+    mcp_change(&state, body.expected_revision.as_deref(), false, |config| {
+        lightagent_core::mcp_servers::set(config, enabled, timeout_secs)
+    })
+}
+
+#[derive(Deserialize)]
+struct McpServerBody {
+    server: lightagent_core::mcp_servers::ServerInput,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// Add a configured MCP server.
+async fn add_mcp_server(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<McpServerBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let McpServerBody {
+        server,
+        expected_revision,
+    } = body;
+    mcp_change(&state, expected_revision.as_deref(), true, move |config| {
+        lightagent_core::mcp_servers::add(config, server)
+    })
+}
+
+/// Edit a configured MCP server; a withheld value left `null` is kept.
+async fn update_mcp_server(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(body): Json<McpServerBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let McpServerBody {
+        server,
+        expected_revision,
+    } = body;
+    mcp_change(&state, expected_revision.as_deref(), false, move |config| {
+        lightagent_core::mcp_servers::update(config, &name, server)
+    })
+}
+
+/// Remove a configured MCP server.
+async fn remove_mcp_server(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    mcp_change(&state, None, false, |config| {
+        lightagent_core::mcp_servers::remove(config, &name)
+    })
+}
+
+/// Where the extension operations act: this runtime's Lightagent home.
+=== replace docs/desktop/contract/operations.json
+--- find
+  {
+   "id": "extensions.set_enabled",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/extensions/{name}/enabled"
+  },
+--- with
+  {
+   "id": "extensions.set_enabled",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/extensions/{name}/enabled"
+  },
+  {
+   "id": "mcp.get",
+   "method": "GET",
+   "path": "/api/lightagent/v1/mcp"
+  },
+  {
+   "id": "mcp.set",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/mcp"
+  },
+  {
+   "id": "mcp.servers.add",
+   "method": "POST",
+   "path": "/api/lightagent/v1/mcp/servers"
+  },
+  {
+   "id": "mcp.servers.update",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/mcp/servers/{name}"
+  },
+  {
+   "id": "mcp.servers.remove",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/mcp/servers/{name}"
+  },
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Total rows: 339
+--- with
+- Total rows: 344
+=== write crates/lightagent/tests/desktop_mcp.rs
+//! MCP server configuration through the shared operations (D6-3): what the
+//! desktop runtime's API writes is the `mcp` section the CLI loads and saves
+//! unchanged; no environment or header value or secret is ever returned; an
+//! edit keeps a withheld value it leaves `null`; invalid entries,
+//! duplicates, unknown names and a stale revision are refused with the file
+//! unchanged byte for byte. Every process here is separate.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+
+const KEY: &str = "92a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081";
+const MCP: &str = "/api/lightagent/v1/mcp";
+const STDIO_SECRET: &str = "mcp-stdio-env-value-3b7e";
+const HEADER_SECRET: &str = "mcp-header-value-91c2";
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-mcp-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+/// One authenticated request: the status and the raw body.
+fn call(runtime: &Runtime, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, raw)
+}
+
+fn cli_ok(home: &Path, args: &[&str]) {
+    let output: Output = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent");
+    assert!(
+        output.status.success(),
+        "lightagent {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn parsed(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|error| panic!("not JSON ({error}): {raw}"))
+}
+
+fn config_text(home: &Path) -> String {
+    std::fs::read_to_string(home.join("config.json")).expect("config.json")
+}
+
+fn mcp_section(home: &Path) -> Value {
+    parsed(&config_text(home))["mcp"].clone()
+}
+
+fn setup(label: &str) -> (PathBuf, Runtime) {
+    let home = scratch_home(label);
+    cli_ok(&home, &["config", "set", "extensions.enabled", "true"]);
+    let runtime = start(&home);
+    (home, runtime)
+}
+
+fn revision(runtime: &Runtime) -> String {
+    let (status, raw) = call(runtime, "GET", MCP, None);
+    assert_eq!(status, 200, "{raw}");
+    parsed(&raw)["revision"]
+        .as_str()
+        .expect("revision")
+        .to_owned()
+}
+
+fn stdio_server() -> Value {
+    json!({
+        "transport": "stdio", "name": "files", "command": "mcp-files",
+        "args": ["--root", "/srv"], "env": { "FILES_TOKEN": STDIO_SECRET }
+    })
+}
+
+fn http_server() -> Value {
+    json!({
+        "transport": "http", "name": "docs", "url": "https://mcp.example.com/mcp",
+        "headers": { "X-Api-Key": HEADER_SECRET },
+        "auth": { "kind": "env", "var": "DOCS_TOKEN" },
+        "untrusted_profiles": ["research"], "credential_profiles": ["research"]
+    })
+}
+
+fn add(runtime: &Runtime, server: Value) -> (u16, String) {
+    let body = json!({ "server": server }).to_string();
+    call(runtime, "POST", &format!("{MCP}/servers"), Some(&body))
+}
+
+#[test]
+fn what_the_api_writes_is_what_the_cli_loads_and_no_value_comes_back() {
+    let (home, runtime) = setup("written");
+    let current = revision(&runtime);
+    let body = json!({ "server": stdio_server(), "expected_revision": current }).to_string();
+    let (status, raw) = call(&runtime, "POST", &format!("{MCP}/servers"), Some(&body));
+    assert_eq!(status, 201, "{raw}");
+    let (status, raw) = add(&runtime, http_server());
+    assert_eq!(status, 201, "{raw}");
+    let (status, raw) = call(
+        &runtime,
+        "PUT",
+        MCP,
+        Some(r#"{"enabled":true,"timeout_secs":45}"#),
+    );
+    assert_eq!(status, 200, "{raw}");
+
+    // Shown with names only.
+    let (status, raw) = call(&runtime, "GET", MCP, None);
+    assert_eq!(status, 200, "{raw}");
+    assert!(
+        !raw.contains(STDIO_SECRET) && !raw.contains(HEADER_SECRET),
+        "{raw}"
+    );
+    let shown = parsed(&raw);
+    assert_eq!(shown["mcp"]["enabled"], true, "{shown}");
+    assert_eq!(shown["mcp"]["timeout_secs"], 45, "{shown}");
+    assert_eq!(shown["mcp"]["servers"][0]["env"], json!(["FILES_TOKEN"]));
+    assert_eq!(shown["mcp"]["servers"][1]["headers"], json!(["X-Api-Key"]));
+    assert_eq!(
+        shown["mcp"]["servers"][1]["auth"],
+        json!({ "kind": "env", "var": "DOCS_TOKEN" })
+    );
+
+    // Saved with their values, as a hand-written section would be.
+    let saved = mcp_section(&home);
+    assert_eq!(saved["enabled"], true);
+    assert_eq!(saved["timeout_secs"], 45);
+    assert_eq!(saved["servers"][0]["command"], "mcp-files");
+    assert_eq!(saved["servers"][0]["args"], json!(["--root", "/srv"]));
+    assert_eq!(saved["servers"][0]["env"]["FILES_TOKEN"], STDIO_SECRET);
+    assert_eq!(saved["servers"][1]["url"], "https://mcp.example.com/mcp");
+    assert_eq!(saved["servers"][1]["headers"]["X-Api-Key"], HEADER_SECRET);
+    assert!(
+        saved["servers"][1]["auth"].to_string().contains("DOCS_TOKEN"),
+        "{saved}"
+    );
+    assert_eq!(saved["servers"][1]["untrusted_profiles"], json!(["research"]));
+
+    // The CLI loads the section, validates it (MCP is on) and saves it
+    // unchanged.
+    cli_ok(&home, &["config", "set", "extensions.enabled", "true"]);
+    assert_eq!(mcp_section(&home), saved);
+}
+
+#[test]
+fn edits_keep_withheld_values_and_refusals_write_nothing() {
+    let (home, runtime) = setup("edits");
+    assert_eq!(add(&runtime, http_server()).0, 201);
+    assert_eq!(add(&runtime, stdio_server()).0, 201);
+
+    // An edit that never saw the values keeps them.
+    let body = json!({ "server": {
+        "transport": "http", "name": "docs", "url": "https://mcp.example.com/v2",
+        "headers": { "X-Api-Key": null }, "auth": { "kind": "keep" }
+    }})
+    .to_string();
+    let (status, raw) = call(&runtime, "PUT", &format!("{MCP}/servers/docs"), Some(&body));
+    assert_eq!(status, 200, "{raw}");
+    assert!(!raw.contains(HEADER_SECRET), "{raw}");
+    let saved = mcp_section(&home);
+    assert_eq!(saved["servers"][0]["url"], "https://mcp.example.com/v2");
+    assert_eq!(saved["servers"][0]["headers"]["X-Api-Key"], HEADER_SECRET);
+    assert!(saved["servers"][0]["auth"].to_string().contains("DOCS_TOKEN"));
+
+    // A given value replaces it; a rename onto another server is refused.
+    let body = json!({ "server": {
+        "transport": "http", "name": "docs", "url": "https://mcp.example.com/v2",
+        "headers": { "X-Api-Key": "replaced" }
+    }})
+    .to_string();
+    assert_eq!(
+        call(&runtime, "PUT", &format!("{MCP}/servers/docs"), Some(&body)).0,
+        200
+    );
+    let saved = mcp_section(&home);
+    assert_eq!(saved["servers"][0]["headers"]["X-Api-Key"], "replaced");
+    assert!(saved["servers"][0]["auth"].is_null(), "{saved}");
+    let body = json!({ "server": {
+        "transport": "stdio", "name": "docs", "command": "mcp-files"
+    }})
+    .to_string();
+    assert_eq!(
+        call(&runtime, "PUT", &format!("{MCP}/servers/files"), Some(&body)).0,
+        409
+    );
+
+    // Every refusal leaves the file exactly as it was.
+    let before = config_text(&home);
+    let refused = [
+        json!({ "transport": "stdio", "name": "empty", "command": "  " }),
+        json!({ "transport": "http", "name": "ftp", "url": "ftp://mcp.example.com/" }),
+        json!({ "transport": "http", "name": "userinfo", "url": "https://u:p@mcp.example.com/" }),
+        json!({ "transport": "http", "name": "profiles", "url": "https://mcp.example.com/", "untrusted_profiles": ["bad id"] }),
+        json!({ "transport": "stdio", "name": "has.dot", "command": "x" }),
+        json!({ "transport": "stdio", "name": "nothing-kept", "command": "x", "env": { "TOKEN": null } }),
+        json!({ "transport": "http", "name": "no-auth-kept", "url": "https://mcp.example.com/", "auth": { "kind": "keep" } }),
+        json!({ "transport": "http", "name": "bad-var", "url": "https://mcp.example.com/", "auth": { "kind": "env", "var": "1BAD" } }),
+    ];
+    for server in refused {
+        let (status, raw) = add(&runtime, server.clone());
+        assert_eq!(status, 400, "{server}: {raw}");
+    }
+    let (status, raw) = add(&runtime, stdio_server());
+    assert_eq!(status, 409, "a duplicate name: {raw}");
+    let (status, raw) = call(&runtime, "PUT", MCP, Some(r#"{"timeout_secs":0}"#));
+    assert_eq!(status, 400, "{raw}");
+    let body = json!({ "server": { "transport": "http", "name": "files", "url": "https://mcp.example.com/", "headers": { "X-Api-Key": null } } }).to_string();
+    let (status, raw) = call(&runtime, "PUT", &format!("{MCP}/servers/files"), Some(&body));
+    assert_eq!(status, 400, "a stdio server has no header to keep: {raw}");
+    assert_eq!(
+        call(&runtime, "PUT", &format!("{MCP}/servers/missing"), Some(&body)).0,
+        404
+    );
+    assert_eq!(
+        call(&runtime, "DELETE", &format!("{MCP}/servers/missing"), None).0,
+        404
+    );
+    assert_eq!(config_text(&home), before, "a refusal changed config.json");
+
+    // A write on a revision read before another write is refused.
+    let stale = revision(&runtime);
+    cli_ok(&home, &["config", "set", "extensions.enabled", "false"]);
+    let after_cli = config_text(&home);
+    let body = json!({ "server": { "transport": "stdio", "name": "late", "command": "x" }, "expected_revision": stale }).to_string();
+    let (status, raw) = call(&runtime, "POST", &format!("{MCP}/servers"), Some(&body));
+    assert_eq!(status, 409, "{raw}");
+    assert_eq!(config_text(&home), after_cli);
+
+    // Removed.
+    let (status, raw) = call(&runtime, "DELETE", &format!("{MCP}/servers/docs"), None);
+    assert_eq!(status, 200, "{raw}");
+    let names: Vec<Value> = mcp_section(&home)["servers"]
+        .as_array()
+        .expect("servers")
+        .iter()
+        .map(|server| server["name"].clone())
+        .collect();
+    assert_eq!(names, vec![json!("files")]);
+}
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  {
+   "id": "api.get.sessions",
+--- with
+  {
+   "id": "api.get.mcp",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/mcp",
+   "source": "crates/lightagent-api/src/lib.rs:144",
+   "behavior": "MCP switch, timeout and configured servers with env and header values withheld (D6-3)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/mcp"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the configuration capabilities it serves (mcp.server.*, config.mcp)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: lightagent_core::mcp_servers::view",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.put.mcp",
+   "kind": "api",
+   "surface": "PUT /api/lightagent/v1/mcp",
+   "source": "crates/lightagent-api/src/lib.rs:144",
+   "behavior": "Switch MCP on or off and set its timeout, on the revision read (D6-3)",
+   "tree_key": null,
+   "tokens": [
+    "PUT /api/lightagent/v1/mcp"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the configuration capabilities it serves (mcp.server.*, config.mcp)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: lightagent_core::mcp_servers::set",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.post.mcp.servers",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/mcp/servers",
+   "source": "crates/lightagent-api/src/lib.rs:144",
+   "behavior": "Add a configured MCP server, validated as Config::validate does (D6-3)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/mcp/servers"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the configuration capabilities it serves (mcp.server.*, config.mcp)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: lightagent_core::mcp_servers::add",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.put.mcp.servers.name",
+   "kind": "api",
+   "surface": "PUT /api/lightagent/v1/mcp/servers/{name}",
+   "source": "crates/lightagent-api/src/lib.rs:144",
+   "behavior": "Edit a configured MCP server; a withheld value left null is kept (D6-3)",
+   "tree_key": null,
+   "tokens": [
+    "PUT /api/lightagent/v1/mcp/servers/{name}"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the configuration capabilities it serves (mcp.server.*, config.mcp)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: lightagent_core::mcp_servers::update",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.delete.mcp.servers.name",
+   "kind": "api",
+   "surface": "DELETE /api/lightagent/v1/mcp/servers/{name}",
+   "source": "crates/lightagent-api/src/lib.rs:144",
+   "behavior": "Remove a configured MCP server (D6-3)",
+   "tree_key": null,
+   "tokens": [
+    "DELETE /api/lightagent/v1/mcp/servers/{name}"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the configuration capabilities it serves (mcp.server.*, config.mcp)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: lightagent_core::mcp_servers::remove",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.sessions",
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.put.extensions.name.enabled` | `PUT /api/lightagent/v1/extensions/{name}/enabled` | applicable | no | (backend reuse) | shared: lightagent_extensions::manage::set_enabled | not-started | `crates/lightagent-api/src/lib.rs:139` |
+--- with
+| `api.put.extensions.name.enabled` | `PUT /api/lightagent/v1/extensions/{name}/enabled` | applicable | no | (backend reuse) | shared: lightagent_extensions::manage::set_enabled | not-started | `crates/lightagent-api/src/lib.rs:139` |
+| `api.get.mcp` | `GET /api/lightagent/v1/mcp` | applicable | no | (backend reuse) | shared: lightagent_core::mcp_servers::view | not-started | `crates/lightagent-api/src/lib.rs:144` |
+| `api.put.mcp` | `PUT /api/lightagent/v1/mcp` | applicable | no | (backend reuse) | shared: lightagent_core::mcp_servers::set | not-started | `crates/lightagent-api/src/lib.rs:144` |
+| `api.post.mcp.servers` | `POST /api/lightagent/v1/mcp/servers` | applicable | no | (backend reuse) | shared: lightagent_core::mcp_servers::add | not-started | `crates/lightagent-api/src/lib.rs:144` |
+| `api.put.mcp.servers.name` | `PUT /api/lightagent/v1/mcp/servers/{name}` | applicable | no | (backend reuse) | shared: lightagent_core::mcp_servers::update | not-started | `crates/lightagent-api/src/lib.rs:144` |
+| `api.delete.mcp.servers.name` | `DELETE /api/lightagent/v1/mcp/servers/{name}` | applicable | no | (backend reuse) | shared: lightagent_core::mcp_servers::remove | not-started | `crates/lightagent-api/src/lib.rs:144` |
+=== end
