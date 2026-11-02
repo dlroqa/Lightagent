@@ -31,7 +31,11 @@ next update names its run.
 | Row 11: D4 acceptance (golden files, ordered concurrency, fail-closed keys, routing report, kept Settings edits) | **CI-validated** at `205f01b` (check and desktop, every job, first run). The D4c gate items are met, except those carried forward (see "Row 11") | `desktop/d4c3-config-acceptance` (stacked on row 10 `3310dfc`) | https://github.com/dlroqa/Lightagent/pull/104 | `205f01b731e0a3149ff465bc894aa97605284c76`, plus the documentation commit `597604d` (check and desktop passed on it) | `205f01b` / tree `b5bf552d9d4e75630b3c3ecda78c58071d15a87f` |
 | Row 12: D4d-1 provider credentials (shared write-only operation; unusable keys fail closed) | **CI-validated** at `6988f6c` (check and desktop, every job) | `desktop/d4d1-credentials` (stacked on row 11 `597604d`) | https://github.com/dlroqa/Lightagent/pull/106 | `6988f6c3256b46d8cc55704e5c3bc2c9e4016b90`, plus the documentation commit `8f0717d` (check and desktop passed on it) | `6988f6c` / tree `bcdfc0b89c6f27047bee39608db9374cc618dad9` |
 | Row 13: D4d-2a endpoint check (explicit, bounded, no redirect with the key) | **CI-validated** at `e6f4506` (check and desktop, every job) | `desktop/d4d2-endpoint-check` (stacked on row 12 `8f0717d`) | https://github.com/dlroqa/Lightagent/pull/107 | `e6f45069c88120c530caeb975b66026d780016dd`, plus this documentation commit | `e6f4506` / tree `e33be00726f6236d4e21c8410fe540a2de9283ca` |
-| D4d–D10 | not started | — | — | — | — |
+| Row 14: D4d-2b-1 a provider key goes only to the endpoint it was saved for | **CI-validated** at `8e3919b` (check, desktop, jev evaluation, subagents; first run) | `desktop/d4d2b-key-binding` (stacked on row 13 `2bed55c`) | https://github.com/dlroqa/Lightagent/pull/108 | `8e3919bd5c2ccd512cbd5c31f78cfb4173197a27` | `8e3919b` / tree `ec8ed729801330750bb2314fcbd201e265060740` |
+| Row 15: D4d-2b-2 saved providers and model through one shared operation set | **CI-validated** at `108dac6` (check, desktop, jev evaluation, subagents; first run) | `desktop/d4d2b2-saved-providers` (stacked on row 14) | https://github.com/dlroqa/Lightagent/pull/109 | `108dac6275435d16ede51db4e839f290fb05d4e8` | `108dac6` / tree `868f78d9afbc50ab5369e208d983b8801d488d7a` |
+| Row 16: D4d-2b-3 Providers and models card in Settings | **CI-validated** at `bb76e74` (check, desktop, jev evaluation). `subagents` failed on one live-broker job (GitHub did not list a dispatched run in time); recorded, not re-run; row 17's `subagents`, whose tree contains row 16, passed | `desktop/d4d2b3-providers-ui` (stacked on row 15) | https://github.com/dlroqa/Lightagent/pull/110 | `bb76e74454e91f91f09a3a1c4c53dbf5458905dd` | `bb76e74` / tree `d3bc96fa1f0d068c75ec16c8fbebc6eecc159f66` |
+| Row 17: D4d-3 every configured remote credential fails closed | **CI-validated** at `c15e249` (check, desktop, jev evaluation, subagents) after a test-setup fix (see "Row 17") | `desktop/d4d3-fail-closed` (stacked on row 16) | https://github.com/dlroqa/Lightagent/pull/111 | `c15e2491cc959b64d1557bf09606e6c71701152a`, plus this documentation commit | `c15e249` / tree `aea17cf71d4615cd76c1c6903213584afb8da4a2` |
+| D4e–D10 | not started | — | — | — | — |
 
 The latest progress record is the copy on the highest stacked desktop branch.
 Branches lower in the stack keep the record as of their own commit.
@@ -832,6 +836,128 @@ not claimed.
 - **`lightagent runtime`:** its control-plane commands still resolve the
   inference key with `resolve()`; that moves to the same fail-closed rule.
 
+## Row 14 — D4d-2b-1: a provider key goes only to the endpoint it was saved for
+
+Session fcfe3d5d took ownership on 2026-11-02T05:36Z (claim on #107) after
+verifying no PR, branch or run newer than #107 and no write to the stack
+since edit request 049.
+
+**The defect.** Every inference path attached the global
+`inference.api_key` to whatever endpoint the run used. So a profile with
+its own `routing.base_url` received the active endpoint's key (runs, the
+history probe, the provider view, the terminal chat and its subagents),
+and `config set inference.base_url` (CLI and `PUT /config/{key}`), `init
+--base-url` and line-mode setup moved the endpoint but kept the previous
+endpoint's key.
+
+- `provider_keys::bound_key(config, base_url)`: the only key a request to
+  `base_url` may carry: the active endpoint's when it is the active
+  endpoint, a saved provider's when it is that provider's, otherwise none.
+  Every inference request path uses it; a bound key that cannot be used
+  still fails closed.
+- `provider_keys::select_endpoint(config, base_url)`: the same endpoint
+  keeps its key, a saved provider's endpoint takes its key, any other
+  endpoint has none.
+- **Behaviour change, on purpose:** a profile endpoint that is neither the
+  active one nor a saved provider's sends no key; an endpoint changed with
+  `config set` needs its key saved again. `desktop_providers.rs` saved the
+  key once and then moved the endpoint; it now asserts the key was not
+  carried and saves it for each endpoint.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Edit request `050` (15 edits, 9 files); branch `desktop/d4d2b-key-binding` created at it; draft PR #108 | `8e3919b` / `ec8ed72` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41395689120 |
+| 2026-11-02 | `check`: **success**, every job on four platforms, including `desktop_key_binding.rs` (profiles on the active, a saved and an unsaved endpoint: provider view, desktop run and CLI chat send that endpoint's key or none; trailing slash keeps the key; a new endpoint by CLI or desktop config route gets none; a saved provider's endpoint gets its own) | `8e3919b` | https://github.com/dlroqa/Lightagent/actions/runs/41395777653 |
+| 2026-11-02 | `desktop`, `jev evaluation`, `subagents`: **success** (fixture `fail`/`verify` dispatches fail by design) | `8e3919b` | https://github.com/dlroqa/Lightagent/actions/runs/41395777655, https://github.com/dlroqa/Lightagent/actions/runs/41395777599, https://github.com/dlroqa/Lightagent/actions/runs/41395777608 |
+
+## Row 15 — D4d-2b-2: saved providers and the model through one shared operation set
+
+`lightagent_core::saved_providers` is shared by `lightagent setup`
+(provider section) and the HTTP API, inside one revision-checked config
+update:
+
+- **list / get:** the local endpoint, each saved provider, and an unsaved
+  active endpoint (`custom`), with each key's state and source only.
+- **create:** refuses a name whose key id another saved provider has (they
+  would share a key file), an endpoint another has (its key would be
+  ambiguous), the local endpoint, reserved names and non-http(s) URLs.
+- **update:** a rename keeps the key (a stored key moves to the new file);
+  a new endpoint **releases** the key unless `keep_key`; an active
+  provider's change moves the active endpoint with it. Profiles naming the
+  old endpoint keep it and send it no key.
+- **remove:** the stored key is released after the save; a removed active
+  provider leaves the local endpoint active, keyless, automatic model.
+- **select / select_model:** the endpoint takes only its own key; the
+  active profile follows (endpoint override cleared on select; model).
+  Every answer says the change applies to the next run: a run in progress
+  keeps its provider and model; an open terminal chat keeps its endpoint
+  until restarted.
+- Key files a change releases are deleted only after the config is saved.
+- API (admin): `GET|POST /providers`, `GET|PATCH|DELETE /providers/{id}`,
+  `POST /providers/{id}/check`, `PUT /provider/active`, `PUT
+  /provider/model`; stale revision 409, duplicate 409 `reason:
+  duplicate`. Contract operations and backend inventory rows (331 rows).
+- Setup: an existing name or endpoint is refused instead of silently
+  replacing a provider; removal deletes the stored key; the active profile
+  is updated after the config save, not before.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Edit request `051` (26 edits, 12 files); branch `desktop/d4d2b2-saved-providers`; draft PR #109 | `108dac6` / `868f78d` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41396956160 |
+| 2026-11-02 | `check`: **success**, every job, including `saved_providers::tests` and `desktop_saved_providers.rs` (create, stale/duplicate/invalid refusals with config.json byte-identical, select with the profile following, the key only at its provider's endpoint, rename, move, keep_key, ordered concurrency with a CLI write, removal, 404/400, no key in any response) | `108dac6` | https://github.com/dlroqa/Lightagent/actions/runs/41397047625 |
+| 2026-11-02 | `desktop`, `jev evaluation`, `subagents`: **success** | `108dac6` | https://github.com/dlroqa/Lightagent/actions/runs/41397047583, https://github.com/dlroqa/Lightagent/actions/runs/41397047530, https://github.com/dlroqa/Lightagent/actions/runs/41397047596 |
+
+## Row 16 — D4d-2b-3: the Providers and models card
+
+Settings → "Providers and models": each provider's endpoint, whether it
+is active and its key's state; Add, Edit (rename; an endpoint change says
+the key is removed, with an explicit "keep this provider's API key"), Use,
+Remove after a confirmation; the model (empty: automatic) with an explicit
+"List models" check of the active provider. Every change is made on the
+loaded revision; a refusal keeps the entries, reloads the list and asks to
+review and try again. After a provider change the API key card remounts,
+so a key typed for one provider is never saved to another. **Browser
+evidence**; native WebView verification is D8.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Edit request `052` (7 edits, 4 files); branch `desktop/d4d2b3-providers-ui`; draft PR #110 | `bb76e74` / `d3bc96f` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41397480896 |
+| 2026-11-02 | `check`: **success**, every job; the render e2e covered a stale save refused with the entry kept, the save, rename, Use with the key card following, the model, a stale removal refused then made, and the harness endpoint restored | `bb76e74` | https://github.com/dlroqa/Lightagent/actions/runs/41397533047 |
+| 2026-11-02 | `desktop`, `jev evaluation`: **success** | `bb76e74` | https://github.com/dlroqa/Lightagent/actions/runs/41397532957, https://github.com/dlroqa/Lightagent/actions/runs/41397532983 |
+| 2026-11-02 | `subagents`: **failure**, one job, `Tester broker (live GitHub Actions)`: `live_the_broker_reports_a_passing_and_a_failing_hosted_run` got `dispatched_unlocated` (the dispatch was accepted but GitHub did not list the run within the broker's window, while about twelve workflows were starting across rows 15-17). Row 16 changes only frontend and e2e files, which this Rust test does not use; the same test passed on rows 14, 15 and 17. **Not re-run.** | `bb76e74` | https://github.com/dlroqa/Lightagent/actions/runs/41397533045 |
+| 2026-11-02 | Parity: `setup.provider.saved`, `setup.provider.url`, `setup.provider.model` implemented: **28 of 227** | — | DESKTOP_CLI_PARITY.md |
+
+## Row 17 — D4d-3: every configured remote credential fails closed
+
+A configured credential that cannot be used was dropped by `resolve()`,
+and the request went out without it. Every remaining path now uses
+`SecretRef::for_request` and sends nothing: web search is withheld (never
+anonymous in its place); Open Terminal and the GitHub Actions broker build
+no connection; the remote index (Qdrant and Infinity) and the semantic
+embedder are not used; `JevClient::from_config` refuses with
+`JevError::CredentialUnavailable` (`credential_unavailable`), so
+classification, routing and the check fall back. Intentionally absent
+credentials are unchanged.
+
+**Audit finding.** `crates/lightagent/src/runtime.rs` is not compiled:
+there is no `mod runtime`, no `lightagent runtime` command, and the file is
+unchanged since `67acdb5`. The previous report's "runtime control-plane
+commands" refers to it. It is left unchanged rather than editing code CI
+cannot build. The live control-plane path, the provider view's runtime
+catalog, takes the endpoint's bound key and fails closed (row 14).
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Edit request `053` (15 edits, 7 files); branch `desktop/d4d3-fail-closed`; draft PR #111 | `ecfd61b` / `f39601b` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41397962017 |
+| 2026-11-02 | `check`: **failure** on all four platforms, one test: `desktop_fail_closed.rs` edited `config.json` before anything had written it (a fresh home has none). Every other test passed, including the new chat and rag unit tests. `desktop`, `jev evaluation`, `subagents`: **success** | `ecfd61b` | https://github.com/dlroqa/Lightagent/actions/runs/41398039699 |
+| 2026-11-02 | `054`: the test creates the config with `lightagent config set` first; the branch moved without force | `c15e249` / `aea17cf` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41400610165 |
+| 2026-11-02 | `check`: **success**, every job (the desktop Jev check refuses with `credential_unavailable` for each unusable kind, names no location, and the endpoint receives no connection) | `c15e249` | https://github.com/dlroqa/Lightagent/actions/runs/41400681156 |
+| 2026-11-02 | `desktop`, `jev evaluation`, `subagents`: **success** (the subagents tree contains row 16's change) | `c15e249` | https://github.com/dlroqa/Lightagent/actions/runs/41400681200, https://github.com/dlroqa/Lightagent/actions/runs/41400681157, https://github.com/dlroqa/Lightagent/actions/runs/41400681150 |
+
+D4d is complete with rows 12-17: shared write-only keys, the bounded
+check, endpoint-bound keys, saved providers and the model, the Settings
+card, and fail-closed credentials on every live path.
+
 ## Artifacts and retention
 
 | Artifact | Run | Retention |
@@ -865,6 +991,7 @@ not claimed.
   | 2026-11-01T22:27:58Z | `d4b-profile-ui` `5f364e2`, `feat/response-action-bar` `987c6db`, `integration/desktop-d4b-response-actions` `b4a61c9`, `tools/source-edit` `df11eac` (lower slices unchanged) | before recording #98's integration; fetch only, working tree `master` `12582a0` clean |
   | 2026-11-01T23:07:09Z | `d4b-profile-ui` `7c3e988`, `d4c-config` `0e46892`, `feat/response-action-bar` `987c6db`, `integration/desktop-d4b-response-actions` `b4a61c9`, `tools/source-edit` `a9f91a3` | D4c validated; fetch only, working tree clean |
   | 2026-11-02T00:57:09Z | `d4c-config` `551e73a`, `d4c1-response-actions` `fbd008c`, `d4c2-session-writes` `aebd5d6`, `tools/source-edit` `b9cacc0` (lower slices unchanged) | row 10 validated; fetch only, working tree `master` `12582a0` clean |
+  | 2026-11-02T06:42:55Z | `d4c3-config-acceptance` `597604d`, `d4d1-credentials` `8f0717d`, `d4d2-endpoint-check` `2bed55c`, `d4d2b-key-binding` `8e3919b`, `d4d2b2-saved-providers` `108dac6`, `d4d2b3-providers-ui` `bb76e74`, `d4d3-fail-closed` `c15e249`, `tools/source-edit` `4cc32f9` (lower slices unchanged) | rows 14-17 validated; fetch only (remote-tracking refs), working tree `master` `12582a0` clean |
 
   A documentation commit cannot record itself. Each row names the heads
   that existed when the sync ran. The commit that carries a row is
@@ -872,7 +999,20 @@ not claimed.
 
 ## Next
 
-This is the order the owner set on 2026-11-02 (DESKTOP_CLAUDE_PROMPT.md §4):
+The owner's order of 2026-11-02 (third continuation, DESKTOP_CLAUDE_PROMPT.md §5):
+
+1. D4d-2b and the fail-closed conversion are done (rows 14-17).
+2. **D4e, workspaces (row 18):** one shared, validated operation for the
+   tools workspace (absolute, an existing folder or one whose parent
+   exists) behind setup, `GET|PUT /workspace` and a Settings card; the
+   effective folder follows the active profile when none is set; applies
+   to the next run.
+3. **D5, including D5b (#105):** cross-process per-session run admission,
+   released by the OS when its holder dies, separate from the short
+   session-file write lock.
+4. D6-D10 in dependency order.
+
+Earlier order (DESKTOP_CLAUDE_PROMPT.md §4), kept for reference:
 
 1. **Rows 11 and 12** are done (see "Row 11" and "Row 12"). D4d continues
    with D4d-2, listed under "Row 12".

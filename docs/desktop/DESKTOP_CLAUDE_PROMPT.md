@@ -322,3 +322,254 @@ Development branches, draft PRs, GitHub-hosted source editing, and necessary hos
 Do NOT merge, tag, publish releases, deploy, activate production, or update installed applications without my separate explicit approval.
 
 Begin with a concise verified status report, then continue the authorized work. Do not stop after that report unless you encounter a genuine blocker or authorization boundary.
+
+## 5. Continuation: D4d-2b, fail-closed credentials, D4e, D5b (2026-11-02, third continuation)
+
+Continue the existing Lightagent Desktop project:
+https://github.com/dlroqa/Lightagent
+
+This is a handoff to a new session. Verify the current GitHub state and read the committed instructions before making changes. Do not restart or duplicate completed work.
+
+PROJECT GOAL
+
+Build an installable Lightagent Desktop application with full CLI capability coverage, using the shared Lightagent backend and React WebUI.
+
+Keep desktop-specific code in desktop/. Preserve integration with providers, models, credentials, tools, skills, MCP, profiles, workspaces, sessions and response actions.
+
+READ FIRST
+
+The previous session reported that all nine governing documents are under docs/desktop/:
+- DESKTOP_BUILD_PLAN.md
+- DESKTOP_CLAUDE_PROMPT.md
+- DESKTOP_PROGRESS.md
+- DESKTOP_CLI_PARITY.md
+- desktop-capabilities.json
+- DESKTOP_ARCHITECTURE.md
+- DESKTOP_ACCEPTANCE.md
+- DESKTOP_MERGE_ORDER.md
+
+Locate and read the full governing document set, including any additional document there, plus:
+docs/response-action-bar-progress.md
+
+Read the versions on the latest relevant development branch, not just master. Follow the documented D0–D10 dependency order.
+
+OWNERSHIP AND PRESERVATION
+
+Check whether another session is actively writing to this branch stack before editing.
+- Use one implementation owner.
+- Do not touch another session’s staging directories.
+- Preserve existing files, uncommitted work and older drafts.
+- No reset, clean, deletion, force push or overwriting work to synchronize.
+- If active ownership conflicts, continue read-only investigation while resolving ownership.
+
+LAST VERIFIED CHECKPOINT — RECHECK
+
+All implementation remains unmerged.
+
+Latest verified PRs:
+- #106, provider credentials:
+  branch desktop/d4d1-credentials
+  head 8f0717d2f05ab1422bca4cf479afee65a244bcbb
+  desktop 41379449836: passed
+  check 41379449916: passed
+- #107, endpoint check:
+  branch desktop/d4d2-endpoint-check
+  head 2bed55cd5329d80b9f438cc685ac829c85dc8804
+  desktop 41382470709: passed
+  check 41382470844: passed
+
+Jev evaluation and subagents also passed on both heads. Both PRs were draft, open and unmerged.
+
+Earlier completed work:
+- D4b runtime/profile lifecycle corrections.
+- #101 shared locked, revision-checked configuration updates.
+- #102 response-action integration and regenerate safety.
+- #103 shared cross-process session writes.
+- #104 remaining D4 configuration acceptance work.
+
+Reported capability coverage: 25 of 227.
+This is capability coverage, not overall project completion.
+
+Do not assume this checkpoint is still current. Inspect newer PRs, branches, issue updates and Actions results before choosing the next change.
+
+WHAT IS ALREADY IMPLEMENTED
+
+Provider credentials:
+- Shared save/replace/remove operations.
+- Write-only Settings entry and status.
+- Stale-save protection.
+- Configured unusable credentials fail closed in CLI chat, routed requests, models, setup model listing and Desktop runtime.
+- Intentionally absent credentials remain supported.
+
+Endpoint checks:
+- Shared CLI/API operation, triggered explicitly.
+- Bounded timeout: 1–30 seconds, default 10.
+- Redirects reported rather than followed.
+- Hosted tests for authentication, models, 401, redirects and timeout.
+
+NEXT WORK — IN ORDER
+
+1. D4d-2b: provider/model selection and saved providers
+
+Create small draft PRs stacked on the verified latest prerequisite.
+
+Use shared operations for CLI, WebUI and Desktop:
+- Provider creation, editing, selection and removal.
+- Saved-provider listing and details.
+- Model listing and selection.
+- Protected credential references and status.
+- Consistent validation and error handling.
+
+Credential isolation:
+- Bind credentials to their intended provider/endpoint.
+- Never implicitly send the previous provider’s key to a newly selected endpoint.
+- Define behavior for endpoint changes, provider rename/deletion, replacement and profile switching.
+- Never expose stored keys to renderer responses, logs, errors, screenshots or artifacts.
+
+Settings behavior:
+- Retain revision checks.
+- Preserve unsaved input after conflicts.
+- Make refresh/review and retry explicit.
+- Explain whether a change affects the next run or requires a restart.
+- Do not silently alter an active run’s provider/model.
+
+Validate shared behavior, credential isolation, stale saves, provider removal, endpoint errors, model selection and profile switching through hosted tests.
+
+2. Finish runtime credential handling
+
+The previous report identified lightagent runtime control-plane commands as still using the old credential-resolution behavior.
+
+Audit every remaining credential-resolution path and complete the fail-closed conversion before declaring D4d complete:
+- Configured but unreadable, missing-from-environment, empty or invalid credentials must stop the operation.
+- Errors must be redacted.
+- Intentionally absent credentials must remain supported.
+- Tests must prove that the configured endpoint receives no request when credential resolution fails.
+
+3. D4e: workspaces
+
+Continue according to the committed plan after D4d’s prerequisites pass.
+
+4. D5, including issue #105
+
+Issue #105 tracks cross-process run admission.
+
+Session-write locking is already implemented, but admission remains per process: separate processes can start turns against the same session concurrently.
+
+Implement its planned D5b fix:
+- Exclusive per-session run admission across Desktop runtime, other serve processes, CLI chat and ACP.
+- Crash recovery through OS-managed lease/lock release.
+- Cancellation and normal completion release.
+- Different sessions remain able to run concurrently.
+- Keep the run lease separate from short session-file write locks.
+- Do not hold the session write lock during inference.
+- Use deterministic separate-process tests on supported platforms.
+
+Then continue D5–D10 in dependency order.
+
+RESPONSE-ACTION REQUIREMENTS
+
+Keep the shared response-action feature in Desktop scope:
+- Copy, read aloud, share, regenerate and More.
+- Regenerate must preserve the previous saved answer after refusal, failure, cancellation or empty output.
+- Enforce session ownership and required permissions.
+- Preserve profile-switch run gates.
+- Verify actual Desktop clipboard, speech and sharing behavior per platform.
+- Show honest unavailable states where unsupported.
+- Verify keyboard navigation, tooltips, accessibility, streaming visibility and narrow windows.
+
+Ratings remain temporary until persistence exists.
+Branching remains disabled until its backend exists.
+Previous-answer navigation remains unavailable until implemented.
+
+Do not count transport integration or browser tests as native Desktop verification.
+
+CARRIED ACCEPTANCE REQUIREMENTS
+
+- D7: diagnostics-bundle secret-redaction tests.
+- D8: native Desktop WebView checks, including Settings, profile switching, close-with-active-runs and response actions.
+- Retain all other requirements in the committed acceptance document.
+- Update parity only when implementation and evidence support it.
+
+PROPOSED MERGE ORDER — VERIFY, DO NOT EXECUTE
+
+#90 → #92 → #93 → #94 → #95 → #96 → #97
+→ #101 → #102 → #103 → #104 → #106 → #107
+→ subsequent dependency-ordered slices.
+
+- #91: framework-spike evidence only.
+- #99: transport evidence only.
+- #98: incorporated through #102; do not merge separately under this plan.
+
+Current CI evidence validates PR heads, not the final merge sequence.
+Before requesting eventual merge approval:
+- Simulate the exact proposed merges.
+- Record resulting commits and trees.
+- Validate candidate trees through hosted Actions.
+- Verify each intermediate master state remains valid.
+- Do not infer equivalence from stacked bases alone.
+
+MANDATORY EXECUTION POLICY
+
+Implementation source and workflow edits:
+- GitHub-native APIs or the existing GitHub-hosted source-edit workflow only.
+- Verify the fixed base, generated commit/tree and provenance.
+- Attach commits to the correct development branches and draft PRs.
+- No local implementation or workflow editing, including temporary staging folders.
+
+All formatting, dependency installation for builds/validation, linting, building, rendering, testing, benchmarking, packaging, installer verification and release dry-runs:
+- GitHub Actions only.
+- GitHub-hosted runners only.
+- No self-hosted runners.
+- No local application execution or validation.
+
+Respect the repository dependency policy.
+Never put credentials in edit requests, logs, screenshots, artifacts or commits.
+
+Preserve the recorded earlier local-edit departure for #98. Do not rewrite history or describe it as compliant.
+
+LOCAL BACKUP AND PROGRESS — REQUIRED
+
+Verify the existing backup:
+~/Repositories/LAcode/Lightagent
+
+Previously:
+- master 12582a0 checked out, working tree clean.
+- Desktop branches retained as fetched remote refs.
+- Progress copies stored in:
+  ~/Repositories/LAcode/desktop-progress/
+
+Local machines may be used only for:
+- Repository copying and safe synchronization.
+- Safekeeping.
+- Static source reading.
+- Progress documentation.
+
+After each completed stage:
+- Safely fetch relevant branches.
+- Preserve existing local work and older snapshots.
+- State which commits are fetched refs versus checked-out files.
+- Refresh local progress copies from authoritative GitHub documents.
+- Record actual synchronization time and backed-up SHA.
+
+REPORTING
+
+For each completed stage, record:
+- Repository, branch and draft PR URL.
+- Exact implementation head SHA/tree.
+- Exact tested SHA/tree and head-versus-merge-candidate distinction.
+- Actions URLs and actual outcomes.
+- Failures, reruns and fixes.
+- Capability coverage and reconciled denominator.
+- Remaining gaps and next stage.
+- Artifact links and retention.
+- Local backup and progress-document paths.
+
+Keep generated installers and validation outputs as Actions artifacts, not committed binaries. Preserve durable conclusions and evidence references in Git.
+
+AUTHORIZATION
+
+Development branches, draft PRs, remote source editing and necessary GitHub-hosted Actions runs are authorized.
+
+Do NOT merge, tag, publish releases, deploy, activate production or update installed applications without my separate explicit approval.
+
+Begin with a concise verified status report, then continue the authorized work. Do not stop at routine progress checkpoints unless a genuine blocker or authorization boundary requires my input.
