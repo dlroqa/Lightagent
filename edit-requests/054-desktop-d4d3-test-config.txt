@@ -1,0 +1,30 @@
+=== base ecfd61b9f3fdfef64e0da98c07445d89fa9417f6
+=== message
+D4d-3: the fail-closed test writes the config through the CLI first
+
+A fresh home has no config.json until something saves the config, so the
+Jev test's direct edit found no file (all four platforms, check run
+41398039699). The test now creates the config with `lightagent config
+set`, as the other desktop tests do, before editing it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent/tests/desktop_fail_closed.rs
+--- find
+    let (listener, url) = untouched();
+    let runtime = start(&home);
+--- with
+    let (listener, url) = untouched();
+    // The config file exists once something saved it: the CLI, here.
+    let created = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["config", "set", "inference.model", "m1"])
+        .env("LIGHTAGENT_HOME", &home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent");
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let runtime = start(&home);
+=== end
