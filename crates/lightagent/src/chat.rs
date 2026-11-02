@@ -1616,9 +1616,9 @@ pub async fn run(
         with_turn_guidance(&mut history, turn_plan);
         // Appended to the session as it is saved now, keeping what another
         // process changed meanwhile (see `SessionStore::apply`).
-        let prompt = StoredMessage::new("user", &line);
+        let asked = StoredMessage::new("user", &line);
         session_store
-            .apply(&mut session, |saved| saved.push_message(prompt.clone()))
+            .apply(&mut session, |saved| saved.push_message(asked.clone()))
             .map_err(|error| format!("could not save session: {error}"))?;
         if let Err(error) = crate::memory::capture(
             &profile_dir,
