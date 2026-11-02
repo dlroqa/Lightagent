@@ -1,0 +1,168 @@
+=== base 3bd001ca4d26bb7664a3155b38ca4e392f928c95
+=== message
+D5a-4: each run control is its own browser step, with diagnostics
+
+The first render (check run 41445394833) timed out clicking Stop, and the
+exception discarded what the earlier steps had found. Each control is now
+a separate step: a failing step records its error, the runs, approvals
+and cancels the page sent, and the end of the page text, takes a
+screenshot, and the remaining steps still run. Clicks are bounded at 10 s.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace e2e/runs.mjs
+--- find
+  try {
+    await page.goto(`${proxy.origin}/#/`, { waitUntil: "domcontentloaded" });
+    await page.getByText(title, { exact: true }).first().click({ timeout: 15000 });
+    await composer.waitFor({ timeout: 15000 });
+
+    // The approval card: Allow once.
+    await send("Write the approved file.");
+    const allow = page.getByRole("alertdialog", { name: "Approve fs.write" });
+    if (!(await until(async () => (await allow.count()) === 1))) failures.push("run controls: no approval card for the first run");
+    await page.screenshot({ path: `${dir}/approval.png` });
+    await allow.getByRole("button", { name: "Allow once" }).click();
+    if (!(await until(() => record.approvals.length === 1))) failures.push("run controls: Allow once sent nothing");
+    else if (record.approvals[0].approve !== true) failures.push(`run controls: Allow once sent ${JSON.stringify(record.approvals[0])}`);
+    if (!(await until(async () => (await allow.count()) === 0))) failures.push("run controls: the approval card stayed after Allow once");
+    if (!(await idle())) failures.push("run controls: the allowed run did not finish");
+
+    // The approval card: Deny, from the keyboard.
+    await send("Write the denied file.");
+    if (!(await until(async () => (await allow.count()) === 1))) failures.push("run controls: no approval card for the second run");
+    await allow.getByRole("button", { name: "Deny" }).focus();
+    await page.keyboard.press("Enter");
+    if (!(await until(() => record.approvals.length === 2))) failures.push("run controls: Deny (keyboard) sent nothing");
+    else if (record.approvals[1].approve !== false) failures.push(`run controls: Deny sent ${JSON.stringify(record.approvals[1])}`);
+    if (!(await idle())) failures.push("run controls: the denied run did not finish");
+
+    // Stop.
+    await send("Work on something long.");
+    const stop = page.getByRole("button", { name: "Stop" });
+    if (!(await until(async () => (await stop.count()) === 1))) failures.push("run controls: no Stop button while a run works");
+    await stop.click();
+    if (!(await until(() => record.cancels.length === 1))) failures.push("run controls: Stop sent no cancel");
+    else if (record.cancels[0] !== proxy.run(2)?.id) failures.push(`run controls: Stop cancelled ${record.cancels[0]}`);
+    if (!(await idle())) failures.push("run controls: the stopped run did not end");
+
+    // A run paused on its time budget: Continue.
+    await send("Look up the time.");
+    const pausedCard = page.getByRole("alertdialog", { name: "Run paused on its time budget" });
+    if (!(await until(async () => (await pausedCard.count()) === 1))) failures.push("run controls: no card for the paused run");
+    await page.screenshot({ path: `${dir}/paused.png` });
+    await pausedCard.getByRole("button", { name: "Continue" }).click();
+    if (!(await until(() => record.continues.length === 1))) failures.push("run controls: Continue sent nothing");
+    else if (record.continues[0].mode !== "extend" || record.continues[0].run !== proxy.run(3)?.id) {
+      failures.push(`run controls: Continue sent ${JSON.stringify(record.continues[0])}`);
+    }
+    if (!(await until(async () => (await pausedCard.count()) === 0))) failures.push("run controls: the paused card stayed after Continue");
+    if (!(await idle())) failures.push("run controls: the continued run did not finish");
+
+    // The steering queue: two steers typed during a run, sent in order after it.
+    await send("Start the long task.");
+    if (!(await until(async () => (await page.getByRole("button", { name: "Stop" }).count()) === 1))) failures.push("run controls: the long run did not start");
+    await send("First steer.");
+    await send("Second steer.");
+    const queued = await until(async () => (await page.evaluate(() => document.body.innerText)).includes("Queued steers (2)"));
+    if (!queued) failures.push("run controls: the two steers are not shown as queued");
+    await page.screenshot({ path: `${dir}/steering.png` });
+    if (record.created.length !== 5) failures.push(`run controls: steers were sent during the run (${record.created.length} runs created)`);
+    finish(proxy.run(4), "Long task done.");
+    if (!(await until(() => record.created.length === 7, 25000))) failures.push(`run controls: the queued steers were not both sent (${record.created.length} runs created)`);
+    const steers = record.created.slice(5).map((created) => created.message);
+    if (JSON.stringify(steers) !== JSON.stringify(["First steer.", "Second steer."])) {
+      failures.push(`run controls: the steers were sent as ${JSON.stringify(steers)}`);
+    }
+
+    const notPausing = record.created.filter((created) => created.on_time_budget !== "pause");
+    if (notPausing.length) failures.push(`run controls: ${notPausing.length} run(s) were created without on_time_budget pause`);
+    if (errors.length) failures.push(`run controls: page errors: ${errors.join("; ")}`);
+  } finally {
+--- with
+  const step = async (name, body) => {
+    try {
+      await body();
+    } catch (err) {
+      const text = await page.evaluate(() => document.body.innerText).catch(() => "");
+      const message = err instanceof Error ? err.message.split("\n")[0] : String(err);
+      failures.push(
+        `run controls: ${name}: ${message} [runs ${record.created.length}, approvals ${record.approvals.length}, ` +
+        `cancels ${record.cancels.length}, continues ${record.continues.length}; page ends: ` +
+        `${text.replace(/\s+/g, " ").slice(-300)}]`,
+      );
+      await page.screenshot({ path: `${dir}/failed-${name.replace(/\W+/g, "-")}.png` }).catch(() => {});
+    }
+  };
+  const allow = page.getByRole("alertdialog", { name: "Approve fs.write" });
+  const stop = page.getByRole("button", { name: "Stop", exact: true });
+  const pausedCard = page.getByRole("alertdialog", { name: "Run paused on its time budget" });
+
+  try {
+    await page.goto(`${proxy.origin}/#/`, { waitUntil: "domcontentloaded" });
+    await page.getByText(title, { exact: true }).first().click({ timeout: 15000 });
+    await composer.waitFor({ timeout: 15000 });
+
+    await step("allow once", async () => {
+      await send("Write the approved file.");
+      if (!(await until(async () => (await allow.count()) === 1))) throw new Error("no approval card for the first run");
+      await page.screenshot({ path: `${dir}/approval.png` });
+      await allow.getByRole("button", { name: "Allow once" }).click({ timeout: 10000 });
+      if (!(await until(() => record.approvals.length === 1))) throw new Error("Allow once sent nothing");
+      if (record.approvals[0].approve !== true) throw new Error(`Allow once sent ${JSON.stringify(record.approvals[0])}`);
+      if (!(await until(async () => (await allow.count()) === 0))) throw new Error("the approval card stayed after Allow once");
+      if (!(await idle())) throw new Error("the allowed run did not finish");
+    });
+
+    await step("deny from the keyboard", async () => {
+      await send("Write the denied file.");
+      if (!(await until(async () => (await allow.count()) === 1))) throw new Error("no approval card for the second run");
+      await allow.getByRole("button", { name: "Deny" }).focus({ timeout: 10000 });
+      await page.keyboard.press("Enter");
+      if (!(await until(() => record.approvals.length === 2))) throw new Error("Deny (keyboard) sent nothing");
+      if (record.approvals[1].approve !== false) throw new Error(`Deny sent ${JSON.stringify(record.approvals[1])}`);
+      if (!(await idle())) throw new Error("the denied run did not finish");
+    });
+
+    await step("stop", async () => {
+      await send("Work on something long.");
+      if (!(await until(async () => (await stop.count()) === 1))) throw new Error("no Stop button while a run works");
+      await stop.click({ timeout: 10000 });
+      if (!(await until(() => record.cancels.length === 1))) throw new Error("Stop sent no cancel");
+      if (record.cancels[0] !== proxy.run(2)?.id) throw new Error(`Stop cancelled ${record.cancels[0]}`);
+      if (!(await idle())) throw new Error("the stopped run did not end");
+    });
+
+    await step("continue", async () => {
+      await send("Look up the time.");
+      if (!(await until(async () => (await pausedCard.count()) === 1))) throw new Error("no card for the paused run");
+      await page.screenshot({ path: `${dir}/paused.png` });
+      await pausedCard.getByRole("button", { name: "Continue" }).click({ timeout: 10000 });
+      if (!(await until(() => record.continues.length === 1))) throw new Error("Continue sent nothing");
+      const sent = record.continues[0];
+      if (sent.mode !== "extend" || sent.run !== proxy.run(3)?.id) throw new Error(`Continue sent ${JSON.stringify(sent)}`);
+      if (!(await until(async () => (await pausedCard.count()) === 0))) throw new Error("the paused card stayed after Continue");
+      if (!(await idle())) throw new Error("the continued run did not finish");
+    });
+
+    await step("steering queue", async () => {
+      await send("Start the long task.");
+      if (!(await until(async () => (await stop.count()) === 1))) throw new Error("the long run did not start");
+      await send("First steer.");
+      await send("Second steer.");
+      const queued = await until(async () => (await page.evaluate(() => document.body.innerText)).includes("Queued steers (2)"));
+      await page.screenshot({ path: `${dir}/steering.png` });
+      if (!queued) throw new Error("the two steers are not shown as queued");
+      if (record.created.length !== 5) throw new Error(`steers were sent during the run (${record.created.length} runs created)`);
+      finish(proxy.run(4), "Long task done.");
+      if (!(await until(() => record.created.length === 7, 25000))) throw new Error("the queued steers were not both sent");
+      const steers = record.created.slice(5).map((created) => created.message);
+      if (JSON.stringify(steers) !== JSON.stringify(["First steer.", "Second steer."])) {
+        throw new Error(`the steers were sent as ${JSON.stringify(steers)}`);
+      }
+    });
+
+    const notPausing = record.created.filter((created) => created.on_time_budget !== "pause");
+    if (notPausing.length) failures.push(`run controls: ${notPausing.length} run(s) were created without on_time_budget pause`);
+    if (errors.length) failures.push(`run controls: page errors: ${errors.join("; ")}`);
+  } finally {
+=== end
