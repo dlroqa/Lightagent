@@ -1,0 +1,399 @@
+=== base aebd5d631238b1b8a302df1ec1aa7bba27972369
+=== message
+Desktop docs: row 10 (session writes) validated; owner's instructions of 2026-11-02
+
+Records row 10 (#103) with its exact evidence: edit requests 038-040,
+two CI failures and their fixes, and check and desktop passing on every
+job at aebd5d6 (tree e9066c3). Commits the owner's continuation
+instructions verbatim as section 4 of DESKTOP_CLAUDE_PROMPT.md. Replaces
+the D4 gate's "exactly one 409" with the owner's ordered-concurrency
+rule, adds row 11 (the remaining D4 acceptance items) to the merge
+order, and records the backup sync. Documentation only; capability
+coverage is unchanged at 22 of 227.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+| Row 10: session writes (#100) | not started | — | — | — | — |
+--- with
+| Row 10: session writes (#100) | **CI-validated** at `aebd5d6` (check and desktop, every job) | `desktop/d4c2-session-writes` (stacked on row 9 `fbd008c`) | https://github.com/dlroqa/Lightagent/pull/103 | `aebd5d631238b1b8a302df1ec1aa7bba27972369`, plus this documentation commit | `aebd5d6` / tree `e9066c30eac669165e9deb505ee67a0884659df8` |
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+- Row 10 (#100) is not prepared yet.
+
+## Artifacts and retention
+--- with
+- Row 10 (#100): see "Row 10" below.
+
+## Row 10 — Session writes: one locked writer (#100)
+
+**Ownership.** On 2026-11-02 at about 00:12Z, the session that built rows 1–9
+had ended its turn at 2026-11-01T23:52:42Z with its final report, and nothing
+else was writing to the stack. One session took the implementation from
+there. The branch was created at row 9's head `fbd008c`, and the claim and
+the audit were recorded on #100.
+
+**Defect.** Every session writer loaded a session whole, changed its copy and
+saved it whole, and no lock was shared across processes. In this process,
+PATCH already refused while a run was active, so the API's in-process pairs
+were serialized by the busy set. The lost updates came from other processes:
+- the terminal chat and ACP saved a snapshot they had held for the whole
+  conversation;
+- a second server on the same profile was not covered by the busy set.
+
+`lightagent sessions delete` was an unlocked writer too.
+
+**Fix.**
+- **One store lock**, `sessions/.lock`: an exclusive OS lock that every process
+  takes. It uses D4c's primitive, now shared as `paths::lock_exclusive`.
+- **`SessionStore::update(id, change)`:** under the lock, re-read the session,
+  apply the change, and write atomically.
+  - A refused change, a failed write, or an unreadable file writes nothing.
+  - A missing session stays missing.
+- **`SessionStore::apply(session, change)`:** for clients that hold a session
+  open. The change applies to the saved state and refreshes the client's view.
+- **`save`** (new sessions) and **`delete`** take the same lock.
+- **Converted writers:**
+  - run admission;
+  - run completion;
+  - regenerate's swap;
+  - PATCH;
+  - the API and CLI deletes;
+  - the chat's prompt, turn and approval writes;
+  - ACP's prompt and completion.
+- **Locking is short.** It covers only the read-modify-write, never inference.
+  The API does that work on the blocking pool.
+- **Unchanged:** run admission (the busy set), cancellation, permission,
+  ownership, and profile isolation.
+
+**Tests (hosted, all four platforms):**
+- **Store:** a writer in another process (the test binary run again) waits for
+  the lock and keeps the holder's change. Also covered:
+  - a stale writer applies to the current session;
+  - a refused change, a failed atomic write, or an unreadable file writes
+    nothing;
+  - `Busy` after the wait;
+  - no re-creation after a delete;
+  - `apply`;
+  - history off.
+- **API:** while the test holds the lock and another process waits to rename
+  the session:
+  - a normal run finishes: rename and answer are both kept;
+  - a regeneration finishes: rename and new answer are both kept;
+  - a provider failure, then a cancellation: the rename is kept and the
+    saved answer is untouched.
+
+  Also:
+  - a record whose write fails leaves the file byte-for-byte unchanged;
+  - two concurrent prompts admit one run and save one prompt;
+  - PATCH during the run is still 409.
+- **`serve --desktop` process:** its PATCH and the CLI's delete wait for
+  another process's lock. The PATCH keeps the turn written inside the lock,
+  and a write after the delete does not re-create the session.
+- **ACP:** a rename made while an editor holds the session survives its next
+  turn.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Branch `desktop/d4c2-session-writes` created at `fbd008c`; ownership and audit recorded | — | https://github.com/dlroqa/Lightagent/issues/100 |
+| 2026-11-02 | Edit request `038`: 24 edits to 11 files; branch moved without force; draft PR #103 | `6c0b7ff` / `e5ff849` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41367313205 |
+| 2026-11-02 | `check` on `6c0b7ff`: **failure**. E0308 in `chat.rs`: the new `prompt` binding shadowed the chat loop's `prompt: TerminalPrompt` | `6c0b7ff` | https://github.com/dlroqa/Lightagent/actions/runs/41367409693 |
+| 2026-11-02 | `039`: the binding renamed to `asked` | `903528f` / `a3aafb3` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41367879919 |
+| 2026-11-02 | `check` on `903528f`: **failure**, only `check (linux-x64)`: `session_history_is_packed_against_the_resolved_window` got 409 on a follow-up prompt. The test posted the follow-up as soon as the record was visible, before the session was released. That gap always existed, but the single-threaded test runtime hid it. Every other job passed, including all new tests on the other three platforms. `desktop` was cancelled by the next push | `903528f` | https://github.com/dlroqa/Lightagent/actions/runs/41367939822, https://github.com/dlroqa/Lightagent/actions/runs/41367939797 |
+| 2026-11-02 | `040`: that test and `a_saved_session_is_reused_by_follow_up_runs_and_new_sessions_are_empty` now wait for the release, as #98's `settled` helper already does. No assertion changed | `aebd5d6` / `e9066c3` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41369131207 |
+| 2026-11-02 | `check` on `aebd5d6`: **success**, all 13 jobs. The new store, API, `serve --desktop` and ACP tests ran and passed on linux-x64, macos-arm64, macos-x64 and windows-x64 | `aebd5d6` | https://github.com/dlroqa/Lightagent/actions/runs/41369189397 |
+| 2026-11-02 | `desktop` on `aebd5d6`: **success**, all 7 jobs | `aebd5d6` | https://github.com/dlroqa/Lightagent/actions/runs/41369189399 |
+| 2026-11-02 | `jev evaluation` and `subagents`: **success**. The dispatched `subagent fixture fail` and `verify` runs fail by design (D0 baseline), as on every earlier head | `aebd5d6` | https://github.com/dlroqa/Lightagent/actions/runs/41369189555, https://github.com/dlroqa/Lightagent/actions/runs/41369189398 |
+
+Capability coverage is unchanged: **22 of 227**. Row 10 adds no capability.
+
+**Known limits (not addressed in row 10):**
+- **Run admission is per process.** Two processes can each run a turn on one
+  session at once. Both turns are kept, but they interleave. A cross-process
+  run lease is a separate follow-up.
+- **A record can be skipped.** If another writer holds the store lock longer
+  than 5 s, the recorder logs `Busy` and does not write. Nothing is
+  overwritten.
+
+## Artifacts and retention
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+  | 2026-11-01T23:07:09Z | `d4b-profile-ui` `7c3e988`, `d4c-config` `0e46892`, `feat/response-action-bar` `987c6db`, `integration/desktop-d4b-response-actions` `b4a61c9`, `tools/source-edit` `a9f91a3` | D4c validated; fetch only, working tree clean |
+--- with
+  | 2026-11-01T23:07:09Z | `d4b-profile-ui` `7c3e988`, `d4c-config` `0e46892`, `feat/response-action-bar` `987c6db`, `integration/desktop-d4b-response-actions` `b4a61c9`, `tools/source-edit` `a9f91a3` | D4c validated; fetch only, working tree clean |
+  | 2026-11-02T00:57:09Z | `d4c-config` `551e73a`, `d4c1-response-actions` `fbd008c`, `d4c2-session-writes` `aebd5d6`, `tools/source-edit` `b9cacc0` (lower slices unchanged) | row 10 validated; fetch only, working tree `master` `12582a0` clean |
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+## Next
+
+#98 does not replace D4c. D4c starts from the D4b head and stays in the
+established order. On 2026-11-01 no other Claude session was running on the
+owner's machine, and no D4c branch, PR or edit request existed.
+
+1. D4c: configuration (show, path, get, set, Jev routing report). Design: one locked read-modify-write with an ETag in `lightagent-core`'s `ConfigStore` (`update(expected_etag, change)`), used by `lightagent config set`, the existing `PUT /settings`, and the new config routes. A stale write gets `409 conflict`, and two processes cannot interleave. Then a Settings advanced editor with typed key and value.
+3. D4d–e: provider, models, key entry and endpoint test; workspaces.
+--- with
+## Next
+
+This is the order the owner set on 2026-11-02 (DESKTOP_CLAUDE_PROMPT.md §4):
+
+1. **Row 11:** the remaining D4 acceptance items, on branch
+   `desktop/d4c3-config-acceptance`, stacked on row 10.
+   - CLI and desktop configuration and profile files compared byte for byte
+     in isolated homes.
+   - Ordered concurrency: a Settings save against a revision loaded before a
+     CLI write gets 409 and writes nothing. A CLI write after a Settings save
+     keeps it.
+   - An unreadable configured secret file fails closed, with a redacted
+     error, before any request is made.
+   - No secret in the renderer's state (the DOM, browser storage, and the
+     loaded settings).
+   - `jev-routing-report` as one shared operation, an API route, and Settings
+     UI.
+   - A Settings conflict keeps the unsaved input and offers review and
+     refresh.
+
+   The diagnostics bundle does not exist until D7 (`/diagnostics`), so its
+   redaction test moves there.
+2. **D4d–e:** providers, models, protected credentials and endpoint checks;
+   then workspaces.
+3. **D5–D10,** in the plan's dependency order.
+=== replace docs/desktop/DESKTOP_MERGE_ORDER.md
+--- find
+| 10 | Session writes: one locked writer (#100) | opened when prepared | `desktop/d4c2-session-writes` | `desktop/d4c1-response-actions` | — | — |
+| 11+ | D4d onwards | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+--- with
+| 10 | Session writes: one locked writer (#100) | https://github.com/dlroqa/Lightagent/pull/103 | `desktop/d4c2-session-writes` | `desktop/d4c1-response-actions` | `aebd5d6` | `aebd5d6` |
+| 11 | D4 acceptance: isolated-home golden files, ordered concurrency, secrets, Jev routing report, Settings conflict | opened when prepared | `desktop/d4c3-config-acceptance` | `desktop/d4c2-session-writes` | — | — |
+| 12+ | D4d onwards | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+=== replace docs/desktop/DESKTOP_ACCEPTANCE.md
+--- find
+| D4 | CLI and desktop produce identical files for profile create/use/delete and config set (golden comparison in isolated homes). Concurrent `config set` and settings save give exactly one `409`, with no lost update. An unreadable secret file fails closed. No secret value appears in the renderer state dump or the diagnostics bundle |
+--- with
+| D4 | CLI and desktop produce identical files for profile create/use/delete and config set (golden comparison in isolated homes). A comparison normalizes only environment-dependent values, each with a written reason. Ordered concurrency (owner, 2026-11-02): a Settings save made against a revision loaded before a CLI write gets `409` and writes nothing, and a CLI write made after a Settings save keeps that save. Unordered races need no exact count of `409`s, only no lost update. An unreadable secret file fails closed, with a redacted error. No secret value appears in the renderer state dump or the diagnostics bundle (the bundle's test belongs to D7, which adds it). `jev-routing-report` is one shared operation behind the CLI, an API route and the UI. A Settings conflict keeps the unsaved input and offers review and refresh, never silently discarding it |
+=== replace docs/response-action-bar-progress.md
+--- find
+a separate branch; see the merge-order entry in the desktop progress record.
+--- with
+a separate branch; see the merge-order entry in the desktop progress record.
+
+Row 10 of the desktop merge order (https://github.com/dlroqa/Lightagent/pull/103)
+changes how regenerate's swap is written. It is now applied under the session
+store's lock, to the session as saved at that moment. A rename, or another
+process's write made during the regeneration, is kept. A failed, cancelled or
+empty regeneration still writes nothing. This is tested in another process on
+all four platforms.
+=== replace docs/desktop/DESKTOP_CLAUDE_PROMPT.md
+--- find
+Continue the established D0–D10 dependency order. Local backup and progress documentation are ongoing requirements throughout the project, not tasks deferred until completion.
+--- with
+Continue the established D0–D10 dependency order. Local backup and progress documentation are ongoing requirements throughout the project, not tasks deferred until completion.
+
+## 4. Continuation: session writes, D4 acceptance, D4d onward (2026-11-02)
+
+You are continuing the existing Lightagent Desktop project in:
+https://github.com/dlroqa/Lightagent
+
+This is a continuation, not a fresh implementation. Read the committed project documents and verify GitHub’s current state before changing anything.
+
+GOAL
+
+Build an installable Lightagent Desktop application with full coverage of existing CLI capabilities, reusing the shared backend and React WebUI.
+
+Keep desktop-specific implementation in desktop/. Include the response-action feature: copy, rating, read aloud, share, regenerate, and the More menu, with honest availability states for unfinished functions.
+
+AUTHORITATIVE DOCUMENTS
+
+Read the current versions on the relevant desktop branches:
+- DESKTOP_BUILD_PLAN.md
+- DESKTOP_CLAUDE_PROMPT.md
+- docs/desktop/DESKTOP_PROGRESS.md
+- DESKTOP_CLI_PARITY.md
+- desktop-capabilities.json
+- DESKTOP_ARCHITECTURE.md
+- DESKTOP_ACCEPTANCE.md
+- DESKTOP_MERGE_ORDER.md
+- docs/response-action-bar-progress.md
+
+Locate files using repository conventions rather than assuming every file is at the root. Report missing documents without inventing their contents.
+
+SESSION OWNERSHIP
+
+Before editing, check whether another session owns this work.
+- Do not modify another session’s staging folders.
+- Preserve all existing files and uncommitted work.
+- Do not overwrite, reset, clean, or delete mixed or older drafts.
+- Use one implementation owner for the branch stack.
+- If another session is actively writing to this stack, resolve ownership before any mutation; read-only investigation can continue.
+
+LAST VERIFIED BASELINE — RECHECK
+
+The previous review verified:
+- #97 D4b head: 7c3e988; desktop and check passed.
+- #101 D4c configuration:
+  branch desktop/d4c-config
+  head 551e73a809c0ee6044a77be5b6b9f0e9d80e60ff
+  check 41360645573 and desktop 41360645549 passed.
+- #102 response-action adoption:
+  branch desktop/d4c1-response-actions
+  head fbd008c01ee5c8933f6ef9e852f0056084f5527a
+  check 41364196274 and desktop 41364196416 passed.
+- Jev evaluation and subagents also passed on both latest heads.
+- #101 and #102 were draft, open, and unmerged.
+- Session-write race is tracked in issue #100; its fix had not been implemented.
+- Desktop capability coverage was 22/226 on #101 and 22/227 after response-action adoption.
+- These are historical checkpoints, not permission to assume GitHub is unchanged.
+
+Verify current heads, bases, source trees, CI results, and any newer PRs before proceeding. Avoid duplicating work completed since this checkpoint.
+
+NEXT WORK — IN ORDER
+
+1. Fix issue #100: concurrent session writers
+
+Prepare a focused draft PR stacked on #102.
+
+Audit every session writer, including:
+- rename, pin, and archive;
+- normal-run completion;
+- regenerate;
+- CLI chat;
+- ACP;
+- any other writer discovered during the audit.
+
+Use one shared cross-process read-modify-write mechanism:
+- Re-read authoritative state under the lock.
+- Apply the intended change to current state.
+- Preserve concurrent metadata and transcript updates.
+- Do not simply lock and save a stale whole-session snapshot.
+- Use atomic persistence and preserve valid data on failure.
+- Keep short persistence locking separate from long-running inference.
+- Preserve run-admission, cancellation, permission, ownership, and profile-isolation behavior.
+
+Add deterministic separate-process tests covering metadata changes racing normal completion and regeneration, concurrent run admission, failed writes, provider failure, and cancellation.
+
+2. Complete remaining D4 acceptance requirements
+
+D4c’s implementation exists, but its acceptance gate was not complete.
+
+Finish:
+- CLI/desktop configuration equivalence using isolated homes.
+- Deterministic stale-revision rejection.
+- Concurrent CLI and Settings saves without lost updates.
+- Unreadable configured secrets failing closed with redacted errors.
+- Secrets absent from renderer state dumps and diagnostics bundles.
+- Jev routing-report shared operation, API route, and UI.
+- Settings conflict handling that preserves unsaved input and offers refresh/review without silently discarding edits.
+
+Concurrency expectations:
+- Load an older Settings revision, complete a CLI write, then submit Settings: require 409 and no overwrite.
+- If Settings commits first, a later CLI update must preserve that change.
+- Do not require every unordered race to produce exactly one 409.
+
+For byte-for-byte configuration comparisons, control environment-dependent values or document narrowly justified normalization. Do not hide meaningful differences.
+
+3. Continue D4d and later stages
+
+Once prerequisites pass, continue providers, models, protected credentials, endpoint checks, workspaces, and D5–D10 in the committed plan’s dependency order.
+
+Keep PRs small and retain exact acceptance evidence. Routine progress reports do not require another approval.
+
+RESPONSE-ACTION DESKTOP REQUIREMENTS
+
+#102 incorporates #98’s response-action work and desktop transport adoption.
+
+Maintain these requirements:
+- Regenerate uses the shared backend and desktop host transport.
+- Failed, cancelled, empty, or refused regeneration preserves the previous saved answer.
+- Session-write permission and ownership are enforced.
+- New run creation and regeneration are blocked appropriately during profile switching.
+- Clipboard, speech, and sharing are verified in the actual desktop WebView on supported platforms.
+- Unsupported capabilities have clear availability states.
+- Keyboard navigation, tooltips, accessibility, streaming visibility, and narrow-window layout are checked.
+- Ratings remain temporary until persistence exists.
+- Branching remains disabled until its backend exists.
+- Previous-answer navigation remains unavailable until implemented.
+
+Contract tests and browser tests are not substitutes for native desktop verification. Keep native gaps explicit and do not count unfinished features as completed parity.
+
+PROPOSED MERGE ORDER — NO MERGES AUTHORIZED
+
+Previously established sequence:
+#90 → #92 → #93 → #94 → #95 → #96 → #97 → #101 → #102
+→ session-write fix → remaining D4 work → subsequent desktop stages.
+
+- #91: framework-spike evidence only.
+- #99: transport-integration evidence only.
+- #98: incorporated through #102; do not merge it separately under this plan.
+- Verify this sequence against current GitHub state and update documentation if new work changes dependencies.
+- Before eventual merge approval, simulate the exact candidate sequence and compare candidate trees with tested trees.
+- Stacked PR bases alone do not prove that every resulting master tree is validated.
+- Do not rewrite or force-update existing branches merely to simplify the sequence.
+
+MANDATORY EXECUTION POLICY
+
+GitHub is authoritative for source, workflows, plans, and durable progress records.
+
+Implementation source and workflow edits:
+- GitHub-native APIs or the existing GitHub-hosted source-edit workflow only.
+- Attach generated commits to the correct development branches and draft PRs.
+- Verify the fixed base, resulting commit/tree, and provenance.
+- No local implementation or workflow editing, including temporary staging folders.
+
+All formatting, dependency installation for builds or validation, linting, building, rendering, testing, benchmarking, packaging, installer verification, and release dry-runs:
+- GitHub Actions only.
+- GitHub-hosted runners only.
+- No self-hosted runners.
+- No local application execution or validation.
+
+Respect the repository dependency policy. Never put credentials in source-edit requests, logs, screenshots, artifacts, or commits.
+
+The earlier local-edit departure for #98 is already recorded. Preserve that record; do not rewrite history or claim it complied with this policy.
+
+LOCAL BACKUP AND PROGRESS — REQUIRED
+
+Verify the existing backup before creating another clone:
+~/Repositories/LAcode/Lightagent
+
+Previous state:
+- Clean checked-out master at 12582a0.
+- Desktop branches preserved as fetched remote refs.
+- Separate progress copies in:
+  ~/Repositories/LAcode/desktop-progress/
+
+Local use is limited to:
+- repository copying and safe synchronization;
+- safekeeping;
+- static source reading;
+- progress documentation.
+
+After each completed stage:
+- Safely fetch relevant branches without force, reset, clean, or overwriting work.
+- State which commits are preserved as remote refs and which are checked out.
+- Refresh local progress-document copies from their authoritative GitHub versions.
+- Preserve older drafts and progress snapshots.
+- Record the actual synchronization time, backed-up SHA, and file paths.
+- Distinguish the documentation commit from the implementation commit it describes.
+
+REPORTING AND ACCEPTANCE
+
+For each stage, report:
+- Repository, branch, and draft PR URL.
+- Exact source head SHA/tree.
+- Exact tested SHA/tree and whether CI tested a head or merge candidate.
+- Actions run URLs and actual results.
+- Failures, reruns, fixes, and outstanding gaps.
+- Capability coverage with a reconciled denominator.
+- Artifact links and retention.
+- Local backup state and progress-document paths.
+- Next dependency-ordered stage.
+
+Keep installers, screenshots, reports, and checksums as Actions artifacts. Keep durable conclusions and evidence references in Git. Do not commit generated binaries.
+
+AUTHORIZATION
+
+Development branches, draft PRs, GitHub-hosted source editing, and necessary hosted Actions runs are authorized.
+
+Do NOT merge, tag, publish releases, deploy, activate production, or update installed applications without my separate explicit approval.
+
+Begin with a concise verified status report, then continue the authorized work. Do not stop after that report unless you encounter a genuine blocker or authorization boundary.
+=== end
