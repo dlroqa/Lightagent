@@ -1,0 +1,96 @@
+=== base e6f45069c88120c530caeb975b66026d780016dd
+=== message
+Desktop docs: D4d-2a (endpoint check) validated; cli.models implemented (25 of 227)
+
+Records D4d-2a (#107) at e6f4506 (tree e33be00): check and desktop
+passing on every job, on the first CI run after the request was applied.
+Marks `cli.models` implemented with that evidence (denominator 227,
+implemented 24 -> 25). Documentation and inventory only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "ui": "Providers/Models",
+   "backend": "extract: lib.rs models(); api: GET /provider (capabilities only)",
+   "permission": "local-operator",
+   "data_scope": "provider",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "ui": "Providers/Models",
+   "backend": "shared: providers::check_active (lightagent models); api: POST /provider/check",
+   "permission": "local-operator",
+   "data_scope": "provider",
+   "desktop_status": "implemented",
+   "verification": "Settings provider card Check connection shows the endpoint's models or its answer, only when asked (UI e2e: e2e/settings.mjs, browser only); API = CLI models through one check that sends the configured key to that endpoint only, follows no redirect, is bounded, and fails closed on an unusable key (crates/lightagent/tests/desktop_providers.rs, all four platforms); desktop: contract operation provider.check; native WebView automation pending D8 (not claimed)",
+   "tested_sha": "e6f45069c88120c530caeb975b66026d780016dd",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41380804834 (check); https://github.com/dlroqa/Lightagent/actions/runs/41380804835 (desktop)"
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "parity_implemented": 24,
+--- with
+  "parity_implemented": 25,
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Implemented: 24 of 227
+--- with
+- Implemented: 25 of 227
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.models` | `lightagent models` | applicable | yes | Providers/Models | extract: lib.rs models(); api: GET /provider (capabilities only) | not-started | `crates/lightagent/src/lib.rs:99` |
+--- with
+| `cli.models` | `lightagent models` | applicable | yes | Providers/Models | shared: providers::check_active; api: POST /provider/check | implemented | `crates/lightagent/src/lib.rs:99` |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `setup.provider.key` | `6988f6c` | Settings Provider API key card: save, stale save refused with the entry kept, replace, remove after confirmation, key gone from the page (UI e2e, browser only); API = CLI, write-only, unusable keys fail closed (crates/lightagent/tests/desktop_credentials.rs, all four platforms); desktop: contract operations provider.credential.*; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41378487660), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41378487692) |
+--- with
+| `setup.provider.key` | `6988f6c` | Settings Provider API key card: save, stale save refused with the entry kept, replace, remove after confirmation, key gone from the page (UI e2e, browser only); API = CLI, write-only, unusable keys fail closed (crates/lightagent/tests/desktop_credentials.rs, all four platforms); desktop: contract operations provider.credential.*; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41378487660), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41378487692) |
+| `cli.models` | `e6f4506` | Settings Check connection, only when asked (UI e2e, browser only); API = CLI models through one bounded check: key to that endpoint only, redirect reported not followed, silent endpoint cut off, unusable key fails closed (crates/lightagent/tests/desktop_providers.rs, all four platforms); desktop: contract operation provider.check; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41380804834), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41380804835) |
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+| Row 12: D4d-1 provider credentials (shared write-only operation; unusable keys fail closed) | **CI-validated** at `6988f6c` (check and desktop, every job) | `desktop/d4d1-credentials` (stacked on row 11 `597604d`) | https://github.com/dlroqa/Lightagent/pull/106 | `6988f6c3256b46d8cc55704e5c3bc2c9e4016b90`, plus this documentation commit | `6988f6c` / tree `bcdfc0b89c6f27047bee39608db9374cc618dad9` |
+--- with
+| Row 12: D4d-1 provider credentials (shared write-only operation; unusable keys fail closed) | **CI-validated** at `6988f6c` (check and desktop, every job) | `desktop/d4d1-credentials` (stacked on row 11 `597604d`) | https://github.com/dlroqa/Lightagent/pull/106 | `6988f6c3256b46d8cc55704e5c3bc2c9e4016b90`, plus the documentation commit `8f0717d` (check and desktop passed on it) | `6988f6c` / tree `bcdfc0b89c6f27047bee39608db9374cc618dad9` |
+| Row 13: D4d-2a endpoint check (explicit, bounded, no redirect with the key) | **CI-validated** at `e6f4506` (check and desktop, every job) | `desktop/d4d2-endpoint-check` (stacked on row 12 `8f0717d`) | https://github.com/dlroqa/Lightagent/pull/107 | `e6f45069c88120c530caeb975b66026d780016dd`, plus this documentation commit | `e6f4506` / tree `e33be00726f6236d4e21c8410fe540a2de9283ca` |
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+**Next in D4d:**
+--- with
+## Row 13 — D4d-2a: the endpoint check
+
+- **`LightweightProvider::for_check`:** a client used only for explicit
+  checks. It never follows a redirect, so the key reaches the configured
+  endpoint only, and a 3xx is reported as that endpoint's answer. Every
+  request is bounded. Runs keep their client.
+- **`providers::check_active`:** the one shared check. It lists the active
+  endpoint's models with that endpoint's own configured key, bounded as a
+  whole. An unusable key fails closed with nothing sent. The result has
+  `ok`, `models`, `error`, `key_sent` and `elapsed_ms`, and never a key.
+- **Where it is used:**
+  - `lightagent models` is this check. It now reports a redirect instead of
+    following it, and gives up after 10 s.
+  - `POST /provider/check` (admin scope; `timeout_secs` 1–30, default 10)
+    runs it through the run factory. It is contract operation
+    `provider.check`, with a backend inventory row (323 rows).
+  - **Settings:** "Check connection" runs only when clicked. That is
+    browser evidence; native WebView verification is D8.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Edit request `048`: **failure** before any commit. A find block was part of a line (the whole-line rule) | — | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41380624787 |
+| 2026-11-02 | `048b` (that block given its whole line, nothing else changed): 26 edits; branch `desktop/d4d2-endpoint-check` moved without force; draft PR #107 | `e6f4506` / `e33be00` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41380687270 |
+| 2026-11-02 | `check` on `e6f4506`: **success**, every job. `an_endpoint_check_is_explicit_bounded_and_sends_the_key_to_that_endpoint_only` passed on all four platforms: key sent to the endpoint and in no response; API models = CLI; 401; 302 not followed and its target untouched; a silent endpoint cut off at 2 s; an unusable key fails closed. Render `[ok]` | `e6f4506` | https://github.com/dlroqa/Lightagent/actions/runs/41380804834 |
+| 2026-11-02 | `desktop` on `e6f4506`: **success**, every job | `e6f4506` | https://github.com/dlroqa/Lightagent/actions/runs/41380804835 |
+| 2026-11-02 | `jev evaluation` and `subagents`: **success**. The fixture `fail` and `verify` dispatches failed by design | `e6f4506` | https://github.com/dlroqa/Lightagent/actions/runs/41380804791, https://github.com/dlroqa/Lightagent/actions/runs/41380804768 |
+| 2026-11-02 | Parity: `cli.models` is implemented: **25 of 227** | — | DESKTOP_CLI_PARITY.md |
+
+**Next in D4d** (the endpoint check above is done):
+=== replace docs/desktop/DESKTOP_MERGE_ORDER.md
+--- find
+| 13+ | D4d-2 onwards (provider/model selection and endpoint check, then D4e workspaces) | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+--- with
+| 13 | D4d-2a endpoint check: explicit, bounded, no redirect with the key | https://github.com/dlroqa/Lightagent/pull/107 | `desktop/d4d2-endpoint-check` | `desktop/d4d1-credentials` | `e6f4506` | `e6f4506` |
+| 14+ | D4d-2b provider/model selection and saved providers, then D4e workspaces | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+=== end
