@@ -141,6 +141,12 @@ pub fn router(state: AppState) -> Router {
             "/api/lightagent/v1/extensions/{name}/enabled",
             axum::routing::put(set_extension_enabled),
         )
+        .route("/api/lightagent/v1/mcp", get(get_mcp).put(put_mcp))
+        .route("/api/lightagent/v1/mcp/servers", post(add_mcp_server))
+        .route(
+            "/api/lightagent/v1/mcp/servers/{name}",
+            axum::routing::put(update_mcp_server).delete(remove_mcp_server),
+        )
         .route(
             "/api/lightagent/v1/profiles",
             get(list_profiles).post(create_profile),
@@ -1831,6 +1837,155 @@ async fn put_workspace(
         Err(UpdateError::Change(message)) => bad_request(&message),
         Err(UpdateError::Store(error)) => config_error(error),
     }
+}
+
+/// The `mcp` section with every value withheld, the revision a change must
+/// name, and when a change applies.
+fn mcp_view(config: &lightagent_core::Config, revision: &ConfigRevision) -> serde_json::Value {
+    json!({
+        "mcp": lightagent_core::mcp_servers::view(config),
+        "revision": revision.as_str(),
+        "effect": lightagent_core::mcp_servers::EFFECT,
+    })
+}
+
+/// A change the shared MCP operations refused, by kind.
+fn mcp_refusal(error: lightagent_core::mcp_servers::McpConfigError) -> Response {
+    use lightagent_core::mcp_servers::McpConfigError;
+    let status = match &error {
+        McpConfigError::NotFound(_) => StatusCode::NOT_FOUND,
+        McpConfigError::Invalid(_) => StatusCode::BAD_REQUEST,
+        McpConfigError::Conflict(_) => StatusCode::CONFLICT,
+    };
+    (status, Json(json!({ "error": error.to_string() }))).into_response()
+}
+
+/// One MCP change, on the revision the caller read when it names one: a
+/// stale revision gets 409 and writes nothing, and so does a refused change.
+fn mcp_change(
+    state: &AppState,
+    expected: Option<&str>,
+    created: bool,
+    change: impl FnOnce(
+        &mut lightagent_core::Config,
+    ) -> Result<(), lightagent_core::mcp_servers::McpConfigError>,
+) -> Response {
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let expected = expected.map(ConfigRevision::parse);
+    match store.update(expected.as_ref(), change) {
+        Ok(((), revision)) => match store.load() {
+            Ok(config) => {
+                let status = if created {
+                    StatusCode::CREATED
+                } else {
+                    StatusCode::OK
+                };
+                (status, Json(mcp_view(&config, &revision))).into_response()
+            }
+            Err(error) => config_error(error),
+        },
+        Err(UpdateError::Change(error)) => mcp_refusal(error),
+        Err(UpdateError::Store(error)) => config_error(error),
+    }
+}
+
+/// The MCP servers, switch and timeout, every value withheld.
+async fn get_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => Json(mcp_view(&config, &revision)).into_response(),
+        Err(error) => config_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct McpSettingsBody {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// Switch MCP on or off and set its timeout.
+async fn put_mcp(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<McpSettingsBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (enabled, timeout_secs) = (body.enabled, body.timeout_secs);
+    mcp_change(&state, body.expected_revision.as_deref(), false, |config| {
+        lightagent_core::mcp_servers::set(config, enabled, timeout_secs)
+    })
+}
+
+#[derive(Deserialize)]
+struct McpServerBody {
+    server: lightagent_core::mcp_servers::ServerInput,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// Add a configured MCP server.
+async fn add_mcp_server(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<McpServerBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let McpServerBody {
+        server,
+        expected_revision,
+    } = body;
+    mcp_change(&state, expected_revision.as_deref(), true, move |config| {
+        lightagent_core::mcp_servers::add(config, server)
+    })
+}
+
+/// Edit a configured MCP server; a withheld value left `null` is kept.
+async fn update_mcp_server(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(body): Json<McpServerBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let McpServerBody {
+        server,
+        expected_revision,
+    } = body;
+    mcp_change(&state, expected_revision.as_deref(), false, move |config| {
+        lightagent_core::mcp_servers::update(config, &name, server)
+    })
+}
+
+/// Remove a configured MCP server.
+async fn remove_mcp_server(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    mcp_change(&state, None, false, |config| {
+        lightagent_core::mcp_servers::remove(config, &name)
+    })
 }
 
 /// Where the extension operations act: this runtime's Lightagent home.

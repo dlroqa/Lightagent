@@ -28,6 +28,7 @@ pub mod ids;
 pub mod invoker;
 pub mod limits;
 pub mod loop_;
+pub mod mcp_servers;
 pub mod mock;
 pub mod paths;
 pub mod permissions;

@@ -139,6 +139,31 @@
    "path": "/api/lightagent/v1/extensions/{name}/enabled"
   },
   {
+   "id": "mcp.get",
+   "method": "GET",
+   "path": "/api/lightagent/v1/mcp"
+  },
+  {
+   "id": "mcp.set",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/mcp"
+  },
+  {
+   "id": "mcp.servers.add",
+   "method": "POST",
+   "path": "/api/lightagent/v1/mcp/servers"
+  },
+  {
+   "id": "mcp.servers.update",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/mcp/servers/{name}"
+  },
+  {
+   "id": "mcp.servers.remove",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/mcp/servers/{name}"
+  },
+  {
    "id": "profiles.list",
    "method": "GET",
    "path": "/api/lightagent/v1/profiles"
