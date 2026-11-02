@@ -1,0 +1,1259 @@
+=== base d7a4491cce6ce62bc454e4a3506e4d052ccb1f56
+=== message
+D6-6 (new scope): import skills from a repository or folder
+
+No CLI operation installed bare skills; extension install handled only
+folders with an extension.json. lightagent_extensions::skill_import adds
+it, for the API and the desktop, tracked as scope beyond the CLI parity
+target.
+
+- Supported layouts in the selected folder (`#subdir`): `extension.json`
+  (an extension, as it is), `SKILL.md` (one skill),
+  `skills/<name>/SKILL.md` or `<name>/SKILL.md` (a set). Anything else is
+  refused and says what was looked for. Each SKILL.md must name a skill
+  (ASCII letters, digits, '-', '_'), be at most 512 KiB, with at most 200
+  skills, no duplicate names and no links anywhere (the copy refuses
+  them).
+- Git sources: https only, `GIT_ALLOW_PROTOCOL=https`, no prompt, Git LFS
+  smudge off; an optional revision (branch, tag or commit; validated) is
+  fetched shallowly and checked out detached; the commit installed is
+  recorded with the URL and folder. Nothing fetched is run: files are only
+  read and copied. A revision with a local folder is refused.
+- The skills are packaged as a generated extension (no instructions, no
+  MCP servers) so they install atomically with the extension machinery
+  and their source record, and the extension's enable/disable is their
+  activation. An import is installed inactive unless `activate` is sent;
+  it never grants a tool permission or turns MCP on.
+- `replace` updates an installed extension of the same name: the new copy
+  is installed beside the old one first, then the two are exchanged, and
+  the activation state saved; if any step fails the old copy is put back.
+  Without `replace` an existing name is a conflict.
+- API (operator): POST /skills/imports; contract skills.import; one
+  backend inventory row (new scope, not counted). The Installed skills
+  card has an Import form (activation unchecked by default).
+- Evidence: backend desktop_skill_import.rs (the four layouts; inactive
+  until enabled, then listed by GET /skills with its source; unsupported
+  layout, bad name, link, revision with a folder, relative source refused
+  with nothing installed; conflict without replace; a failed replace
+  keeps the old copy byte for byte; a replace updates it; no leftovers);
+  host runs.py `skills`; browser e2e/skills.mjs. Not exercised: fetching
+  from a real Git host (no network dependency in CI); the revision
+  validation is unit-tested.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-extensions/src/manage.rs
+--- find
+fn git_source(source: &Path) -> Result<Option<(String, PathBuf)>, ManageError> {
+--- with
+pub(crate) fn git_source(source: &Path) -> Result<Option<(String, PathBuf)>, ManageError> {
+=== replace crates/lightagent-extensions/src/lib.rs
+--- find
+pub mod manage;
+--- with
+pub mod manage;
+pub mod skill_import;
+=== write crates/lightagent-extensions/src/skill_import.rs
+//! Skills from a repository or folder that is not an extension (D6-6, new
+//! scope: no CLI operation installed bare skills). The skills are packaged
+//! as an extension the import generates, so they install atomically into an
+//! extension root with links refused and their source recorded, and the
+//! extension's enable/disable is their activation. An import is inactive
+//! unless the caller asks to activate it, and it never grants a tool
+//! permission: skills are instructions the model reads on request.
+//!
+//! Supported layouts in the selected folder (`#subdir`):
+//! - `extension.json`: an extension, installed as it is;
+//! - `SKILL.md`: one skill;
+//! - `skills/<name>/SKILL.md`: a set of skills;
+//! - `<name>/SKILL.md`: a set of skills.
+//!
+//! Anything else is refused. Nothing fetched is run: git fetches without a
+//! prompt or Git LFS smudging, and files are only read and copied.
+
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use lightagent_core::skills::Skill;
+use lightagent_core::{ConfigStore, LightagentPaths, RunId, SkillStore};
+use serde::Serialize;
+
+use crate::manage::{self, ManageError, SOURCE_FILE, Scope, Source};
+
+/// The largest SKILL.md an import accepts.
+const MAX_SKILL_BYTES: u64 = 512 * 1024;
+/// The most skills one import accepts.
+const MAX_SKILLS: usize = 200;
+
+/// How to import.
+#[derive(Clone, Debug)]
+pub struct ImportOptions {
+    pub scope: Scope,
+    /// The extension to install the skills as; derived from the source when unset.
+    pub name: Option<String>,
+    /// A branch, tag or commit to install (Git sources only).
+    pub revision: Option<String>,
+    /// Replace an installed extension of the same name; it is kept if anything fails.
+    pub replace: bool,
+    /// Make the skills available to runs now; otherwise they are installed inactive.
+    pub activate: bool,
+}
+
+/// Which supported layout the source had.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Layout {
+    Extension,
+    SingleSkill,
+    SkillsFolder,
+    SkillFolders,
+}
+
+/// What an import did.
+#[derive(Clone, Debug, Serialize)]
+pub struct Imported {
+    pub name: String,
+    pub dir: PathBuf,
+    pub scope: Scope,
+    pub layout: Layout,
+    pub skills: Vec<String>,
+    pub active: bool,
+    pub replaced: bool,
+    pub source: Source,
+}
+
+fn invalid(message: impl Into<String>) -> ManageError {
+    ManageError::Invalid(message.into())
+}
+
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// A branch, tag or commit name git cannot read as an option or a path
+/// outside its references.
+pub(crate) fn valid_revision(revision: &str) -> bool {
+    !revision.is_empty()
+        && revision.len() <= 200
+        && !revision.starts_with('-')
+        && !revision.contains("..")
+        && revision
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+}
+
+fn plain_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+}
+
+fn plain_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink())
+}
+
+/// The folders directly in `dir` that hold a SKILL.md, by name.
+fn skill_children(dir: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| !name.starts_with('.'))
+                        && plain_dir(path)
+                        && plain_file(&path.join("SKILL.md"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    found.sort();
+    found
+}
+
+/// The skill a folder's SKILL.md names, checked.
+fn read_skill(dir: &Path) -> Result<String, ManageError> {
+    let file = dir.join("SKILL.md");
+    let size = std::fs::symlink_metadata(&file)
+        .map_err(|e| invalid(format!("{}: {e}", file.display())))?
+        .len();
+    if size > MAX_SKILL_BYTES {
+        return Err(invalid(format!(
+            "{} is larger than {} KiB",
+            file.display(),
+            MAX_SKILL_BYTES / 1024
+        )));
+    }
+    let text = std::fs::read_to_string(&file)
+        .map_err(|e| invalid(format!("{}: {e}", file.display())))?;
+    let fallback = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let skill = Skill::from_markdown(&text, fallback)
+        .ok_or_else(|| invalid(format!("{} names no skill", file.display())))?;
+    if !valid_name(&skill.name) {
+        return Err(invalid(format!(
+            "skill name {:?} must be ASCII letters, digits, '-' or '_'",
+            skill.name
+        )));
+    }
+    Ok(skill.name)
+}
+
+/// A name for the import from its source: the folder, or the repository.
+fn derived_name(source: &Path, url: Option<&str>, subdir: &Path) -> String {
+    let from_subdir = subdir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_owned);
+    let raw = from_subdir
+        .or_else(|| {
+            url.and_then(|url| url.trim_end_matches('/').rsplit('/').next())
+                .map(|last| last.trim_end_matches(".git").to_owned())
+        })
+        .or_else(|| {
+            source
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
+    let cleaned: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches('-').chars().take(64).collect::<String>();
+    if cleaned.is_empty() {
+        "skills".to_owned()
+    } else {
+        cleaned
+    }
+}
+
+fn git(args: Vec<OsString>) -> Result<String, ManageError> {
+    let output = Command::new("git")
+        .args(&args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ALLOW_PROTOCOL", "https")
+        .env("GIT_LFS_SKIP_SMUDGE", "1")
+        .output()
+        .map_err(|e| ManageError::Unavailable(format!("could not start git: {e}")))?;
+    if !output.status.success() {
+        let verb = args
+            .iter()
+            .find(|arg| !arg.to_string_lossy().starts_with('-'))
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        return Err(ManageError::Unavailable(format!(
+            "git {verb} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// The folder to import from, its source record and a derived name.
+fn fetch(
+    work: &Path,
+    source: &Path,
+    revision: Option<&str>,
+) -> Result<(PathBuf, Source, String), ManageError> {
+    let Some((url, subdir)) = manage::git_source(source)? else {
+        if revision.is_some() {
+            return Err(invalid("a revision applies only to a Git source"));
+        }
+        let path = source
+            .canonicalize()
+            .map_err(|e| invalid(format!("source: {e}")))?;
+        if !plain_dir(&path) {
+            return Err(invalid("the source must be a folder"));
+        }
+        let name = derived_name(&path, None, Path::new(""));
+        return Ok((path.clone(), Source::Local { path }, name));
+    };
+    if let Some(revision) = revision
+        && !valid_revision(revision)
+    {
+        return Err(invalid(format!(
+            "{revision:?} is not a branch, tag or commit name"
+        )));
+    }
+    std::fs::create_dir_all(work).map_err(|e| ManageError::Store(e.to_string()))?;
+    let checkout = work.join("checkout");
+    let mut clone: Vec<OsString> = vec!["clone".into(), "--depth".into(), "1".into()];
+    if revision.is_some() {
+        clone.push("--no-checkout".into());
+    }
+    clone.extend(["--".into(), url.clone().into(), checkout.clone().into_os_string()]);
+    git(clone)?;
+    if let Some(revision) = revision {
+        let at = |args: &[&str]| {
+            let mut all: Vec<OsString> = vec!["-C".into(), checkout.clone().into_os_string()];
+            all.extend(args.iter().map(OsString::from));
+            all
+        };
+        git(at(&["fetch", "--depth", "1", "--", "origin", revision]))?;
+        git(at(&["checkout", "--detach", "FETCH_HEAD"]))?;
+    }
+    let commit = git(vec![
+        "-C".into(),
+        checkout.clone().into_os_string(),
+        "rev-parse".into(),
+        "HEAD".into(),
+    ])?;
+    let base = checkout.join(&subdir);
+    let inside = base
+        .canonicalize()
+        .ok()
+        .zip(checkout.canonicalize().ok())
+        .is_some_and(|(base, checkout)| base.starts_with(checkout));
+    if !plain_dir(&base) || !inside {
+        return Err(invalid(format!(
+            "the repository has no folder {:?}",
+            subdir.display().to_string()
+        )));
+    }
+    let name = derived_name(source, Some(url.as_str()), &subdir);
+    let record = Source::Git {
+        url,
+        subdir: subdir.to_string_lossy().replace('\\', "/"),
+        revision: commit,
+    };
+    Ok((base, record, name))
+}
+
+/// Import skills from `source` into the root for `options.scope`.
+pub fn import(
+    paths: &LightagentPaths,
+    source: &Path,
+    options: ImportOptions,
+) -> Result<Imported, ManageError> {
+    let root = manage::root(paths, options.scope)?;
+    let work = std::env::temp_dir().join(format!(
+        "lightagent-skill-import-{}",
+        RunId::new().as_str()
+    ));
+    let result = import_in(paths, &work, &root, source, &options);
+    let _ = std::fs::remove_dir_all(&work);
+    result
+}
+
+fn import_in(
+    paths: &LightagentPaths,
+    work: &Path,
+    root: &Path,
+    source: &Path,
+    options: &ImportOptions,
+) -> Result<Imported, ManageError> {
+    let (base, origin, derived) = fetch(work, source, options.revision.as_deref())?;
+    if let Some(name) = &options.name
+        && !valid_name(name)
+    {
+        return Err(invalid(format!(
+            "the name {name:?} must be ASCII letters, digits, '-' or '_'"
+        )));
+    }
+    let name = options.name.clone().unwrap_or(derived);
+
+    // The layout, and the skill folders a generated extension takes.
+    let (layout, folders) = if plain_file(&base.join("extension.json")) {
+        (Layout::Extension, Vec::new())
+    } else if plain_file(&base.join("SKILL.md")) {
+        (Layout::SingleSkill, vec![base.clone()])
+    } else if plain_dir(&base.join("skills")) && !skill_children(&base.join("skills")).is_empty() {
+        (Layout::SkillsFolder, skill_children(&base.join("skills")))
+    } else {
+        let children = skill_children(&base);
+        if children.is_empty() {
+            return Err(invalid(
+                "no supported layout: expected extension.json, SKILL.md, skills/<name>/SKILL.md or <name>/SKILL.md in the selected folder",
+            ));
+        }
+        (Layout::SkillFolders, children)
+    };
+    if folders.len() > MAX_SKILLS {
+        return Err(invalid(format!("more than {MAX_SKILLS} skills")));
+    }
+
+    // The folder that is installed, with the source record in it.
+    std::fs::create_dir_all(work).map_err(|e| ManageError::Store(e.to_string()))?;
+    let stage = work.join("stage").join(&name);
+    let mut skills = Vec::new();
+    if layout == Layout::Extension {
+        crate::copy_tree(&base, &stage).map_err(invalid)?;
+        let manifest = std::fs::read_to_string(stage.join("extension.json"))
+            .map_err(|e| invalid(format!("extension.json: {e}")))?;
+        let ext = crate::parse_extension(&manifest, &name, &stage)
+            .ok_or_else(|| invalid("invalid extension.json"))?;
+        if options.name.as_ref().is_some_and(|given| given != &ext.name) {
+            return Err(invalid(format!(
+                "this source is an extension named '{}'",
+                ext.name
+            )));
+        }
+        skills = SkillStore::load(&[ext.skills_dir()]).names();
+    } else {
+        for folder in &folders {
+            let skill = read_skill(folder)?;
+            if skills.contains(&skill) {
+                return Err(invalid(format!("two skills are named {skill:?}")));
+            }
+            crate::copy_tree(folder, &stage.join("skills").join(&skill)).map_err(invalid)?;
+            skills.push(skill);
+        }
+        let manifest = serde_json::json!({
+            "name": name,
+            "description": format!("Skills imported from {}", source.to_string_lossy()),
+        });
+        std::fs::write(stage.join("extension.json"), manifest.to_string())
+            .map_err(|e| ManageError::Store(e.to_string()))?;
+    }
+    let record = serde_json::to_vec_pretty(&origin).map_err(|e| ManageError::Store(e.to_string()))?;
+    std::fs::write(stage.join(SOURCE_FILE), record).map_err(|e| ManageError::Store(e.to_string()))?;
+    let manifest = std::fs::read_to_string(stage.join("extension.json"))
+        .map_err(|e| invalid(format!("extension.json: {e}")))?;
+    let ext_name = crate::parse_extension(&manifest, &name, &stage)
+        .map(|ext| ext.name)
+        .ok_or_else(|| invalid("invalid extension.json"))?;
+
+    let destination = root.join(&ext_name);
+    let exists = std::fs::symlink_metadata(&destination).is_ok();
+    if exists && !options.replace {
+        return Err(ManageError::Conflict(format!(
+            "an extension named '{ext_name}' is already installed; choose another name or replace it"
+        )));
+    }
+    let pid = std::process::id();
+    let incoming = root.join(format!(".{ext_name}.install-incoming-{pid}"));
+    let previous = root.join(format!(".{ext_name}.install-previous-{pid}"));
+    let installed = if exists {
+        // The new copy is installed beside the old one, then the two are
+        // exchanged; the old one is put back if anything fails.
+        let ext = crate::install(&stage, &incoming).map_err(|message| {
+            let _ = std::fs::remove_dir_all(&incoming);
+            invalid(message)
+        })?;
+        if let Err(error) = std::fs::rename(&destination, &previous) {
+            let _ = std::fs::remove_dir_all(&incoming);
+            return Err(ManageError::Conflict(format!(
+                "the installed '{ext_name}' could not be moved aside ({error}); it is unchanged"
+            )));
+        }
+        if let Err(error) = std::fs::rename(&ext.dir, &destination) {
+            let _ = std::fs::rename(&previous, &destination);
+            let _ = std::fs::remove_dir_all(&incoming);
+            return Err(ManageError::Store(format!(
+                "could not put the new copy in place ({error}); the installed one was restored"
+            )));
+        }
+        let _ = std::fs::remove_dir_all(&incoming);
+        destination.clone()
+    } else {
+        crate::install(&stage, root).map_err(invalid)?.dir
+    };
+
+    let saved = ConfigStore::at(paths).update(None, |config| {
+        if options.activate {
+            config.extensions.enabled = true;
+            config.extensions.disabled.retain(|n| n != &ext_name);
+        } else if !config.extensions.disabled.iter().any(|n| n == &ext_name) {
+            config.extensions.disabled.push(ext_name.clone());
+            config.extensions.disabled.sort();
+        }
+        Ok::<_, String>(config.extensions.enabled)
+    });
+    let enabled = match saved {
+        Ok((enabled, _)) => enabled,
+        Err(error) => {
+            if exists {
+                let _ = std::fs::remove_dir_all(&destination);
+                let _ = std::fs::rename(&previous, &destination);
+            } else {
+                let _ = crate::uninstall(&ext_name, root);
+            }
+            return Err(ManageError::Store(format!(
+                "could not save the activation state ({error}); nothing was changed"
+            )));
+        }
+    };
+    if exists {
+        let _ = std::fs::remove_dir_all(&previous);
+    }
+    Ok(Imported {
+        name: ext_name,
+        dir: installed,
+        scope: options.scope,
+        layout,
+        skills,
+        active: enabled && options.activate,
+        replaced: exists,
+        source: origin,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn revisions_cannot_be_options_or_leave_the_references() {
+        for good in ["main", "v1.2.0", "release/2026-11", "0123456789abcdef"] {
+            assert!(valid_revision(good), "{good}");
+        }
+        for bad in ["", "-upload-pack=x", "a..b", "a b", "a;b", "a\\b"] {
+            assert!(!valid_revision(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_name_is_derived_from_the_folder_or_the_repository() {
+        assert_eq!(
+            derived_name(Path::new("x"), Some("https://github.com/o/My.Skills.git"), Path::new("")),
+            "My-Skills"
+        );
+        assert_eq!(
+            derived_name(Path::new("x"), Some("https://github.com/o/r"), Path::new("packs/writing")),
+            "writing"
+        );
+        assert_eq!(derived_name(Path::new("/tmp/my skills"), None, Path::new("")), "my-skills");
+    }
+}
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+        .route("/api/lightagent/v1/skills", get(list_skills))
+--- with
+        .route("/api/lightagent/v1/skills", get(list_skills))
+        .route("/api/lightagent/v1/skills/imports", post(import_skills))
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+/// Where the extension operations act: this runtime's Lightagent home.
+--- with
+/// An import of skills from a repository or folder (new scope).
+#[derive(Deserialize)]
+struct ImportSkillsBody {
+    source: String,
+    #[serde(default)]
+    revision: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    scope: Option<extension_ops::Scope>,
+    #[serde(default)]
+    replace: bool,
+    #[serde(default)]
+    activate: bool,
+}
+
+/// Import skills (see `lightagent_extensions::skill_import`): installed
+/// inactive unless `activate`, never with a tool permission.
+async fn import_skills(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ImportSkillsBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let paths = match extension_paths(&state) {
+        Ok(paths) => paths,
+        Err(response) => return *response,
+    };
+    let remote = body.source.starts_with("https://") || body.source.starts_with("git+https://");
+    if !remote && !std::path::Path::new(&body.source).is_absolute() {
+        return bad_request("the source must be an absolute folder path or an https:// Git URL");
+    }
+    let options = lightagent_extensions::skill_import::ImportOptions {
+        scope: body.scope.unwrap_or(extension_ops::Scope::Global),
+        name: body.name,
+        revision: body.revision,
+        replace: body.replace,
+        activate: body.activate,
+    };
+    let source = PathBuf::from(body.source);
+    match tokio::task::spawn_blocking(move || {
+        lightagent_extensions::skill_import::import(&paths, &source, options)
+    })
+    .await
+    {
+        Ok(Ok(imported)) => (StatusCode::CREATED, Json(imported)).into_response(),
+        Ok(Err(error)) => extension_error(error),
+        Err(error) => internal(&error.to_string()),
+    }
+}
+
+/// Where the extension operations act: this runtime's Lightagent home.
+=== replace docs/desktop/contract/operations.json
+--- find
+   "id": "skills.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/skills"
+  },
+--- with
+   "id": "skills.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/skills"
+  },
+  {
+   "id": "skills.import",
+   "method": "POST",
+   "path": "/api/lightagent/v1/skills/imports"
+  },
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  {
+   "id": "api.get.sessions",
+--- with
+  {
+   "id": "api.post.skills.imports",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/skills/imports",
+   "source": "crates/lightagent-api/src/lib.rs:132",
+   "behavior": "NEW SCOPE (no CLI operation): import skills from an https Git repository or a folder; layouts extension.json, SKILL.md, skills/<name>/SKILL.md, <name>/SKILL.md; installed inactive unless asked; source and commit recorded (D6-6)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/skills/imports"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "New scope beyond the audited CLI: tracked, never counted toward CLI parity",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "Tools: Installed skills, Import",
+   "backend": "shared: lightagent_extensions::skill_import::import",
+   "permission": "local-operator",
+   "data_scope": "home|profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.sessions",
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Total rows: 345
+--- with
+- Total rows: 346
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.post.mcp.servers.name.check` | `POST /api/lightagent/v1/mcp/servers/{name}/check` | applicable | no | (backend reuse) | shared: chat::check_mcp_server via RunFactory::check_mcp | not-started | `crates/lightagent-api/src/lib.rs:150` |
+--- with
+| `api.post.mcp.servers.name.check` | `POST /api/lightagent/v1/mcp/servers/{name}/check` | applicable | no | (backend reuse) | shared: chat::check_mcp_server via RunFactory::check_mcp | not-started | `crates/lightagent-api/src/lib.rs:150` |
+| `api.post.skills.imports` | `POST /api/lightagent/v1/skills/imports` | applicable | no | Tools: Installed skills, Import | shared: lightagent_extensions::skill_import::import (new scope) | not-started | `crates/lightagent-api/src/lib.rs:132` |
+=== replace frontend/src/api/agent.ts
+--- find
+  /** Connects the server now; a stdio server's command is started. */
+--- with
+  /** Import skills from a repository or folder (new scope); inactive unless `activate`. */
+  importSkills: (request: {
+    source: string;
+    revision?: string;
+    name?: string;
+    scope: ExtensionScope;
+    activate: boolean;
+    replace: boolean;
+  }) => jsonRequest<SkillImported>("/skills/imports", { method: "POST", body: JSON.stringify(request) }),
+  /** Connects the server now; a stdio server's command is started. */
+=== replace frontend/src/api/agent.ts
+--- find
+export interface ExtensionInstalled {
+--- with
+/** What a skills import did. */
+export interface SkillImported {
+  name: string;
+  dir: string;
+  scope: ExtensionScope;
+  layout: "extension" | "single_skill" | "skills_folder" | "skill_folders";
+  skills: string[];
+  active: boolean;
+  replaced: boolean;
+  source: ExtensionSource;
+}
+
+export interface ExtensionInstalled {
+=== write frontend/src/components/SkillImport.tsx
+import { useState } from "react";
+
+import { agentApi, type ExtensionScope } from "../api/agent";
+
+function errorText(cause: unknown): string {
+  return (cause instanceof Error ? cause.message : String(cause)).replace(/^\d{3}:\s*/, "");
+}
+
+/**
+ * Import skills from a repository or a folder. They are packaged as an
+ * extension, installed inactive unless asked, and grant no tool
+ * permission; nothing in the source is run.
+ */
+export function SkillImportForm({ onImported }: { onImported: () => void }) {
+  const [source, setSource] = useState("");
+  const [revision, setRevision] = useState("");
+  const [name, setName] = useState("");
+  const [scope, setScope] = useState<ExtensionScope>("global");
+  const [activate, setActivate] = useState(false);
+  const [replace, setReplace] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function submit() {
+    if (!source.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const imported = await agentApi.importSkills({
+        source: source.trim(),
+        revision: revision.trim() || undefined,
+        name: name.trim() || undefined,
+        scope,
+        activate,
+        replace,
+      });
+      const from = imported.source.kind === "git" ? ` at commit ${imported.source.revision.slice(0, 12)}` : "";
+      setMessage(
+        `Imported ${imported.skills.length} skill${imported.skills.length === 1 ? "" : "s"} ` +
+          `(${imported.skills.join(", ")}) as the extension ${imported.name}${from}` +
+          `${imported.replaced ? ", replacing the earlier copy" : ""}. ` +
+          (imported.active
+            ? "They are available to new runs."
+            : "They are inactive: enable the extension under Extensions to use them."),
+      );
+      setSource("");
+      setRevision("");
+      setName("");
+      setActivate(false);
+      setReplace(false);
+      onImported();
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <fieldset data-testid="skill-import" style={{ border: 0, padding: 0, margin: "0 0 14px", minWidth: 0 }}>
+      <legend className="field__label">Import skills</legend>
+      {message && <div className="notice notice--info" role="status">{message}</div>}
+      <div className="field">
+        <label className="field__label" htmlFor="skill-import-source">Repository URL or folder</label>
+        <input id="skill-import-source" className="input" value={source} spellCheck={false} disabled={busy}
+          placeholder="https://github.com/owner/repo#folder or /path/to/skills" aria-describedby="skill-import-help"
+          onChange={(event) => setSource(event.target.value)} />
+        <p id="skill-import-help" className="muted" style={{ margin: "4px 0 0" }}>
+          Supported: a SKILL.md, skills/&lt;name&gt;/SKILL.md, &lt;name&gt;/SKILL.md, or an extension. Nothing in it is
+          run, and importing grants no tool permission.
+        </p>
+      </div>
+      <div className="field">
+        <label className="field__label" htmlFor="skill-import-revision">Branch, tag or commit (Git only, optional)</label>
+        <input id="skill-import-revision" className="input" value={revision} spellCheck={false} disabled={busy}
+          onChange={(event) => setRevision(event.target.value)} />
+      </div>
+      <div className="field">
+        <label className="field__label" htmlFor="skill-import-name">Install as (optional)</label>
+        <input id="skill-import-name" className="input" value={name} spellCheck={false} disabled={busy}
+          onChange={(event) => setName(event.target.value)} />
+      </div>
+      <fieldset style={{ border: 0, padding: 0, margin: "10px 0 0", minWidth: 0 }}>
+        <legend className="field__label">Import for</legend>
+        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input type="radio" name="skill-import-scope" checked={scope === "global"} disabled={busy}
+            onChange={() => setScope("global")} />
+          Every profile
+        </label>
+        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input type="radio" name="skill-import-scope" checked={scope === "profile"} disabled={busy}
+            onChange={() => setScope("profile")} />
+          This profile only
+        </label>
+      </fieldset>
+      <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10 }}>
+        <input type="checkbox" checked={activate} disabled={busy} onChange={(event) => setActivate(event.target.checked)} />
+        Make them available to runs now
+      </label>
+      <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
+        <input type="checkbox" checked={replace} disabled={busy} onChange={(event) => setReplace(event.target.checked)} />
+        Replace an installed copy with the same name (kept if the import fails)
+      </label>
+      {error && <div role="alert" style={{ fontSize: 11.5, color: "var(--danger)", marginTop: 6 }}>{error}</div>}
+      <button type="button" className="btn" style={{ marginTop: 10 }} disabled={busy || !source.trim()}
+        aria-busy={busy || undefined} onClick={() => void submit()}>
+        Import
+      </button>
+    </fieldset>
+  );
+}
+=== replace frontend/src/screens/AgentTools.tsx
+--- find
+import { McpCard } from "../components/Mcp";
+--- with
+import { McpCard } from "../components/Mcp";
+import { SkillImportForm } from "../components/SkillImport";
+=== replace frontend/src/screens/AgentTools.tsx
+--- find
+  const [mcpState, setMcpState] = useState<string | null>(null);
+--- with
+  const [mcpState, setMcpState] = useState<string | null>(null);
+  const [extensionsVersion, setExtensionsVersion] = useState(0);
+=== replace frontend/src/screens/AgentTools.tsx
+--- find
+        <ExtensionsCard />
+--- with
+        <ExtensionsCard key={extensionsVersion} />
+=== replace frontend/src/screens/AgentTools.tsx
+--- find
+          <p className="card__note">Instructions available to the harness on demand. Full skill bodies remain server-side.</p>
+--- with
+          <p className="card__note">Instructions available to the harness on demand. Full skill bodies remain server-side.</p>
+          <SkillImportForm
+            onImported={() => {
+              setAttempt((value) => value + 1);
+              setExtensionsVersion((value) => value + 1);
+            }}
+          />
+=== write crates/lightagent/tests/desktop_skill_import.rs
+//! Skills imported from a folder (D6-6, new scope): each supported layout
+//! installs as an inactive extension until it is enabled; refused imports
+//! install nothing; a replace that fails keeps the installed copy. Every
+//! process here is separate. (Fetching from a real Git host is not
+//! exercised here: CI takes no network dependency on one.)
+
+use std::collections::BTreeMap;
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+
+const KEY: &str = "92a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081";
+const IMPORTS: &str = "/api/lightagent/v1/skills/imports";
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-skill-import-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+/// One authenticated request: the status and the raw body.
+fn call(runtime: &Runtime, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, raw)
+}
+
+fn cli_ok(home: &Path, args: &[&str]) {
+    let output: Output = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent");
+    assert!(
+        output.status.success(),
+        "lightagent {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn parsed(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|error| panic!("not JSON ({error}): {raw}"))
+}
+
+fn cli_json(home: &Path, args: &[&str]) -> Value {
+    let mut all = vec!["--json"];
+    all.extend_from_slice(args);
+    let output: Output = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(&all)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    serde_json::from_slice(&output.stdout).expect("JSON output")
+}
+
+fn write_skill(dir: &Path, name: &str, description: &str) {
+    std::fs::create_dir_all(dir).expect("skill dir");
+    std::fs::write(
+        dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {description}\n---\nDo it.\n"),
+    )
+    .expect("SKILL.md");
+}
+
+fn import(runtime: &Runtime, body: Value) -> (u16, String) {
+    call(runtime, "POST", IMPORTS, Some(&body.to_string()))
+}
+
+fn setup(label: &str) -> (PathBuf, Runtime) {
+    let home = scratch_home(label);
+    cli_ok(&home, &["config", "set", "extensions.enabled", "true"]);
+    let runtime = start(&home);
+    (home, runtime)
+}
+
+fn skill_names(runtime: &Runtime) -> Vec<String> {
+    let (status, raw) = call(runtime, "GET", "/api/lightagent/v1/skills", None);
+    assert_eq!(status, 200, "{raw}");
+    parsed(&raw)["skills"]
+        .as_array()
+        .expect("skills")
+        .iter()
+        .filter_map(|skill| skill["name"].as_str().map(str::to_owned))
+        .collect()
+}
+
+fn files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    let mut found = BTreeMap::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next).expect("read dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let relative = path
+                    .strip_prefix(dir)
+                    .expect("relative")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                found.insert(relative, std::fs::read(&path).expect("read"));
+            }
+        }
+    }
+    found
+}
+
+fn leftovers(root: &Path) -> Vec<String> {
+    std::fs::read_dir(root)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with('.'))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn each_supported_layout_imports_inactive_until_enabled() {
+    let (home, runtime) = setup("layouts");
+    let sources = home.join("sources");
+    write_skill(&sources.join("solo"), "solo-skill", "One skill");
+    write_skill(&sources.join("pack").join("skills").join("a"), "a", "A");
+    write_skill(&sources.join("pack").join("skills").join("b"), "b", "B");
+    write_skill(&sources.join("flat").join("x"), "x", "X");
+    write_skill(&sources.join("flat").join("y"), "y", "Y");
+    write_skill(&sources.join("ext").join("skills").join("z"), "z", "Z");
+    std::fs::write(sources.join("ext").join("extension.json"), r#"{"name":"packed"}"#)
+        .expect("manifest");
+
+    let (status, raw) = import(&runtime, json!({ "source": sources.join("solo") }));
+    assert_eq!(status, 201, "{raw}");
+    let imported = parsed(&raw);
+    assert_eq!(imported["name"], "solo", "{imported}");
+    assert_eq!(imported["layout"], "single_skill", "{imported}");
+    assert_eq!(imported["skills"], json!(["solo-skill"]), "{imported}");
+    assert_eq!(imported["active"], false, "installed inactive unless asked");
+    assert_eq!(imported["source"]["kind"], "local", "{imported}");
+    assert!(!skill_names(&runtime).contains(&"solo-skill".to_owned()));
+    let listed = cli_json(&home, &["extensions", "list"]);
+    assert_eq!(listed["extensions"][0]["name"], "solo", "{listed}");
+    assert_eq!(listed["extensions"][0]["active"], false, "{listed}");
+    cli_ok(&home, &["extensions", "enable", "solo"]);
+    assert!(skill_names(&runtime).contains(&"solo-skill".to_owned()));
+
+    let (status, raw) = import(
+        &runtime,
+        json!({ "source": sources.join("pack"), "activate": true }),
+    );
+    assert_eq!(status, 201, "{raw}");
+    let imported = parsed(&raw);
+    assert_eq!(imported["layout"], "skills_folder", "{imported}");
+    assert_eq!(imported["skills"], json!(["a", "b"]), "{imported}");
+    assert_eq!(imported["active"], true, "{imported}");
+    let names = skill_names(&runtime);
+    assert!(names.contains(&"a".to_owned()) && names.contains(&"b".to_owned()), "{names:?}");
+
+    let (status, raw) = import(&runtime, json!({ "source": sources.join("flat") }));
+    assert_eq!(status, 201, "{raw}");
+    assert_eq!(parsed(&raw)["layout"], "skill_folders", "{raw}");
+
+    let (status, raw) = import(&runtime, json!({ "source": sources.join("ext") }));
+    assert_eq!(status, 201, "{raw}");
+    let imported = parsed(&raw);
+    assert_eq!(imported["layout"], "extension", "{imported}");
+    assert_eq!(imported["name"], "packed", "{imported}");
+    assert_eq!(
+        parsed(&std::fs::read_to_string(home.join("config.json")).expect("config"))["mcp"]["enabled"],
+        false
+    );
+    assert!(leftovers(&home.join("extensions")).is_empty());
+}
+
+#[test]
+fn refused_imports_install_nothing() {
+    let (home, runtime) = setup("refused");
+    let sources = home.join("sources");
+    std::fs::create_dir_all(sources.join("readme")).expect("dir");
+    std::fs::write(sources.join("readme").join("README.md"), "no skills").expect("readme");
+    std::fs::create_dir_all(sources.join("badname")).expect("dir");
+    std::fs::write(
+        sources.join("badname").join("SKILL.md"),
+        "---\nname: bad name\ndescription: x\n---\nx\n",
+    )
+    .expect("SKILL.md");
+    write_skill(&sources.join("twins").join("one"), "same", "1");
+    write_skill(&sources.join("twins").join("two"), "same", "2");
+    write_skill(&sources.join("fine"), "fine", "Fine");
+
+    let refused = [
+        json!({ "source": sources.join("readme") }),
+        json!({ "source": sources.join("badname") }),
+        json!({ "source": sources.join("twins") }),
+        json!({ "source": sources.join("fine"), "revision": "main" }),
+        json!({ "source": sources.join("fine"), "name": "bad.name" }),
+        json!({ "source": "relative/folder" }),
+        json!({ "source": sources.join("missing") }),
+    ];
+    for body in refused {
+        let (status, raw) = import(&runtime, body.clone());
+        assert_eq!(status, 400, "{body}: {raw}");
+    }
+    let (_, raw) = import(&runtime, json!({ "source": sources.join("readme") }));
+    assert!(raw.contains("SKILL.md"), "the refusal says what was looked for: {raw}");
+
+    #[cfg(unix)]
+    {
+        write_skill(&sources.join("linked"), "linked", "Linked");
+        std::os::unix::fs::symlink(&home, sources.join("linked").join("outside")).expect("link");
+        let (status, raw) = import(&runtime, json!({ "source": sources.join("linked") }));
+        assert_eq!(status, 400, "{raw}");
+    }
+
+    assert_eq!(cli_json(&home, &["extensions", "list"])["extensions"], json!([]));
+    assert!(leftovers(&home.join("extensions")).is_empty());
+}
+
+#[test]
+fn a_replace_keeps_the_installed_copy_when_it_fails() {
+    let (home, runtime) = setup("replace");
+    let sources = home.join("sources");
+    write_skill(&sources.join("kit").join("skills").join("k"), "k", "one");
+    std::fs::create_dir_all(sources.join("broken")).expect("dir");
+    std::fs::write(sources.join("broken").join("README.md"), "nothing").expect("readme");
+    let installed = home.join("extensions").join("kit");
+
+    assert_eq!(import(&runtime, json!({ "source": sources.join("kit") })).0, 201);
+    let before = files(&installed);
+    let (status, raw) = import(&runtime, json!({ "source": sources.join("kit") }));
+    assert_eq!(status, 409, "without replace: {raw}");
+    let (status, raw) = import(
+        &runtime,
+        json!({ "source": sources.join("broken"), "name": "kit", "replace": true }),
+    );
+    assert_eq!(status, 400, "{raw}");
+    assert_eq!(files(&installed), before, "a failed replace changed the installed copy");
+
+    write_skill(&sources.join("kit").join("skills").join("k"), "k", "two");
+    let (status, raw) = import(
+        &runtime,
+        json!({ "source": sources.join("kit"), "replace": true }),
+    );
+    assert_eq!(status, 201, "{raw}");
+    assert_eq!(parsed(&raw)["replaced"], true, "{raw}");
+    let text = std::fs::read_to_string(installed.join("skills").join("k").join("SKILL.md"))
+        .expect("SKILL.md");
+    assert!(text.contains("two"), "{text}");
+    assert!(leftovers(&home.join("extensions")).is_empty());
+}
+=== write e2e/skills.mjs
+// The skills import on the Tools screen against the real harness (D6-6,
+// new scope): an import leaves "available to runs" unchecked, installs the
+// skills inactive (they are not listed until enabled), says so, and the
+// Extensions card shows the new extension as inactive.
+
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const PACK = "render-import-pack";
+const SKILL = "render-import-skill";
+
+export async function checkSkillImport(browser, base, outDir) {
+  const failures = [];
+  const dir = await mkdtemp(join(tmpdir(), "lightagent-render-import-"));
+  const pack = join(dir, PACK);
+  await mkdir(join(pack, "skills", SKILL), { recursive: true });
+  await writeFile(join(pack, "skills", SKILL, "SKILL.md"), `---\nname: ${SKILL}\ndescription: Imported\n---\nDo it.\n`);
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1400 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  try {
+    await page.goto(`${base}/#/tools`);
+    const form = page.getByTestId("skill-import");
+    await form.waitFor({ timeout: 15000 });
+    await page.locator("#skill-import-source").fill(pack);
+    if (await form.getByRole("checkbox", { name: "Make them available to runs now" }).isChecked()) {
+      failures.push("skills: activation starts checked");
+    }
+    await form.getByRole("button", { name: "Import", exact: true }).click();
+    const done = form.getByRole("status").filter({ hasText: `as the extension ${PACK}` });
+    await done.waitFor({ timeout: 20000 });
+    if (!(await done.innerText()).includes("inactive")) failures.push("skills: the import does not say it is inactive");
+    const skills = await (await fetch(`${base}/api/lightagent/v1/skills`)).json();
+    if ((skills.skills ?? []).some((skill) => skill.name === SKILL)) failures.push("skills: an inactive import is listed for runs");
+    const row = page.getByTestId(`extension-${PACK}`);
+    await row.waitFor({ timeout: 10000 });
+    if (!(await row.innerText()).includes("Inactive")) failures.push("skills: the Extensions card does not show it inactive");
+    await page.screenshot({ path: `${outDir}/skills-imported.png`, fullPage: true });
+    if (errors.length) failures.push(`skills: page errors: ${errors.join("; ")}`);
+  } catch (err) {
+    failures.push(`skills: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  } finally {
+    await page.close();
+    await fetch(`${base}/api/lightagent/v1/extensions/${PACK}`, { method: "DELETE" }).catch(() => {});
+    await rm(dir, { recursive: true, force: true });
+  }
+  return failures;
+}
+=== replace e2e/render.mjs
+--- find
+import { checkToolCatalog } from "./tools.mjs";
+--- with
+import { checkToolCatalog } from "./tools.mjs";
+import { checkSkillImport } from "./skills.mjs";
+=== replace e2e/render.mjs
+--- find
+  // Installs and removes an extension with a skill: after the routes above.
+--- with
+  // Imports and removes a skills pack: after the routes above have rendered.
+  try {
+    failures.push(...(await checkSkillImport(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`skills: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Installs and removes an extension with a skill: after the routes above.
+=== replace desktop/e2e/runs.py
+--- find
+            ("tools", lambda: scenario_tools(host, cli)),
+--- with
+            ("tools", lambda: scenario_tools(host, cli)),
+            ("skills", lambda: scenario_skills(host, cli)),
+=== replace desktop/e2e/runs.py
+--- find
+def scenario_tools(host, cli):
+--- with
+def scenario_skills(host, cli):
+    """D6-6 (new scope) through the host transport: a skills folder imports
+    inactive, the CLI sees the extension inactive, and it is removed."""
+    import shutil
+    import tempfile
+
+    check = Checks("skills")
+    work = tempfile.mkdtemp(prefix="lightagent-e2e-skills-")
+    try:
+        skill = os.path.join(work, "host-pack", "skills", "host-skill")
+        os.makedirs(skill)
+        with open(os.path.join(skill, "SKILL.md"), "w", encoding="utf-8") as handle:
+            handle.write("---\nname: host-skill\ndescription: Host\n---\nDo it.\n")
+        status, imported = host.fetch("POST", f"{API}/skills/imports", {"source": os.path.join(work, "host-pack")})
+        imported = imported or {}
+        check.expect("imported through the host, inactive",
+                     status == 201 and imported.get("skills") == ["host-skill"] and imported.get("active") is False,
+                     (status, imported))
+        listed = json.loads(harness.run_cli(cli, "--json", "extensions", "list")).get("extensions", [])
+        check.expect("the CLI sees it inactive",
+                     [(e.get("name"), e.get("active")) for e in listed] == [("host-pack", False)], listed)
+        status, _ = host.fetch("DELETE", f"{API}/extensions/host-pack")
+        check.expect("removed through the host", status == 200, status)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return check
+
+
+def scenario_tools(host, cli):
+=== end
