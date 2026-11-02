@@ -11,7 +11,10 @@
   {
    "id": "tools.list",
    "method": "GET",
-   "path": "/api/lightagent/v1/tools"
+   "path": "/api/lightagent/v1/tools",
+   "query": [
+    "mcp"
+   ]
   },
   {
    "id": "workers.list",
