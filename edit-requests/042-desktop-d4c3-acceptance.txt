@@ -1,0 +1,1004 @@
+=== base 3310dfc813d33dfee3ab3b923a387733b67b295f
+=== message
+D4 acceptance: isolated-home golden files, fail-closed keys, routing report, kept Settings edits
+
+The remaining D4 gate items (DESKTOP_ACCEPTANCE.md):
+
+- `jev-routing-report` is one shared operation,
+  `lightagent_core::config_keys::jev_routing_report`, moved unchanged from
+  the CLI. It is served read-only as GET /jev/routing-report (admin scope,
+  like /config), listed as contract operation `jev.routing_report`, and
+  shown in Settings as a dry-run table under the routing permission.
+- An unreadable key file fails closed. `SecretRef::for_request` gives the
+  value to send, and refuses a file reference that cannot be read with
+  `UnreadableSecret`, whose message names neither the path nor any
+  content. Every other case resolves exactly as `resolve` did. The
+  runtime's run, history-window probe and model listing use it: a run
+  fails before any request is made, never sent without the credential it
+  was configured with.
+- A Settings save refused with 409 no longer replaces the screen's values
+  and asks for the change again. The change is kept and listed against
+  the values saved now (a section such as Jev is named, never shown).
+  "Apply my change to the current settings" saves it on the current
+  revision; "Discard my change" shows the saved values.
+
+Hosted tests:
+- the CLI and the desktop runtime, in two isolated homes, perform the
+  same profile create/use/delete and config set, and every file in the
+  two homes is the same, with the home's own path as the only
+  normalization;
+- a Settings save, then a CLI write: both are kept (the reverse order is
+  D4c's stale-409 test);
+- an unreadable key file fails the run with a redacted error, and the
+  configured provider endpoint receives no connection;
+- the API's routing report is the CLI's `--json` report;
+- e2e: conflict then apply, and conflict then discard, against the real
+  harness; the dry-run table lists the server's profiles; a saved secret
+  is in neither the DOM, browser storage, form fields nor the settings
+  response.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-core/src/config.rs
+--- find
+            Self::File { path } => format!("${{file:{}}}", path.display()),
+        }
+    }
+}
+--- with
+            Self::File { path } => format!("${{file:{}}}", path.display()),
+        }
+    }
+
+    /// The value to send with a request about to be made. A file reference
+    /// that cannot be read is refused, so the request is never made without
+    /// the credential it was configured with. Every other case is exactly
+    /// [`Self::resolve`]: an unset variable or an empty value sends none, as
+    /// before.
+    pub fn for_request(&self) -> Result<Option<String>, UnreadableSecret> {
+        match self.lookup() {
+            SecretLookup::Value(value) => Ok(Some(value)),
+            SecretLookup::Unreadable => Err(UnreadableSecret),
+            SecretLookup::Unresolved | SecretLookup::Empty => Ok(self.resolve()),
+        }
+    }
+}
+=== replace crates/lightagent-core/src/config.rs
+--- find
+            Self::Unreadable => "Unreadable",
+            Self::Empty => "Empty",
+        })
+    }
+}
+--- with
+            Self::Unreadable => "Unreadable",
+            Self::Empty => "Empty",
+        })
+    }
+}
+
+/// A configured secret file that cannot be read. Its message names neither
+/// the path nor anything the file holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnreadableSecret;
+
+impl std::fmt::Display for UnreadableSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the configured secret file cannot be read")
+    }
+}
+
+impl std::error::Error for UnreadableSecret {}
+=== replace crates/lightagent-core/src/lib.rs
+--- find
+    SubagentsConfig, ToolNameMode, ToolPolicyMode, ToolsConfig, UpdateError, WebConfig,
+--- with
+    SubagentsConfig, ToolNameMode, ToolPolicyMode, ToolsConfig, UnreadableSecret, UpdateError,
+    WebConfig,
+=== replace crates/lightagent-core/src/config_keys.rs
+--- find
+/// Parse a boolean config value, accepting the usual spellings.
+fn parse_bool(value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => Err(format!("expected a boolean, got '{value}'")),
+    }
+}
+--- with
+/// Parse a boolean config value, accepting the usual spellings.
+fn parse_bool(value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => Err(format!("expected a boolean, got '{value}'")),
+    }
+}
+
+/// `lightagent config jev-routing-report`, shared by the CLI and the HTTP
+/// API: the routing-permission dry run. For every profile on disk (and the
+/// built-in `default`), whether it may route now and under `strict`. Profile
+/// ids and fixed vocabulary only; no message, session or key is read, and
+/// nothing is changed.
+pub fn jev_routing_report(config: &Config, profiles: &[crate::ProfileId]) -> serde_json::Value {
+    let jev = &config.platform.jev;
+    let strict = crate::JevConfig {
+        routing_permission: crate::JevRoutingPermission::Strict,
+        ..jev.clone()
+    };
+    let mut ids: Vec<String> = profiles.iter().map(|id| id.as_str().to_owned()).collect();
+    if !ids.iter().any(|id| id == "default") {
+        ids.push("default".to_owned());
+    }
+    ids.sort();
+    ids.dedup();
+    let rows: Vec<serde_json::Value> = ids
+        .iter()
+        .map(|id| {
+            serde_json::json!({
+                "profile": id,
+                "now": jev.routing_grant(id).as_str(),
+                "under_strict": strict.routing_grant(id).as_str(),
+            })
+        })
+        .collect();
+    let denied: Vec<&String> = ids
+        .iter()
+        .filter(|id| !strict.routing_grant(id).permits())
+        .collect();
+    let unknown: Vec<&String> = jev
+        .routing_allowed_profiles
+        .iter()
+        .filter(|allowed| !ids.contains(allowed))
+        .collect();
+    let routing_active = jev.endpoint.enabled
+        && (jev
+            .allowed_models
+            .iter()
+            .any(|model| !model.trim().is_empty())
+            || !jev.allowed_profiles.is_empty());
+    serde_json::json!({
+        "report": "jev-routing-permission-dry-run",
+        "changes_made": false,
+        "routing_enabled": routing_active,
+        "routing_input": jev.routing_input.as_str(),
+        "permission_policy": jev.routing_permission.as_str(),
+        "compatibility": jev.routing_permission == crate::JevRoutingPermission::LegacyAllProfiles,
+        "profiles": rows,
+        "denied_under_strict": denied,
+        "allowed_profiles_not_found": unknown,
+    })
+}
+=== replace crates/lightagent/src/lib.rs
+--- find
+use lightagent_core::config_keys::{get_key, set_key};
+--- with
+use lightagent_core::config_keys::{get_key, jev_routing_report, set_key};
+=== replace crates/lightagent/src/lib.rs
+--- find
+/// The routing-permission dry run: for every profile on disk (and the
+/// built-in `default`), whether it may route now and under `strict`. Profile
+/// ids and fixed vocabulary only; no message, session or key is read.
+fn jev_routing_report(config: &Config, profiles: &[ProfileId]) -> serde_json::Value {
+    let jev = &config.platform.jev;
+    let strict = lightagent_core::JevConfig {
+        routing_permission: lightagent_core::JevRoutingPermission::Strict,
+        ..jev.clone()
+    };
+    let mut ids: Vec<String> = profiles.iter().map(|id| id.as_str().to_owned()).collect();
+    if !ids.iter().any(|id| id == "default") {
+        ids.push("default".to_owned());
+    }
+    ids.sort();
+    ids.dedup();
+    let rows: Vec<serde_json::Value> = ids
+        .iter()
+        .map(|id| {
+            serde_json::json!({
+                "profile": id,
+                "now": jev.routing_grant(id).as_str(),
+                "under_strict": strict.routing_grant(id).as_str(),
+            })
+        })
+        .collect();
+    let denied: Vec<&String> = ids
+        .iter()
+        .filter(|id| !strict.routing_grant(id).permits())
+        .collect();
+    let unknown: Vec<&String> = jev
+        .routing_allowed_profiles
+        .iter()
+        .filter(|allowed| !ids.contains(allowed))
+        .collect();
+    let routing_active = jev.endpoint.enabled
+        && (jev
+            .allowed_models
+            .iter()
+            .any(|model| !model.trim().is_empty())
+            || !jev.allowed_profiles.is_empty());
+    serde_json::json!({
+        "report": "jev-routing-permission-dry-run",
+        "changes_made": false,
+        "routing_enabled": routing_active,
+        "routing_input": jev.routing_input.as_str(),
+        "permission_policy": jev.routing_permission.as_str(),
+        "compatibility": jev.routing_permission == lightagent_core::JevRoutingPermission::LegacyAllProfiles,
+        "profiles": rows,
+        "denied_under_strict": denied,
+        "allowed_profiles_not_found": unknown,
+    })
+}
+
+--- with
+=== replace crates/lightagent/src/serve.rs
+--- find
+        if let Some(key) = config
+            .inference
+            .api_key
+            .as_ref()
+            .and_then(|secret| secret.resolve())
+        {
+            provider_config = provider_config.with_api_key(key);
+        }
+        let provider = LightweightProvider::new(provider_config).ok()?;
+--- with
+        // An unreadable key file: no probe without the credential it names.
+        if let Some(key) = config
+            .inference
+            .api_key
+            .as_ref()
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+            .ok()?
+        {
+            provider_config = provider_config.with_api_key(key);
+        }
+        let provider = LightweightProvider::new(provider_config).ok()?;
+=== replace crates/lightagent/src/serve.rs
+--- find
+        let api_key = config
+            .inference
+            .api_key
+            .as_ref()
+            .and_then(|secret| secret.resolve());
+        let mut provider_config = ProviderConfig::new(base_url.clone(), configured_model.clone());
+--- with
+        let api_key = config
+            .inference
+            .api_key
+            .as_ref()
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+            .map_err(|error| format!("inference: {error}"))?;
+        let mut provider_config = ProviderConfig::new(base_url.clone(), configured_model.clone());
+=== replace crates/lightagent/src/serve.rs
+--- find
+        let api_key = config
+            .inference
+            .api_key
+            .as_ref()
+            .and_then(|secret| secret.resolve());
+
+        let mut provider_config = ProviderConfig::new(base_url.clone(), model)
+--- with
+        // A key file that cannot be read fails the run before any request:
+        // never a request without the credential it was configured with.
+        let api_key = match config
+            .inference
+            .api_key
+            .as_ref()
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+        {
+            Ok(key) => key,
+            Err(error) => {
+                fail(&sink, &format!("inference: {error}; the run was not sent"));
+                return RunStatus::Failed;
+            }
+        };
+
+        let mut provider_config = ProviderConfig::new(base_url.clone(), model)
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+        .route("/api/lightagent/v1/jev/verify", post(verify_jev))
+--- with
+        .route("/api/lightagent/v1/jev/verify", post(verify_jev))
+        .route(
+            "/api/lightagent/v1/jev/routing-report",
+            get(get_jev_routing_report),
+        )
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+async fn get_config(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+--- with
+/// `lightagent config jev-routing-report`: the same dry run, from the same
+/// shared operation. It reads the config and the profile list and changes
+/// nothing.
+async fn get_jev_routing_report(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (Some(store), Some(root)) = (&state.config_store, home(&state)) else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let config = match store.load() {
+        Ok(config) => config,
+        Err(error) => return config_error(error),
+    };
+    match ProfileStore::new(&root).list() {
+        Ok(profiles) => Json(lightagent_core::config_keys::jev_routing_report(
+            &config, &profiles,
+        ))
+        .into_response(),
+        Err(error) => internal(&error.to_string()),
+    }
+}
+
+async fn get_config(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+=== replace docs/desktop/contract/operations.json
+--- find
+   "id": "jev.verify",
+   "method": "POST",
+   "path": "/api/lightagent/v1/jev/verify"
+  },
+--- with
+   "id": "jev.verify",
+   "method": "POST",
+   "path": "/api/lightagent/v1/jev/verify"
+  },
+  {
+   "id": "jev.routing_report",
+   "method": "GET",
+   "path": "/api/lightagent/v1/jev/routing-report"
+  },
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "backend": "api: GET /config/{key}",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+--- with
+   "backend": "api: GET /config/{key}",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.jev.routing-report",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/jev/routing-report",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "The Jev routing-permission dry run, read-only (lightagent config jev-routing-report)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/jev/routing-report"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: GET /jev/routing-report",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "total_rows": 318,
+--- with
+  "total_rows": 319,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "api": 36,
+--- with
+   "api": 37,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "applicable": 282,
+--- with
+   "applicable": 283,
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.get.config.key` | `GET /api/lightagent/v1/config/{key}` | applicable | no | (backend reuse) | api: GET /config/{key} | not-started | `crates/lightagent-api/src/lib.rs` |
+--- with
+| `api.get.config.key` | `GET /api/lightagent/v1/config/{key}` | applicable | no | (backend reuse) | api: GET /config/{key} | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.get.jev.routing-report` | `GET /api/lightagent/v1/jev/routing-report` | applicable | no | (backend reuse) | api: GET /jev/routing-report | not-started | `crates/lightagent-api/src/lib.rs` |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Total rows: 318
+--- with
+- Total rows: 319
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| api | 36 |
+--- with
+| api | 37 |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| applicable | 282 |
+--- with
+| applicable | 283 |
+=== replace frontend/src/api/agent.ts
+--- find
+/** One config key as `lightagent config get` reads it (secrets redacted). */
+--- with
+/** `lightagent config jev-routing-report`: the routing-permission dry run. It changes nothing. */
+export interface JevRoutingReport {
+  report: string;
+  changes_made: boolean;
+  routing_enabled: boolean;
+  routing_input: string;
+  permission_policy: string;
+  compatibility: boolean;
+  profiles: { profile: string; now: string; under_strict: string }[];
+  denied_under_strict: string[];
+  allowed_profiles_not_found: string[];
+}
+
+/** One config key as `lightagent config get` reads it (secrets redacted). */
+=== replace frontend/src/api/agent.ts
+--- find
+  jevStatus: () => jsonRequest<JevStatus>("/jev"),
+--- with
+  jevStatus: () => jsonRequest<JevStatus>("/jev"),
+  jevRoutingReport: () => jsonRequest<JevRoutingReport>("/jev/routing-report"),
+=== replace frontend/src/components/Jev.tsx
+--- find
+  type JevRoutingPermission,
+  type JevSettings,
+--- with
+  type JevRoutingPermission,
+  type JevRoutingReport,
+  type JevSettings,
+=== replace frontend/src/components/Jev.tsx
+--- find
+/** A profile's model-routing permission, decided as the server decides it. */
+--- with
+/** A grant as the server reported it; a value this screen does not know is shown as it is. */
+function grantLabel(value: string): { label: string; tone: Tone } {
+  return GRANT_LABEL[value as JevRoutingGrant] ?? { label: value, tone: "neutral" };
+}
+
+/** The server's routing-permission dry run (`lightagent config jev-routing-report`). It changes nothing. */
+function RoutingReportView() {
+  const [report, setReport] = useState<JevRoutingReport | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  async function run() {
+    setLoading(true);
+    setError(null);
+    try {
+      setReport(await agentApi.jevRoutingReport());
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoading(false);
+    }
+  }
+  return (
+    <div data-testid="jev-routing-report" style={{ marginTop: 12 }}>
+      <button type="button" className="btn" disabled={loading} aria-busy={loading || undefined}
+        onClick={() => void run()}>
+        {loading ? "Running the dry run…" : report ? "Run the dry run again" : "Dry run: who Strict would deny"}
+      </button>
+      {error && <p className="jev-hint" role="alert">The routing report could not be read: {error}</p>}
+      {report && (
+        <div aria-live="polite">
+          <p className="jev-hint">
+            Dry run; nothing was changed. Policy: {report.compatibility ? "Compatibility" : "Strict"}. Routing
+            active: {report.routing_enabled ? "yes" : "no"}.
+          </p>
+          <table className="table" aria-label="Model routing permission dry run">
+            <thead>
+              <tr><th scope="col">Profile</th><th scope="col">Now</th><th scope="col">Under Strict</th></tr>
+            </thead>
+            <tbody>
+              {report.profiles.map((row) => {
+                const now = grantLabel(row.now);
+                const strict = grantLabel(row.under_strict);
+                return (
+                  <tr key={row.profile}>
+                    <td>{row.profile}</td>
+                    <td><Pill tone={now.tone}>{now.label}</Pill></td>
+                    <td><Pill tone={strict.tone}>{strict.label}</Pill></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <p className="jev-hint">
+            {report.denied_under_strict.length
+              ? `Strict would deny: ${report.denied_under_strict.join(", ")}.`
+              : "Strict would deny no profile."}
+            {report.allowed_profiles_not_found.length
+              ? ` Listed but not found as a profile: ${report.allowed_profiles_not_found.join(", ")}.`
+              : ""}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A profile's model-routing permission, decided as the server decides it. */
+=== replace frontend/src/components/Jev.tsx
+--- find
+      <p className="jev-hint">
+        Separate from task classification permission. A profile permission is not proof of who is acting:
+--- with
+      <RoutingReportView />
+      <p className="jev-hint">
+        Separate from task classification permission. A profile permission is not proof of who is acting:
+=== replace frontend/src/screens/SettingsScreen.tsx
+--- find
+  const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (settings.data) setCurrent(settings.data);
+  }, [settings.data]);
+
+  async function persist(patch: Partial<LightagentSettings>) {
+    if (!current || saving) return;
+    setSaving(true);
+    setMessage(null);
+    try {
+      // Saved against the revision these values were loaded at: a change
+      // made meanwhile elsewhere is never silently overwritten.
+      const saved = await agentApi.saveSettings({ ...current, ...patch, expected_revision: current.revision });
+      setCurrent(saved);
+      setMessage("Saved. New runs use these settings.");
+      jev.refresh();
+    } catch (cause) {
+      const text = cause instanceof Error ? cause.message : String(cause);
+      if (text.startsWith("409:")) {
+        setMessage("These settings were changed elsewhere (another window, the CLI or the desktop app), so nothing was saved. The current values are shown now; apply your change again.");
+        settings.refresh();
+      } else {
+        setMessage(text);
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+--- with
+  const [message, setMessage] = useState<string | null>(null);
+  // A change refused because the settings changed elsewhere: kept, with the
+  // values saved now, until it is applied to them or discarded.
+  const [conflict, setConflict] = useState<{
+    patch: Partial<LightagentSettings>;
+    latest: LightagentSettings | null;
+  } | null>(null);
+
+  useEffect(() => {
+    if (settings.data) setCurrent(settings.data);
+  }, [settings.data]);
+
+  async function persist(patch: Partial<LightagentSettings>, base: LightagentSettings | null = current) {
+    if (!base || saving) return;
+    setSaving(true);
+    setMessage(null);
+    try {
+      // Saved against the revision these values were loaded at: a change
+      // made meanwhile elsewhere is never silently overwritten.
+      const saved = await agentApi.saveSettings({ ...base, ...patch, expected_revision: base.revision });
+      setCurrent(saved);
+      setConflict(null);
+      setMessage("Saved. New runs use these settings.");
+      jev.refresh();
+    } catch (cause) {
+      const text = cause instanceof Error ? cause.message : String(cause);
+      if (text.startsWith("409:")) {
+        // Nothing was saved. The change stays here, with what is saved now.
+        const latest = await agentApi.settings().catch(() => null);
+        setConflict((earlier) => ({ patch: { ...earlier?.patch, ...patch }, latest }));
+      } else {
+        setMessage(text);
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function discard() {
+    if (conflict?.latest) setCurrent(conflict.latest);
+    else settings.refresh();
+    setConflict(null);
+    setMessage("Your change was discarded. The values saved now are shown.");
+  }
+=== replace frontend/src/screens/SettingsScreen.tsx
+--- find
+        {message && <div className="notice notice--info">{message}</div>}
+--- with
+        {message && <div className="notice notice--info">{message}</div>}
+        {conflict && (
+          <div className="notice notice--warn" role="alert" data-testid="settings-conflict">
+            <p style={{ margin: 0 }}>
+              These settings were changed elsewhere (another window, the CLI or the desktop app) after this
+              screen loaded, so your change was not saved. It is kept here until you apply or discard it.
+            </p>
+            <ul style={{ margin: "8px 0" }}>
+              {Object.entries(conflict.patch).map(([key, mine]) => (
+                <li key={key}>
+                  <strong>{readableKey(key)}</strong>: your change {shown(mine)}; saved now{" "}
+                  {conflict.latest ? shown(conflict.latest[key as keyof LightagentSettings]) : "could not be read"}
+                </li>
+              ))}
+            </ul>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button type="button" className="btn" disabled={saving || !conflict.latest}
+                onClick={() => void persist(conflict.patch, conflict.latest)}>
+                Apply my change to the current settings
+              </button>
+              <button type="button" className="btn" disabled={saving} onClick={discard}>
+                Discard my change
+              </button>
+            </div>
+          </div>
+        )}
+=== replace frontend/src/screens/SettingsScreen.tsx
+--- find
+function NumberSetting({ label, value, min = 1, max, disabled, onSave }: {
+--- with
+/** A settings field's name as the conflict notice shows it. */
+function readableKey(key: string): string {
+  return key.replace(/_/g, " ");
+}
+
+/** A value as the conflict notice shows it. A section of settings (Jev, an endpoint) is named, never shown: it can hold a key typed into it. */
+function shown(value: unknown): string {
+  if (value === null || value === undefined) return "none";
+  if (typeof value === "object") return "(an edited section)";
+  return String(value);
+}
+
+function NumberSetting({ label, value, min = 1, max, disabled, onSave }: {
+=== write e2e/settings.mjs
+// The Settings screen against the real harness: a save made against an
+// outdated revision keeps the change on screen and saves it on the current
+// values only when asked, or discards it when asked; the Jev routing dry run
+// shows the server's report; and a saved secret is nowhere in what the
+// renderer holds. crates/lightagent/tests/desktop_config.rs proves the API's
+// writes are the CLI's.
+
+const SECRET = "render-state-secret-5d2c81-not-a-real-key";
+
+async function settingsNow(base) {
+  return (await fetch(`${base}/api/lightagent/v1/settings`)).json();
+}
+
+async function put(base, path, body) {
+  return fetch(`${base}/api/lightagent/v1${path}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Another writer: what the CLI or another window would do. */
+async function writeElsewhere(base, key, value) {
+  const response = await put(base, `/config/${key}`, { value: String(value) });
+  if (!response.ok) throw new Error(`the direct write of ${key} answered ${response.status}`);
+}
+
+export async function checkSettingsStates(browser, base, outDir) {
+  const failures = [];
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1100 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const original = await settingsNow(base);
+  const approval = page.locator("#agent-approval");
+  const notice = page.getByTestId("settings-conflict");
+  try {
+    await page.goto(`${base}/#/settings`);
+    await page.getByText("Agent runtime").first().waitFor({ timeout: 15000 });
+
+    // A change refused as stale is kept, then applied to the current values.
+    const turns = original.max_turns + 3;
+    await writeElsewhere(base, "agent.max_turns", turns);
+    const target = original.approval_policy === "strict" ? "permissive" : "strict";
+    await approval.selectOption(target);
+    await notice.waitFor({ timeout: 5000 });
+    if (!(await notice.innerText()).includes("approval policy")) {
+      failures.push("settings: the conflict notice does not name the unsaved change");
+    }
+    let now = await settingsNow(base);
+    if (now.approval_policy !== original.approval_policy) failures.push("settings: a stale save changed the approval policy");
+    await page.screenshot({ path: `${outDir}/settings-conflict.png` });
+    await notice.getByRole("button", { name: "Apply my change to the current settings" }).click();
+    await page.getByText("Saved. New runs use these settings.").waitFor({ timeout: 5000 });
+    now = await settingsNow(base);
+    if (now.approval_policy !== target) failures.push("settings: applying the kept change did not save it");
+    if (now.max_turns !== turns) failures.push("settings: applying the kept change lost the other writer's change");
+
+    // Refused again, then discarded: nothing is saved and the saved value shows.
+    await writeElsewhere(base, "agent.max_turns", turns + 1);
+    await approval.selectOption(original.approval_policy);
+    await notice.waitFor({ timeout: 5000 });
+    await notice.getByRole("button", { name: "Discard my change" }).click();
+    await notice.waitFor({ state: "detached", timeout: 5000 });
+    now = await settingsNow(base);
+    if (now.approval_policy !== target) failures.push("settings: a discarded change was saved");
+    if (await approval.inputValue() !== target) failures.push("settings: after discarding, the screen does not show the saved value");
+
+    // The routing dry run is the server's report.
+    await page.getByRole("button", { name: "Dry run: who Strict would deny" }).click();
+    const report = page.getByTestId("jev-routing-report");
+    await report.getByRole("table").waitFor({ timeout: 5000 });
+    const served = await (await fetch(`${base}/api/lightagent/v1/jev/routing-report`)).json();
+    const shownReport = await report.innerText();
+    for (const row of served.profiles ?? []) {
+      if (!shownReport.includes(row.profile)) failures.push(`settings: the routing dry run does not list ${row.profile}`);
+    }
+    if (served.changes_made !== false) failures.push("settings: the routing report claims to have changed something");
+
+    // A saved secret is in none of the renderer's state.
+    const current = await settingsNow(base);
+    const saved = await put(base, "/settings", { ...current, jev: { ...current.jev, api_key: SECRET } });
+    if (!saved.ok) failures.push(`settings: saving the test secret answered ${saved.status}`);
+    await page.reload();
+    await page.getByText("Agent runtime").first().waitFor({ timeout: 15000 });
+    await page.waitForLoadState("networkidle").catch(() => {});
+    const state = await page.evaluate(() => JSON.stringify({
+      html: document.documentElement.outerHTML,
+      local: Object.fromEntries(Object.entries(window.localStorage)),
+      session: Object.fromEntries(Object.entries(window.sessionStorage)),
+      fields: [...document.querySelectorAll("input, textarea, select")].map((field) => field.value),
+    }));
+    if (state.includes(SECRET)) failures.push("settings: the saved secret appears in the renderer's state");
+    if (JSON.stringify(await settingsNow(base)).includes(SECRET)) failures.push("settings: the settings response carries the secret");
+
+    if (errors.length) failures.push(`settings: uncaught page error — ${errors[0]}`);
+    console.log(`  [${failures.length ? "FAIL" : "ok"}] settings conflict, routing dry run and renderer state`);
+  } finally {
+    await page.close();
+    // Leave the harness's runtime settings as they were found.
+    const after = await settingsNow(base).catch(() => null);
+    if (after) {
+      await put(base, "/settings", {
+        ...after,
+        approval_policy: original.approval_policy,
+        max_turns: original.max_turns,
+      }).catch(() => {});
+    }
+  }
+  return failures;
+}
+=== replace e2e/render.mjs
+--- find
+import { checkConfigEditor } from "./config.mjs";
+--- with
+import { checkConfigEditor } from "./config.mjs";
+import { checkSettingsStates } from "./settings.mjs";
+=== replace e2e/render.mjs
+--- find
+    failures.push(`config editor: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  await browser.close();
+--- with
+    failures.push(`config editor: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Changes the config file and saves a test secret: last.
+  try {
+    failures.push(...(await checkSettingsStates(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`settings states: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  await browser.close();
+=== replace crates/lightagent/tests/desktop_config.rs
+--- find
+    for (key, expected) in [
+        ("agent.max_turns", "7"),
+        ("agent.max_tool_calls", "11"),
+        ("memory.top_k", "9"),
+    ] {
+        assert_eq!(cli_ok(&home, &["config", "get", key]), expected, "{key}");
+    }
+}
+--- with
+    for (key, expected) in [
+        ("agent.max_turns", "7"),
+        ("agent.max_tool_calls", "11"),
+        ("memory.top_k", "9"),
+    ] {
+        assert_eq!(cli_ok(&home, &["config", "get", key]), expected, "{key}");
+    }
+}
+
+/// Every file under `root`, by `/`-separated relative path, with its text.
+/// The one normalization: the home's own path, which differs between two
+/// homes by construction, reads as `<HOME>` wherever a file records it
+/// (raw, or escaped inside JSON).
+fn files(root: &Path) -> std::collections::BTreeMap<String, String> {
+    let home = root.display().to_string();
+    let escaped = serde_json::to_string(&home).expect("JSON");
+    let escaped = escaped.trim_matches('"').to_owned();
+    let mut found = std::collections::BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read dir").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let relative = path
+                .strip_prefix(root)
+                .expect("under the home")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let text = String::from_utf8_lossy(&std::fs::read(&path).expect("read"))
+                .replace(&escaped, "<HOME>")
+                .replace(&home, "<HOME>");
+            found.insert(relative, text);
+        }
+    }
+    found
+}
+
+#[test]
+fn the_cli_and_the_desktop_write_the_same_files_in_isolated_homes() {
+    let by_cli = scratch_home("golden-cli");
+    let by_desktop = scratch_home("golden-desktop");
+    for args in [
+        vec!["profile", "create", "work", "--name", "Work", "--model", "m1"],
+        vec!["profile", "use", "work"],
+        vec!["config", "set", "agent.max_turns", "7"],
+        vec!["config", "set", "memory.top_k", "9"],
+        vec!["profile", "create", "scratch"],
+        vec!["profile", "delete", "scratch"],
+    ] {
+        cli_ok(&by_cli, &args);
+    }
+    let runtime = start(&by_desktop);
+    let steps = [
+        (
+            "POST",
+            "/api/lightagent/v1/profiles".to_owned(),
+            Some(r#"{"id":"work","name":"Work","model":"m1"}"#),
+        ),
+        ("PUT", "/api/lightagent/v1/profiles/work/active".to_owned(), None),
+        ("PUT", key_path("agent.max_turns"), Some(r#"{"value":"7"}"#)),
+        ("PUT", key_path("memory.top_k"), Some(r#"{"value":"9"}"#)),
+        (
+            "POST",
+            "/api/lightagent/v1/profiles".to_owned(),
+            Some(r#"{"id":"scratch"}"#),
+        ),
+        ("DELETE", "/api/lightagent/v1/profiles/scratch".to_owned(), None),
+    ];
+    for (method, path, body) in steps {
+        let (status, raw, _) = call(&runtime, method, &path, body);
+        assert_eq!(status, 200, "{method} {path}: {raw}");
+    }
+    drop(runtime);
+
+    let (cli_files, desktop_files) = (files(&by_cli), files(&by_desktop));
+    assert_eq!(
+        cli_files.keys().collect::<Vec<_>>(),
+        desktop_files.keys().collect::<Vec<_>>(),
+        "the two homes hold different files"
+    );
+    for (name, text) in &cli_files {
+        assert_eq!(Some(text), desktop_files.get(name), "{name} differs");
+    }
+}
+
+#[test]
+fn a_settings_save_then_a_cli_write_keeps_both() {
+    let home = scratch_home("settings-first");
+    let runtime = start(&home);
+    let (_, _, settings) = call(&runtime, "GET", "/api/lightagent/v1/settings", None);
+    let mut save = settings.clone();
+    save["expected_revision"] = settings["revision"].clone();
+    save["max_turns"] = 6.into();
+    let (status, raw, _) = call(
+        &runtime,
+        "PUT",
+        "/api/lightagent/v1/settings",
+        Some(&save.to_string()),
+    );
+    assert_eq!(status, 200, "{raw}");
+    // The CLI writes after the Settings save committed: it keeps that save.
+    cli_ok(&home, &["config", "set", "memory.top_k", "5"]);
+    assert_eq!(cli_ok(&home, &["config", "get", "agent.max_turns"]), "6");
+    assert_eq!(cli_ok(&home, &["config", "get", "memory.top_k"]), "5");
+    let (_, _, after) = call(&runtime, "GET", "/api/lightagent/v1/settings", None);
+    assert_eq!(after["max_turns"], 6, "{after}");
+}
+
+#[test]
+fn an_unreadable_key_file_fails_the_run_closed_before_any_request() {
+    let home = scratch_home("unreadable-key");
+    // The configured provider endpoint: it must receive no connection at all.
+    let provider = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    provider.set_nonblocking(true).expect("non-blocking");
+    let port = provider.local_addr().expect("address").port();
+    cli_ok(
+        &home,
+        &[
+            "config",
+            "set",
+            "inference.base_url",
+            &format!("http://127.0.0.1:{port}/v1"),
+        ],
+    );
+    let missing = home.join("missing-inference-key");
+    let config_file = home.join("config.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config_file).expect("read")).expect("config JSON");
+    value["inference"]["api_key"] = serde_json::json!({ "kind": "file", "path": missing });
+    std::fs::write(&config_file, serde_json::to_vec_pretty(&value).expect("JSON")).expect("write");
+
+    let runtime = start(&home);
+    let (status, raw, run) = call(
+        &runtime,
+        "POST",
+        "/api/lightagent/v1/runs",
+        Some(r#"{"message":"hello"}"#),
+    );
+    assert_eq!(status, 202, "{raw}");
+    let id = run["id"].as_str().expect("run id").to_owned();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let (_, _, state) = call(&runtime, "GET", &format!("/api/lightagent/v1/runs/{id}"), None);
+        if state["status"] == "failed" {
+            break;
+        }
+        assert_ne!(state["status"], "completed", "{state}");
+        assert!(std::time::Instant::now() < deadline, "the run never failed: {state}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (_, events, _) = call(
+        &runtime,
+        "GET",
+        &format!("/api/lightagent/v1/runs/{id}/events"),
+        None,
+    );
+    assert!(events.contains("cannot be read"), "{events}");
+    assert!(
+        !events.contains("missing-inference-key"),
+        "the error names the key file: {events}"
+    );
+    match provider.accept() {
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+        other => panic!("the provider endpoint was contacted: {other:?}"),
+    }
+}
+
+#[test]
+fn the_api_routing_report_is_the_cli_routing_report() {
+    let home = scratch_home("routing-report");
+    cli_ok(&home, &["profile", "create", "work"]);
+    let runtime = start(&home);
+    let (status, raw, report) = call(
+        &runtime,
+        "GET",
+        "/api/lightagent/v1/jev/routing-report",
+        None,
+    );
+    assert_eq!(status, 200, "{raw}");
+    let printed = cli_ok(&home, &["--json", "config", "jev-routing-report"]);
+    let cli: serde_json::Value = serde_json::from_str(&printed).expect("report JSON");
+    assert_eq!(report, cli);
+    assert_eq!(report["changes_made"], false);
+    assert!(
+        report["profiles"]
+            .as_array()
+            .expect("profiles")
+            .iter()
+            .any(|row| row["profile"] == "work"),
+        "{report}"
+    );
+}
+=== end
