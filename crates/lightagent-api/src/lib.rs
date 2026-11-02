@@ -2238,6 +2238,12 @@ async fn start_run(
                 return internal(&error.to_string());
             }
         };
+        // A turn of this session that a process ended before recording is
+        // recorded as interrupted before this one is admitted. It is never
+        // run again.
+        if let Err(error) = session_store.recover_interrupted(&id, &lease) {
+            eprintln!("could not record an interrupted run of session {id:?}: {error}");
+        }
         // Checked, and for a new prompt saved, on the session as it is saved
         // now, under the store's lock: a change another writer made since is
         // kept. The busy entry above stays the rule for admitting runs.
@@ -2334,6 +2340,11 @@ async fn start_run(
             Turn::Append => None,
             Turn::Regenerate { run_id } => Some(run_id),
         };
+        // If this process ends before the run is recorded, the next one to
+        // take the session records it as interrupted, and never reruns it.
+        if let Err(error) = session_store.journal_run(id, run.id(), replacing.is_some()) {
+            eprintln!("could not journal the run of session {id:?}: {error}");
+        }
         tokio::spawn(record_run_in_session(
             Arc::clone(&run),
             session_store.clone(),
@@ -2401,6 +2412,9 @@ async fn record_run_in_session(
                 }
                 Err(error) => eprintln!("could not save agent session {id:?}: {error}"),
             }
+            // The turn is recorded (or kept out of the session on purpose):
+            // nothing is left to recover.
+            sessions.clear_run_journal(&id);
             // The lease goes first: once the busy entry is gone, the session
             // is free in every process.
             drop(lease.take());

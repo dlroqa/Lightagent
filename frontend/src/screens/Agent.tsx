@@ -273,6 +273,12 @@ function describeStop(reason: string, answered: boolean): { label: string; text:
     case "RepeatedToolCalls":
       notice = { label: "limit reached", text: "The run stopped because it kept repeating the same tool call." };
       break;
+    case "Interrupted":
+      notice = {
+        label: "interrupted",
+        text: "Lightagent stopped while this run was working. It was not run again; anything its tools finished before then stays done.",
+      };
+      break;
   }
   return notice;
 }

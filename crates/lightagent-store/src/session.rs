@@ -343,6 +343,22 @@ impl Drop for RunLease {
     }
 }
 
+/// The stop reason recorded for a turn whose process ended before it could
+/// record the turn itself.
+pub const INTERRUPTED: &str = "Interrupted";
+
+/// A turn in flight, written when an API turn starts and removed once the
+/// turn is recorded. A journal that outlives the process holding the
+/// session's run lease marks an interrupted turn.
+#[derive(Debug, Serialize, Deserialize)]
+struct RunJournal {
+    run_id: String,
+    started_at: SystemTime,
+    /// The turn would have replaced the session's latest answer.
+    #[serde(default)]
+    replacing: bool,
+}
+
 /// Why [`SessionStore::update`] wrote nothing.
 #[derive(Debug)]
 pub enum SessionUpdateError<E> {
@@ -559,6 +575,119 @@ impl SessionStore {
                 reason: err.to_string(),
             }),
         }
+    }
+
+    fn journal_path(&self, id: &SessionId) -> PathBuf {
+        self.directory
+            .join(RUNS_DIR)
+            .join(format!("{}.run", id.as_str()))
+    }
+
+    /// Note that session `id` has turn `run_id` in flight, so that a crash
+    /// before the turn is recorded is found later
+    /// ([`Self::recover_interrupted`]). The caller holds `id`'s run lease.
+    pub fn journal_run(
+        &self,
+        id: &SessionId,
+        run_id: &str,
+        replacing: bool,
+    ) -> Result<(), StoreError> {
+        let journal = RunJournal {
+            run_id: run_id.to_owned(),
+            started_at: SystemTime::now(),
+            replacing,
+        };
+        let unwritable = |reason: String| StoreError::Unwritable {
+            id: id.as_str().to_owned(),
+            reason,
+        };
+        let bytes = serde_json::to_vec(&journal).map_err(|err| unwritable(err.to_string()))?;
+        paths::write_private(&self.journal_path(id), &bytes)
+            .map_err(|err| unwritable(err.to_string()))
+    }
+
+    /// Session `id`'s turn was recorded: forget its journal.
+    pub fn clear_run_journal(&self, id: &SessionId) {
+        let _ = std::fs::remove_file(self.journal_path(id));
+    }
+
+    /// Record session `id`'s interrupted turn, if a journal outlived the
+    /// process that wrote it. An appended turn gets a run record with stop
+    /// reason [`INTERRUPTED`] and no answer; an interrupted regeneration
+    /// leaves the saved answer and its record as they were. Then the journal
+    /// goes. Nothing is run again. The caller holds `id`'s run lease, so no
+    /// live turn owns the journal. Returns whether there was one.
+    pub fn recover_interrupted(
+        &self,
+        id: &SessionId,
+        _lease: &RunLease,
+    ) -> Result<bool, StoreError> {
+        let path = self.journal_path(id);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => {
+                return Err(StoreError::Unreadable {
+                    id: id.as_str().to_owned(),
+                    reason: err.to_string(),
+                });
+            }
+        };
+        // An unreadable journal still marks an interruption; only its
+        // details are lost.
+        let journal: Option<RunJournal> = serde_json::from_slice(&bytes).ok();
+        if !journal.as_ref().is_some_and(|journal| journal.replacing) {
+            let record = RunRecord {
+                run_id: journal
+                    .as_ref()
+                    .map(|journal| journal.run_id.clone())
+                    .unwrap_or_default(),
+                started_at: journal
+                    .as_ref()
+                    .map_or_else(SystemTime::now, |journal| journal.started_at),
+                ended_at: Some(SystemTime::now()),
+                stop_reason: Some(INTERRUPTED.to_owned()),
+                tools: Vec::new(),
+            };
+            let recorded = self.update(id, |session| {
+                session.runs.push(record);
+                session.touch();
+                Ok::<(), Infallible>(())
+            });
+            match recorded {
+                Ok(_) | Err(SessionUpdateError::Store(StoreError::NotFound(_))) => {}
+                Err(SessionUpdateError::Store(error)) => return Err(error),
+                Err(SessionUpdateError::Change(never)) => match never {},
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+        Ok(true)
+    }
+
+    /// Record every interrupted turn in this store
+    /// ([`Self::recover_interrupted`]). A session whose lease a live process
+    /// holds is left alone. Returns the sessions recorded.
+    pub fn recover_all_interrupted(&self) -> Vec<SessionId> {
+        let Ok(entries) = std::fs::read_dir(self.directory.join(RUNS_DIR)) else {
+            return Vec::new();
+        };
+        let mut recovered = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(stem) = name.to_str().and_then(|name| name.strip_suffix(".run")) else {
+                continue;
+            };
+            let Ok(id) = SessionId::parse(stem) else {
+                continue;
+            };
+            let Ok(lease) = self.lease_run(&id) else {
+                continue;
+            };
+            if self.recover_interrupted(&id, &lease).unwrap_or(false) {
+                recovered.push(id);
+            }
+        }
+        recovered
     }
 
     /// Write `session` atomically and owner-only; the caller holds the lock.
@@ -782,6 +911,77 @@ mod tests {
         drop(held);
         let again = store.lease_run(&one).expect("freed on drop");
         drop((again, other));
+    }
+
+    #[test]
+    fn an_interrupted_turn_is_recorded_once_and_never_run_again() {
+        let store = SessionStore::new(scratch_dir());
+        let mut session = Session::new("profile", "title");
+        session.push_message(StoredMessage::new("user", "hello"));
+        let id = session.id.clone();
+        store.save(&session).expect("save");
+        let lease = store.lease_run(&id).expect("lease");
+        store.journal_run(&id, "run-1", false).expect("journal");
+        // A turn still running in a live process is left alone.
+        assert!(store.recover_all_interrupted().is_empty());
+        // Its process ends without recording the turn.
+        drop(lease);
+        assert_eq!(store.recover_all_interrupted(), vec![id.clone()]);
+        let saved = store.load(&id).expect("load");
+        let run = saved.runs.last().expect("a run record");
+        assert_eq!(run.stop_reason.as_deref(), Some(INTERRUPTED));
+        assert_eq!(run.run_id, "run-1");
+        assert_eq!(saved.messages.len(), 1, "no answer, and nothing run again");
+        // Recorded once.
+        assert!(store.recover_all_interrupted().is_empty());
+        assert_eq!(store.load(&id).expect("load").runs.len(), 1);
+    }
+
+    #[test]
+    fn an_interrupted_regeneration_keeps_the_saved_answer() {
+        use lightagent_core::{AgentEvent, RunId, StopReason};
+        let store = SessionStore::new(scratch_dir());
+        let mut session = Session::new("profile", "title");
+        session.push_message(StoredMessage::new("user", "hello"));
+        session.record_run_events(
+            &[
+                AgentEvent::RunStarted {
+                    run: RunId::new(),
+                    parent: None,
+                },
+                AgentEvent::Content {
+                    text: "The answer.".into(),
+                },
+                AgentEvent::RunCompleted {
+                    reason: StopReason::EndTurn,
+                },
+            ],
+            "EndTurn",
+        );
+        let id = session.id.clone();
+        store.save(&session).expect("save");
+        let before = store.load(&id).expect("load");
+        let lease = store.lease_run(&id).expect("lease");
+        store.journal_run(&id, "run-2", true).expect("journal");
+        drop(lease);
+        assert_eq!(store.recover_all_interrupted(), vec![id.clone()]);
+        assert_eq!(store.load(&id).expect("load"), before);
+        assert!(store.recover_all_interrupted().is_empty());
+    }
+
+    #[test]
+    fn a_recorded_turn_leaves_no_journal() {
+        let store = SessionStore::new(scratch_dir());
+        let session = Session::new("profile", "title");
+        let id = session.id.clone();
+        store.save(&session).expect("save");
+        let lease = store.lease_run(&id).expect("lease");
+        store.journal_run(&id, "run-3", false).expect("journal");
+        store.clear_run_journal(&id);
+        assert!(!store.recover_interrupted(&id, &lease).expect("recover"));
+        drop(lease);
+        assert!(store.recover_all_interrupted().is_empty());
+        assert!(store.load(&id).expect("load").runs.is_empty());
     }
 
     #[test]

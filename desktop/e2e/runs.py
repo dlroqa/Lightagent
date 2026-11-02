@@ -17,6 +17,11 @@ LIGHTAGENT_HOME, set by the caller, is isolated.
   regenerate  R1 through the host: a finished answer replaces the saved one;
               a provider failure, a refusal, an empty answer and a cancel keep
               it; a stale answer id and a busy session are refused
+  crash       an approved write runs, then the runtime is killed while the
+              model's next turn is in flight: the host reports the lost stream
+              and restarts its runtime; the session records the run as
+              Interrupted with no answer; neither the turn nor the write is
+              repeated; the session takes the next run
 
 This is host-level evidence (host transport and relay plus the real
 runtime), not browser or native WebView evidence. Writes runs.json; exits
@@ -54,6 +59,10 @@ def scripts(provider):
             [("text", "one "), ("gate", "relay"), ("text", "two "), ("text", "three "),
              ("tool", "datetime.now", {}), ("finish", "tool_calls")]
             if turn == 0 else [("gate", "relay-2"), ("text", "four."), ("finish", "stop")]
+        ),
+        "crash": lambda p, turn, index: (
+            [write("crash.txt", "once\n"), ("finish", "tool_calls")]
+            if turn == 0 else [("text", "Still "), ("gate", "crash"), ("text", "working."), ("finish", "stop")]
         ),
         "regen": lambda p, turn, index: {
             "first": [("text", "First answer."), ("finish", "stop")],
@@ -232,6 +241,44 @@ def scenario_regenerate(host, provider, workspace):
     return check
 
 
+def scenario_crash(host, provider, workspace, report):
+    check = Checks("crash")
+    path = os.path.join(workspace, "crash.txt")
+    session = host.new_session()
+    run = host.start_run(session, "[e2e:crash] Write the file, then keep working.")
+    stream = Stream(host, run)
+    stream.until(lambda s: s.has("approval.required"))
+    host.fetch("POST", f"{API}/approvals/{run}", {"approve": True})
+    held = provider.wait_for("gate", "crash", gate="crash")
+    written = harness.read(path)
+    victims = harness.runtimes(host.process.pid)
+    for victim in victims:
+        victim.kill()
+    stream.finish()
+    restarted = harness.wait_until(lambda: "RUNTIME_RESTARTED" in (harness.read(report) or ""))
+    host.wait_ready()
+    saved = host.session(session)
+    gone = host.fetch("GET", f"{API}/runs/{run}")
+    sent = len(provider.requests("crash"))
+    follow = host.fetch("POST", f"{API}/runs", {"message": "[e2e:after-crash] Next.", "session_id": session})
+    if follow[0] == 202:
+        Stream(host, follow[1]["id"]).finish()
+    runs = saved.get("runs", [])
+    check.expect("the model's next turn was in flight", held, provider.log[-3:])
+    check.expect("the approved write ran once before the crash", written == "once\n", written)
+    check.expect("exactly one runtime was killed", len(victims) == 1, [v.pid for v in victims])
+    check.expect("the host reported the lost stream", stream.error is not None, stream.error)
+    check.expect("the host restarted its runtime", bool(restarted), None)
+    check.expect("the session records the run as interrupted", bool(runs) and runs[-1].get("stop_reason") == "Interrupted", runs)
+    check.expect("no answer was saved for it", harness.answers(saved) == [], harness.answers(saved))
+    check.expect("the restarted runtime does not know the old run", gone[0] == 404, gone)
+    check.expect("the turn was not sent again after the restart", sent == 2, provider.requests("crash"))
+    check.expect("the session takes the next run", follow[0] == 202, follow)
+    check.expect("the write was not repeated", harness.read(path) == "once\n" and len(provider.requests("crash")) == 2, harness.read(path))
+    provider.open("crash")
+    return check
+
+
 def main():
     out = os.path.abspath(sys.argv[1])
     cli = sys.argv[2]
@@ -256,6 +303,8 @@ def main():
             ("cancel", lambda: scenario_cancel(host, provider, workspace)),
             ("relay", lambda: scenario_relay(host, provider, workspace, report)),
             ("regenerate", lambda: scenario_regenerate(host, provider, workspace)),
+            # Last: it kills the runtime, and the host restarts one at most once a minute.
+            ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]
         for name, scenario in scenarios:
             try:
