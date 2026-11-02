@@ -318,6 +318,67 @@ fn a_run_paused_on_its_time_budget_continues_the_same_execution() {
 }
 
 #[test]
+fn a_paused_run_is_found_from_its_session_and_resumes_once() {
+    let (runtime, bodies) = setup("found");
+    let session = new_session(&runtime);
+    let run = start_run(&runtime, &session, true);
+    wait_until("the run to pause", || {
+        run_info(&runtime, &run)["status"] == "awaiting_continue"
+    });
+    let session_path = format!("/api/lightagent/v1/sessions/{session}");
+
+    // A client that lost the page finds the paused run from its session: on
+    // the session itself, and on the refusal of a new turn.
+    let (status, raw) = call(&runtime, "GET", &session_path, None);
+    assert_eq!(status, 200, "{raw}");
+    let saved: Value = serde_json::from_str(&raw).expect("session JSON");
+    assert_eq!(saved["active_run"]["id"], run.as_str(), "{saved}");
+    assert_eq!(
+        saved["active_run"]["status"], "awaiting_continue",
+        "{saved}"
+    );
+    let body = json!({ "message": "Something else.", "session_id": session }).to_string();
+    let (status, raw) = call(&runtime, "POST", "/api/lightagent/v1/runs", Some(&body));
+    assert_eq!(status, 409, "{raw}");
+    let refused: Value = serde_json::from_str(&raw).expect("refusal JSON");
+    assert_eq!(refused["active_run"]["id"], run.as_str(), "{refused}");
+
+    // A mode the API does not define is refused; the run stays paused.
+    let (status, raw) = continue_run(&runtime, &run, "forever");
+    assert!(
+        (400..500).contains(&status) && status != 409,
+        "{status}: {raw}"
+    );
+    assert_eq!(run_info(&runtime, &run)["status"], "awaiting_continue");
+
+    // Two clients continue at once: exactly one resumes the run.
+    let mut both: Vec<u16> = std::thread::scope(|scope| {
+        let first = scope.spawn(|| continue_run(&runtime, &run, "extend").0);
+        let second = scope.spawn(|| continue_run(&runtime, &run, "extend").0);
+        vec![
+            first.join().expect("first continue"),
+            second.join().expect("second continue"),
+        ]
+    });
+    both.sort_unstable();
+    assert_eq!(both, vec![200, 409]);
+    wait_until("the run to finish", || {
+        run_info(&runtime, &run)["status"] == "completed"
+    });
+    assert_eq!(
+        bodies.lock().expect("bodies").len(),
+        2,
+        "the paused run was resumed exactly once"
+    );
+
+    // Finished, it is no longer named on its session.
+    let (status, raw) = call(&runtime, "GET", &session_path, None);
+    assert_eq!(status, 200, "{raw}");
+    let saved: Value = serde_json::from_str(&raw).expect("session JSON");
+    assert!(saved.get("active_run").is_none(), "{saved}");
+}
+
+#[test]
 fn a_paused_run_can_be_cancelled_and_runs_that_did_not_ask_wrap_up() {
     let (runtime, bodies) = setup("cancel");
     let session = new_session(&runtime);

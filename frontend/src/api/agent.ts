@@ -161,6 +161,8 @@ export interface AgentSession {
   messages: SessionMessage[];
   approvals_unrestricted: boolean;
   runs: SessionRun[];
+  /** A turn the server is running (or holding paused) that the caller may see. */
+  active_run?: { id: string; status: string };
 }
 
 export interface LightagentSettings {
