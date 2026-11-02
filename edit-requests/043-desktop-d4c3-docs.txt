@@ -1,0 +1,112 @@
+=== base 205f01b731e0a3149ff465bc894aa97605284c76
+=== message
+Desktop docs: row 11 (D4 acceptance) validated; jev-routing-report implemented (23 of 227)
+
+Records row 11 (#104) at 205f01b (tree b5bf552): check and desktop
+passed on every job, on the first run. Marks
+`cli.config.jev-routing-report` implemented with that evidence
+(denominator 227, implemented 22 -> 23), and records which D4 gate items
+are now met and which are carried forward (the diagnostics bundle to D7,
+native WebView verification to D8, CLI chat key resolution to D4d).
+Documentation and inventory only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "ui": "Settings/Diagnostics: Jev routing report",
+   "backend": "extract: jev_routing_report()",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "ui": "Settings/Diagnostics: Jev routing report",
+   "backend": "shared: lightagent_core::config_keys::jev_routing_report; api: GET /jev/routing-report",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "implemented",
+   "verification": "Settings dry-run table under the routing permission lists the server's report (UI e2e: e2e/settings.mjs in the standalone Web UI render job); API = CLI --json report (crates/lightagent/tests/desktop_config.rs, all four platforms); desktop: contract operation jev.routing_report; native WebView automation pending D8 (not claimed)",
+   "tested_sha": "205f01b731e0a3149ff465bc894aa97605284c76",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41370767535 (check); https://github.com/dlroqa/Lightagent/actions/runs/41370767531 (desktop)"
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "parity_implemented": 22,
+--- with
+  "parity_implemented": 23,
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Implemented: 22 of 227
+--- with
+- Implemented: 23 of 227
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.config.jev-routing-report` | `lightagent config jev-routing-report` | applicable | yes | Settings/Diagnostics: Jev routing report | extract: jev_routing_report() | not-started | `crates/lightagent/src/lib.rs:203` |
+--- with
+| `cli.config.jev-routing-report` | `lightagent config jev-routing-report` | applicable | yes | Settings/Diagnostics: Jev routing report | shared: lightagent_core::config_keys::jev_routing_report; api: GET /jev/routing-report | implemented | `crates/lightagent/src/lib.rs:203` |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.config.set.arg.value` | `0e46892` | Advanced configuration card Value field, invalid value refused with the CLI's words (UI e2e; API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms)); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41359276745), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41359276774) |
+--- with
+| `cli.config.set.arg.value` | `0e46892` | Advanced configuration card Value field, invalid value refused with the CLI's words (UI e2e; API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms)); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41359276745), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41359276774) |
+| `cli.config.jev-routing-report` | `205f01b` | Settings dry-run table under the routing permission lists the server's report (UI e2e: e2e/settings.mjs); API = CLI `--json` report (crates/lightagent/tests/desktop_config.rs, all four platforms); desktop: contract operation jev.routing_report; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41370767535), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41370767531) |
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+| Row 10: session writes (#100) | **CI-validated** at `aebd5d6` (check and desktop, every job) | `desktop/d4c2-session-writes` (stacked on row 9 `fbd008c`) | https://github.com/dlroqa/Lightagent/pull/103 | `aebd5d631238b1b8a302df1ec1aa7bba27972369`, plus this documentation commit | `aebd5d6` / tree `e9066c30eac669165e9deb505ee67a0884659df8` |
+--- with
+| Row 10: session writes (#100) | **CI-validated** at `aebd5d6` (check and desktop, every job) | `desktop/d4c2-session-writes` (stacked on row 9 `fbd008c`) | https://github.com/dlroqa/Lightagent/pull/103 | `aebd5d631238b1b8a302df1ec1aa7bba27972369`, plus the documentation commit `3310dfc` | `aebd5d6` / tree `e9066c30eac669165e9deb505ee67a0884659df8` |
+| Row 11: D4 acceptance (golden files, ordered concurrency, fail-closed keys, routing report, kept Settings edits) | **CI-validated** at `205f01b` (check and desktop, every job, first run). The D4c gate items are met, except those carried forward (see "Row 11") | `desktop/d4c3-config-acceptance` (stacked on row 10 `3310dfc`) | https://github.com/dlroqa/Lightagent/pull/104 | `205f01b731e0a3149ff465bc894aa97605284c76`, plus this documentation commit | `205f01b` / tree `b5bf552d9d4e75630b3c3ecda78c58071d15a87f` |
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+## Artifacts and retention
+--- with
+## Row 11 — D4 acceptance
+
+Edit request `042`, based on row 10's documentation head `3310dfc`, was
+applied as 32 edits to 15 files.
+
+| D4 gate item | Now | Evidence (all four platforms unless noted) |
+|---|---|---|
+| CLI and desktop write identical files (profile create/use/delete, config set) in isolated homes | **met** | `the_cli_and_the_desktop_write_the_same_files_in_isolated_homes`. Every file in the two homes is compared. The one normalization is the home's own path, which differs by construction. No file was excluded |
+| A Settings save on a revision loaded before a CLI write: 409, nothing written | **met** (D4c) | `a_stale_write_is_refused_with_409_and_writes_nothing` |
+| A Settings save, then a CLI write: both kept | **met** | `a_settings_save_then_a_cli_write_keeps_both` |
+| Unordered races: no lost update (no exact `409` count required) | **met** | D4c's cross-process lock test and core `config::tests` |
+| An unreadable secret file fails closed, with a redacted error | **met for the desktop runtime** | `an_unreadable_key_file_fails_the_run_closed_before_any_request`: the run fails, the error names no path, and the configured endpoint gets no connection. `SecretRef::for_request` is also used by the runtime's history probe and model listing |
+| No secret in the renderer state dump | **met in the browser harness** | `e2e/settings.mjs` checks the DOM, local and session storage, form fields, and the settings response. The native WebView repeats this in D8 |
+| No secret in the diagnostics bundle | **carried to D7** | The bundle does not exist until D7 (`/diagnostics`) adds it, with this test |
+| `jev-routing-report`: shared operation, API route, UI | **met** | `lightagent_core::config_keys::jev_routing_report`; `GET /jev/routing-report` (contract `jev.routing_report`, inventory `api.get.jev.routing-report`); Settings dry-run table. `the_api_routing_report_is_the_cli_routing_report`; e2e |
+| A Settings conflict keeps the unsaved input and offers review and refresh | **met** | e2e: conflict then apply (the other writer's change is kept), and conflict then discard (nothing saved, saved value shown) |
+
+**Carried forward:**
+- **D4d:** the terminal chat still resolves its key with `resolve`, so an
+  unreadable key file there sends no key rather than failing. It moves to
+  protected credentials, with its own test.
+- **D7:** the diagnostics bundle's redaction test.
+- **D8:** native WebView verification of these screens.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Branch `desktop/d4c3-config-acceptance` created at `3310dfc`; edit request `042`; branch moved without force; draft PR #104 | `205f01b` / `b5bf552` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41370688162 |
+| 2026-11-02 | `check` on `205f01b`: **success**, all 13 jobs. The four new `desktop_config.rs` tests ran on all four platforms. `standalone Web UI render` printed `[ok] settings conflict, routing dry run and renderer state` | `205f01b` | https://github.com/dlroqa/Lightagent/actions/runs/41370767535 |
+| 2026-11-02 | `desktop` on `205f01b`: **success**, all 7 jobs, including the inventory and contract checks with `jev.routing_report` | `205f01b` | https://github.com/dlroqa/Lightagent/actions/runs/41370767531 |
+| 2026-11-02 | `jev evaluation` and `subagents`: **success**. The fixture `fail` and `verify` dispatches failed by design, as on every earlier head | `205f01b` | https://github.com/dlroqa/Lightagent/actions/runs/41370767708, https://github.com/dlroqa/Lightagent/actions/runs/41370767658 |
+| 2026-11-02 | Parity: `cli.config.jev-routing-report` is implemented: **23 of 227**. The new `api.get.jev.routing-report` row is backend and not counted (319 rows) | — | DESKTOP_CLI_PARITY.md |
+
+## Artifacts and retention
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+1. **Row 11:** the remaining D4 acceptance items, on branch
+   `desktop/d4c3-config-acceptance`, stacked on row 10.
+--- with
+1. **Row 11** is done (see "Row 11"). Its carried items are listed there.
+   The next slice is **D4d**: providers, models, protected credentials
+   (including the terminal chat's key resolution) and endpoint checks.
+
+   The original row 11 scope, for reference:
+=== replace docs/desktop/DESKTOP_MERGE_ORDER.md
+--- find
+| 11 | D4 acceptance: isolated-home golden files, ordered concurrency, secrets, Jev routing report, Settings conflict | opened when prepared | `desktop/d4c3-config-acceptance` | `desktop/d4c2-session-writes` | — | — |
+--- with
+| 11 | D4 acceptance: isolated-home golden files, ordered concurrency, secrets, Jev routing report, Settings conflict | https://github.com/dlroqa/Lightagent/pull/104 | `desktop/d4c3-config-acceptance` | `desktop/d4c2-session-writes` | `205f01b` | `205f01b` |
+=== end
