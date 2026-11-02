@@ -30,5 +30,5 @@ pub use context::model_history;
 pub use error::StoreError;
 pub use session::{
     RunRecord, Session, SessionId, SessionSearchResult, SessionStore, SessionSummary,
-    StoredMessage, ToolHistoryEntry,
+    SessionUpdateError, StoredMessage, ToolHistoryEntry,
 };

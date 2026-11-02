@@ -378,19 +378,29 @@ impl AcpServer {
                         return;
                     }
                     Some(session) => {
-                        let history = model_history(&session.stored, &text, history_limit);
+                        // Appended to the session as it is saved now, under
+                        // the store's lock, so a change another client made
+                        // since (a rename, a turn) is kept.
                         let mut updated = session.stored.clone();
-                        updated.push_message(StoredMessage::new("user", &text));
-                        if let Some(store) = &session.store
-                            && let Err(error) = store.save(&updated)
-                        {
-                            let _ = outbound.send(protocol::error(
-                                id,
-                                -32603,
-                                &format!("could not save session: {error}"),
-                            ));
-                            return;
-                        }
+                        let append = |saved: &mut StoredSession| {
+                            let history = model_history(saved, &text, history_limit);
+                            saved.push_message(StoredMessage::new("user", &text));
+                            history
+                        };
+                        let history = match &session.store {
+                            Some(store) => match store.apply(&mut updated, append) {
+                                Ok(history) => history,
+                                Err(error) => {
+                                    let _ = outbound.send(protocol::error(
+                                        id,
+                                        -32603,
+                                        &format!("could not save session: {error}"),
+                                    ));
+                                    return;
+                                }
+                            },
+                            None => append(&mut updated),
+                        };
                         session.stored = updated;
                         session.busy = true;
                         (session.profile.clone(), session.cwd.clone(), history)
@@ -519,11 +529,16 @@ impl PromptTask {
         // atomically persist the newly completed assistant turn.
         let mut save_error = None;
         if let Some(session) = self.sessions.lock().await.get_mut(&session_id) {
-            session.stored.record_run_events(&events, reason);
-            if let Some(store) = &session.store
-                && let Err(error) = store.save(&session.stored)
-            {
-                save_error = Some(error.to_string());
+            // Recorded into the session as it is saved now, so a change
+            // another client made during the run is kept.
+            let record = |saved: &mut StoredSession| saved.record_run_events(&events, reason);
+            match &session.store {
+                Some(store) => {
+                    if let Err(error) = store.apply(&mut session.stored, record) {
+                        save_error = Some(error.to_string());
+                    }
+                }
+                None => record(&mut session.stored),
             }
             session.active = None;
             session.busy = false;

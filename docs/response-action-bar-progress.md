@@ -212,3 +212,10 @@ profile switch runs, it also refuses requests that start a run
 (`desktop/src-tauri/src/switch.rs`). #98 is based on `master`, which has
 neither, so it cannot change them itself. The integration evidence lives on
 a separate branch; see the merge-order entry in the desktop progress record.
+
+Row 10 of the desktop merge order (https://github.com/dlroqa/Lightagent/pull/103)
+changes how regenerate's swap is written. It is now applied under the session
+store's lock, to the session as saved at that moment. A rename, or another
+process's write made during the regeneration, is kept. A failed, cancelled or
+empty regeneration still writes nothing. This is tested in another process on
+all four platforms.

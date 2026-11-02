@@ -1614,9 +1614,11 @@ pub async fn run(
         }
         with_turn_guidance(&mut history, turn_guidance);
         with_turn_guidance(&mut history, turn_plan);
-        session.push_message(StoredMessage::new("user", &line));
+        // Appended to the session as it is saved now, keeping what another
+        // process changed meanwhile (see `SessionStore::apply`).
+        let asked = StoredMessage::new("user", &line);
         session_store
-            .save(&session)
+            .apply(&mut session, |saved| saved.push_message(asked.clone()))
             .map_err(|error| format!("could not save session: {error}"))?;
         if let Err(error) = crate::memory::capture(
             &profile_dir,
@@ -1730,9 +1732,10 @@ fn drop_paused(run: PausedRun, session: &mut Session, store: &SessionStore) {
     save_turn(session, store, &run.events);
 }
 
+/// Record a run's turn in the session as it is saved now, keeping what
+/// another process changed meanwhile (see `SessionStore::apply`).
 fn save_turn(session: &mut Session, store: &SessionStore, events: &[AgentEvent]) {
-    record_turn(session, events);
-    if let Err(error) = store.save(session) {
+    if let Err(error) = store.apply(session, |saved| record_turn(saved, events)) {
         eprintln!("· could not save session: {error}");
     }
 }
@@ -2749,9 +2752,8 @@ async fn drive(
                 )
                 .await?;
                 if choice == ApprovalChoice::Unrestricted {
-                    session.approvals_unrestricted = true;
                     store
-                        .save(session)
+                        .apply(session, |saved| saved.approvals_unrestricted = true)
                         .map_err(|error| format!("could not save session approval: {error}"))?;
                 }
             }

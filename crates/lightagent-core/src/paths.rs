@@ -184,6 +184,45 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     })
 }
 
+/// Why [`lock_exclusive`] returned no lock.
+#[derive(Debug)]
+pub enum LockError {
+    /// Another holder kept the lock for the whole wait.
+    Busy,
+    /// The lock file could not be created, opened or locked.
+    Io(io::Error),
+}
+
+/// Hold an exclusive OS lock on the file at `path`, creating the file and its
+/// directory when missing. Every process takes the same lock, and the OS
+/// releases it when the returned file is dropped or its process ends, so a
+/// holder that crashed never leaves it stuck. Waits up to `wait` for another
+/// holder, then reports [`LockError::Busy`].
+pub fn lock_exclusive(path: &Path, wait: std::time::Duration) -> Result<std::fs::File, LockError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(LockError::Io)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(LockError::Io)?;
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => return Err(LockError::Busy),
+            Err(std::fs::TryLockError::Error(err)) => return Err(LockError::Io(err)),
+        }
+    }
+}
+
 #[cfg(unix)]
 const OWNER_ONLY_FILE: u32 = 0o600;
 #[cfg(unix)]

@@ -1,8 +1,9 @@
 //! The session model and its store.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use lightagent_core::paths;
 use lightagent_core::{AgentEvent, ProfileHandle};
@@ -304,11 +305,53 @@ impl SessionSummary {
     }
 }
 
+/// How long a writer waits for another writer's lock before reporting
+/// [`StoreError::Busy`].
+const LOCK_WAIT: Duration = Duration::from_secs(5);
+
+/// The store's write lock, in its directory. Not a `.json` file, so a listing
+/// or a search never reads it as a session.
+const LOCK_FILE: &str = ".lock";
+
+/// Why [`SessionStore::update`] wrote nothing.
+#[derive(Debug)]
+pub enum SessionUpdateError<E> {
+    /// The change itself refused, with its own error.
+    Change(E),
+    /// The store refused: a busy lock, or a session that is missing or could
+    /// not be read or written.
+    Store(StoreError),
+}
+
+impl SessionUpdateError<Infallible> {
+    /// The store's error: a change that cannot fail has no other.
+    pub fn into_store(self) -> StoreError {
+        match self {
+            Self::Store(error) => error,
+            Self::Change(never) => match never {},
+        }
+    }
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for SessionUpdateError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Change(error) => error.fmt(f),
+            Self::Store(error) => error.fmt(f),
+        }
+    }
+}
+
 /// Reads and writes sessions under one directory (a profile's `sessions/`).
+///
+/// Every write takes the store's lock, which every process takes, and
+/// changes a session as it is saved at that moment, so no writer loses
+/// another's change: see [`SessionStore::update`].
 #[derive(Clone, Debug)]
 pub struct SessionStore {
     directory: PathBuf,
     keep_history: bool,
+    lock_wait: Duration,
 }
 
 impl SessionStore {
@@ -317,7 +360,14 @@ impl SessionStore {
         Self {
             directory: directory.into(),
             keep_history: true,
+            lock_wait: LOCK_WAIT,
         }
+    }
+
+    /// The same store, waiting at most `wait` for another writer's lock.
+    pub fn with_lock_wait(mut self, wait: Duration) -> Self {
+        self.lock_wait = wait;
+        self
     }
 
     /// The store for a profile's `sessions/` directory.
@@ -366,15 +416,101 @@ impl SessionStore {
         Ok(path)
     }
 
-    /// Persist a session atomically and owner-only. A no-op when history is off.
+    /// Write `session` whole, atomically and owner-only, under the store's
+    /// lock. A no-op when history is off. It replaces whatever is saved, so it
+    /// is for a session not saved yet: a writer that changes a saved session
+    /// uses [`SessionStore::update`] or [`SessionStore::apply`], which keep
+    /// every other writer's change.
     pub fn save(&self, session: &Session) -> Result<(), StoreError> {
         if !self.keep_history {
             return Ok(());
         }
+        let _lock = self.lock()?;
+        self.write(session)
+    }
+
+    /// The one way to change a saved session. Under the store's lock, read
+    /// session `id` as it is saved now, apply `change`, and write it
+    /// atomically. Nothing is written unless every step succeeds, so a
+    /// refused change, a failed write or an unreadable file leaves the saved
+    /// session exactly as it was. No other writer's change is lost, because
+    /// each applies to what the last one wrote, and a missing session stays
+    /// missing. Returns `change`'s value and the session as saved. With
+    /// history off, nothing is written.
+    pub fn update<T, E>(
+        &self,
+        id: &SessionId,
+        change: impl FnOnce(&mut Session) -> Result<T, E>,
+    ) -> Result<(T, Session), SessionUpdateError<E>> {
+        let _lock = if self.keep_history {
+            Some(self.lock().map_err(SessionUpdateError::Store)?)
+        } else {
+            None
+        };
+        let mut session = self.load(id).map_err(SessionUpdateError::Store)?;
+        let value = change(&mut session).map_err(SessionUpdateError::Change)?;
+        if self.keep_history {
+            self.write(&session).map_err(SessionUpdateError::Store)?;
+        }
+        Ok((value, session))
+    }
+
+    /// For a client holding a session open, such as the terminal chat or an
+    /// ACP editor: apply `change` to the session as saved now (see
+    /// [`SessionStore::update`]) and make `session` that saved state, so the
+    /// client also sees what other writers changed. A session not saved yet,
+    /// or deleted meanwhile, is saved from `session` with the change, since
+    /// it holds the client's whole conversation. On any other error the store
+    /// is unchanged and `session` takes the change alone, as the client's
+    /// view.
+    pub fn apply<T>(
+        &self,
+        session: &mut Session,
+        change: impl Fn(&mut Session) -> T,
+    ) -> Result<T, StoreError> {
+        match self.update(&session.id, |saved| Ok::<T, Infallible>(change(saved))) {
+            Ok((value, saved)) => {
+                *session = saved;
+                Ok(value)
+            }
+            Err(error) => match error.into_store() {
+                StoreError::NotFound(_) => {
+                    let value = change(session);
+                    self.save(session)?;
+                    Ok(value)
+                }
+                error => {
+                    change(session);
+                    Err(error)
+                }
+            },
+        }
+    }
+
+    /// Hold the store's write lock: an exclusive OS lock on [`LOCK_FILE`] in
+    /// the store's directory, which every process takes. Waits up to the
+    /// store's lock wait. One lock for the whole store rather than one per
+    /// session, so a deletion and a later writer are ordered as well, and no
+    /// lock file outlives a deleted session.
+    fn lock(&self) -> Result<std::fs::File, StoreError> {
         paths::create_private_dir(&self.directory).map_err(|err| StoreError::Directory {
             path: self.directory.clone(),
             reason: err.to_string(),
         })?;
+        let path = self.directory.join(LOCK_FILE);
+        paths::lock_exclusive(&path, self.lock_wait).map_err(|error| match error {
+            paths::LockError::Busy => StoreError::Busy {
+                path: self.directory.clone(),
+            },
+            paths::LockError::Io(err) => StoreError::Directory {
+                path: path.clone(),
+                reason: err.to_string(),
+            },
+        })
+    }
+
+    /// Write `session` atomically and owner-only; the caller holds the lock.
+    fn write(&self, session: &Session) -> Result<(), StoreError> {
         let mut bytes =
             serde_json::to_vec_pretty(session).map_err(|err| StoreError::Unwritable {
                 id: session.id.as_str().to_owned(),
@@ -409,8 +545,11 @@ impl SessionStore {
         })
     }
 
-    /// Delete a session. Returns whether a file was removed.
+    /// Delete a session, under the store's lock. Returns whether a file was
+    /// removed. A writer that comes later finds the session missing and
+    /// writes nothing.
     pub fn delete(&self, id: &SessionId) -> Result<bool, StoreError> {
+        let _lock = self.lock()?;
         match std::fs::remove_file(self.path_for(id)) {
             Ok(()) => Ok(true),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -830,6 +969,290 @@ mod tests {
             & 0o777;
         assert_eq!(mode, 0o600, "a transcript must not be world-readable");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn rename(store: &SessionStore, id: &SessionId, title: &str) -> Session {
+        store
+            .update(id, |session| {
+                session.title = title.to_owned();
+                Ok::<(), Infallible>(())
+            })
+            .unwrap()
+            .1
+    }
+
+    #[test]
+    fn an_update_applies_to_the_session_as_saved_now() {
+        let dir = scratch_dir();
+        let store = SessionStore::new(&dir);
+        let session = Session::new("default", "chat");
+        store.save(&session).unwrap();
+        // One writer loaded the session before another renamed it: its
+        // change applies to the renamed session, so neither change is lost.
+        let stale = store.load(&session.id).unwrap();
+        rename(&store, &session.id, "renamed");
+        let ((), saved) = store
+            .update(&stale.id, |current| {
+                current.push_message(StoredMessage::new("assistant", "answer"));
+                Ok::<(), Infallible>(())
+            })
+            .unwrap();
+        assert_eq!(saved.title, "renamed");
+        assert_eq!(saved.messages.len(), 1);
+        assert_eq!(store.load(&session.id).unwrap(), saved);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_refused_change_a_failed_write_or_an_unreadable_file_writes_nothing() {
+        let dir = scratch_dir();
+        let store = SessionStore::new(&dir);
+        let session = Session::new("default", "chat");
+        store.save(&session).unwrap();
+        let path = store.path_for(&session.id);
+        let before = std::fs::read(&path).unwrap();
+
+        let refused = store.update(&session.id, |current| {
+            current.title = "changed".to_owned();
+            Err::<(), _>("no")
+        });
+        assert!(
+            matches!(refused, Err(SessionUpdateError::Change("no"))),
+            "{refused:?}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        // The atomic write's temporary file cannot be created: the saved
+        // session is kept whole.
+        let temporary = dir.join(format!("{}.json.tmp", session.id.as_str()));
+        std::fs::create_dir(&temporary).unwrap();
+        let failed = store.update(&session.id, |current| {
+            current.title = "changed".to_owned();
+            Ok::<(), Infallible>(())
+        });
+        assert!(
+            matches!(
+                failed,
+                Err(SessionUpdateError::Store(StoreError::Unwritable { .. }))
+            ),
+            "{failed:?}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir(&temporary).unwrap();
+
+        // A damaged file is reported, never replaced by a fresh session.
+        std::fs::write(&path, b"{ not json").unwrap();
+        let unreadable = store.update(&session.id, |_| Ok::<(), Infallible>(()));
+        assert!(
+            matches!(
+                unreadable,
+                Err(SessionUpdateError::Store(StoreError::Unreadable { .. }))
+            ),
+            "{unreadable:?}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_waiting_writer_keeps_the_holders_change_and_a_long_hold_is_busy() {
+        let dir = scratch_dir();
+        let store = SessionStore::new(&dir);
+        let session = Session::new("default", "chat");
+        store.save(&session).unwrap();
+        let held = store.lock().unwrap();
+        let waiting = {
+            let store = store.clone();
+            let id = session.id.clone();
+            std::thread::spawn(move || rename(&store, &id, "renamed"))
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !waiting.is_finished(),
+            "the writer did not wait for the lock"
+        );
+        // The holder writes while the other waits; the waiting writer keeps it.
+        let mut answered = store.load(&session.id).unwrap();
+        answered.push_message(StoredMessage::new("assistant", "kept"));
+        store.write(&answered).unwrap();
+        drop(held);
+        let saved = waiting.join().unwrap();
+        assert_eq!((saved.title.as_str(), saved.messages.len()), ("renamed", 1));
+
+        let impatient = store.clone().with_lock_wait(Duration::from_millis(50));
+        let held = store.lock().unwrap();
+        let busy = impatient.update(&session.id, |_| Ok::<(), Infallible>(()));
+        assert!(
+            matches!(
+                busy,
+                Err(SessionUpdateError::Store(StoreError::Busy { .. }))
+            ),
+            "{busy:?}"
+        );
+        assert!(matches!(
+            impatient.delete(&session.id),
+            Err(StoreError::Busy { .. })
+        ));
+        drop(held);
+        assert_eq!(store.load(&session.id).unwrap(), saved);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_deleted_session_is_not_recreated_by_a_later_update() {
+        let dir = scratch_dir();
+        let store = SessionStore::new(&dir);
+        let session = Session::new("default", "chat");
+        store.save(&session).unwrap();
+        assert!(store.delete(&session.id).unwrap());
+        let late = store.update(&session.id, |current| {
+            current.title = "late".to_owned();
+            Ok::<(), Infallible>(())
+        });
+        assert!(
+            matches!(
+                late,
+                Err(SessionUpdateError::Store(StoreError::NotFound(_)))
+            ),
+            "{late:?}"
+        );
+        assert!(matches!(
+            store.load(&session.id),
+            Err(StoreError::NotFound(_))
+        ));
+        // The lock file is the store's own, never listed as a session.
+        assert!(dir.join(LOCK_FILE).is_file());
+        assert!(store.list().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_client_holding_a_session_open_keeps_its_conversation_and_sees_other_writers() {
+        let dir = scratch_dir();
+        let store = SessionStore::new(&dir);
+        let mut open = Session::new("default", "chat session");
+        // Not saved yet: the first change saves the client's session.
+        let count = store
+            .apply(&mut open, |session| {
+                session.push_message(StoredMessage::new("user", "first"));
+                session.messages.len()
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(store.load(&open.id).unwrap(), open);
+        // Another writer renames it; the client's next change keeps the
+        // rename, and the client sees it.
+        rename(&store, &open.id, "renamed");
+        store
+            .apply(&mut open, |session| {
+                session.push_message(StoredMessage::new("assistant", "answer"))
+            })
+            .unwrap();
+        assert_eq!(open.title, "renamed");
+        assert_eq!(open.messages.len(), 2);
+        assert_eq!(store.load(&open.id).unwrap(), open);
+        // Deleted meanwhile: the client's conversation is saved again, whole.
+        store.delete(&open.id).unwrap();
+        store
+            .apply(&mut open, |session| {
+                session.push_message(StoredMessage::new("user", "again"))
+            })
+            .unwrap();
+        assert_eq!(store.load(&open.id).unwrap().messages.len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn with_history_off_an_update_writes_nothing() {
+        let dir = scratch_dir();
+        let keeping = SessionStore::new(&dir);
+        let session = Session::new("default", "chat");
+        keeping.save(&session).unwrap();
+        let off = SessionStore::new(&dir).keep_history(false);
+        let ((), changed) = off
+            .update(&session.id, |current| {
+                current.title = "changed".to_owned();
+                Ok::<(), Infallible>(())
+            })
+            .unwrap();
+        assert_eq!(changed.title, "changed");
+        assert_eq!(keeping.load(&session.id).unwrap(), session);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other process of the cross-process test: this test binary, run
+    /// again with `LIGHTAGENT_TEST_SESSION_DIR` and `LIGHTAGENT_TEST_SESSION_ID`
+    /// set. It marks that it started, then renames that session through the
+    /// store. Run any other way it does nothing.
+    #[test]
+    #[ignore = "run only as the writer process of the cross-process test"]
+    fn session_writer_process() {
+        let (Ok(dir), Ok(id)) = (
+            std::env::var("LIGHTAGENT_TEST_SESSION_DIR"),
+            std::env::var("LIGHTAGENT_TEST_SESSION_ID"),
+        ) else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let id = SessionId::parse(&id).unwrap();
+        std::fs::write(dir.join("writer.started"), b"").unwrap();
+        rename(&SessionStore::new(&dir), &id, "renamed elsewhere");
+    }
+
+    #[test]
+    fn a_writer_in_another_process_waits_for_the_lock_and_keeps_the_holders_change() {
+        let dir = scratch_dir();
+        let store = SessionStore::new(&dir);
+        let session = Session::new("default", "chat");
+        store.save(&session).unwrap();
+        let held = store.lock().unwrap();
+        let mut writer = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "session::tests::session_writer_process",
+                "--ignored",
+            ])
+            .env("LIGHTAGENT_TEST_SESSION_DIR", &dir)
+            .env("LIGHTAGENT_TEST_SESSION_ID", session.id.as_str())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = dir.join("writer.started");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !started.exists() {
+            assert!(
+                writer.try_wait().unwrap().is_none(),
+                "the writer process ended before writing"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the writer process never started"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            writer.try_wait().unwrap().is_none(),
+            "the writer wrote while another process held the lock"
+        );
+        // Another writer's change, made inside the lock: the waiting process
+        // must keep it.
+        let mut answered = store.load(&session.id).unwrap();
+        answered.push_message(StoredMessage::new("assistant", "kept"));
+        store.write(&answered).unwrap();
+        drop(held);
+        assert!(writer.wait().unwrap().success());
+        let saved = store.load(&session.id).unwrap();
+        assert_eq!(saved.title, "renamed elsewhere");
+        assert_eq!(
+            saved
+                .messages
+                .last()
+                .map(|message| message.content.as_str()),
+            Some("kept")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

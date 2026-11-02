@@ -26,4 +26,8 @@ pub enum StoreError {
     /// The store's directory could not be created or listed.
     #[error("could not access the session store at {path}: {reason}")]
     Directory { path: PathBuf, reason: String },
+
+    /// Another writer held the store's lock for longer than a writer waits.
+    #[error("the session store at {path} is busy: another writer holds its lock")]
+    Busy { path: PathBuf },
 }
