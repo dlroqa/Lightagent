@@ -507,6 +507,7 @@ async fn a_saved_session_is_reused_by_follow_up_runs_and_new_sessions_are_empty(
             requests: Arc::clone(&requests),
         }));
         let store = state.sessions.clone();
+        let busy = Arc::clone(&state.busy_sessions);
         let addr = spawn_server(state).await;
         let (status, body) = http(
             &addr,
@@ -548,6 +549,8 @@ async fn a_saved_session_is_reused_by_follow_up_runs_and_new_sessions_are_empty(
                 }
                 tokio::task::yield_now().await;
             }
+            // The next prompt is admitted once the session is released.
+            released(&busy, &id_parsed).await;
         }
         assert!(requests.lock().await[0].is_empty());
         assert_eq!(
@@ -1304,6 +1307,7 @@ async fn follow_up_history(window: Option<u32>) -> Vec<ProviderMessage> {
         requests: Arc::clone(&requests),
     }));
     let store = state.sessions.clone();
+    let busy = Arc::clone(&state.busy_sessions);
     let addr = spawn_server(state).await;
     let (_, body) = http(
         &addr,
@@ -1332,6 +1336,8 @@ async fn follow_up_history(window: Option<u32>) -> Vec<ProviderMessage> {
         while store.load(&parsed).unwrap().runs.len() <= index {
             tokio::task::yield_now().await;
         }
+        // The next prompt is admitted once the session is released.
+        released(&busy, &parsed).await;
     }
     let requests = requests.lock().await;
     requests[1].clone()
