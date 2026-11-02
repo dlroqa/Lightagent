@@ -467,6 +467,63 @@ def scenario_extensions(host, cli):
     return check
 
 
+def scenario_mcp(host):
+    """D6-4 through the host transport: a stdio server is added and listed
+    without starting; a check starts it once, reports why it failed with no
+    environment value, and its process is gone afterwards; MCP stays off."""
+    import shutil
+    import tempfile
+
+    check = Checks("mcp")
+    work = tempfile.mkdtemp(prefix="lightagent-e2e-mcp-")
+    pidfile = os.path.join(work, "pid")
+    secret = "e2e-mcp-env-value-5c1e"
+    script = ("import os, sys, time; open(sys.argv[1], 'w').write(str(os.getpid())); "
+              "sys.stderr.write('token ' + os.environ.get('TOKEN', '') + '\\n'); sys.stderr.flush(); time.sleep(300)")
+
+    def gone(pid):
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            try:
+                with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
+                    state = handle.read().rsplit(")", 1)[1].split()[0]
+            except OSError:
+                return True
+            if state == "Z":
+                return True
+            time.sleep(0.1)
+        return False
+
+    try:
+        status, _ = host.fetch("PUT", f"{API}/mcp", {"timeout_secs": 2})
+        check.expect("timeout set through the host", status == 200, status)
+        server = {"transport": "stdio", "name": "hostprobe", "command": sys.executable,
+                  "args": ["-c", script, pidfile], "env": {"TOKEN": secret}}
+        status, added = host.fetch("POST", f"{API}/mcp/servers", {"server": server})
+        check.expect("added through the host, value withheld", status == 201 and secret not in json.dumps(added),
+                     (status, added))
+        status, listed = host.fetch("GET", f"{API}/mcp")
+        check.expect("listing starts nothing", status == 200 and not os.path.exists(pidfile),
+                     (status, os.path.exists(pidfile)))
+        status, result = host.fetch("POST", f"{API}/mcp/servers/hostprobe/check")
+        started = os.path.exists(pidfile)
+        check.expect("a check starts it and reports the failure without the value",
+                     status == 200 and started and (result or {}).get("ok") is False and secret not in json.dumps(result),
+                     (status, result, started))
+        pid = None
+        if started:
+            with open(pidfile, encoding="utf-8") as handle:
+                pid = handle.read().strip()
+        check.expect("its process is gone after the check", pid is not None and gone(pid), pid)
+        status, view = host.fetch("GET", f"{API}/mcp")
+        check.expect("a check does not turn MCP on", ((view or {}).get("mcp") or {}).get("enabled") is False, view)
+        status, _ = host.fetch("DELETE", f"{API}/mcp/servers/hostprobe")
+        check.expect("removed through the host", status == 200, status)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return check
+
+
 def main():
     out = os.path.abspath(sys.argv[1])
     cli = sys.argv[2]
@@ -494,6 +551,7 @@ def main():
             ("continue", lambda: scenario_continue(host, provider, workspace)),
             ("steering", lambda: scenario_steering(host, provider, workspace)),
             ("extensions", lambda: scenario_extensions(host, cli)),
+            ("mcp", lambda: scenario_mcp(host)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]

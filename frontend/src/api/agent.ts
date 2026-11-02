@@ -58,6 +58,51 @@ export interface ExtensionDetail {
   mcp_enabled: boolean;
 }
 
+/** The `mcp` section as the server shows it: names only, never a value. */
+export type McpServerView =
+  | { transport: "stdio"; name: string; command: string; args: string[]; env: string[] }
+  | {
+      transport: "http";
+      name: string;
+      url: string;
+      headers: string[];
+      auth: { kind: "env"; var: string } | { kind: "file" } | null;
+      untrusted_profiles: string[];
+      credential_profiles: string[];
+    };
+
+export interface McpState {
+  mcp: { enabled: boolean; timeout_secs: number; servers: McpServerView[] };
+  revision: string;
+  effect: string;
+}
+
+/** A server as a write states it; a `null` value keeps the saved one. */
+export type McpServerInput =
+  | { transport: "stdio"; name: string; command: string; args: string[]; env: Record<string, string | null> }
+  | {
+      transport: "http";
+      name: string;
+      url: string;
+      headers: Record<string, string | null>;
+      auth: { kind: "none" } | { kind: "keep" } | { kind: "env"; var: string };
+      untrusted_profiles: string[];
+      credential_profiles: string[];
+    };
+
+/** What an explicit check found. */
+export interface McpCheck {
+  name: string;
+  transport: "stdio" | "http";
+  declared_by: string;
+  ok: boolean;
+  tools: string[];
+  more_tools: number;
+  error: string | null;
+  elapsed_ms: number;
+  mcp_enabled: boolean;
+}
+
 export interface ExtensionInstalled {
   name: string;
   dir: string;
@@ -523,6 +568,23 @@ export const agentApi = {
       `/extensions/${encodeURIComponent(name)}?scope=${scope}`,
       { method: "DELETE" },
     ),
+  /** MCP servers through the shared operations; values are never returned. */
+  mcp: () => jsonRequest<McpState>("/mcp"),
+  setMcp: (change: { enabled?: boolean; timeout_secs?: number }, revision: string) =>
+    jsonRequest<McpState>("/mcp", {
+      method: "PUT",
+      body: JSON.stringify({ ...change, expected_revision: revision }),
+    }),
+  addMcpServer: (server: McpServerInput, revision: string) =>
+    jsonRequest<McpState>("/mcp/servers", {
+      method: "POST",
+      body: JSON.stringify({ server, expected_revision: revision }),
+    }),
+  removeMcpServer: (name: string) =>
+    jsonRequest<McpState>(`/mcp/servers/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  /** Connects the server now; a stdio server's command is started. */
+  checkMcpServer: (name: string) =>
+    jsonRequest<McpCheck>(`/mcp/servers/${encodeURIComponent(name)}/check`, { method: "POST" }),
   workers: () => jsonRequest<{ workers: WorkerReadiness[] }>("/workers"),
   settings: () => jsonRequest<LightagentSettings>("/settings"),
   saveSettings: (settings: LightagentSettings) =>

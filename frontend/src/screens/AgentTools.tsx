@@ -6,6 +6,7 @@ import { agentApi, type SkillInfo, type ToolInfo, type WorkerReadiness } from ".
 import { Card } from "../components/Card";
 import { Empty, Pill } from "../components/Bits";
 import { ExtensionsCard } from "../components/Extensions";
+import { McpCard } from "../components/Mcp";
 import { JevToolCard } from "../components/Jev";
 import { TopBar } from "../components/Shell";
 
@@ -153,6 +154,7 @@ export function AgentTools() {
           )}
         </Card>
         <ExtensionsCard />
+        <McpCard />
         <Card title="Specialists">
           <p className="card__note">The roles a task can be delegated to, and whether each can do its work now. Every run rechecks.</p>
           <Specialists />
