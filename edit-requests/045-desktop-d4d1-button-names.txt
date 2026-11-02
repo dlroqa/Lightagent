@@ -1,0 +1,64 @@
+=== base a1bd6557eb0045e6649ef4c089b281a5f71390c3
+=== message
+Name the provider key card's buttons and messages apart from the Jev key's
+
+The Jev settings row also has a "Save key" button, so the render check's
+locator matched two buttons (check 41376245339, standalone Web UI render),
+and a person using a screen reader heard the same name twice. The
+provider card's buttons and messages now say "API key".
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace frontend/src/components/ProviderCredential.tsx
+--- find
+      setMessage(replacing ? "Key replaced." : "Key saved.");
+--- with
+      setMessage(replacing ? "Provider API key replaced." : "Provider API key saved.");
+=== replace frontend/src/components/ProviderCredential.tsx
+--- find
+      setMessage("Key removed. Requests are sent without a key.");
+--- with
+      setMessage("Provider API key removed. Requests are sent without a key.");
+=== replace frontend/src/components/ProviderCredential.tsx
+--- find
+          {configured ? "Replace key" : "Save key"}
+--- with
+          {configured ? "Replace API key" : "Save API key"}
+=== replace frontend/src/components/ProviderCredential.tsx
+--- find
+            Remove key
+--- with
+            Remove API key
+=== replace frontend/src/components/ProviderCredential.tsx
+--- find
+              Confirm: remove the key
+--- with
+              Confirm: remove the API key
+=== replace frontend/src/components/ProviderCredential.tsx
+--- find
+              Keep the key
+--- with
+              Keep the API key
+=== replace e2e/settings.mjs
+--- find
+      await page.getByRole("button", { name: "Save key", exact: true }).click();
+      await page.getByText("Key saved.", { exact: true }).waitFor({ timeout: 5000 });
+--- with
+      await page.getByRole("button", { name: "Save API key", exact: true }).click();
+      await page.getByText("Provider API key saved.", { exact: true }).waitFor({ timeout: 5000 });
+=== replace e2e/settings.mjs
+--- find
+      await page.getByRole("button", { name: "Replace key", exact: true }).click();
+      await page.getByText("Key replaced.", { exact: true }).waitFor({ timeout: 5000 });
+--- with
+      await page.getByRole("button", { name: "Replace API key", exact: true }).click();
+      await page.getByText("Provider API key replaced.", { exact: true }).waitFor({ timeout: 5000 });
+=== replace e2e/settings.mjs
+--- find
+      await page.getByRole("button", { name: "Remove key", exact: true }).click();
+      await page.getByRole("button", { name: "Confirm: remove the key" }).click();
+      await page.getByText("Key removed.", { exact: false }).waitFor({ timeout: 5000 });
+--- with
+      await page.getByRole("button", { name: "Remove API key", exact: true }).click();
+      await page.getByRole("button", { name: "Confirm: remove the API key", exact: true }).click();
+      await page.getByText("Provider API key removed.", { exact: false }).waitFor({ timeout: 5000 });
+=== end
