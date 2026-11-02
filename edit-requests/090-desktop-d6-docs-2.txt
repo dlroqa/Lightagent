@@ -1,0 +1,762 @@
+=== base 62e87e6307a1746ce2d20e0c20530f6726aac400
+=== message
+Desktop docs: rows 28-31, the host contract fix, 64 of 227
+
+- PROGRESS: rows 28-31 with every failure and fix: #122's cancelled
+  macos-arm64 job (runner not acquired; only that job rerun, passed), the
+  TS2322 fix, the render-check route, and the host contract defect (query
+  parameters `scope` and `mcp` were refused by the desktop host, fixed in
+  rows 27 and 30 and merged forward). The CLI and desktop difference in
+  turning MCP on, and when extension and MCP changes apply (each run
+  connects its own servers: the next run, no restart). Carried D7 and D8
+  requirements. Backup sync of 20:06:04Z. Next.
+- MERGE_ORDER: rows 28-31; D7 follows at row 32.
+- Inventory and parity, implemented at 62e87e6 with backend, host and
+  browser evidence: mcp.server.stdio (+command, args, env),
+  mcp.server.http (+url, headers), config.mcp, cli.tools.list,
+  slash.skills, skills.roots: 53 → 64 of 227. mcp.server.http.auth,
+  .untrusted_profiles and .credential_profiles stay not counted: the form
+  and backend support them, the browser check does not exercise them yet.
+  Skill import is new scope and not counted.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "mcp.server.stdio",
+   "kind": "mcp-registration",
+   "surface": "[mcp].servers transport=stdio",
+   "source": "crates/lightagent-core/src/config.rs:416",
+   "behavior": "stdio MCP server: command, args, env",
+   "tree_key": null,
+   "tokens": [
+    "stdio"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions: MCP servers (shows command; external executable must exist)",
+   "backend": "config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6)",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "mcp.server.stdio",
+   "kind": "mcp-registration",
+   "surface": "[mcp].servers transport=stdio",
+   "source": "crates/lightagent-core/src/config.rs:416",
+   "behavior": "stdio MCP server: command, args, env",
+   "tree_key": null,
+   "tokens": [
+    "stdio"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions: MCP servers (shows command; external executable must exist)",
+   "backend": "config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6)",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_mcp.rs (API writes = the config the CLI loads; values withheld; check of a fake HTTP server and a unix stdio probe); host: desktop/e2e/runs.py mcp; browser: e2e/mcp.mjs (real harness); native WebView: D8",
+   "tested_sha": "62e87e6307a1746ce2d20e0c20530f6726aac400",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41506198528, https://github.com/dlroqa/Lightagent/actions/runs/41506198503"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `mcp.server.stdio` | `[mcp].servers transport=stdio` | applicable | yes | Tools/MCP/Extensions: MCP servers (shows command; external executable must exist) | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | not-started | `crates/lightagent-core/src/config.rs:416` |
+--- with
+| `mcp.server.stdio` | `[mcp].servers transport=stdio` | applicable | yes | Tools/MCP/Extensions: MCP servers (shows command; external executable must exist) | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | implemented | `crates/lightagent-core/src/config.rs:416` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "mcp.server.stdio.command",
+   "kind": "mcp-registration",
+   "surface": "[mcp].servers transport=stdio.command",
+   "source": "crates/lightagent-core/src/config.rs:418",
+   "behavior": "Executable to spawn",
+   "tree_key": null,
+   "tokens": [
+    "stdio.command"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions: MCP server form field",
+   "backend": "config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6)",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "mcp.server.stdio.command",
+   "kind": "mcp-registration",
+   "surface": "[mcp].servers transport=stdio.command",
+   "source": "crates/lightagent-core/src/config.rs:418",
+   "behavior": "Executable to spawn",
+   "tree_key": null,
+   "tokens": [
+    "stdio.command"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions: MCP server form field",
+   "backend": "config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6)",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_mcp.rs (API writes = the config the CLI loads; values withheld; check of a fake HTTP server and a unix stdio probe); host: desktop/e2e/runs.py mcp; browser: e2e/mcp.mjs (real harness); native WebView: D8",
+   "tested_sha": "62e87e6307a1746ce2d20e0c20530f6726aac400",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41506198528, https://github.com/dlroqa/Lightagent/actions/runs/41506198503"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `mcp.server.stdio.command` | `[mcp].servers transport=stdio.command` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | not-started | `crates/lightagent-core/src/config.rs:418` |
+--- with
+| `mcp.server.stdio.command` | `[mcp].servers transport=stdio.command` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | implemented | `crates/lightagent-core/src/config.rs:418` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "mcp.server.stdio.args",
+   "kind": "mcp-registration",
+   "surface": "[mcp].servers transport=stdio.args",
+   "source": "crates/lightagent-core/src/config.rs:420",
+   "behavior": "Arguments",
+   "tree_key": null,
+   "tokens": [
+    "stdio.args"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions: MCP server form field",
+   "backend": "config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6)",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "mcp.server.stdio.args",
+   "kind": "mcp-registration",
+   "surface": "[mcp].servers transport=stdio.args",
+   "source": "crates/lightagent-core/src/config.rs:420",
+   "behavior": "Arguments",
+   "tree_key": null,
+   "tokens": [
+    "stdio.args"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions: MCP server form field",
+   "backend": "config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6)",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_mcp.rs (API writes = the config the CLI loads; values withheld; check of a fake HTTP server and a unix stdio probe); host: desktop/e2e/runs.py mcp; browser: e2e/mcp.mjs (real harness); native WebView: D8",
+   "tested_sha": "62e87e6307a1746ce2d20e0c20530f6726aac400",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41506198528, https://github.com/dlroqa/Lightagent/actions/runs/41506198503"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `mcp.server.stdio.args` | `[mcp].servers transport=stdio.args` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | not-started | `crates/lightagent-core/src/config.rs:420` |
+--- with
+| `mcp.server.stdio.args` | `[mcp].servers transport=stdio.args` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | implemented | `crates/lightagent-core/src/config.rs:420` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "mcp.server.stdio.env",
+   "kind": "mcp-registration",
+   "surface": "[mcp].servers transport=stdio.env",
+   "source": "crates/lightagent-core/src/config.rs:422",
+   "behavior": "Environment",
+   "tree_key": null,
+   "tokens": [
+    "stdio.env"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions: MCP server form field",
+   "backend": "config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6)",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "mcp.server.stdio.env",
+   "kind": "mcp-registration",
+   "surface": "[mcp].servers transport=stdio.env",
+   "source": "crates/lightagent-core/src/config.rs:422",
+   "behavior": "Environment",
+   "tree_key": null,
+   "tokens": [
+    "stdio.env"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions: MCP server form field",
+   "backend": "config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6)",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_mcp.rs (API writes = the config the CLI loads; values withheld; check of a fake HTTP server and a unix stdio probe); host: desktop/e2e/runs.py mcp; browser: e2e/mcp.mjs (real harness); native WebView: D8",
+   "tested_sha": "62e87e6307a1746ce2d20e0c20530f6726aac400",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41506198528, https://github.com/dlroqa/Lightagent/actions/runs/41506198503"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `mcp.server.stdio.env` | `[mcp].servers transport=stdio.env` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | not-started | `crates/lightagent-core/src/config.rs:422` |
+--- with
+| `mcp.server.stdio.env` | `[mcp].servers transport=stdio.env` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | implemented | `crates/lightagent-core/src/config.rs:422` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "mcp.server.http",
+   "kind": "mcp-registration",
+   "surface": "[mcp].servers transport=http",
+   "source": "crates/lightagent-core/src/config.rs:424",
+   "behavior": "Streamable-HTTP MCP server",
+   "tree_key": null,
+   "tokens": [
+    "http"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions: MCP servers",
+   "backend": "config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6)",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "mcp.server.http",
+   "kind": "mcp-registration",
+   "surface": "[mcp].servers transport=http",
+   "source": "crates/lightagent-core/src/config.rs:424",
+   "behavior": "Streamable-HTTP MCP server",
+   "tree_key": null,
+   "tokens": [
+    "http"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions: MCP servers",
+   "backend": "config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6)",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_mcp.rs (API writes = the config the CLI loads; values withheld; check of a fake HTTP server and a unix stdio probe); host: desktop/e2e/runs.py mcp; browser: e2e/mcp.mjs (real harness); native WebView: D8",
+   "tested_sha": "62e87e6307a1746ce2d20e0c20530f6726aac400",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41506198528, https://github.com/dlroqa/Lightagent/actions/runs/41506198503"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `mcp.server.http` | `[mcp].servers transport=http` | applicable | yes | Tools/MCP/Extensions: MCP servers | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | not-started | `crates/lightagent-core/src/config.rs:424` |
+--- with
+| `mcp.server.http` | `[mcp].servers transport=http` | applicable | yes | Tools/MCP/Extensions: MCP servers | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | implemented | `crates/lightagent-core/src/config.rs:424` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "mcp.server.http.url",
+   "kind": "mcp-registration",
+   "surface": "[mcp].servers transport=http.url",
+   "source": "crates/lightagent-core/src/config.rs:426",
+   "behavior": "Endpoint URL (no userinfo)",
+   "tree_key": null,
+   "tokens": [
+    "http.url"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions: MCP server form field",
+   "backend": "config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6)",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "mcp.server.http.url",
+   "kind": "mcp-registration",
+   "surface": "[mcp].servers transport=http.url",
+   "source": "crates/lightagent-core/src/config.rs:426",
+   "behavior": "Endpoint URL (no userinfo)",
+   "tree_key": null,
+   "tokens": [
+    "http.url"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions: MCP server form field",
+   "backend": "config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6)",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_mcp.rs (API writes = the config the CLI loads; values withheld; check of a fake HTTP server and a unix stdio probe); host: desktop/e2e/runs.py mcp; browser: e2e/mcp.mjs (real harness); native WebView: D8",
+   "tested_sha": "62e87e6307a1746ce2d20e0c20530f6726aac400",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41506198528, https://github.com/dlroqa/Lightagent/actions/runs/41506198503"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `mcp.server.http.url` | `[mcp].servers transport=http.url` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | not-started | `crates/lightagent-core/src/config.rs:426` |
+--- with
+| `mcp.server.http.url` | `[mcp].servers transport=http.url` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | implemented | `crates/lightagent-core/src/config.rs:426` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "mcp.server.http.headers",
+   "kind": "mcp-registration",
+   "surface": "[mcp].servers transport=http.headers",
+   "source": "crates/lightagent-core/src/config.rs:428",
+   "behavior": "Extra headers",
+   "tree_key": null,
+   "tokens": [
+    "http.headers"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions: MCP server form field",
+   "backend": "config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6)",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "mcp.server.http.headers",
+   "kind": "mcp-registration",
+   "surface": "[mcp].servers transport=http.headers",
+   "source": "crates/lightagent-core/src/config.rs:428",
+   "behavior": "Extra headers",
+   "tree_key": null,
+   "tokens": [
+    "http.headers"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions: MCP server form field",
+   "backend": "config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6)",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_mcp.rs (API writes = the config the CLI loads; values withheld; check of a fake HTTP server and a unix stdio probe); host: desktop/e2e/runs.py mcp; browser: e2e/mcp.mjs (real harness); native WebView: D8",
+   "tested_sha": "62e87e6307a1746ce2d20e0c20530f6726aac400",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41506198528, https://github.com/dlroqa/Lightagent/actions/runs/41506198503"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `mcp.server.http.headers` | `[mcp].servers transport=http.headers` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | not-started | `crates/lightagent-core/src/config.rs:428` |
+--- with
+| `mcp.server.http.headers` | `[mcp].servers transport=http.headers` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | implemented | `crates/lightagent-core/src/config.rs:428` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "config.mcp",
+   "kind": "config",
+   "surface": "config.toml [mcp]",
+   "source": "crates/lightagent-core/src/config.rs:Config.mcp",
+   "behavior": "Configuration section [mcp]",
+   "tree_key": null,
+   "tokens": [
+    "mcp"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions",
+   "backend": "api: GET/PUT /settings (subset); extract: typed config read/write",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "config.mcp",
+   "kind": "config",
+   "surface": "config.toml [mcp]",
+   "source": "crates/lightagent-core/src/config.rs:Config.mcp",
+   "behavior": "Configuration section [mcp]",
+   "tree_key": null,
+   "tokens": [
+    "mcp"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions",
+   "backend": "api: GET/PUT /settings (subset); extract: typed config read/write",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_mcp.rs (API writes = the config the CLI loads; values withheld; check of a fake HTTP server and a unix stdio probe); host: desktop/e2e/runs.py mcp; browser: e2e/mcp.mjs (real harness); native WebView: D8",
+   "tested_sha": "62e87e6307a1746ce2d20e0c20530f6726aac400",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41506198528, https://github.com/dlroqa/Lightagent/actions/runs/41506198503"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `config.mcp` | `config.toml [mcp]` | applicable | yes | Tools/MCP/Extensions | api: GET/PUT /settings (subset); extract: typed config read/write | not-started | `crates/lightagent-core/src/config.rs:Config.mcp` |
+--- with
+| `config.mcp` | `config.toml [mcp]` | applicable | yes | Tools/MCP/Extensions | api: GET/PUT /settings (subset); extract: typed config read/write | implemented | `crates/lightagent-core/src/config.rs:Config.mcp` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.tools.list",
+   "kind": "command",
+   "surface": "lightagent tools list",
+   "source": "crates/lightagent/src/lib.rs:211",
+   "behavior": "List tools available to the active profile incl. extensions",
+   "tree_key": "cmd lightagent tools list",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions: tool catalog",
+   "backend": "api: GET /tools",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.tools.list",
+   "kind": "command",
+   "surface": "lightagent tools list",
+   "source": "crates/lightagent/src/lib.rs:211",
+   "behavior": "List tools available to the active profile incl. extensions",
+   "tree_key": "cmd lightagent tools list",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions: tool catalog",
+   "backend": "api: GET /tools",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_tools.rs (tools list = GET /tools with permissions); host: desktop/e2e/runs.py tools; browser: e2e/tools.mjs; native WebView: D8",
+   "tested_sha": "62e87e6307a1746ce2d20e0c20530f6726aac400",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41506198528, https://github.com/dlroqa/Lightagent/actions/runs/41506198503"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.tools.list` | `lightagent tools list` | applicable | yes | Tools/MCP/Extensions: tool catalog | api: GET /tools | not-started | `crates/lightagent/src/lib.rs:211` |
+--- with
+| `cli.tools.list` | `lightagent tools list` | applicable | yes | Tools/MCP/Extensions: tool catalog | api: GET /tools | implemented | `crates/lightagent/src/lib.rs:211` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "slash.skills",
+   "kind": "slash",
+   "surface": "/skills",
+   "source": "crates/lightagent/src/slash.rs:58",
+   "behavior": "List skills loaded for the session incl. extensions'",
+   "tree_key": null,
+   "tokens": [
+    "skills"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Skills",
+   "backend": "api: GET /skills",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "slash.skills",
+   "kind": "slash",
+   "surface": "/skills",
+   "source": "crates/lightagent/src/slash.rs:58",
+   "behavior": "List skills loaded for the session incl. extensions'",
+   "tree_key": null,
+   "tokens": [
+    "skills"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Skills",
+   "backend": "api: GET /skills",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_tools.rs (skills as a run loads them, with source); browser: e2e/tools.mjs (source and version shown); host: desktop/e2e/runs.py skills; native WebView: D8",
+   "tested_sha": "62e87e6307a1746ce2d20e0c20530f6726aac400",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41506198528, https://github.com/dlroqa/Lightagent/actions/runs/41506198503"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `slash.skills` | `/skills` | applicable | yes | Skills | api: GET /skills | not-started | `crates/lightagent/src/slash.rs:58` |
+--- with
+| `slash.skills` | `/skills` | applicable | yes | Skills | api: GET /skills | implemented | `crates/lightagent/src/slash.rs:58` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "skills.roots",
+   "kind": "skill-registration",
+   "surface": "<home>/skills and <profile>/skills (SKILL.md)",
+   "source": "crates/lightagent-core/src/skills.rs:204",
+   "behavior": "Skill discovery roots",
+   "tree_key": null,
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Skills: list with scope and source",
+   "backend": "api: GET /skills",
+   "permission": "local-operator",
+   "data_scope": "home|profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "skills.roots",
+   "kind": "skill-registration",
+   "surface": "<home>/skills and <profile>/skills (SKILL.md)",
+   "source": "crates/lightagent-core/src/skills.rs:204",
+   "behavior": "Skill discovery roots",
+   "tree_key": null,
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Skills: list with scope and source",
+   "backend": "api: GET /skills",
+   "permission": "local-operator",
+   "data_scope": "home|profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_tools.rs (skills as a run loads them, with source); browser: e2e/tools.mjs (source and version shown); host: desktop/e2e/runs.py skills; native WebView: D8",
+   "tested_sha": "62e87e6307a1746ce2d20e0c20530f6726aac400",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41506198528, https://github.com/dlroqa/Lightagent/actions/runs/41506198503"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `skills.roots` | `<home>/skills and <profile>/skills (SKILL.md)` | applicable | yes | Skills: list with scope and source | api: GET /skills | not-started | `crates/lightagent-core/src/skills.rs:204` |
+--- with
+| `skills.roots` | `<home>/skills and <profile>/skills (SKILL.md)` | applicable | yes | Skills: list with scope and source | api: GET /skills | implemented | `crates/lightagent-core/src/skills.rs:204` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "parity_implemented": 53,
+--- with
+  "parity_implemented": 64,
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Implemented: 53 of 227
+--- with
+- Implemented: 64 of 227
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Total rows: 346
+--- with
+- D6 note (2026-11-02, rows 28-31): `mcp.server.stdio` (+`command`, `args`, `env`), `mcp.server.http` (+`url`, `headers`), `config.mcp`, `cli.tools.list`, `slash.skills` and `skills.roots` are implemented at `62e87e6` with backend, host and browser evidence; native WebView is D8. `mcp.server.http.auth`, `mcp.server.http.untrusted_profiles` and `mcp.server.http.credential_profiles` are supported by the shared operation and the MCP card's form but not yet exercised by a browser check, so they are not counted. Difference recorded: `lightagent extensions install` turns MCP on for a bundle with MCP servers (and says so); the API and desktop do only when asked, and the desktop's MCP switch asks for confirmation. Skill import (`api.post.skills.imports`) is new scope beyond the CLI and never counted
+- Total rows: 346
+=== replace docs/desktop/DESKTOP_MERGE_ORDER.md
+--- find
+| 28+ | D6-3 MCP servers (shared operations, then the card), tools and skills views, GitHub skill installation (new scope); then D7-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+--- with
+| 28 | D6-3 MCP server configuration through one shared operation set | https://github.com/dlroqa/Lightagent/pull/122 | `desktop/d6c-mcp-ops` | `desktop/d6b-extensions-ui` (via merge commit `7ddb855`) | `7ddb855` | `7ddb855` |
+| 29 | D6-4 an explicit MCP server check, and the MCP card | https://github.com/dlroqa/Lightagent/pull/123 | `desktop/d6d-mcp-check` | `desktop/d6c-mcp-ops` (via merge commit `f9b5be6`) | `f9b5be6` | `f9b5be6` (macos-arm64 jobs waiting for runner capacity when this was written) |
+| 30 | D6-5 effective tool permissions, an MCP-free catalog, skills with their source | https://github.com/dlroqa/Lightagent/pull/124 | `desktop/d6e-tools-skills` | `desktop/d6d-mcp-check` (via merge commit `ef1984d`) | `831d05f` | `831d05f` |
+| 31 | D6-6 (new scope) import skills from a repository or folder | https://github.com/dlroqa/Lightagent/pull/125 | `desktop/d6f-skill-import` | `desktop/d6e-tools-skills` (via merge commit `62e87e6`) | `62e87e6` | `62e87e6` |
+| 32+ | D6 close-out (the three MCP auth/profile fields' browser evidence, the `config.extensions` switch), then D7-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+
+Row 27's head is now `5cc2dad` (the uninstall `scope` contract fix, `088`); its last fully tested head is recorded in DESKTOP_PROGRESS.md when its macos-arm64 jobs finish.
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+## Artifacts and retention
+--- with
+## Row 28 — D6-3: MCP server configuration through one shared operation set
+
+- `lightagent_core::mcp_servers`: view (env and header values and auth
+  secrets withheld; names and the auth reference's kind shown), add,
+  update (`null` or auth `keep` keeps a withheld value; keeping something
+  never saved is refused), remove, set (enabled, timeout 1-600 s). Every
+  write is validated whether MCP is on or off, by `Config::validate`'s
+  rules plus a tool-namespace-safe name, through `ConfigStore::update` on
+  the caller's revision.
+- API (operator): `GET|PUT /mcp`, `POST /mcp/servers`,
+  `PUT|DELETE /mcp/servers/{name}`; contract `mcp.*`.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | `082`; branch `desktop/d6c-mcp-ops`, draft PR #122 | `7378a33` / `ab88f64` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41465935346 |
+| 2026-11-02 | `check`: 12 of 13 jobs passed; `check (macos-arm64)` job 125347244973 **cancelled by infrastructure**: GitHub's annotation "The job was not acquired by Runner of type hosted even after multiple attempts" (macOS arm64 capacity notices); no log exists. Only that job was rerun (attempt 2, job 125447936741): **success**. The attempt-1 record stays in the run history | `7378a33` | https://github.com/dlroqa/Lightagent/actions/runs/41466088883 |
+
+## Row 29 — D6-4: an explicit MCP server check, and the MCP card
+
+- `chat::check_mcp_server` connects one server as an operator run does
+  (`plan_mcp_servers`, the configured timeout, the same HTTP client with no
+  redirects, an extension's folder as working folder), lists its tools (at
+  most 200), and disconnects; the stdio child is killed on drop
+  (`kill_on_drop` and `Drop`), also when the outer limit (3× timeout)
+  gives up. Errors are cut at 600 characters with every configured env,
+  header and auth value replaced. It changes no setting.
+- Only on request: `POST /mcp/servers/{name}/check`. Listing servers
+  (`GET /mcp`) or opening any screen starts nothing (see row 30 for the
+  catalog).
+- MCP card: on/off (turning on is confirmed, and explained), timeout,
+  servers with names only, Check (a stdio check first shows the exact
+  command and asks to confirm), Remove (confirmed), Add (starts nothing).
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | `083`; branch `desktop/d6d-mcp-check`, draft PR #123 | `1063a88` / `ddd9857` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41497555661 |
+| 2026-11-02 | `check`: **failure**, TS2322 (`checks[name]` is possibly undefined under strict index access) | `1063a88` | https://github.com/dlroqa/Lightagent/actions/runs/41497733333 |
+| 2026-11-02 | `085` → `98d497b`: **success** (24 of 24) | `98d497b` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41498643954 |
+
+## Row 30 — D6-5: effective tool permissions, an MCP-free catalog, skills with their source
+
+- `tool_permission` (one rule): `lightagent tools list` and
+  `RunFactory::tool_catalog` evaluate each tool under the active profile's
+  approval policy (auto/ask/block). `GET /tools` adds `permission` and
+  `mcp` (off/skipped/connected).
+- **Defect found and fixed:** the Agent screen and Settings fetched
+  `GET /tools` when opened, and building that catalog connects every MCP
+  server when MCP is on, so opening either screen started every stdio MCP
+  server. `?mcp=skip` builds the catalog with MCP off; the Web UI always
+  uses it; the Tools screen lists MCP tools only after "Include MCP server
+  tools", which says it starts their commands. Other API clients keep the
+  connecting default, as `tools list` does.
+- `GET /skills` lists what a run loads (global, active extensions', the
+  profile's; later overrides) with each skill's source and version. The
+  active extensions' skills were missing before.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | `084`; branch `desktop/d6e-tools-skills`, draft PR #124 | `c06a651` / `ec93e11` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41498319035 |
+| 2026-11-02 | `085` merged in (`d7a4491`); render **failure**: the existing tools-recovery check's glob no longer matched `/tools?mcp=skip` | `d7a4491` | https://github.com/dlroqa/Lightagent/actions/runs/41498996321 |
+| 2026-11-02 | `087` (regex route) → `d4650af` | `d4650af` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41500383127 |
+| 2026-11-02 | Row 31's host run **failed**: "query parameter mcp is not allowed for tools.list". The desktop host refuses query parameters its contract does not list, so in the desktop app the catalog could not load. The same rule refused the Extensions card's `?scope=` on uninstall (row 27). Fixed where each was introduced: `088` on row 27 (`extensions.uninstall` query `scope`; the host scenario now uninstalls with `?scope=global`) merged forward through rows 28-31; `089` on row 30 (`tools.list` query `mcp`) merged into row 31 | `5cc2dad` (r27), `7ddb855` (r28), `f9b5be6` (r29), `831d05f` (r30) | https://github.com/dlroqa/Lightagent/actions/runs/41501324410, source-edit https://github.com/dlroqa/Lightagent/actions/runs/41503092346, https://github.com/dlroqa/Lightagent/actions/runs/41503223111 |
+
+## Row 31 — D6-6 (new scope): import skills from a repository or folder
+
+Tracked as scope beyond the audited CLI (no CLI operation installed bare
+skills): one backend inventory row, never counted; the CLI-parity
+denominator stays 227.
+
+- Layouts: `extension.json`, `SKILL.md`, `skills/<name>/SKILL.md`,
+  `<name>/SKILL.md`; anything else is refused naming what was looked for.
+  SKILL.md ≤ 512 KiB, ≤ 200 skills, valid unique names, no links anywhere.
+- Git: https only, `GIT_ALLOW_PROTOCOL=https`, no prompt, LFS smudge off;
+  optional revision validated and fetched shallowly; the commit is
+  recorded. Nothing fetched is run.
+- Packaged as a generated, inert extension: installation is separate from
+  activation (inactive unless `activate`) and grants no tool permission.
+- `replace` installs beside, exchanges, saves activation; any failure puts
+  the old copy back.
+- **Not exercised in CI:** fetching from a real Git host; revision
+  handling is covered by validation unit tests only.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | `086`; branch `desktop/d6f-skill-import`, draft PR #125; later merges of rows 30's and 27's fixes | `814e5ec` → `62e87e6` / `25fbf86` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41499829596 |
+
+## Extensions and MCP: CLI and desktop differences, and when changes apply
+
+- **Install and MCP.** `lightagent extensions install` switches
+  `mcp.enabled` on when the bundle declares MCP servers, and prints that it
+  did (unchanged CLI behavior). The API and the desktop do so only when
+  asked (`activate_mcp`; the card's "Turn MCP on" checkbox starts
+  unchecked), and the MCP card's own switch asks for confirmation. The
+  difference is deliberate: the desktop never turns on execution as a side
+  effect. A skills import never turns MCP on.
+- **Enable, disable and running processes.** MCP servers are connected per
+  run: each run builds its registry (`serve.rs` start-run →
+  `configured_registry_for` → `mcp_tools`) and drops it at the end. So
+  enabling or disabling an extension, installing or removing one, and any
+  MCP configuration change apply from the next run, with no restart or
+  reconnect. A turn already running keeps the servers it connected until it
+  ends. A check (row 29) connects and disconnects on its own.
+
+## Carried requirements (unchanged)
+
+- D7: diagnostics-bundle secret-redaction checks.
+- D8: native WebView checks for Settings, profiles, close with active runs,
+  run controls, response actions R2-R5, and now the Extensions, MCP and
+  skills-import controls (confirmations, keyboard use, narrow windows).
+
+Coverage at `62e87e6`: **64 of 227** (11 rows added: the MCP server and `config.mcp` rows, `cli.tools.list`, `slash.skills`, `skills.roots`).
+
+Reruns: besides the reruns this session made (job 125447936741 for #122, job 125475716344 for #123), attempt-2 reruns of the subagents runs 41503194650, 41503200320, 41503201249 ("Tester broker": the fixture run stayed queued past the test's window while five PRs' runs filled the runners) and of check run 41503194699 (macos-arm64 runner not acquired) were started from the owner's account outside this session; all passed. Their attempt-1 records remain in the run histories.
+
+## Artifacts and retention
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+  | 2026-11-02T14:32:30Z | `d5c-paused-discovery` `ed0ae47`, `d6a-extension-ops` `3e558b8`, `d6b-extensions-ui` `c89c989`, `tools/source-edit` `e1144b6` (lower slices unchanged) | rows 25-27 validated; fetch only (remote-tracking refs), working tree `master` `12582a0` clean |
+--- with
+  | 2026-11-02T14:32:30Z | `d5c-paused-discovery` `ed0ae47`, `d6a-extension-ops` `3e558b8`, `d6b-extensions-ui` `c89c989`, `tools/source-edit` `e1144b6` (lower slices unchanged) | rows 25-27 validated; fetch only (remote-tracking refs), working tree `master` `12582a0` clean |
+
+  | 2026-11-02T20:06:04Z | `d6b-extensions-ui` `5cc2dad`, `d6c-mcp-ops` `7ddb855`, `d6d-mcp-check` `f9b5be6`, `d6e-tools-skills` `831d05f`, `d6f-skill-import` `62e87e6`, `tools/source-edit` `f5537ff` (lower slices unchanged) | rows 28-31 and the row 27 fix; fetch only (remote-tracking refs), working tree `master` `12582a0` clean |
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+5. **Next: row 28**, MCP servers through a new shared operation set (see
+   "D6 — Tools, MCP, extensions and skills: inventory map"), then the MCP
+   card, the tools and skills views, and GitHub skill installation as
+   labelled new scope; then D7-D10 in dependency order. D8 keeps the native
+   WebView checks (Settings, profile switching, close with active runs, run
+   controls, response actions R2-R5, the Extensions card). Before merge
+   approval (D10), the exact candidate merge sequence is simulated on
+   hosted runners and every candidate tree validated.
+--- with
+5. Rows 28-31 are done (MCP configuration, the MCP check and card, tool
+   permissions and the MCP-free catalog, skills with their source, and
+   skill import as new scope), at 64 of 227.
+6. **Next:** the D6 close-out (browser evidence for the three remaining MCP
+   fields, a `config.extensions` master switch), then D7 (remaining CLI
+   parity, including the diagnostics bundle and its redaction checks) and
+   D8-D10 in dependency order. D8 keeps the native WebView checks
+   (Settings, profile switching, close with active runs, run controls,
+   response actions R2-R5, Extensions, MCP and skill import). Before merge
+   approval (D10), the exact candidate merge sequence is simulated on
+   hosted runners and every candidate tree validated.
+=== end
