@@ -1,0 +1,509 @@
+=== base 108dac6275435d16ede51db4e839f290fb05d4e8
+=== message
+D4d-2b: a Providers and models card in Settings over the shared operations
+
+Settings gets a "Providers and models" card that changes providers and the
+model only through the shared operations (GET|POST /providers,
+PATCH|DELETE /providers/{id}, POST /providers/{id}/check, PUT
+/provider/active, PUT /provider/model), so it writes exactly what
+`lightagent setup provider` writes.
+
+- Each provider shows its endpoint, whether it is active, and its key's
+  state only. The local endpoint has no Edit or Remove.
+- Add (name and endpoint), Edit (rename; a new endpoint says the key will
+  be removed, with an explicit "keep this provider's API key" choice),
+  Use, and Remove after a confirmation.
+- The model field takes a model id (empty: automatic) and offers the
+  models an explicit "List models" check returned for the active
+  provider, which sends that provider's own key only.
+- Every change is made on the revision the card loaded. A refusal (the
+  configuration changed elsewhere, or a duplicate name or endpoint) keeps
+  every entry on screen, reloads the list, and says to review and try
+  again; nothing is retried silently. Each success says the change applies
+  to the next run.
+- After a provider change the API key card reloads for the new active
+  provider, so a key typed for one provider is never saved to another.
+
+The render e2e covers it against the real harness: a stale save refused
+with the entry kept, the save on the current revision, rename, Use (the
+key card follows), the model, and a stale removal refused then made.
+Browser evidence only; native WebView verification remains D8.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace frontend/src/api/agent.ts
+--- find
+/** What an explicit endpoint check found (`lightagent models`). It never holds a key. */
+--- with
+/** A provider as the picker shows it: its key's state only, never the key. */
+export interface ProviderEntry {
+  id: string;
+  name: string;
+  base_url: string;
+  kind: "local" | "saved" | "custom";
+  active: boolean;
+  key_state: ProviderCredentialStatus["state"];
+  key_source: "file" | "env" | null;
+}
+
+/** The providers `lightagent setup provider` offers, the model, and when a change applies. */
+export interface ProviderList {
+  providers: ProviderEntry[];
+  active: string | null;
+  model: string | null;
+  revision: string;
+  effect: string;
+}
+
+/** A saved provider's edit; an absent field stays as it is. */
+export interface ProviderEdit {
+  name?: string;
+  base_url?: string;
+  keep_key?: boolean;
+}
+
+/** What an explicit endpoint check found (`lightagent models`). It never holds a key. */
+=== replace frontend/src/api/agent.ts
+--- find
+  verifyJev: () => jsonRequest<JevVerification>("/jev/verify", { method: "POST", body: "{}" }),
+--- with
+  providers: () => jsonRequest<ProviderList>("/providers"),
+  /** Every provider change names the revision it was made on: 409 when it is stale. */
+  createProvider: (name: string, baseUrl: string, expectedRevision: string) =>
+    jsonRequest<ProviderList>("/providers", {
+      method: "POST",
+      body: JSON.stringify({ name, base_url: baseUrl, expected_revision: expectedRevision }),
+    }),
+  updateProvider: (id: string, edit: ProviderEdit, expectedRevision: string) =>
+    jsonRequest<ProviderList>(`/providers/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ ...edit, expected_revision: expectedRevision }),
+    }),
+  removeProvider: (id: string, expectedRevision: string) =>
+    jsonRequest<ProviderList>(
+      `/providers/${encodeURIComponent(id)}?expected_revision=${encodeURIComponent(expectedRevision)}`,
+      { method: "DELETE" },
+    ),
+  /** An explicit, bounded check of one provider's endpoint, with its own key only. */
+  checkSavedProvider: (id: string, timeoutSecs?: number) =>
+    jsonRequest<EndpointCheck>(`/providers/${encodeURIComponent(id)}/check`, {
+      method: "POST",
+      body: JSON.stringify({ timeout_secs: timeoutSecs }),
+    }),
+  selectProvider: (id: string, model: string | null, expectedRevision: string) =>
+    jsonRequest<ProviderList>("/provider/active", {
+      method: "PUT",
+      body: JSON.stringify({ id, model, expected_revision: expectedRevision }),
+    }),
+  selectProviderModel: (model: string | null, expectedRevision: string) =>
+    jsonRequest<ProviderList>("/provider/model", {
+      method: "PUT",
+      body: JSON.stringify({ model, expected_revision: expectedRevision }),
+    }),
+  verifyJev: () => jsonRequest<JevVerification>("/jev/verify", { method: "POST", body: "{}" }),
+=== write frontend/src/components/Providers.tsx
+import { useEffect, useState } from "react";
+
+import { agentApi, type ProviderEntry, type ProviderList } from "../api/agent";
+import { Pill } from "./Bits";
+import { Card } from "./Card";
+
+type Tone = "ok" | "warn" | "danger" | "info" | "accent" | "neutral";
+
+const KEY: Record<ProviderEntry["key_state"], { label: string; tone: Tone }> = {
+  absent: { label: "No key", tone: "neutral" },
+  ready: { label: "Key saved", tone: "ok" },
+  unreadable: { label: "Key cannot be read", tone: "danger" },
+  unresolved: { label: "Key variable not set", tone: "danger" },
+  empty: { label: "Key empty", tone: "danger" },
+  invalid: { label: "Key invalid", tone: "danger" },
+};
+
+function errorText(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
+}
+
+function sameUrl(left: string, right: string): boolean {
+  return left.trim().replace(/\/+$/, "") === right.trim().replace(/\/+$/, "");
+}
+
+/**
+ * Providers and the model, through the operations `lightagent setup
+ * provider` shares: add, rename or move, use, and remove saved providers,
+ * and choose the model. Each provider keeps its own key, sent only to its
+ * endpoint; this card shows only the key's state.
+ */
+export function ProvidersCard({ onChanged }: { onChanged?: () => void }) {
+  const [list, setList] = useState<ProviderList | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editUrl, setEditUrl] = useState("");
+  const [keepKey, setKeepKey] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  const [model, setModel] = useState("");
+  const [models, setModels] = useState<string[]>([]);
+  const [listing, setListing] = useState(false);
+
+  async function load(): Promise<ProviderList | null> {
+    try {
+      const next = await agentApi.providers();
+      setList(next);
+      return next;
+    } catch (cause) {
+      setError(errorText(cause));
+      return null;
+    }
+  }
+
+  useEffect(() => {
+    void load().then((next) => {
+      if (next) setModel(next.model ?? "");
+    });
+  }, []);
+
+  /**
+   * One change, made on the revision this card loaded. A refusal keeps
+   * every entry on screen and reloads the list; nothing is retried.
+   */
+  async function change(
+    action: (revision: string) => Promise<ProviderList>,
+    done: string,
+    after?: () => void,
+  ) {
+    if (!list || busy) return;
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const next = await action(list.revision);
+      setList(next);
+      setMessage(`${done} ${next.effect}`);
+      after?.();
+      onChanged?.();
+    } catch (cause) {
+      const text = errorText(cause);
+      if (text.startsWith("409:")) {
+        await load();
+        setError(
+          `Nothing was saved: ${text.slice(4).trim()} Your entries are kept and the list now shows the current providers. Review it, then try again.`,
+        );
+      } else {
+        setError(text.replace(/^\d{3}:\s*/, ""));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function startEdit(provider: ProviderEntry) {
+    setEditing(provider.id);
+    setEditName(provider.name);
+    setEditUrl(provider.base_url);
+    setKeepKey(false);
+    setConfirmRemove(null);
+  }
+
+  function saveEdit(provider: ProviderEntry) {
+    const edit: { name?: string; base_url?: string; keep_key?: boolean } = {};
+    if (editName.trim() !== provider.name) edit.name = editName;
+    if (!sameUrl(editUrl, provider.base_url)) {
+      edit.base_url = editUrl;
+      edit.keep_key = keepKey;
+    }
+    if (edit.name === undefined && edit.base_url === undefined) {
+      setEditing(null);
+      return;
+    }
+    void change(
+      (revision) => agentApi.updateProvider(provider.id, edit, revision),
+      `Saved the changes to ${editName.trim() || provider.name}.`,
+      () => setEditing(null),
+    );
+  }
+
+  // Only when asked: a check sends the active provider's own key to it.
+  async function listModels(provider: ProviderEntry) {
+    setListing(true);
+    setError(null);
+    try {
+      const check = await agentApi.checkSavedProvider(provider.id);
+      if (check.ok) {
+        setModels(check.models);
+        setMessage(
+          check.models.length
+            ? `${provider.name} offers: ${check.models.join(", ")}.`
+            : `${provider.name} answered with no model loaded.`,
+        );
+      } else {
+        setError(`Could not list the models of ${provider.name}: ${check.error ?? "no answer"}`);
+      }
+    } catch (cause) {
+      setError(errorText(cause).replace(/^\d{3}:\s*/, ""));
+    } finally {
+      setListing(false);
+    }
+  }
+
+  const active = list?.providers.find((provider) => provider.active) ?? null;
+  const chosenModel = model.trim();
+  return (
+    <Card title="Providers and models">
+      <div data-testid="providers-card">
+        <p className="card__note">
+          Shared with the terminal CLI (lightagent setup provider). Each provider keeps its own API key,
+          which is sent only to that provider's endpoint.{list ? ` ${list.effect}` : ""}
+        </p>
+        {error && <div className="notice notice--warn" role="alert">{error}</div>}
+        {message && <div className="notice notice--info" role="status">{message}</div>}
+        {list && (
+          <ul style={{ listStyle: "none", padding: 0, margin: "8px 0", display: "grid", gap: 12 }}>
+            {list.providers.map((provider) => {
+              const key = KEY[provider.key_state] ?? { label: provider.key_state, tone: "neutral" as Tone };
+              const editable = provider.kind === "saved";
+              const moving = editing === provider.id && !sameUrl(editUrl, provider.base_url);
+              return (
+                <li key={provider.id} data-testid={`provider-${provider.id}`} style={{ minWidth: 0 }}>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                    <strong>{provider.name}</strong>
+                    {provider.active && <Pill tone="accent">Active</Pill>}
+                    <Pill tone={key.tone}>{key.label}</Pill>
+                  </div>
+                  <div className="muted" style={{ overflowWrap: "anywhere" }}>{provider.base_url}</div>
+                  {editing === provider.id ? (
+                    <div style={{ marginTop: 8 }}>
+                      <div className="field">
+                        <label className="field__label" htmlFor={`provider-name-${provider.id}`}>Name</label>
+                        <input id={`provider-name-${provider.id}`} className="input" value={editName}
+                          disabled={busy} onChange={(event) => setEditName(event.target.value)} />
+                      </div>
+                      <div className="field">
+                        <label className="field__label" htmlFor={`provider-url-${provider.id}`}>Endpoint URL</label>
+                        <input id={`provider-url-${provider.id}`} className="input" type="url" value={editUrl}
+                          spellCheck={false} disabled={busy} onChange={(event) => setEditUrl(event.target.value)} />
+                      </div>
+                      {moving && provider.key_state !== "absent" && (
+                        <>
+                          <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+                            <input type="checkbox" checked={keepKey} disabled={busy}
+                              onChange={(event) => setKeepKey(event.target.checked)} />
+                            Keep this provider's API key for the new endpoint
+                          </label>
+                          {!keepKey && (
+                            <p className="muted" style={{ margin: "4px 0 0" }}>
+                              The API key is removed when the endpoint changes, so it is never sent to the new
+                              endpoint.
+                            </p>
+                          )}
+                        </>
+                      )}
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+                        <button type="button" className="btn" disabled={busy || !editName.trim() || !editUrl.trim()}
+                          aria-busy={busy || undefined} onClick={() => saveEdit(provider)}>
+                          Save changes
+                        </button>
+                        <button type="button" className="btn" disabled={busy} onClick={() => setEditing(null)}>
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                      {!provider.active && (
+                        <button type="button" className="btn" disabled={busy} aria-label={`Use ${provider.name}`}
+                          onClick={() => void change(
+                            (revision) => agentApi.selectProvider(provider.id, null, revision),
+                            `${provider.name} is the active provider, with automatic model selection.`,
+                            () => {
+                              setModel("");
+                              setModels([]);
+                            },
+                          )}>
+                          Use
+                        </button>
+                      )}
+                      {editable && confirmRemove !== provider.id && (
+                        <>
+                          <button type="button" className="btn" disabled={busy} aria-label={`Edit ${provider.name}`}
+                            onClick={() => startEdit(provider)}>
+                            Edit
+                          </button>
+                          <button type="button" className="btn" disabled={busy} aria-label={`Remove ${provider.name}`}
+                            onClick={() => setConfirmRemove(provider.id)}>
+                            Remove
+                          </button>
+                        </>
+                      )}
+                      {editable && confirmRemove === provider.id && (
+                        <>
+                          <button type="button" className="btn" disabled={busy}
+                            onClick={() => void change(
+                              (revision) => agentApi.removeProvider(provider.id, revision),
+                              `Removed ${provider.name}${provider.active ? "; the local endpoint is active" : ""}.`,
+                              () => setConfirmRemove(null),
+                            )}>
+                            {`Confirm: remove ${provider.name}`}
+                          </button>
+                          <button type="button" className="btn" disabled={busy} onClick={() => setConfirmRemove(null)}>
+                            {`Keep ${provider.name}`}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+
+        <div className="field" style={{ marginTop: 12 }}>
+          <label className="field__label" htmlFor="provider-model">
+            {active ? `Model for ${active.name}` : "Model"}
+          </label>
+          <input id="provider-model" className="input" list="provider-models" placeholder="Automatic"
+            spellCheck={false} value={model} disabled={!list || busy} onChange={(event) => setModel(event.target.value)} />
+          <datalist id="provider-models">
+            {models.map((id) => <option key={id} value={id} />)}
+          </datalist>
+          <p className="muted" style={{ margin: "4px 0 0" }}>
+            Leave it empty for automatic selection: the model the endpoint has loaded.
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+          <button type="button" className="btn" disabled={!list || busy} aria-busy={busy || undefined}
+            onClick={() => void change(
+              (revision) => agentApi.selectProviderModel(chosenModel || null, revision),
+              chosenModel ? `Model set to ${chosenModel}.` : "Model set to automatic selection.",
+            )}>
+            Use this model
+          </button>
+          <button type="button" className="btn" disabled={!active || listing} aria-busy={listing || undefined}
+            onClick={() => active && void listModels(active)}>
+            {listing ? "Listing models…" : "List models"}
+          </button>
+        </div>
+
+        <fieldset style={{ border: 0, padding: 0, margin: "16px 0 0", minWidth: 0 }}>
+          <legend className="field__label">Add a provider</legend>
+          <div className="field">
+            <label className="field__label" htmlFor="provider-new-name">Name</label>
+            <input id="provider-new-name" className="input" value={name} disabled={!list || busy}
+              onChange={(event) => setName(event.target.value)} />
+          </div>
+          <div className="field">
+            <label className="field__label" htmlFor="provider-new-url">OpenAI-compatible endpoint URL</label>
+            <input id="provider-new-url" className="input" type="url" placeholder="https://" spellCheck={false}
+              value={url} disabled={!list || busy} onChange={(event) => setUrl(event.target.value)} />
+          </div>
+          <button type="button" className="btn" style={{ marginTop: 10 }}
+            disabled={!list || busy || !name.trim() || !url.trim()} aria-busy={busy || undefined}
+            onClick={() => void change(
+              (revision) => agentApi.createProvider(name, url, revision),
+              `Saved ${name.trim()}. Use it, then save its API key in the API key card if it needs one.`,
+              () => {
+                setName("");
+                setUrl("");
+              },
+            )}>
+            Save provider
+          </button>
+        </fieldset>
+      </div>
+    </Card>
+  );
+}
+=== replace frontend/src/screens/SettingsScreen.tsx
+--- find
+import { ProviderCredentialCard } from "../components/ProviderCredential";
+--- with
+import { ProviderCredentialCard } from "../components/ProviderCredential";
+import { ProvidersCard } from "../components/Providers";
+=== replace frontend/src/screens/SettingsScreen.tsx
+--- find
+  const [message, setMessage] = useState<string | null>(null);
+--- with
+  const [message, setMessage] = useState<string | null>(null);
+  // Bumped by a provider change, so the API key card reloads for the new
+  // active provider and never saves a key typed for another one.
+  const [providerVersion, setProviderVersion] = useState(0);
+=== replace frontend/src/screens/SettingsScreen.tsx
+--- find
+          <ProviderCredentialCard />
+--- with
+          <ProvidersCard onChanged={() => setProviderVersion((version) => version + 1)} />
+          <ProviderCredentialCard key={providerVersion} />
+=== replace e2e/settings.mjs
+--- find
+    // A saved secret is in none of the renderer's state.
+--- with
+    // Providers and models: the shared operations. The card loaded before
+    // the writes above, so its first save is refused and the entry stays;
+    // on the current revision it is saved, renamed, used and given a model,
+    // and a stale removal is refused before it is made.
+    const providersNow = async () => (await fetch(`${base}/api/lightagent/v1/providers`)).json();
+    const startedWith = await providersNow();
+    const originalUrl = startedWith.providers.find((provider) => provider.active)?.base_url;
+    const originalModel = startedWith.model;
+    const labUrl = "http://127.0.0.1:9/e2e-lab";
+    const card = page.getByTestId("providers-card");
+    const newName = page.locator("#provider-new-name");
+    await newName.fill("E2E Lab");
+    await page.locator("#provider-new-url").fill(labUrl);
+    const saveProvider = page.getByRole("button", { name: "Save provider", exact: true });
+    await saveProvider.click();
+    await card.getByText("Nothing was saved", { exact: false }).waitFor({ timeout: 5000 });
+    if (await newName.inputValue() !== "E2E Lab") failures.push("providers: a refused save lost the entry");
+    if ((await providersNow()).providers.some((provider) => provider.id === "e2e-lab")) {
+      failures.push("providers: a refused save stored the provider");
+    }
+    await saveProvider.click();
+    await page.getByTestId("provider-e2e-lab").waitFor({ timeout: 5000 });
+    if (await newName.inputValue()) failures.push("providers: the saved entry stays in the field");
+
+    await page.getByRole("button", { name: "Edit E2E Lab", exact: true }).click();
+    await page.locator("#provider-name-e2e-lab").fill("E2E Lab Two");
+    await page.getByRole("button", { name: "Save changes", exact: true }).click();
+    await page.getByTestId("provider-e2e-lab-two").waitFor({ timeout: 5000 });
+
+    await page.getByRole("button", { name: "Use E2E Lab Two", exact: true }).click();
+    await card.getByText("E2E Lab Two is the active provider", { exact: false }).waitFor({ timeout: 5000 });
+    if ((await providersNow()).active !== "e2e-lab-two") failures.push("providers: Use did not select the provider");
+    if (!(await card.innerText()).includes("Applies to the next run")) {
+      failures.push("providers: the card does not say when a change applies");
+    }
+    if ((await credentialNow()).base_url !== labUrl) failures.push("providers: the key status is not the new provider's");
+    await page.getByText(`(${labUrl})`, { exact: false }).first().waitFor({ timeout: 5000 });
+
+    await page.locator("#provider-model").fill("e2e-model");
+    await page.getByRole("button", { name: "Use this model", exact: true }).click();
+    await card.getByText("Model set to e2e-model.", { exact: false }).waitFor({ timeout: 5000 });
+    if ((await providersNow()).model !== "e2e-model") failures.push("providers: the model was not saved");
+    await page.screenshot({ path: `${outDir}/settings-providers.png` });
+
+    // Back to the harness's endpoint and model, as another writer.
+    if (originalUrl) await writeElsewhere(base, "inference.base_url", originalUrl);
+    if (originalModel) await writeElsewhere(base, "inference.model", originalModel);
+    else await put(base, "/provider/model", { model: null });
+    await page.getByRole("button", { name: "Remove E2E Lab Two", exact: true }).click();
+    const confirmRemove = page.getByRole("button", { name: "Confirm: remove E2E Lab Two", exact: true });
+    await confirmRemove.click();
+    await card.getByText("Nothing was saved", { exact: false }).waitFor({ timeout: 5000 });
+    if (!(await providersNow()).providers.some((provider) => provider.id === "e2e-lab-two")) {
+      failures.push("providers: a refused removal removed the provider");
+    }
+    await confirmRemove.click();
+    await card.getByText("Removed E2E Lab Two.", { exact: false }).waitFor({ timeout: 5000 });
+    const finished = await providersNow();
+    if (finished.providers.some((provider) => provider.id === "e2e-lab-two")) {
+      failures.push("providers: the removal did not remove the provider");
+    }
+    if (originalUrl && finished.providers.find((provider) => provider.active)?.base_url !== originalUrl) {
+      failures.push("providers: the harness endpoint was not restored");
+    }
+
+    // A saved secret is in none of the renderer's state.
+=== end
