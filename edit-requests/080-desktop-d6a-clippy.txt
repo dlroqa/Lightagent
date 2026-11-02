@@ -1,0 +1,50 @@
+=== base 63f1fba2d1f19680887f6f800c8383185a58fecb
+=== message
+D6-1: box the extension helpers' error response (clippy result_large_err)
+
+check run 41458378742 failed clippy: a `Result<_, Response>` error variant
+is large. The helpers return `Box<Response>`, as `authorized_run` does.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+fn extension_paths(state: &AppState) -> Result<LightagentPaths, Response> {
+    home(state)
+        .map(LightagentPaths::rooted_at)
+        .ok_or_else(|| internal("Lightagent settings are unavailable in this embedding"))
+}
+
+fn extension_config(state: &AppState) -> Result<lightagent_core::Config, Response> {
+    match &state.config_store {
+        Some(store) => store.load().map_err(config_error),
+        None => Err(internal(
+            "Lightagent settings are unavailable in this embedding",
+        )),
+    }
+}
+--- with
+fn extension_paths(state: &AppState) -> Result<LightagentPaths, Box<Response>> {
+    home(state)
+        .map(LightagentPaths::rooted_at)
+        .ok_or_else(|| Box::new(internal("Lightagent settings are unavailable in this embedding")))
+}
+
+fn extension_config(state: &AppState) -> Result<lightagent_core::Config, Box<Response>> {
+    match &state.config_store {
+        Some(store) => store.load().map_err(|error| Box::new(config_error(error))),
+        None => Err(Box::new(internal(
+            "Lightagent settings are unavailable in this embedding",
+        ))),
+    }
+}
+=== replace crates/lightagent-api/src/lib.rs count=2
+--- find
+        (Err(response), _) | (_, Err(response)) => return response,
+--- with
+        (Err(response), _) | (_, Err(response)) => return *response,
+=== replace crates/lightagent-api/src/lib.rs count=3
+--- find
+        Err(response) => return response,
+--- with
+        Err(response) => return *response,
+=== end
