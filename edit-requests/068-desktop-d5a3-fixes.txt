@@ -1,0 +1,81 @@
+=== base 87172632077714c9b79f45ed276c83dee9b15b63
+=== message
+D5a-3: no expect in the lock guard; wrap-up turns in the test providers
+
+- `ExclusiveLock::into_file` returns an `Option` (clippy denies `expect`
+  in library code; check run 41439783665).
+- A wrap-up turn (continue `answer`, and a run that did not ask to pause)
+  adds an instruction message after the tool result, so the last message
+  is not the tool result. The hosted fake provider now attributes a request
+  to the latest user message that carries a scenario marker, the continue
+  check looks for the unread tool result anywhere after the prompt, and the
+  separate-process test's provider answers once the conversation holds a
+  tool result (desktop run 41439783419: answer and default were filed as
+  unmarked requests).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-core/src/paths.rs
+--- find
+    pub fn into_file(mut self) -> std::fs::File {
+        self.file
+            .take()
+            .expect("a lock holds its file until it is dropped")
+    }
+--- with
+    pub fn into_file(mut self) -> Option<std::fs::File> {
+        self.file.take()
+    }
+=== replace crates/lightagent-store/tests/run_lease.rs
+--- find
+        .expect("control lock")
+        .into_file();
+--- with
+        .expect("control lock")
+        .into_file()
+        .expect("the control lock's file");
+=== replace desktop/e2e/harness.py
+--- find
+        users = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+        last = users[-1] if users else -1
+        found = re.search(r"\[e2e:([a-z0-9-]+)\]", content_of(messages[last]) if users else "")
+        scenario = found.group(1) if found else "none"
+--- with
+        # The latest user message with a scenario marker: a wrap-up turn adds
+        # an unmarked instruction after the tool results.
+        last, scenario = -1, "none"
+        for i in reversed([i for i, m in enumerate(messages) if m.get("role") == "user"]):
+            found = re.search(r"\[e2e:([a-z0-9-]+)\]", content_of(messages[i]))
+            if found:
+                last, scenario = i, found.group(1)
+                break
+=== replace desktop/e2e/runs.py
+--- find
+            check.expect(f"{mode}: the same execution carried on", len(requests) == 2 and requests[1]["roles"][-1:] == ["tool"], requests)
+--- with
+            # The tool result the model had not read is in the next turn's
+            # conversation: the same execution went on, not a new turn.
+            check.expect(f"{mode}: the same execution carried on", len(requests) == 2 and "tool" in requests[1]["roles"], requests)
+=== replace crates/lightagent/tests/desktop_continue.rs
+--- find
+/// A provider that, when the conversation ends with the user's prompt,
+/// asks for `datetime.now` and takes longer than the run's one-second time
+/// budget; when it ends with a tool result, it answers "Found it.". Every
+/// request body is kept.
+--- with
+/// A provider that, until the conversation holds a tool result, asks for
+/// `datetime.now` and takes longer than the run's one-second time budget;
+/// once it does, it answers "Found it.". Every request body is kept.
+=== replace crates/lightagent/tests/desktop_continue.rs
+--- find
+                let last_role = request["messages"]
+                    .as_array()
+                    .and_then(|messages| messages.last())
+                    .map(|message| message["role"].as_str().unwrap_or("").to_owned())
+                    .unwrap_or_default();
+                if last_role == "tool" {
+--- with
+                let has_result = request["messages"]
+                    .as_array()
+                    .is_some_and(|messages| messages.iter().any(|message| message["role"] == "tool"));
+                if has_result {
+=== end
