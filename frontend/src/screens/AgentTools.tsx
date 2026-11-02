@@ -29,6 +29,19 @@ function riskTone(risk: string): Tone {
   }
 }
 
+/** A tool's permission in words: what a run's call does. */
+const PERMISSION: Record<string, { label: string; tone: Tone }> = {
+  auto: { label: "Runs without asking", tone: "ok" },
+  ask: { label: "Asks first", tone: "info" },
+  block: { label: "Blocked", tone: "danger" },
+};
+
+function skillSource(skill: SkillInfo): string | null {
+  if (!skill.source) return null;
+  if (skill.source.scope === "extension") return `Extension ${skill.source.extension ?? ""}`.trim();
+  return skill.source.scope === "profile" ? "This profile" : "Every profile";
+}
+
 /** A readiness state in words and a tone; never colour alone. */
 const READINESS: Record<WorkerReadiness["state"], { label: string; tone: Tone }> = {
   ready: { label: "Ready", tone: "ok" },
@@ -85,16 +98,19 @@ export function AgentTools() {
   const [tools, setTools] = useState<ToolInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const [includeMcp, setIncludeMcp] = useState(false);
+  const [mcpState, setMcpState] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
     setError(null);
     setSkills(null);
     setTools(null);
-    Promise.all([agentApi.tools(), agentApi.skills()])
+    Promise.all([agentApi.tools({ includeMcp }), agentApi.skills()])
       .then(([toolResponse, skillResponse]) => {
         if (live) {
           setTools(toolResponse.tools);
+          setMcpState(toolResponse.mcp ?? null);
           setSkills(skillResponse.skills);
         }
       })
@@ -104,7 +120,7 @@ export function AgentTools() {
     return () => {
       live = false;
     };
-  }, [attempt]);
+  }, [attempt, includeMcp]);
 
   return (
     <>
@@ -114,6 +130,24 @@ export function AgentTools() {
           <JevToolCard />
         </Card>
         <Card title="Enabled tools">
+          <p className="card__note">
+            Permission is what a run&apos;s call does under this profile&apos;s approval policy, as lightagent tools
+            list reports it.
+          </p>
+          {mcpState === "skipped" && (
+            <div className="notice notice--info" role="status">
+              MCP server tools are not listed: listing them connects every MCP server agent runs use, which starts
+              their local commands.{" "}
+              <button type="button" className="btn" onClick={() => setIncludeMcp(true)}>
+                Include MCP server tools
+              </button>
+            </div>
+          )}
+          {mcpState === "connected" && (
+            <div className="notice notice--info" role="status">
+              MCP server tools are included: their servers were connected (local commands started) to list them.
+            </div>
+          )}
           {error ? (
             <div role="alert">
               <p className="muted">Could not reach the agent API: {error}</p>
@@ -145,6 +179,11 @@ export function AgentTools() {
                   <Wrench size={15} />
                   <strong style={{ minWidth: 140 }}>{tool.name}</strong>
                   <Pill tone={riskTone(tool.risk)}>{tool.risk}</Pill>
+                  {tool.permission && (
+                    <Pill tone={PERMISSION[tool.permission]?.tone ?? "neutral"}>
+                      {PERMISSION[tool.permission]?.label ?? tool.permission}
+                    </Pill>
+                  )}
                   <span className="muted" style={{ fontSize: 13 }}>
                     {tool.description}
                   </span>
@@ -168,6 +207,8 @@ export function AgentTools() {
               {skills.map((skill) => (
                 <div key={skill.name} style={{ padding: "10px 12px", border: "1px solid var(--border, #2a2a2a)", borderRadius: 8 }}>
                   <strong>{skill.name}</strong>
+                  {skillSource(skill) && <span style={{ marginLeft: 8 }}><Pill tone="info">{skillSource(skill)}</Pill></span>}
+                  {skill.version && <span className="muted" style={{ marginLeft: 8, fontSize: 13 }}>{skill.version}</span>}
                   {skill.description && <span className="muted" style={{ marginLeft: 10, fontSize: 13 }}>{skill.description}</span>}
                 </div>
               ))}

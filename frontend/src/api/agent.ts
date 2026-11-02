@@ -8,10 +8,15 @@ export interface ToolInfo {
   name: string;
   risk: string;
   description: string;
+  /** What a run's call does under the profile's approval policy. */
+  permission?: "auto" | "ask" | "block";
 }
 export interface SkillInfo {
   name: string;
   description: string;
+  version?: string | null;
+  /** Where a run loads it from; a later source overrides an earlier one. */
+  source?: { scope: "global" | "extension" | "profile"; extension?: string };
 }
 
 /** Where an extension is installed: every profile's root, or the active profile's. */
@@ -547,7 +552,14 @@ export interface ConfigValue {
 }
 
 export const agentApi = {
-  tools: () => jsonRequest<{ tools: ToolInfo[] }>("/tools"),
+  /**
+   * The tool catalog. MCP servers are connected (a local MCP command is
+   * started) only with `includeMcp`; every screen asks without it.
+   */
+  tools: (options: { includeMcp?: boolean } = {}) =>
+    jsonRequest<{ tools: ToolInfo[]; mcp?: "off" | "skipped" | "connected" }>(
+      options.includeMcp ? "/tools" : "/tools?mcp=skip",
+    ),
   skills: () => jsonRequest<{ skills: SkillInfo[] }>("/skills"),
   /** `lightagent extensions list|show|install|enable|disable|uninstall`, the same operations. */
   extensions: () => jsonRequest<ExtensionListing>("/extensions"),

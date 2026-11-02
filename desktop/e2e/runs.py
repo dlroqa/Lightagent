@@ -467,6 +467,23 @@ def scenario_extensions(host, cli):
     return check
 
 
+def scenario_tools(host, cli):
+    """D6-5 through the host transport: the catalog with permissions, built
+    without connecting MCP, is what `lightagent tools list` reports."""
+    check = Checks("tools")
+
+    def rows(tools):
+        return sorted((t.get("name"), t.get("risk"), t.get("permission")) for t in tools or [])
+
+    status, catalog = host.fetch("GET", f"{API}/tools?mcp=skip")
+    by_cli = json.loads(harness.run_cli(cli, "--json", "tools", "list"))
+    check.expect("the host's catalog is the CLI's, permissions included",
+                 status == 200 and rows((catalog or {}).get("tools")) == rows(by_cli)
+                 and all(t.get("permission") in ("auto", "ask", "block") for t in (catalog or {}).get("tools", [])),
+                 (status, catalog, by_cli))
+    return check
+
+
 def scenario_mcp(host):
     """D6-4 through the host transport: a stdio server is added and listed
     without starting; a check starts it once, reports why it failed with no
@@ -552,6 +569,7 @@ def main():
             ("steering", lambda: scenario_steering(host, provider, workspace)),
             ("extensions", lambda: scenario_extensions(host, cli)),
             ("mcp", lambda: scenario_mcp(host)),
+            ("tools", lambda: scenario_tools(host, cli)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]

@@ -106,6 +106,71 @@ impl RunFactory for LightweightRunFactory {
             .collect())
     }
 
+    /// The catalog `tools()` builds, each tool with its permission under the
+    /// active profile's approval policy, as `lightagent tools list` reports
+    /// it. Without `include_mcp` it is built with MCP off, so no MCP server
+    /// is connected or started.
+    async fn tool_catalog(&self, include_mcp: bool) -> Option<Result<serde_json::Value, String>> {
+        Some(
+            async {
+                let paths = LightagentPaths::rooted_at(&self.root);
+                let mut config = ConfigStore::at(&paths).load().map_err(|e| e.to_string())?;
+                let mcp = if !config.mcp.enabled {
+                    "off"
+                } else if include_mcp {
+                    "connected"
+                } else {
+                    "skipped"
+                };
+                if !include_mcp {
+                    config.mcp.enabled = false;
+                }
+                let profiles = ProfileStore::new(&self.root);
+                let profile = resolve_profile(&profiles, &config, None)?;
+                let profile_dir = profiles.handle(&profile.id).dir().to_path_buf();
+                let extensions = load_extensions(&self.root, &profile_dir);
+                let skills = load_skills(&self.root, &profile_dir, &extensions, &config);
+                let mut registry =
+                    configured_registry(&config, &profile_dir, &extensions, !skills.is_empty())
+                        .await;
+                crate::coordinator::add_explicit_tool(
+                    &mut registry,
+                    &config,
+                    profile.id.as_str(),
+                    crate::coordinator::JevBudget::new(
+                        config.platform.jev.classification.max_calls_per_run,
+                    ),
+                    Arc::clone(&self.jev),
+                );
+                let registry = crate::chat::tool_policy(
+                    &config,
+                    &extensions,
+                    &registry,
+                    &profile,
+                    RunTrust::LocalOperator,
+                )
+                .apply(&registry);
+                let policy = lightagent_core::PolicyEngine::new(profile.approval_policy.into());
+                let tools: Vec<serde_json::Value> = registry
+                    .names()
+                    .iter()
+                    .filter_map(|name| registry.get(name))
+                    .map(|tool| {
+                        let definition = tool.definition();
+                        serde_json::json!({
+                            "name": definition.name,
+                            "risk": definition.risk.as_str(),
+                            "permission": crate::tool_permission(&policy, definition),
+                            "description": definition.description,
+                        })
+                    })
+                    .collect();
+                Ok::<_, String>(serde_json::json!({ "tools": tools, "mcp": mcp }))
+            }
+            .await,
+        )
+    }
+
     /// What a run of `profile` with `trust` would receive, built exactly as
     /// the run builds it: the profile's remote access, the explicit Jev tool
     /// and the profile's tool policy for that trust.

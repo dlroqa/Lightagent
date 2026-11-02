@@ -13,6 +13,7 @@ import { checkConfigEditor } from "./config.mjs";
 import { checkSettingsStates } from "./settings.mjs";
 import { checkExtensions } from "./extensions.mjs";
 import { checkMcp } from "./mcp.mjs";
+import { checkToolCatalog } from "./tools.mjs";
 
 const BASE = (process.env.PANEL_BASE ?? "http://127.0.0.1:8735").replace(/\/+$/, "");
 const OUT_DIR = process.env.OUT_DIR ?? "screens";
@@ -384,6 +385,12 @@ async function main() {
     failures.push(...(await checkExtensions(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`extensions: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Installs and removes an extension with a skill: after the routes above.
+  try {
+    failures.push(...(await checkToolCatalog(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`tools: ${err instanceof Error ? err.message : String(err)}`);
   }
   // Adds, checks and removes MCP servers: after the routes above have rendered.
   try {
