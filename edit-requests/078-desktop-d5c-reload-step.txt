@@ -1,0 +1,24 @@
+=== base 65a65dc706546f6445871e5156f48ac27d24c03b
+=== message
+D5 close-out: the reload step opens the conversation from the list
+
+After a reload the Agent screen starts on its welcome screen, which has no
+conversation composer, so waiting for that composer timed out (check run
+41456445238: the paused run had been created and shown). The step now
+picks the conversation from the list, as a person would, then expects the
+paused run's card.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace e2e/runs.mjs
+--- find
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await composer.waitFor({ timeout: 15000 });
+      if (!(await until(async () => (await pausedCard.count()) === 1, 5000))) {
+        await page.getByText(title, { exact: true }).first().click({ timeout: 15000 });
+      }
+--- with
+      await page.reload({ waitUntil: "domcontentloaded" });
+      // The reloaded page opens on its welcome screen; the conversation is
+      // picked from the list, as a person would.
+      await page.getByText(title, { exact: true }).first().click({ timeout: 15000 });
+=== end
