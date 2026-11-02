@@ -103,17 +103,34 @@ impl SecretRef {
         }
     }
 
-    /// The value to send with a request about to be made. A file reference
-    /// that cannot be read is refused, so the request is never made without
-    /// the credential it was configured with. Every other case is exactly
-    /// [`Self::resolve`]: an unset variable or an empty value sends none, as
-    /// before.
-    pub fn for_request(&self) -> Result<Option<String>, UnreadableSecret> {
+    /// The value to send with a request about to be made. A configured
+    /// reference that cannot be used is refused: a file that cannot be read,
+    /// an unset variable, an empty value, or one no header can carry. A
+    /// request is never made without the credential it was configured with.
+    /// `Ok` always holds a value; it is an `Option` so an optional
+    /// reference reads as `map_or(Ok(None), SecretRef::for_request)`, where
+    /// `None` is an intentionally absent key.
+    pub fn for_request(&self) -> Result<Option<String>, SecretUnavailable> {
         match self.lookup() {
+            SecretLookup::Value(value) if value.chars().any(char::is_control) => {
+                Err(SecretUnavailable::Invalid)
+            }
             SecretLookup::Value(value) => Ok(Some(value)),
-            SecretLookup::Unreadable => Err(UnreadableSecret),
-            SecretLookup::Unresolved | SecretLookup::Empty => Ok(self.resolve()),
+            SecretLookup::Unreadable => Err(SecretUnavailable::Unreadable),
+            SecretLookup::Unresolved => Err(SecretUnavailable::Unresolved),
+            SecretLookup::Empty => Err(SecretUnavailable::Empty),
         }
+    }
+}
+
+/// The state of an optional configured secret, for a status display:
+/// `absent` (none configured, on purpose), `ready`, or why it cannot be used
+/// ([`SecretUnavailable::as_str`]). Never the value or where it is kept.
+pub fn secret_state(secret: Option<&SecretRef>) -> &'static str {
+    match secret.map(SecretRef::for_request) {
+        None => "absent",
+        Some(Ok(_)) => "ready",
+        Some(Err(problem)) => problem.as_str(),
     }
 }
 
@@ -145,18 +162,92 @@ impl std::fmt::Debug for SecretLookup {
     }
 }
 
-/// A configured secret file that cannot be read. Its message names neither
-/// the path nor anything the file holds.
+/// Why a configured secret cannot be used for a request. No variant, and no
+/// message, names the reference's path or variable, or anything it holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct UnreadableSecret;
+pub enum SecretUnavailable {
+    /// A file reference that cannot be read.
+    Unreadable,
+    /// An environment reference whose variable is not set.
+    Unresolved,
+    /// A value of nothing but whitespace.
+    Empty,
+    /// A value with a line break or another control character, which no
+    /// HTTP header can carry.
+    Invalid,
+}
 
-impl std::fmt::Display for UnreadableSecret {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("the configured secret file cannot be read")
+impl SecretUnavailable {
+    /// A stable name for status displays and API responses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unreadable => "unreadable",
+            Self::Unresolved => "unresolved",
+            Self::Empty => "empty",
+            Self::Invalid => "invalid",
+        }
     }
 }
 
-impl std::error::Error for UnreadableSecret {}
+impl std::fmt::Display for SecretUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unreadable => "the configured secret file cannot be read",
+            Self::Unresolved => "the configured secret's environment variable is not set",
+            Self::Empty => "the configured secret is empty",
+            Self::Invalid => "the configured secret contains a line break or control character",
+        })
+    }
+}
+
+impl std::error::Error for SecretUnavailable {}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    fn scratch() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "lightagent-secret-{}",
+            crate::ids::RunId::new().as_str()
+        ))
+    }
+
+    #[test]
+    fn a_configured_secret_that_cannot_be_used_is_refused_and_an_absent_one_is_not() {
+        let dir = scratch();
+        std::fs::create_dir_all(&dir).expect("dir");
+        let write = |name: &str, text: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, text).expect("write");
+            SecretRef::file(path)
+        };
+        let good = write("good", "  sk-good  \n");
+        assert_eq!(good.for_request(), Ok(Some("sk-good".to_owned())));
+        assert_eq!(secret_state(Some(&good)), "ready");
+        for (secret, problem) in [
+            (
+                SecretRef::file(dir.join("missing")),
+                SecretUnavailable::Unreadable,
+            ),
+            (
+                SecretRef::env("LIGHTAGENT_TEST_FOR_REQUEST_UNSET"),
+                SecretUnavailable::Unresolved,
+            ),
+            (write("empty", " \n"), SecretUnavailable::Empty),
+            (write("control", "abc\u{7}def"), SecretUnavailable::Invalid),
+            (write("break", "abc\ndef"), SecretUnavailable::Invalid),
+        ] {
+            assert_eq!(secret.for_request(), Err(problem), "{secret:?}");
+            assert_eq!(secret_state(Some(&secret)), problem.as_str());
+            let message = problem.to_string();
+            assert!(!message.contains("FOR_REQUEST_UNSET"), "{message}");
+            assert!(!message.contains(&dir.display().to_string()), "{message}");
+        }
+        assert_eq!(secret_state(None), "absent");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
 
 /// Which provider backend answers, and where.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

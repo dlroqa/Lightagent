@@ -87,6 +87,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/lightagent/v1/jev", get(get_jev_status))
         .route("/api/lightagent/v1/jev/verify", post(verify_jev))
         .route(
+            "/api/lightagent/v1/provider/credential",
+            get(get_provider_credential)
+                .put(put_provider_credential)
+                .delete(delete_provider_credential),
+        )
+        .route(
             "/api/lightagent/v1/jev/routing-report",
             get(get_jev_routing_report),
         )
@@ -1277,6 +1283,129 @@ struct ConfigWrite {
 
 /// `lightagent config path` and `show`: where the config lives, its
 /// revision, and its content with secrets redacted.
+/// The active endpoint's provider API key as status only: whether one is
+/// configured and usable, and where it comes from, never the key itself or
+/// the file that holds it.
+fn credential_view(
+    config: &lightagent_core::Config,
+    revision: &ConfigRevision,
+) -> serde_json::Value {
+    let source = config
+        .inference
+        .api_key
+        .as_ref()
+        .map(|secret| match secret {
+            SecretRef::Env { .. } => "env",
+            SecretRef::File { .. } => "file",
+        });
+    json!({
+        "provider_key_id": lightagent_core::provider_keys::active_key_id(config),
+        "base_url": config.inference.base_url,
+        "state": lightagent_core::secret_state(config.inference.api_key.as_ref()),
+        "source": source,
+        "revision": revision.as_str(),
+    })
+}
+
+/// A provider key typed into Settings. Write-only: no `Debug`, and never
+/// returned or logged.
+#[derive(Deserialize)]
+struct CredentialBody {
+    key: String,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+async fn get_provider_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => Json(credential_view(&config, &revision)).into_response(),
+        Err(error) => config_error(error),
+    }
+}
+
+/// Save or replace the active endpoint's key in the shared secrets store
+/// and point the config at it, as `lightagent setup provider` does. With
+/// `expected_revision`, a stale save gets 409 and writes nothing.
+async fn put_provider_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<CredentialBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (Some(store), Some(root)) = (&state.config_store, home(&state)) else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    if let Err(message) = lightagent_core::provider_keys::validate_key(&body.key) {
+        return bad_request(message);
+    }
+    let paths = LightagentPaths::rooted_at(root);
+    let expected = body.expected_revision.as_deref().map(ConfigRevision::parse);
+    // The key is written inside the config lock, after the revision check, so
+    // a refused save changes nothing.
+    let saved = store.update(expected.as_ref(), |config| {
+        let provider_id = lightagent_core::provider_keys::active_key_id(config);
+        let secret = lightagent_core::provider_keys::store_key(&paths, &provider_id, &body.key)?;
+        lightagent_core::provider_keys::use_key(config, Some(secret));
+        Ok::<(), String>(())
+    });
+    match saved {
+        Ok(((), revision)) => match store.load() {
+            Ok(config) => Json(credential_view(&config, &revision)).into_response(),
+            Err(error) => config_error(error),
+        },
+        Err(UpdateError::Change(message)) => internal(&message),
+        Err(UpdateError::Store(error)) => config_error(error),
+    }
+}
+
+/// Remove the active endpoint's key: the config stops referring to it, and
+/// the stored file is deleted when it is the shared store's own.
+async fn delete_provider_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (Some(store), Some(root)) = (&state.config_store, home(&state)) else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let paths = LightagentPaths::rooted_at(root);
+    let removed = store.update(None, |config| {
+        let provider_id = lightagent_core::provider_keys::active_key_id(config);
+        let ours = lightagent_core::provider_keys::stored_reference(&paths, &provider_id);
+        let previous = config.inference.api_key.clone();
+        lightagent_core::provider_keys::use_key(config, None);
+        Ok::<_, std::convert::Infallible>((previous == Some(ours)).then_some(provider_id))
+    });
+    match removed {
+        Ok((stored, revision)) => {
+            if let Some(provider_id) = stored
+                && let Err(message) =
+                    lightagent_core::provider_keys::remove_key(&paths, &provider_id)
+            {
+                return internal(&message);
+            }
+            match store.load() {
+                Ok(config) => Json(credential_view(&config, &revision)).into_response(),
+                Err(error) => config_error(error),
+            }
+        }
+        Err(error) => config_error(error.into_store()),
+    }
+}
+
 /// `lightagent config jev-routing-report`: the same dry run, from the same
 /// shared operation. It reads the config and the profile list and changes
 /// nothing.

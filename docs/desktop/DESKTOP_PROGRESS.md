@@ -28,7 +28,8 @@ next update names its run.
 | D4c Configuration: one locked, revision-checked writer | **CI-validated** at `0e46892` (check and desktop, every job); the D4 gate items listed under D4c remain | `desktop/d4c-config` (stacked on D4b `7c3e988`) | https://github.com/dlroqa/Lightagent/pull/101 | `0e4689232ae0ce0653367883222b40d41b62218d`, plus this documentation commit | `0e46892` / tree `dd1faa22ddd161d99de2407a312e8ed9d0789c54` |
 | Row 9: response actions delivery (#98 with its adoption) | **CI-validated** at `a51449c` (`desktop` after one re-run of an infrastructure-failed bundling job; see "Row 9") | `desktop/d4c1-response-actions` (stacked on D4c) | https://github.com/dlroqa/Lightagent/pull/102 | `a51449ce66790a1092459167545ac645cf226290`, plus this documentation commit | `a51449c` / tree `ab20d7eb19eecbc47a60a0a9e4a4df1bd85926aa` |
 | Row 10: session writes (#100) | **CI-validated** at `aebd5d6` (check and desktop, every job) | `desktop/d4c2-session-writes` (stacked on row 9 `fbd008c`) | https://github.com/dlroqa/Lightagent/pull/103 | `aebd5d631238b1b8a302df1ec1aa7bba27972369`, plus the documentation commit `3310dfc` | `aebd5d6` / tree `e9066c30eac669165e9deb505ee67a0884659df8` |
-| Row 11: D4 acceptance (golden files, ordered concurrency, fail-closed keys, routing report, kept Settings edits) | **CI-validated** at `205f01b` (check and desktop, every job, first run). The D4c gate items are met, except those carried forward (see "Row 11") | `desktop/d4c3-config-acceptance` (stacked on row 10 `3310dfc`) | https://github.com/dlroqa/Lightagent/pull/104 | `205f01b731e0a3149ff465bc894aa97605284c76`, plus this documentation commit | `205f01b` / tree `b5bf552d9d4e75630b3c3ecda78c58071d15a87f` |
+| Row 11: D4 acceptance (golden files, ordered concurrency, fail-closed keys, routing report, kept Settings edits) | **CI-validated** at `205f01b` (check and desktop, every job, first run). The D4c gate items are met, except those carried forward (see "Row 11") | `desktop/d4c3-config-acceptance` (stacked on row 10 `3310dfc`) | https://github.com/dlroqa/Lightagent/pull/104 | `205f01b731e0a3149ff465bc894aa97605284c76`, plus the documentation commit `597604d` (check and desktop passed on it) | `205f01b` / tree `b5bf552d9d4e75630b3c3ecda78c58071d15a87f` |
+| Row 12: D4d-1 provider credentials (shared write-only operation; unusable keys fail closed) | **CI-validated** at `6988f6c` (check and desktop, every job) | `desktop/d4d1-credentials` (stacked on row 11 `597604d`) | https://github.com/dlroqa/Lightagent/pull/106 | `6988f6c3256b46d8cc55704e5c3bc2c9e4016b90`, plus this documentation commit | `6988f6c` / tree `bcdfc0b89c6f27047bee39608db9374cc618dad9` |
 | D4d–D10 | not started | — | — | — | — |
 
 The latest progress record is the copy on the highest stacked desktop branch.
@@ -736,6 +737,72 @@ applied as 32 edits to 15 files.
 | 2026-11-02 | `jev evaluation` and `subagents`: **success**. The fixture `fail` and `verify` dispatches failed by design, as on every earlier head | `205f01b` | https://github.com/dlroqa/Lightagent/actions/runs/41370767708, https://github.com/dlroqa/Lightagent/actions/runs/41370767658 |
 | 2026-11-02 | Parity: `cli.config.jev-routing-report` is implemented: **23 of 227**. The new `api.get.jev.routing-report` row is backend and not counted (319 rows) | — | DESKTOP_CLI_PARITY.md |
 
+## Row 12 — D4d-1: provider credentials
+
+The owner's instructions of 2026-11-02 (second continuation) set D4d's
+scope. This slice does the credential part.
+
+- **One operation, one store.** `lightagent_core::provider_keys` stores,
+  replaces and removes the active endpoint's key. It writes the owner-only
+  `secrets/provider-<id>.key` atomically and points the config at it.
+  `lightagent setup provider` and the HTTP API both use it, so the terminal
+  and the desktop write the same file and the same reference. Nothing
+  returns a stored key.
+- **Absent is not unreadable.**
+  - No `inference.api_key` is *intentionally absent*: no key is sent, as
+    local providers expect.
+  - A configured reference that cannot be used is refused by
+    `SecretRef::for_request`: an unreadable file, an unset variable, an
+    empty value, or a value with a line break or control character.
+  - `SecretUnavailable` says which, never the path, the variable or the
+    value. Status displays use `secret_state`.
+- **Fail closed** on the inference key wherever a request is made with it:
+  - the terminal chat refuses to start, and skips a routed request;
+  - `lightagent models`;
+  - setup's model listing;
+  - the desktop runtime (run, history probe, model listing).
+
+  This closes row 11's carried D4d item.
+- **API:** `GET|PUT|DELETE /provider/credential` (admin scope).
+  - GET returns the status (`absent`, `ready`, `unreadable`, `unresolved`,
+    `empty` or `invalid`) and the source (`file` or `env`).
+  - PUT is a write-only save. It is revision-checked: a stale save gets 409,
+    and the key is written inside the config lock after the check, so a
+    refused save changes nothing.
+  - DELETE removes the key.
+
+  Contract operations are `provider.credential.get`, `.set` and `.remove`,
+  with backend inventory rows (322 rows).
+- **Settings:** a "Provider API key" card with the status, a write-only
+  password field, Save or Replace, and Remove after a confirmation.
+
+**Evidence types.** The Settings flows are **browser** evidence: the Web UI
+against the real harness. Native desktop WebView verification is D8 and is
+not claimed.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Cross-process run admission filed as its own defect, with the topology audit and plan (D5b) | — | https://github.com/dlroqa/Lightagent/issues/105 |
+| 2026-11-02 | Branch `desktop/d4d1-credentials` created at `597604d`; edit request `044` (32 edits, 15 files); draft PR #106 | `a1bd655` / `9c74ea4` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41376157867 |
+| 2026-11-02 | `check` on `a1bd655`: **failure**, only `standalone Web UI render`. "Save key" matched two buttons (the Jev row has one too). The other 12 jobs passed, including every new Rust test on four platforms | `a1bd655` | https://github.com/dlroqa/Lightagent/actions/runs/41376245339 |
+| 2026-11-02 | `045`: the card's buttons and messages say "API key", which also gives a screen reader distinct names | `599b261` / `682ef7b` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41377094979 |
+| 2026-11-02 | `check` on `599b261`: **failure**, render only. The card's first save was rightly refused as stale (the conflict checks above it had written the config), so the success message never came. `desktop`: **failure**, inventory only: a core test's literal `"LIGHTAGENT_TEST"` read as an undeclared environment variable | `599b261` | https://github.com/dlroqa/Lightagent/actions/runs/41377130735, https://github.com/dlroqa/Lightagent/actions/runs/41377130716 |
+| 2026-11-02 | `046`: the e2e now asserts the stale save (refusal shown, entry kept, nothing stored), then saves on the current revision. The test literal was changed | `6988f6c` / `bcdfc0b` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41378439550 |
+| 2026-11-02 | `check` on `6988f6c`: **success**, all 13 jobs. `desktop_credentials.rs`, `provider_keys::tests` and `config::secret_tests` passed on all four platforms, and the render printed `[ok] settings conflict, routing dry run and renderer state` | `6988f6c` | https://github.com/dlroqa/Lightagent/actions/runs/41378487660 |
+| 2026-11-02 | `desktop` on `6988f6c`: **success**, all 7 jobs | `6988f6c` | https://github.com/dlroqa/Lightagent/actions/runs/41378487692 |
+| 2026-11-02 | `jev evaluation` and `subagents`: **success**. The fixture `fail` and `verify` dispatches failed by design | `6988f6c` | https://github.com/dlroqa/Lightagent/actions/runs/41378487683, https://github.com/dlroqa/Lightagent/actions/runs/41378487629 |
+| 2026-11-02 | Parity: `setup.provider.key` is implemented: **24 of 227** | — | DESKTOP_CLI_PARITY.md |
+
+**Next in D4d:**
+- **D4d-2:** provider and model selection, and saved providers, through
+  shared operations (`setup.provider.url`, `.saved`, `.model`,
+  `cli.models`).
+- **The endpoint check:** an explicit user action with a bounded timeout,
+  sending the intended provider's key and never following a redirect with
+  it.
+- **`lightagent runtime`:** its control-plane commands still resolve the
+  inference key with `resolve()`; that moves to the same fail-closed rule.
+
 ## Artifacts and retention
 
 | Artifact | Run | Retention |
@@ -778,7 +845,8 @@ applied as 32 edits to 15 files.
 
 This is the order the owner set on 2026-11-02 (DESKTOP_CLAUDE_PROMPT.md §4):
 
-1. **Row 11** is done (see "Row 11"). Its carried items are listed there.
+1. **Rows 11 and 12** are done (see "Row 11" and "Row 12"). D4d continues
+   with D4d-2, listed under "Row 12".
    The next slice is **D4d**: providers, models, protected credentials
    (including the terminal chat's key resolution) and endpoint checks.
 

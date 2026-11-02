@@ -93,11 +93,11 @@
   }
  ],
  "summary": {
-  "total_rows": 319,
+  "total_rows": 322,
   "by_kind": {
    "acp-method": 8,
    "alias": 2,
-   "api": 37,
+   "api": 40,
    "argument": 47,
    "command": 86,
    "config": 14,
@@ -112,12 +112,12 @@
    "value": 6
   },
   "by_applicability": {
-   "applicable": 283,
+   "applicable": 286,
    "host-owned": 7,
    "not-applicable": 29
   },
   "parity_denominator": 227,
-  "parity_implemented": 23,
+  "parity_implemented": 24,
   "pending_decision_rows": 0,
   "not_counted_duplicates": 26
  },
@@ -4580,13 +4580,13 @@
    "counts_toward_parity": true,
    "duplicate_of": null,
    "ui": "Providers/Models: key entry (write-only; host sends to backend; renderer shows redacted status)",
-   "backend": "extract: store_provider_key*()",
+   "backend": "shared: lightagent_core::provider_keys (store_key, use_key, remove_key); api: GET|PUT|DELETE /provider/credential",
    "permission": "local-operator; secret write-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Settings Provider API key card: save, stale save refused with the entry kept, replace, remove after confirmation, and the key gone from the field and the page (UI e2e: e2e/settings.mjs in the standalone Web UI render job, browser only); API = CLI: one key file and reference, write-only, never in a response or CLI output, and unusable keys fail closed (crates/lightagent/tests/desktop_credentials.rs, all four platforms); desktop: contract operations provider.credential.get/set/remove; native WebView automation pending D8 (not claimed)",
+   "tested_sha": "6988f6c3256b46d8cc55704e5c3bc2c9e4016b90",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41378487660 (check); https://github.com/dlroqa/Lightagent/actions/runs/41378487692 (desktop)"
   },
   {
    "id": "setup.provider.model",
@@ -7219,6 +7219,78 @@
    "backend": "api: GET /jev/routing-report",
    "permission": "local-operator",
    "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.provider.credential",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/provider/credential",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "The active endpoint's provider API key as status only (absent, ready, or why it cannot be used); never the key",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/provider/credential"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: GET /provider/credential",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.put.provider.credential",
+   "kind": "api",
+   "surface": "PUT /api/lightagent/v1/provider/credential",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "Save or replace the active endpoint's provider API key (write-only, revision-checked) in the shared secrets store",
+   "tree_key": null,
+   "tokens": [
+    "PUT /api/lightagent/v1/provider/credential"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: PUT /provider/credential",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.delete.provider.credential",
+   "kind": "api",
+   "surface": "DELETE /api/lightagent/v1/provider/credential",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "Remove the active endpoint's provider API key from the config and the shared secrets store",
+   "tree_key": null,
+   "tokens": [
+    "DELETE /api/lightagent/v1/provider/credential"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: DELETE /provider/credential",
+   "permission": "local-operator",
+   "data_scope": "installation",
    "desktop_status": "not-started",
    "verification": null,
    "tested_sha": null,

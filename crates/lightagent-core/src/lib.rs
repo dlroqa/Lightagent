@@ -33,6 +33,7 @@ pub mod paths;
 pub mod permissions;
 pub mod profile;
 pub mod provider;
+pub mod provider_keys;
 pub mod provisioning;
 pub mod skills;
 pub mod tool_stream;
@@ -47,9 +48,9 @@ pub use config::{
     GenerationOverride, GithubActionsConfig, InferenceConfig, InfinityConfig,
     JevClassificationConfig, JevClassificationMode, JevConfig, JevRoutingGrant, JevRoutingInput,
     JevRoutingPermission, McpConfig, McpServerEntry, OpenTerminalConfig, PlatformConfig,
-    PlatformEndpointConfig, QdrantConfig, SavedProvider, SecretLookup, SecretRef, SecurityConfig,
-    SubagentsConfig, ToolNameMode, ToolPolicyMode, ToolsConfig, UnreadableSecret, UpdateError,
-    WebConfig, WebSearchConfig, WorkerResolution,
+    PlatformEndpointConfig, QdrantConfig, SavedProvider, SecretLookup, SecretRef,
+    SecretUnavailable, SecurityConfig, SubagentsConfig, ToolNameMode, ToolPolicyMode, ToolsConfig,
+    UpdateError, WebConfig, WebSearchConfig, WorkerResolution, secret_state,
 };
 pub use event::{
     AgentEvent, ClassificationDiagnostics, SpecialistRestriction, SpecialistSelection,

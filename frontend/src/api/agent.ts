@@ -364,6 +364,15 @@ export interface ConfigView {
   config: Record<string, unknown>;
 }
 
+/** The active endpoint's provider API key as status only; the key itself is never returned. */
+export interface ProviderCredentialStatus {
+  provider_key_id: string;
+  base_url: string;
+  state: "absent" | "ready" | "unreadable" | "unresolved" | "empty" | "invalid";
+  source: "file" | "env" | null;
+  revision: string;
+}
+
 /** `lightagent config jev-routing-report`: the routing-permission dry run. It changes nothing. */
 export interface JevRoutingReport {
   report: string;
@@ -405,6 +414,15 @@ export const agentApi = {
   provider: () => jsonRequest<ProviderCapabilities>("/provider"),
   jevStatus: () => jsonRequest<JevStatus>("/jev"),
   jevRoutingReport: () => jsonRequest<JevRoutingReport>("/jev/routing-report"),
+  providerCredential: () => jsonRequest<ProviderCredentialStatus>("/provider/credential"),
+  /** Write-only: the response is the status, never the key. 409 when `expectedRevision` is stale. */
+  saveProviderCredential: (key: string, expectedRevision?: string) =>
+    jsonRequest<ProviderCredentialStatus>("/provider/credential", {
+      method: "PUT",
+      body: JSON.stringify({ key, expected_revision: expectedRevision }),
+    }),
+  removeProviderCredential: () =>
+    jsonRequest<ProviderCredentialStatus>("/provider/credential", { method: "DELETE" }),
   verifyJev: () => jsonRequest<JevVerification>("/jev/verify", { method: "POST", body: "{}" }),
   profiles: () => jsonRequest<ProfileCatalog>("/profiles"),
   profile: (id: string) => jsonRequest<AgentProfileDetail>(`/profiles/${encodeURIComponent(id)}`),

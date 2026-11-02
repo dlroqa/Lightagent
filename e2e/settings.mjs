@@ -6,6 +6,8 @@
 // writes are the CLI's.
 
 const SECRET = "render-state-secret-5d2c81-not-a-real-key";
+const PROVIDER_KEY = "render-provider-key-9e41a7-not-a-real-key";
+const PROVIDER_KEY_2 = "render-provider-key-b07c33-not-a-real-key";
 
 async function settingsNow(base) {
   return (await fetch(`${base}/api/lightagent/v1/settings`)).json();
@@ -75,6 +77,42 @@ export async function checkSettingsStates(browser, base, outDir) {
       if (!shownReport.includes(row.profile)) failures.push(`settings: the routing dry run does not list ${row.profile}`);
     }
     if (served.changes_made !== false) failures.push("settings: the routing report claims to have changed something");
+
+    // The provider key: saved write-only, replaced, then removed.
+    const credentialNow = async () =>
+      (await fetch(`${base}/api/lightagent/v1/provider/credential`)).json();
+    const keyField = page.locator("#provider-api-key");
+    if ((await credentialNow()).state !== "absent") {
+      failures.push("settings: the harness started with a provider key; the credential flow needs none");
+    } else {
+      await page.getByTestId("provider-credential-state").waitFor({ timeout: 5000 });
+      await keyField.fill(PROVIDER_KEY);
+      const saveKey = page.getByRole("button", { name: "Save API key", exact: true });
+      // The card loaded before the writes above, so its revision is stale:
+      // the save is refused, and the entry stays in the field.
+      await saveKey.click();
+      await page.getByText("so the key was not saved", { exact: false }).waitFor({ timeout: 5000 });
+      if (await keyField.inputValue() !== PROVIDER_KEY) failures.push("settings: a refused key save lost the entry");
+      if ((await credentialNow()).state !== "absent") failures.push("settings: a refused key save stored the key");
+      // On the current revision it is stored.
+      await saveKey.click();
+      await page.getByText("Provider API key saved.", { exact: true }).waitFor({ timeout: 5000 });
+      let credential = await credentialNow();
+      if (credential.state !== "ready") failures.push(`settings: after saving, the key is ${credential.state}`);
+      if (JSON.stringify(credential).includes(PROVIDER_KEY)) failures.push("settings: the credential status carries the key");
+      if (await keyField.inputValue()) failures.push("settings: the key stays in the field after saving");
+      if ((await page.content()).includes(PROVIDER_KEY)) failures.push("settings: the saved key is in the page");
+      await page.screenshot({ path: `${outDir}/settings-provider-key.png` });
+      await keyField.fill(PROVIDER_KEY_2);
+      await page.getByRole("button", { name: "Replace API key", exact: true }).click();
+      await page.getByText("Provider API key replaced.", { exact: true }).waitFor({ timeout: 5000 });
+      if ((await page.content()).includes(PROVIDER_KEY_2)) failures.push("settings: the replaced key is in the page");
+      await page.getByRole("button", { name: "Remove API key", exact: true }).click();
+      await page.getByRole("button", { name: "Confirm: remove the API key", exact: true }).click();
+      await page.getByText("Provider API key removed.", { exact: false }).waitFor({ timeout: 5000 });
+      credential = await credentialNow();
+      if (credential.state !== "absent") failures.push(`settings: after removing, the key is ${credential.state}`);
+    }
 
     // A saved secret is in none of the renderer's state.
     const current = await settingsNow(base);

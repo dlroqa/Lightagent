@@ -5,15 +5,15 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 ## Coverage
 
 - Denominator: 227
-- Implemented: 23 of 227
+- Implemented: 24 of 227
 - Pending D1 decision rows: 0
-- Total rows: 319
+- Total rows: 322
 
 | Kind | Rows |
 |---|---|
 | acp-method | 8 |
 | alias | 2 |
-| api | 37 |
+| api | 40 |
 | argument | 47 |
 | command | 86 |
 | config | 14 |
@@ -29,7 +29,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 
 | Applicability | Rows |
 |---|---|
-| applicable | 283 |
+| applicable | 286 |
 | host-owned | 7 |
 | not-applicable | 29 |
 
@@ -71,6 +71,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.config.set.arg.key` | `0e46892` | Advanced configuration card Key field (UI e2e); API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41359276745), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41359276774) |
 | `cli.config.set.arg.value` | `0e46892` | Advanced configuration card Value field, invalid value refused with the CLI's words (UI e2e; API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms)); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41359276745), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41359276774) |
 | `cli.config.jev-routing-report` | `205f01b` | Settings dry-run table under the routing permission lists the server's report (UI e2e: e2e/settings.mjs); API = CLI `--json` report (crates/lightagent/tests/desktop_config.rs, all four platforms); desktop: contract operation jev.routing_report; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41370767535), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41370767531) |
+| `setup.provider.key` | `6988f6c` | Settings Provider API key card: save, stale save refused with the entry kept, replace, remove after confirmation, key gone from the page (UI e2e, browser only); API = CLI, write-only, unusable keys fail closed (crates/lightagent/tests/desktop_credentials.rs, all four platforms); desktop: contract operations provider.credential.*; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41378487660), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41378487692) |
 
 ## What the drift check cannot detect automatically
 
@@ -311,7 +312,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `setup.profiles.menu` | `lightagent setup → profiles` | applicable | dup→`cli.profile.create` | Profiles/Workspaces | same as cli.profile.* | not-started | `crates/lightagent/src/setup.rs:748` |
 | `setup.provider.saved` | `lightagent setup → provider` | applicable | yes | Providers/Models: saved providers | extract: setup.rs provider section | not-started | `crates/lightagent/src/setup.rs:326` |
 | `setup.provider.url` | `lightagent setup → provider` | applicable | yes | Providers/Models: endpoint + test connection | extract: setup.rs provider section; provider_models() | not-started | `crates/lightagent/src/setup.rs:67` |
-| `setup.provider.key` | `lightagent setup → provider` | applicable | yes | Providers/Models: key entry (write-only; host sends to backend; renderer shows redacted status) | extract: store_provider_key*() | not-started | `crates/lightagent/src/setup.rs:391` |
+| `setup.provider.key` | `lightagent setup → provider` | applicable | yes | Providers/Models: key entry (write-only; host sends to backend; renderer shows redacted status) | shared: lightagent_core::provider_keys; api: GET\|PUT\|DELETE /provider/credential | implemented | `crates/lightagent/src/setup.rs:391` |
 | `setup.provider.model` | `lightagent setup → provider` | applicable | yes | Providers/Models: model picker | extract: setup.rs provider section | not-started | `crates/lightagent/src/setup.rs:97` |
 | `setup.tools.mode` | `lightagent setup → tools` | applicable | yes | Tools/MCP/Extensions: local tools | api: PUT /settings (partial) | not-started | `crates/lightagent/src/setup.rs:910` |
 | `setup.tools.workspace` | `lightagent setup → tools` | applicable | yes | Profiles/Workspaces: workspace folder (picker) | api: PUT /settings (partial) | not-started | `crates/lightagent/src/setup.rs:920` |
@@ -467,6 +468,9 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `api.get.config` | `GET /api/lightagent/v1/config` | applicable | no | (backend reuse) | api: GET /config | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.get.config.key` | `GET /api/lightagent/v1/config/{key}` | applicable | no | (backend reuse) | api: GET /config/{key} | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.get.jev.routing-report` | `GET /api/lightagent/v1/jev/routing-report` | applicable | no | (backend reuse) | api: GET /jev/routing-report | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.get.provider.credential` | `GET /api/lightagent/v1/provider/credential` | applicable | no | (backend reuse) | api: GET /provider/credential | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.put.provider.credential` | `PUT /api/lightagent/v1/provider/credential` | applicable | no | (backend reuse) | api: PUT /provider/credential | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.delete.provider.credential` | `DELETE /api/lightagent/v1/provider/credential` | applicable | no | (backend reuse) | api: DELETE /provider/credential | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.put.config.key` | `PUT /api/lightagent/v1/config/{key}` | applicable | no | (backend reuse) | api: PUT /config/{key} | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.get.approvals` | `GET /api/lightagent/v1/approvals` | applicable | no | (backend reuse) | api: GET /approvals | not-started | `crates/lightagent-api/src/lib.rs:109` |
 | `api.post.approvals.run` | `POST /api/lightagent/v1/approvals/{run}` | applicable | no | (backend reuse) | api: POST /approvals/{run} | not-started | `crates/lightagent-api/src/lib.rs:110` |

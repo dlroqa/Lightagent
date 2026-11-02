@@ -1401,8 +1401,11 @@ async fn models(json: bool) -> Result<(), String> {
     let paths = paths()?;
     let config = load_config(&paths)?;
     let mut provider_config = ProviderConfig::new(config.inference.base_url.clone(), "default");
+    // A configured key that cannot be used fails closed: nothing is sent.
     if let Some(secret) = &config.inference.api_key
-        && let Some(value) = secret.resolve()
+        && let Some(value) = secret
+            .for_request()
+            .map_err(|error| format!("inference: {error}; nothing was sent"))?
     {
         provider_config = provider_config.with_api_key(value);
     }
