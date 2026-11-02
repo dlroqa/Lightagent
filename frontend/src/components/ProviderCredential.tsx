@@ -73,7 +73,7 @@ export function ProviderCredentialCard() {
     try {
       setStatus(await agentApi.saveProviderCredential(key, status.revision));
       setKey("");
-      setMessage(replacing ? "Key replaced." : "Key saved.");
+      setMessage(replacing ? "Provider API key replaced." : "Provider API key saved.");
     } catch (cause) {
       const text = cause instanceof Error ? cause.message : String(cause);
       if (text.startsWith("409:")) {
@@ -95,7 +95,7 @@ export function ProviderCredentialCard() {
     try {
       setStatus(await agentApi.removeProviderCredential());
       setConfirmRemove(false);
-      setMessage("Key removed. Requests are sent without a key.");
+      setMessage("Provider API key removed. Requests are sent without a key.");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -128,20 +128,20 @@ export function ProviderCredentialCard() {
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
         <button type="button" className="btn" disabled={!status || busy || !key.trim()} aria-busy={busy || undefined}
           onClick={() => void save()}>
-          {configured ? "Replace key" : "Save key"}
+          {configured ? "Replace API key" : "Save API key"}
         </button>
         {configured && !confirmRemove && (
           <button type="button" className="btn" disabled={busy} onClick={() => setConfirmRemove(true)}>
-            Remove key
+            Remove API key
           </button>
         )}
         {configured && confirmRemove && (
           <>
             <button type="button" className="btn" disabled={busy} onClick={() => void remove()}>
-              Confirm: remove the key
+              Confirm: remove the API key
             </button>
             <button type="button" className="btn" disabled={busy} onClick={() => setConfirmRemove(false)}>
-              Keep the key
+              Keep the API key
             </button>
           </>
         )}

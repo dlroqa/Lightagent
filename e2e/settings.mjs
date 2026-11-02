@@ -87,8 +87,8 @@ export async function checkSettingsStates(browser, base, outDir) {
     } else {
       await page.getByTestId("provider-credential-state").waitFor({ timeout: 5000 });
       await keyField.fill(PROVIDER_KEY);
-      await page.getByRole("button", { name: "Save key", exact: true }).click();
-      await page.getByText("Key saved.", { exact: true }).waitFor({ timeout: 5000 });
+      await page.getByRole("button", { name: "Save API key", exact: true }).click();
+      await page.getByText("Provider API key saved.", { exact: true }).waitFor({ timeout: 5000 });
       let credential = await credentialNow();
       if (credential.state !== "ready") failures.push(`settings: after saving, the key is ${credential.state}`);
       if (JSON.stringify(credential).includes(PROVIDER_KEY)) failures.push("settings: the credential status carries the key");
@@ -96,12 +96,12 @@ export async function checkSettingsStates(browser, base, outDir) {
       if ((await page.content()).includes(PROVIDER_KEY)) failures.push("settings: the saved key is in the page");
       await page.screenshot({ path: `${outDir}/settings-provider-key.png` });
       await keyField.fill(PROVIDER_KEY_2);
-      await page.getByRole("button", { name: "Replace key", exact: true }).click();
-      await page.getByText("Key replaced.", { exact: true }).waitFor({ timeout: 5000 });
+      await page.getByRole("button", { name: "Replace API key", exact: true }).click();
+      await page.getByText("Provider API key replaced.", { exact: true }).waitFor({ timeout: 5000 });
       if ((await page.content()).includes(PROVIDER_KEY_2)) failures.push("settings: the replaced key is in the page");
-      await page.getByRole("button", { name: "Remove key", exact: true }).click();
-      await page.getByRole("button", { name: "Confirm: remove the key" }).click();
-      await page.getByText("Key removed.", { exact: false }).waitFor({ timeout: 5000 });
+      await page.getByRole("button", { name: "Remove API key", exact: true }).click();
+      await page.getByRole("button", { name: "Confirm: remove the API key", exact: true }).click();
+      await page.getByText("Provider API key removed.", { exact: false }).waitFor({ timeout: 5000 });
       credential = await credentialNow();
       if (credential.state !== "absent") failures.push(`settings: after removing, the key is ${credential.state}`);
     }
