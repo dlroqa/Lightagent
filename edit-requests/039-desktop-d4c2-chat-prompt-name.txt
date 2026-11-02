@@ -1,0 +1,19 @@
+=== base 6c0b7ff943ea7d2555dbd0e3c5786b363f1f0943
+=== message
+Name the chat's saved prompt so it does not shadow the terminal prompt
+
+The prompt message appended to the session was bound as `prompt`, which
+hid the chat loop's `prompt: TerminalPrompt` passed on to `drive` and
+`wait_for_outcome` later in the same turn (CI 41367409693, E0308).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent/src/chat.rs
+--- find
+        let prompt = StoredMessage::new("user", &line);
+        session_store
+            .apply(&mut session, |saved| saved.push_message(prompt.clone()))
+--- with
+        let asked = StoredMessage::new("user", &line);
+        session_store
+            .apply(&mut session, |saved| saved.push_message(asked.clone()))
+=== end
