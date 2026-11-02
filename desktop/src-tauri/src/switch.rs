@@ -298,6 +298,8 @@ async fn try_switch(host: &Arc<Host>, id: String, stop: bool) -> Result<Outcome,
         .resolve("PUT", &format!("/api/lightagent/v1/profiles/{id}/active"))
         .map_err(|message| Failure::new("invalid", message))?;
     let _switching = Switching::begin(host)?;
+    #[cfg(feature = "e2e-hooks")]
+    crate::e2e_driver::switch_gate(&id).await;
     let runs = active_runs(host)
         .await
         .map_err(|message| Failure::new("unavailable", message))?;

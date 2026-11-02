@@ -7,6 +7,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod contract;
+#[cfg(feature = "e2e-hooks")]
+mod e2e_driver;
 mod sidecar;
 mod sse;
 mod switch;
@@ -32,6 +34,15 @@ const MAX_POLL: Duration = Duration::from_secs(25);
 const AUTO_RESTART_WINDOW: Duration = Duration::from_secs(60);
 /// How often the host checks that its runtime is still alive.
 const WATCH_INTERVAL: Duration = Duration::from_millis(500);
+/// How many resumes in a row may forward nothing before a broken relay
+/// reports the break.
+const RELAY_ATTEMPTS: u32 = 5;
+/// The pause before resuming a broken relay; it doubles with each resume
+/// in a row that forwards nothing.
+const RELAY_BACKOFF: Duration = Duration::from_millis(100);
+/// Why a relay ends when its runtime no longer has the run.
+const RUN_GONE: &str =
+    "the runtime has no such run: a runtime restart ends the runs it was working on";
 
 enum Runtime {
     Starting,
@@ -73,6 +84,10 @@ struct Subscription {
     state: Mutex<SubscriptionState>,
     notify: Notify,
     task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    /// Drops the relay's current connection to the runtime, which the relay
+    /// then resumes. Only the test driver uses it, to break a relay on
+    /// purpose.
+    interrupt: Notify,
 }
 
 #[derive(Default)]
@@ -159,6 +174,10 @@ struct RuntimeStatus {
 
 #[tauri::command]
 fn runtime_status(host: tauri::State<'_, Arc<Host>>) -> RuntimeStatus {
+    status(host.inner())
+}
+
+fn status(host: &Host) -> RuntimeStatus {
     let mut status = RuntimeStatus {
         state: "starting",
         detail: None,
@@ -295,6 +314,19 @@ async fn api_fetch(
     body_base64: Option<String>,
     filename: Option<String>,
 ) -> Result<FetchResult, String> {
+    fetch(host.inner(), method, target, body, body_base64, filename).await
+}
+
+/// One contract operation on the runtime: the UI's `api_fetch` (and the
+/// test driver) call exactly this.
+async fn fetch(
+    host: &Host,
+    method: String,
+    target: String,
+    body: Option<String>,
+    body_base64: Option<String>,
+    filename: Option<String>,
+) -> Result<FetchResult, String> {
     let operation = host.contract.resolve(&method, &target)?.clone();
     if host.switching.load(Ordering::Acquire) && switch::blocked_while_switching(&operation.id) {
         return Err("a profile switch is in progress; try again when it has finished".to_owned());
@@ -354,22 +386,24 @@ async fn api_fetch(
 
 #[tauri::command]
 async fn api_subscribe(host: tauri::State<'_, Arc<Host>>, target: String) -> Result<u64, String> {
+    subscribe(host.inner(), target)
+}
+
+/// Start relaying a stream operation: the UI's `api_subscribe` (and the
+/// test driver) call exactly this.
+fn subscribe(host: &Arc<Host>, target: String) -> Result<u64, String> {
     let operation = host.contract.resolve("GET", &target)?;
     if !operation.stream {
         return Err(format!("{} is not a stream", operation.id));
     }
-    let (base, authorization) = host.connection()?;
-    let request = host
-        .http
-        .get(format!("{base}{target}"))
-        .header(reqwest::header::AUTHORIZATION, authorization)
-        .header(reqwest::header::ACCEPT, "text/event-stream");
+    host.connection()?;
     let id = host.next_subscription.fetch_add(1, Ordering::Relaxed);
     let subscription = Arc::new(Subscription::default());
     lock(&host.subscriptions).insert(id, Arc::clone(&subscription));
     let relay = Arc::clone(&subscription);
+    let owner = Arc::clone(host);
     let task = tauri::async_runtime::spawn(async move {
-        let outcome = relay_stream(request, &relay).await;
+        let outcome = relay_stream(&owner, &target, &relay).await;
         {
             let mut state = lock(&relay.state);
             state.closed = true;
@@ -381,14 +415,98 @@ async fn api_subscribe(host: tauri::State<'_, Arc<Host>>, target: String) -> Res
     Ok(id)
 }
 
+/// How one connection of a relay ended.
+enum Leg {
+    /// The runtime ended the stream after the run's last event.
+    Done,
+    /// The connection failed, was dropped, or ended while the run was still
+    /// working. `progress`: it forwarded at least one new event.
+    Broken { reason: String, progress: bool },
+}
+
+/// What the runtime says about a relayed run once its stream has ended.
+enum RunCheck {
+    Finished,
+    Working,
+    Gone,
+    Unknown(String),
+}
+
+/// Relay a run's event stream into `subscription`. A break is resumed from
+/// the last event forwarded, with `Last-Event-ID`: the runtime numbers each
+/// event by its position in the run, so nothing is skipped, and an event at
+/// or before the last one forwarded is never forwarded again. After
+/// [`RELAY_ATTEMPTS`] resumes in a row that forward nothing, the break is
+/// reported.
 async fn relay_stream(
-    request: reqwest::RequestBuilder,
+    host: &Host,
+    target: &str,
     subscription: &Subscription,
 ) -> Result<(), String> {
-    let response = request
-        .send()
-        .await
-        .map_err(|error| format!("the runtime did not answer: {}", error.without_url()))?;
+    let mut last = None;
+    let mut failures = 0;
+    let (mut resumes, mut skipped) = (0u32, 0usize);
+    let outcome = loop {
+        match relay_leg(host, target, subscription, &mut last, &mut skipped).await {
+            Ok(Leg::Done) => break Ok(()),
+            Err(reason) => break Err(reason),
+            Ok(Leg::Broken { reason, progress }) => {
+                failures = if progress { 1 } else { failures + 1 };
+                if failures > RELAY_ATTEMPTS {
+                    break Err(format!("{reason}; the stream could not be resumed"));
+                }
+                resumes += 1;
+                tokio::time::sleep(RELAY_BACKOFF * 2u32.pow(failures - 1)).await;
+            }
+        }
+    };
+    let path = target.split('?').next().unwrap_or(target);
+    let last = last.map_or_else(|| "none".to_owned(), |id: u64| id.to_string());
+    host.e2e.note_once(
+        "RELAY_END",
+        &format!(
+            "target={path} resumes={resumes} skipped={skipped} last={last} error={}",
+            outcome.is_err()
+        ),
+    );
+    outcome
+}
+
+/// One connection of a relay, resumed after `last` when there is one.
+async fn relay_leg(
+    host: &Host,
+    target: &str,
+    subscription: &Subscription,
+    last: &mut Option<u64>,
+    skipped: &mut usize,
+) -> Result<Leg, String> {
+    let broken = |reason: String, progress: bool| -> Result<Leg, String> {
+        Ok(Leg::Broken { reason, progress })
+    };
+    let (base, authorization) = match host.connection() {
+        Ok(connection) => connection,
+        Err(reason) => return broken(reason, false),
+    };
+    let mut request = host
+        .http
+        .get(format!("{base}{target}"))
+        .header(reqwest::header::AUTHORIZATION, authorization)
+        .header(reqwest::header::ACCEPT, "text/event-stream");
+    if let Some(last) = *last {
+        request = request.header("Last-Event-ID", last.to_string());
+    }
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return broken(
+                format!("the runtime did not answer: {}", error.without_url()),
+                false,
+            );
+        }
+    };
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(RUN_GONE.to_owned());
+    }
     if !response.status().is_success() {
         return Err(format!(
             "the runtime refused the stream ({})",
@@ -397,15 +515,99 @@ async fn relay_stream(
     }
     let mut parser = sse::SseParser::default();
     let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| format!("the stream broke: {}", error.without_url()))?;
-        let events = parser.push(&chunk);
-        if !events.is_empty() {
-            lock(&subscription.state).events.extend(events);
-            subscription.notify.notify_waiters();
+    let mut progress = false;
+    loop {
+        let next = std::pin::pin!(stream.next());
+        let dropped = std::pin::pin!(subscription.interrupt.notified());
+        let chunk = match futures_util::future::select(next, dropped).await {
+            futures_util::future::Either::Left((chunk, _)) => chunk,
+            futures_util::future::Either::Right(((), _)) => {
+                return broken("the relay's connection was dropped".to_owned(), progress);
+            }
+        };
+        match chunk {
+            Some(Ok(chunk)) => {
+                let events = parser.push(&chunk);
+                let total = events.len();
+                let fresh: Vec<_> = events
+                    .into_iter()
+                    .filter(|event| advance(last, event))
+                    .collect();
+                *skipped += total - fresh.len();
+                if !fresh.is_empty() {
+                    progress = true;
+                    lock(&subscription.state).events.extend(fresh);
+                    subscription.notify.notify_waiters();
+                }
+            }
+            Some(Err(error)) => {
+                return broken(
+                    format!("the stream broke: {}", error.without_url()),
+                    progress,
+                );
+            }
+            None => break,
         }
     }
-    Ok(())
+    match check_run(host, target).await {
+        RunCheck::Finished => Ok(Leg::Done),
+        RunCheck::Working => broken(
+            "the stream ended while the run was still working".to_owned(),
+            progress,
+        ),
+        RunCheck::Gone => Err(RUN_GONE.to_owned()),
+        RunCheck::Unknown(reason) => broken(reason, progress),
+    }
+}
+
+/// Whether `event` follows the last event forwarded, recording it as the
+/// last if so. An event without a numeric id cannot repeat one.
+fn advance(last: &mut Option<u64>, event: &sse::SseEvent) -> bool {
+    match event.id.as_deref().and_then(|id| id.parse::<u64>().ok()) {
+        Some(id) if last.is_some_and(|seen| id <= seen) => false,
+        Some(id) => {
+            *last = Some(id);
+            true
+        }
+        None => true,
+    }
+}
+
+/// Ask the runtime about the run a stream relayed, once the stream ended.
+async fn check_run(host: &Host, target: &str) -> RunCheck {
+    let path = target.split('?').next().unwrap_or(target);
+    let Some(run) = path.strip_suffix("/events") else {
+        return RunCheck::Finished;
+    };
+    let (base, authorization) = match host.connection() {
+        Ok(connection) => connection,
+        Err(reason) => return RunCheck::Unknown(reason),
+    };
+    let response = match host
+        .http
+        .get(format!("{base}{run}"))
+        .header(reqwest::header::AUTHORIZATION, authorization)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return RunCheck::Unknown(format!(
+                "the runtime did not answer: {}",
+                error.without_url()
+            ));
+        }
+    };
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return RunCheck::Gone;
+    }
+    let body = response.text().await.unwrap_or_default();
+    let run: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    match run["status"].as_str() {
+        Some("completed" | "cancelled" | "failed") => RunCheck::Finished,
+        Some(_) => RunCheck::Working,
+        None => RunCheck::Unknown("the runtime's answer about the run was unreadable".to_owned()),
+    }
 }
 
 #[derive(Serialize)]
@@ -430,6 +632,11 @@ async fn api_events_poll(
     subscription: u64,
     wait_ms: u64,
 ) -> Result<PollResult, String> {
+    poll(host.inner(), subscription, wait_ms).await
+}
+
+/// The events relayed since the last poll, waiting up to `wait_ms` for one.
+async fn poll(host: &Host, subscription: u64, wait_ms: u64) -> Result<PollResult, String> {
     let entry = lock(&host.subscriptions)
         .get(&subscription)
         .cloned()
@@ -454,6 +661,10 @@ async fn api_events_poll(
 
 #[tauri::command]
 fn api_unsubscribe(host: tauri::State<'_, Arc<Host>>, subscription: u64) {
+    unsubscribe(host.inner(), subscription);
+}
+
+fn unsubscribe(host: &Host, subscription: u64) {
     if let Some(entry) = lock(&host.subscriptions).remove(&subscription)
         && let Some(task) = lock(&entry.task).take()
     {
@@ -635,6 +846,8 @@ fn main() {
                     start_runtime(&host, false);
                 }
                 #[cfg(feature = "e2e-hooks")]
+                e2e_driver::start(&host);
+                #[cfg(feature = "e2e-hooks")]
                 switch::run_e2e_switches(&host);
                 watch_runtime(&host);
             });
@@ -682,4 +895,37 @@ fn main() {
         }
         _ => {}
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(id: Option<&str>) -> sse::SseEvent {
+        sse::SseEvent {
+            id: id.map(str::to_owned),
+            event: "model.delta".into(),
+            data: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_resumed_relay_forwards_each_event_once_in_order() {
+        let mut last = None;
+        let first: Vec<bool> = ["0", "1", "2"]
+            .iter()
+            .map(|id| advance(&mut last, &event(Some(id))))
+            .collect();
+        assert_eq!(first, [true, true, true]);
+        // A runtime that replays from the start after a resume: only what
+        // is new passes.
+        let replayed: Vec<bool> = ["0", "1", "2", "3"]
+            .iter()
+            .map(|id| advance(&mut last, &event(Some(id))))
+            .collect();
+        assert_eq!(replayed, [false, false, false, true]);
+        assert_eq!(last, Some(3));
+        assert!(advance(&mut last, &event(None)));
+        assert_eq!(last, Some(3));
+    }
 }
