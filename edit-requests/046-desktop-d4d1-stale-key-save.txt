@@ -1,0 +1,38 @@
+=== base 599b261a890477561916634e974862a1e6b81068
+=== message
+Check the key card's refused save, and keep test literals out of the env scan
+
+- The render check's provider-key card loaded before the conflict checks
+  above it wrote the config, so its first save was rightly refused as
+  stale (409), and the success message the check waited for never came
+  (check 41377130735). The check now asserts what a stale save must do:
+  the refusal is shown, the entry stays in the field, nothing is stored,
+  and the next save, on the current revision, stores the key.
+- A core test asserted on the literal "LIGHTAGENT_TEST", which the
+  desktop inventory's environment scan read as an undeclared variable
+  (desktop 41377130716). It now checks for the variable's own suffix.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-core/src/config.rs
+--- find
+            assert!(!message.contains("LIGHTAGENT_TEST"), "{message}");
+--- with
+            assert!(!message.contains("FOR_REQUEST_UNSET"), "{message}");
+=== replace e2e/settings.mjs
+--- find
+      await keyField.fill(PROVIDER_KEY);
+      await page.getByRole("button", { name: "Save API key", exact: true }).click();
+      await page.getByText("Provider API key saved.", { exact: true }).waitFor({ timeout: 5000 });
+--- with
+      await keyField.fill(PROVIDER_KEY);
+      const saveKey = page.getByRole("button", { name: "Save API key", exact: true });
+      // The card loaded before the writes above, so its revision is stale:
+      // the save is refused, and the entry stays in the field.
+      await saveKey.click();
+      await page.getByText("so the key was not saved", { exact: false }).waitFor({ timeout: 5000 });
+      if (await keyField.inputValue() !== PROVIDER_KEY) failures.push("settings: a refused key save lost the entry");
+      if ((await credentialNow()).state !== "absent") failures.push("settings: a refused key save stored the key");
+      // On the current revision it is stored.
+      await saveKey.click();
+      await page.getByText("Provider API key saved.", { exact: true }).waitFor({ timeout: 5000 });
+=== end
