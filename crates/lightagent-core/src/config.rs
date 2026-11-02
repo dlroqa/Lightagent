@@ -2577,7 +2577,7 @@ impl ConfigStore {
 
     /// Hold the config's write lock: an exclusive OS lock on `<config>.lock`,
     /// which every process takes. Waits up to the store's lock wait.
-    fn lock(&self) -> Result<std::fs::File, ConfigError> {
+    fn lock(&self) -> Result<paths::ExclusiveLock, ConfigError> {
         let mut name = self
             .path
             .file_name()

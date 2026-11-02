@@ -199,6 +199,11 @@
    "path": "/api/lightagent/v1/runs/{id}/cancel"
   },
   {
+   "id": "runs.continue",
+   "method": "POST",
+   "path": "/api/lightagent/v1/runs/{id}/continue"
+  },
+  {
    "id": "sessions.list",
    "method": "GET",
    "path": "/api/lightagent/v1/sessions"

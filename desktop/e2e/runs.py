@@ -17,6 +17,16 @@ LIGHTAGENT_HOME, set by the caller, is isolated.
   regenerate  R1 through the host: a finished answer replaces the saved one;
               a provider failure, a refusal, an empty answer and a cancel keep
               it; a stale answer id and a busy session are refused
+  continue    with a one-second budget set through the host, a run started
+              with on_time_budget pause pauses (run.paused, awaiting_continue)
+              and sends nothing; continue resumes the same execution (the next
+              turn carries the unread tool result): extend offers the tools,
+              answer does not and ends on the budget; a second continue and a
+              cancel while paused behave; a run that did not ask wraps up
+  steering    the server side of the client-held steering queue: a steer sent
+              while the session is busy is refused and not saved; two clients
+              sending at once get exactly one admitted; queued turns then run
+              in order
   crash       an approved write runs, then the runtime is killed while the
               model's next turn is in flight: the host reports the lost stream
               and restarts its runtime; the session records the run as
@@ -41,6 +51,16 @@ def scripts(provider):
     def write(name, content):
         return ("tool", "fs.write", {"path": name, "content": content, "append": True})
 
+    def slow_lookup(p, turn, index):
+        # The tool's turn outlasts a one-second budget, so the budget runs
+        # out with its result unread.
+        if turn == 0:
+            return [("tool", "datetime.now", {}), ("sleep", 1.5), ("finish", "tool_calls")]
+        return [("text", "Found it."), ("finish", "stop")]
+
+    for name in ("continue-extend", "continue-answer", "continue-cancel", "continue-default"):
+        provider.scripts[name] = slow_lookup
+
     provider.scripts.update({
         "stream": lambda p, turn, index: (
             [("text", "Checking "), ("text", "the time. "), ("tool", "datetime.now", {}), ("finish", "tool_calls")]
@@ -64,6 +84,7 @@ def scripts(provider):
             [write("crash.txt", "once\n"), ("finish", "tool_calls")]
             if turn == 0 else [("text", "Still "), ("gate", "crash"), ("text", "working."), ("finish", "stop")]
         ),
+        "steer-hold": lambda p, turn, index: [("text", "Working"), ("gate", "steer-hold"), ("text", " done."), ("finish", "stop")],
         "regen": lambda p, turn, index: {
             "first": [("text", "First answer."), ("finish", "stop")],
             "second": [("text", "Second answer."), ("finish", "stop")],
@@ -241,6 +262,120 @@ def scenario_regenerate(host, provider, workspace):
     return check
 
 
+def scenario_continue(host, provider, workspace):
+    check = Checks("continue")
+    status, body = host.fetch("PUT", f"{API}/config/agent.wall_clock_secs", {"value": "1"})
+    check.expect("a one-second time budget is set through the host", status == 200, (status, body))
+    try:
+        for mode in ("extend", "answer"):
+            name = f"continue-{mode}"
+            session = host.new_session()
+            status, created = host.fetch(
+                "POST", f"{API}/runs",
+                {"message": f"[e2e:{name}] Look it up.", "session_id": session, "on_time_budget": "pause"},
+            )
+            check.expect(f"{mode}: the run starts", status == 202, (status, created))
+            if status != 202:
+                continue
+            run = created["id"]
+            stream = Stream(host, run)
+            paused = stream.until(lambda s: s.has("run.paused"))
+            _, info = host.fetch("GET", f"{API}/runs/{run}")
+            waiting = len(provider.requests(name))
+            status, answered = host.fetch("POST", f"{API}/runs/{run}/continue", {"mode": mode})
+            stream.finish()
+            again = host.fetch("POST", f"{API}/runs/{run}/continue", {"mode": mode})
+            requests = provider.requests(name)
+            final = (stream.data("run.completed") or [{}])[-1]
+            check.expect(f"{mode}: the run paused on its budget", paused and (info or {}).get("status") == "awaiting_continue", (stream.names(), info))
+            check.expect(f"{mode}: nothing was sent while paused", waiting == 1, waiting)
+            check.expect(f"{mode}: the continue was taken", status == 200 and (answered or {}).get("continued") is True, (status, answered))
+            # The tool result the model had not read is in the next turn's
+            # conversation: the same execution went on, not a new turn.
+            check.expect(f"{mode}: the same execution carried on", len(requests) == 2 and "tool" in requests[1]["roles"], requests)
+            if mode == "extend":
+                check.expect("extend: the tools are offered again", len(requests) == 2 and requests[1]["offered"] > 0, requests)
+                check.expect("extend: the run completed", final.get("reason") == "EndTurn", final)
+            else:
+                check.expect("answer: the final turn has no tools", len(requests) == 2 and requests[1]["offered"] == 0, requests)
+                check.expect("answer: it ended on the budget", final.get("reason") == "WallClockExceeded", final)
+            check.expect(f"{mode}: the answer arrived", "Found it." in stream.text(), stream.text())
+            check.expect(f"{mode}: a second continue is refused", again[0] == 409, again)
+
+        session = host.new_session()
+        status, created = host.fetch(
+            "POST", f"{API}/runs",
+            {"message": "[e2e:continue-cancel] Look it up.", "session_id": session, "on_time_budget": "pause"},
+        )
+        if status == 202:
+            run = created["id"]
+            stream = Stream(host, run)
+            stream.until(lambda s: s.has("run.paused"))
+            host.fetch("POST", f"{API}/runs/{run}/cancel", {})
+            stream.finish()
+            _, info = host.fetch("GET", f"{API}/runs/{run}")
+            check.expect("cancel: a paused run is cancelled", (info or {}).get("status") == "cancelled" and stream.has("run.cancelled"), (info, stream.names()))
+            check.expect("cancel: nothing more was sent", len(provider.requests("continue-cancel")) == 1, provider.requests("continue-cancel"))
+        else:
+            check.expect("cancel: the run starts", False, (status, created))
+
+        session = host.new_session()
+        stream = Stream(host, host.start_run(session, "[e2e:continue-default] Look it up.")).finish()
+        requests = provider.requests("continue-default")
+        final = (stream.data("run.completed") or [{}])[-1]
+        check.expect("default: a run that did not ask never pauses", not stream.has("run.paused"), stream.names())
+        check.expect("default: it wraps up without tools", final.get("reason") == "WallClockExceeded" and len(requests) == 2 and requests[1]["offered"] == 0, (final, requests))
+    finally:
+        host.fetch("PUT", f"{API}/config/agent.wall_clock_secs", {"value": ""})
+    return check
+
+
+def scenario_steering(host, provider, workspace):
+    check = Checks("steering")
+    session = host.new_session()
+    first = host.start_run(session, "[e2e:steer-hold] Start.")
+    stream = Stream(host, first)
+    stream.until(lambda s: "Working" in s.text())
+    busy = host.fetch("POST", f"{API}/runs", {"message": "[e2e:steer] Too early.", "session_id": session})
+    provider.open("steer-hold")
+    stream.finish()
+    recorded(host, session, 1)
+    check.expect("a steer sent while the session is busy is refused", busy[0] == 409, busy)
+
+    # Two clients send their queued steer at once: exactly one is admitted.
+    deadline = time.time() + 10
+    while True:
+        sent = [
+            host.send("fetch", method="POST", target=f"{API}/runs",
+                      body=json.dumps({"message": f"[e2e:steer] Steer {n}.", "session_id": session}))
+            for n in (1, 2)
+        ]
+        answers = [host.answer(ident) for ident in sent]
+        statuses = sorted(answer["status"] for answer in answers)
+        if statuses != [409, 409] or time.time() > deadline:
+            break
+        time.sleep(0.1)
+    check.expect("two clients at once: exactly one is admitted", statuses == [202, 409], statuses)
+    if statuses == [202, 409]:
+        won = 0 if answers[0]["status"] == 202 else 1
+        Stream(host, json.loads(answers[won]["body"])["id"]).finish()
+        recorded(host, session, 2)
+        other = f"[e2e:steer] Steer {2 - won}."
+        deadline, follow = time.time() + 10, None
+        while time.time() < deadline:
+            follow = host.fetch("POST", f"{API}/runs", {"message": other, "session_id": session})
+            if follow[0] != 409:
+                break
+            time.sleep(0.1)
+        if follow and follow[0] == 202:
+            Stream(host, follow[1]["id"]).finish()
+        saved = recorded(host, session, 3)
+        prompts = [m.get("content") for m in saved.get("messages", []) if m.get("role") == "user"]
+        expected = ["[e2e:steer-hold] Start.", f"[e2e:steer] Steer {won + 1}.", other]
+        check.expect("the queued turns ran in the order admitted, the refused one never saved", prompts == expected, prompts)
+    return check
+
+
 def scenario_crash(host, provider, workspace, report):
     check = Checks("crash")
     path = os.path.join(workspace, "crash.txt")
@@ -303,6 +438,8 @@ def main():
             ("cancel", lambda: scenario_cancel(host, provider, workspace)),
             ("relay", lambda: scenario_relay(host, provider, workspace, report)),
             ("regenerate", lambda: scenario_regenerate(host, provider, workspace)),
+            ("continue", lambda: scenario_continue(host, provider, workspace)),
+            ("steering", lambda: scenario_steering(host, provider, workspace)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]

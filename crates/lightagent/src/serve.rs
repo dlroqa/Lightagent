@@ -379,7 +379,7 @@ impl RunFactory for LightweightRunFactory {
         cancel: CancellationToken,
         decisions: UnboundedReceiver<ApprovalDecision>,
     ) -> RunStatus {
-        self.run_with(request, trust, None, sink, cancel, decisions)
+        self.run_with(request, trust, None, sink, cancel, decisions, None)
             .await
     }
 
@@ -396,14 +396,48 @@ impl RunFactory for LightweightRunFactory {
         cancel: CancellationToken,
         decisions: UnboundedReceiver<ApprovalDecision>,
     ) -> RunStatus {
-        self.run_with(request, trust, Some(authorization), sink, cancel, decisions)
-            .await
+        self.run_with(
+            request,
+            trust,
+            Some(authorization),
+            sink,
+            cancel,
+            decisions,
+            None,
+        )
+        .await
+    }
+
+    /// A run that may pause on its time budget and be continued.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_controlled(
+        &self,
+        request: StartRun,
+        trust: RunTrust,
+        authorization: Option<RunAuthorization>,
+        controls: manager::RunControls,
+        sink: AgentEventSink,
+        cancel: CancellationToken,
+        decisions: UnboundedReceiver<ApprovalDecision>,
+    ) -> RunStatus {
+        self.run_with(
+            request,
+            trust,
+            authorization,
+            sink,
+            cancel,
+            decisions,
+            Some(controls),
+        )
+        .await
     }
 }
 
 impl LightweightRunFactory {
     /// The run itself. `authorization` is `None` for a run that is not
-    /// revocable, which then behaves exactly as it always has.
+    /// revocable, which then behaves exactly as it always has. `controls`,
+    /// when set, makes the run pause on its time budget until continued.
+    #[allow(clippy::too_many_arguments)]
     async fn run_with(
         &self,
         request: StartRun,
@@ -412,6 +446,7 @@ impl LightweightRunFactory {
         sink: AgentEventSink,
         cancel: CancellationToken,
         decisions: UnboundedReceiver<ApprovalDecision>,
+        controls: Option<manager::RunControls>,
     ) -> RunStatus {
         if let Some(authorization) = &authorization
             && let Err(denial) = authorization.verify()
@@ -718,7 +753,14 @@ impl LightweightRunFactory {
         let provider = AuthorizedProvider::new(provider, authorization.clone());
         let agent = AgentLoop::from_profile(provider, executor, &profile)
             .with_generation(generation.budget);
-        manager::drive_supervised(
+        let (agent, continues) = match controls {
+            Some(controls) => (
+                agent.with_wall_clock_policy(controls.on_wall_clock),
+                Some(controls.continues),
+            ),
+            None => (agent, None),
+        };
+        manager::drive_controlled(
             agent,
             request.history,
             request.message,
@@ -726,6 +768,7 @@ impl LightweightRunFactory {
             cancel,
             decisions,
             authorization,
+            continues,
         )
         .await
     }

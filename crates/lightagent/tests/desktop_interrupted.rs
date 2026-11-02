@@ -262,6 +262,42 @@ fn a_turn_interrupted_by_a_crash_is_recorded_and_never_run_again() {
 }
 
 #[test]
+fn a_second_runtime_leaves_a_live_turn_alone() {
+    let home = scratch_home("live");
+    let (url, chats) = provider(0);
+    cli_ok(&home, &["config", "set", "inference.base_url", &url]);
+    let first = start(&home);
+    let id = new_session(&first);
+    let (status, raw) = run_on(&first, &id, "hello");
+    assert_eq!(status, 202, "{raw}");
+    wait_until("the turn to reach the provider", || {
+        chats.load(Ordering::SeqCst) == 1
+    });
+    // Another runtime starts on the same home while that turn runs: its
+    // process still holds the session's lease, so the turn is not
+    // interrupted, at startup or when the session is asked for a turn.
+    let second = start(&home);
+    let saved = session(&second, &id);
+    assert_eq!(saved["runs"].as_array().map(Vec::len), Some(0), "{saved}");
+    let (status, raw) = run_on(&second, &id, "again");
+    assert_eq!(status, 409, "the live turn still holds the session: {raw}");
+    let saved = session(&second, &id);
+    assert_eq!(saved["runs"].as_array().map(Vec::len), Some(0), "{saved}");
+    // Once its process is gone, the next turn records it, and only the new
+    // turn is sent.
+    drop(first);
+    let (status, raw) = run_on(&second, &id, "again");
+    assert_eq!(status, 202, "{raw}");
+    let saved = session(&second, &id);
+    let runs = saved["runs"].as_array().expect("runs");
+    assert_eq!(runs.len(), 1, "{saved}");
+    assert_eq!(runs[0]["stop_reason"], "Interrupted", "{saved}");
+    wait_until("the new turn to reach the provider", || {
+        chats.load(Ordering::SeqCst) == 2
+    });
+}
+
+#[test]
 fn an_interrupted_regeneration_keeps_the_saved_answer() {
     let home = scratch_home("regenerate");
     let (url, chats) = provider(1);

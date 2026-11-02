@@ -137,10 +137,14 @@ class FakeProvider:
 
     def serve(self, handler, request):
         messages = request.get("messages") or []
-        users = [i for i, m in enumerate(messages) if m.get("role") == "user"]
-        last = users[-1] if users else -1
-        found = re.search(r"\[e2e:([a-z0-9-]+)\]", content_of(messages[last]) if users else "")
-        scenario = found.group(1) if found else "none"
+        # The latest user message with a scenario marker: a wrap-up turn adds
+        # an unmarked instruction after the tool results.
+        last, scenario = -1, "none"
+        for i in reversed([i for i, m in enumerate(messages) if m.get("role") == "user"]):
+            found = re.search(r"\[e2e:([a-z0-9-]+)\]", content_of(messages[i]))
+            if found:
+                last, scenario = i, found.group(1)
+                break
         turn = sum(1 for m in messages[last + 1:] if m.get("role") == "assistant")
         tools = {}
         for tool in request.get("tools") or []:
@@ -148,7 +152,10 @@ class FakeProvider:
             if name:
                 tools[normal(name)] = name
         index = len(self.requests(scenario))
-        self.record(event="request", scenario=scenario, turn=turn, index=index, tools=sorted(tools.values()))
+        self.record(
+            event="request", scenario=scenario, turn=turn, index=index, tools=sorted(tools.values()),
+            roles=[m.get("role") for m in messages], offered=len(request.get("tools") or []),
+        )
         script = self.scripts.get(scenario)
         steps = script(self, turn, index) if script else [("text", "ok"), ("finish", "stop")]
         if steps and steps[0][0] == "status":
@@ -183,6 +190,9 @@ class FakeProvider:
                     if not self.gate(step[1]).wait(WAIT):
                         self.record(event="gate-timeout", scenario=scenario, gate=step[1])
                         return
+                elif kind == "sleep":
+                    # Only for the time budget, which is measured in time.
+                    time.sleep(step[1])
                 elif kind == "finish":
                     self.chunk(handler, {}, finish=step[1])
             handler.wfile.write(b"data: [DONE]\n\n")

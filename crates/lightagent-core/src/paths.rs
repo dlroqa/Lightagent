@@ -193,12 +193,39 @@ pub enum LockError {
     Io(io::Error),
 }
 
+/// An exclusive OS lock on a file, from [`lock_exclusive`]. Dropping it
+/// unlocks, then closes. The lock belongs to the open file, which a child
+/// that another thread is starting shares until its exec closes its copy, so
+/// closing only this handle would keep the lock held until then; unlocking
+/// releases it at once, whoever else still has the file open.
+#[derive(Debug)]
+pub struct ExclusiveLock {
+    file: Option<std::fs::File>,
+}
+
+impl ExclusiveLock {
+    /// The open file, still locked, without the unlock on drop: the lock then
+    /// lasts until every copy of the file is closed (tests use this as a
+    /// control).
+    pub fn into_file(mut self) -> Option<std::fs::File> {
+        self.file.take()
+    }
+}
+
+impl Drop for ExclusiveLock {
+    fn drop(&mut self) {
+        if let Some(file) = &self.file {
+            let _ = file.unlock();
+        }
+    }
+}
+
 /// Hold an exclusive OS lock on the file at `path`, creating the file and its
-/// directory when missing. Every process takes the same lock, and the OS
-/// releases it when the returned file is dropped or its process ends, so a
+/// directory when missing. Every process takes the same lock, and it is
+/// released when the returned lock is dropped or its process ends, so a
 /// holder that crashed never leaves it stuck. Waits up to `wait` for another
 /// holder, then reports [`LockError::Busy`].
-pub fn lock_exclusive(path: &Path, wait: std::time::Duration) -> Result<std::fs::File, LockError> {
+pub fn lock_exclusive(path: &Path, wait: std::time::Duration) -> Result<ExclusiveLock, LockError> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -213,7 +240,7 @@ pub fn lock_exclusive(path: &Path, wait: std::time::Duration) -> Result<std::fs:
     let deadline = std::time::Instant::now() + wait;
     loop {
         match file.try_lock() {
-            Ok(()) => return Ok(file),
+            Ok(()) => return Ok(ExclusiveLock { file: Some(file) }),
             Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }

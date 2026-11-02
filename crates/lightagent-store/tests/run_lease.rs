@@ -2,8 +2,10 @@
 //! started while the lease was held never inherits it across exec, and one
 //! still starting (Unix: between fork and exec, sharing its parent's open
 //! files) does not keep it either, because the lease unlocks before it
-//! closes. A held lease is refused within the store's documented bound, and
-//! different sessions take their leases at the same time.
+//! closes. The short write locks (`paths::lock_exclusive`, as the config and
+//! session stores take them) are released the same way. A held lease is
+//! refused within the store's documented bound, and different sessions take
+//! their leases at the same time.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -86,7 +88,13 @@ fn a_lease_dropped_while_a_child_is_starting_is_free_at_once() {
     let lease = store.lease_run(&id).expect("lease");
     // The control: a lock file closed without unlocking.
     let control = dir.join("control.lock");
-    let held = paths::lock_exclusive(&control, Duration::ZERO).expect("control lock");
+    let held = paths::lock_exclusive(&control, Duration::ZERO)
+        .expect("control lock")
+        .into_file()
+        .expect("the control lock's file");
+    // A short write lock, as the config and session stores take it.
+    let write = dir.join("write.lock");
+    let writing = paths::lock_exclusive(&write, Duration::ZERO).expect("write lock");
 
     let (mut forked, mut tell) = std::io::pipe().expect("pipe");
     let starter = std::thread::spawn(move || {
@@ -108,7 +116,9 @@ fn a_lease_dropped_while_a_child_is_starting_is_free_at_once() {
 
     drop(lease);
     drop(held);
+    drop(writing);
     let lease_free = free_now(&lease_file(&dir, &id));
+    let write_free = free_now(&write);
     let control_free = free_now(&control);
     let starting = !starter.is_finished();
     starter.join().expect("starter").expect("the child ran");
@@ -119,6 +129,10 @@ fn a_lease_dropped_while_a_child_is_starting_is_free_at_once() {
     assert!(
         lease_free,
         "a dropped lease stayed held by a child that was still starting"
+    );
+    assert!(
+        write_free,
+        "a dropped write lock stayed held by a child that was still starting"
     );
     if cfg!(target_os = "linux") {
         assert!(
