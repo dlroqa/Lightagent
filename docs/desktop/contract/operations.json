@@ -99,6 +99,16 @@
    "path": "/api/lightagent/v1/providers/{id}/check"
   },
   {
+   "id": "workspace.get",
+   "method": "GET",
+   "path": "/api/lightagent/v1/workspace"
+  },
+  {
+   "id": "workspace.set",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/workspace"
+  },
+  {
    "id": "skills.list",
    "method": "GET",
    "path": "/api/lightagent/v1/skills"

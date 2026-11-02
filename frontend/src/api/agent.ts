@@ -373,6 +373,21 @@ export interface ProviderCredentialStatus {
   revision: string;
 }
 
+/** The tools workspace (`lightagent setup tools`) for the next run of the active profile. */
+export interface WorkspaceState {
+  workspace: {
+    configured: string | null;
+    effective: string | null;
+    source: "config" | "profile";
+    profile: string | null;
+    exists: boolean;
+    tools_enabled: boolean;
+    terminal_enabled: boolean;
+  };
+  revision: string;
+  effect: string;
+}
+
 /** A provider as the picker shows it: its key's state only, never the key. */
 export interface ProviderEntry {
   id: string;
@@ -465,6 +480,13 @@ export const agentApi = {
     jsonRequest<EndpointCheck>("/provider/check", {
       method: "POST",
       body: JSON.stringify({ timeout_secs: timeoutSecs }),
+    }),
+  workspace: () => jsonRequest<WorkspaceState>("/workspace"),
+  /** An absolute folder, or `null` for the active profile's own folder; 409 when the revision is stale. */
+  setWorkspace: (path: string | null, expectedRevision: string) =>
+    jsonRequest<WorkspaceState>("/workspace", {
+      method: "PUT",
+      body: JSON.stringify({ path, expected_revision: expectedRevision }),
     }),
   providers: () => jsonRequest<ProviderList>("/providers"),
   /** Every provider change names the revision it was made on: 409 when it is stale. */

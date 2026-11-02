@@ -120,6 +120,10 @@ pub fn router(state: AppState) -> Router {
             post(check_saved_provider),
         )
         .route(
+            "/api/lightagent/v1/workspace",
+            get(get_workspace).put(put_workspace),
+        )
+        .route(
             "/api/lightagent/v1/jev/routing-report",
             get(get_jev_routing_report),
         )
@@ -1747,6 +1751,71 @@ async fn check_saved_provider(
     {
         Ok(check) => Json(check).into_response(),
         Err(error) => unavailable(&error),
+    }
+}
+
+/// A workspace choice: an absolute folder, or `null` for the active
+/// profile's own `workspace/`.
+#[derive(Deserialize)]
+struct WorkspaceBody {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// The workspace for the next run of the active profile, the revision a
+/// change must name, and when a change applies.
+fn workspace_view(
+    config: &lightagent_core::Config,
+    revision: &ConfigRevision,
+    root: &std::path::Path,
+) -> serde_json::Value {
+    json!({
+        "workspace": lightagent_core::workspaces::view(config, &LightagentPaths::rooted_at(root)),
+        "revision": revision.as_str(),
+        "effect": lightagent_core::workspaces::EFFECT,
+    })
+}
+
+/// The workspace folder `lightagent setup tools` sets.
+async fn get_workspace(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (Some(store), Some(root)) = (&state.config_store, home(&state)) else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => Json(workspace_view(&config, &revision, &root)).into_response(),
+        Err(error) => config_error(error),
+    }
+}
+
+/// Set or clear the workspace folder as setup does, on the revision the
+/// caller read: a stale one gets 409 and writes nothing; a folder that is
+/// not absolute, is a file or has no parent folder gets 400.
+async fn put_workspace(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<WorkspaceBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (Some(store), Some(root)) = (&state.config_store, home(&state)) else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let expected = body.expected_revision.as_deref().map(ConfigRevision::parse);
+    match store.update(expected.as_ref(), |config| {
+        lightagent_core::workspaces::set(config, body.path.as_deref())
+    }) {
+        Ok(((), revision)) => match store.load() {
+            Ok(config) => Json(workspace_view(&config, &revision, &root)).into_response(),
+            Err(error) => config_error(error),
+        },
+        Err(UpdateError::Change(message)) => bad_request(&message),
+        Err(UpdateError::Store(error)) => config_error(error),
     }
 }
 
