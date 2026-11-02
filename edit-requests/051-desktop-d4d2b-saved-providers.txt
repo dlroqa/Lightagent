@@ -1,0 +1,2231 @@
+=== base 8e3919bd5c2ccd512cbd5c31f78cfb4173197a27
+=== message
+D4d-2b: saved providers and model selection through one shared operation set
+
+Saved providers (named OpenAI-compatible endpoints) and the model are now
+changed through `lightagent_core::saved_providers`, which the terminal
+setup and the HTTP API (and so the desktop) share, inside one
+revision-checked config update. Each key stays bound to its endpoint.
+
+- list / get: the local endpoint, each saved provider, and an unsaved
+  active endpoint, with each key's state and source only, never a key, a
+  key file or a variable name.
+- create: a name or endpoint another saved provider has is refused; two
+  names with one key id would share a key file, two providers on one
+  endpoint would make its key ambiguous. Reserved names and non-http(s)
+  URLs are refused. The active endpoint does not change.
+- update: a rename keeps the key (a stored key moves to the new name's
+  file); a new endpoint releases the key unless `keep_key` asks to keep
+  it; an active provider's change moves the active endpoint with it.
+- remove: the stored key is released after the save; a removed active
+  provider leaves the local endpoint active with automatic model
+  selection.
+- select / select_model: the endpoint takes only the key bound to it; the
+  active profile follows (endpoint override cleared on select, model).
+  Every answer says a change applies to the next run: a run in progress
+  keeps its provider and model.
+- A key file a change releases is removed only after the config is saved,
+  so a refused save keeps every key it names.
+
+API (admin scope): GET|POST /providers, GET|PATCH|DELETE /providers/{id},
+POST /providers/{id}/check (bounded, that endpoint's own key, no
+redirect), PUT /provider/active, PUT /provider/model. A stale
+`expected_revision` gets 409 and writes nothing; a duplicate gets 409
+with reason "duplicate". Contract operations providers.* and
+provider.active / provider.model.set, with backend inventory rows (331).
+
+`lightagent setup` (provider section) uses the same operations: creating
+an existing name or endpoint is refused instead of silently replacing a
+provider; removing one deletes its stored key; the active profile is
+updated after the config is saved, not before.
+
+Hosted tests: saved_providers unit tests (listing without keys,
+duplicates, reserved names, rename moving the key, endpoint change
+releasing it, keep_key, removal, selection binding the key, model
+validation) and crates/lightagent/tests/desktop_saved_providers.rs (the
+desktop runtime and the CLI in separate processes against recording fake
+endpoints: create, stale and duplicate refusals with the config
+unchanged, selection with the profile following, the key going only to
+its provider's endpoint after save, rename, move, keep_key, ordered
+concurrency with a CLI write, removal, 404/400 errors, no key in any
+response).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-core/src/lib.rs
+--- find
+pub mod provisioning;
+--- with
+pub mod provisioning;
+pub mod saved_providers;
+=== replace crates/lightagent-core/src/provider_keys.rs
+--- find
+const LOCAL_URL: &str = "http://127.0.0.1:11434";
+--- with
+/// The local Lightweight endpoint's URL.
+pub const LOCAL_URL: &str = "http://127.0.0.1:11434";
+=== replace crates/lightagent-core/src/provider_keys.rs
+--- find
+fn same_url(left: &str, right: &str) -> bool {
+--- with
+/// Whether two URLs name the same endpoint (a trailing `/` aside).
+pub(crate) fn same_url(left: &str, right: &str) -> bool {
+=== write crates/lightagent-core/src/saved_providers.rs
+//! Saved providers: named OpenAI-compatible endpoints the provider picker
+//! offers, each with its own key. `lightagent setup provider`, the HTTP API
+//! and the desktop's Settings list, create, edit, select and remove them
+//! through these functions, inside one config update, so every surface
+//! writes the same config and the same key files. A key stays bound to its
+//! endpoint (`provider_keys::bound_key`); nothing here returns one.
+
+use serde::Serialize;
+
+use crate::ProfileStore;
+use crate::config::{Config, SavedProvider, SecretRef, secret_state};
+use crate::paths::{self, LightagentPaths};
+use crate::provider_keys::{self, LOCAL_PROVIDER_ID, LOCAL_URL, same_url};
+
+/// The active endpoint's id when it is neither the local endpoint nor a
+/// saved provider's.
+pub const CUSTOM_PROVIDER_ID: &str = "custom";
+
+/// When a provider or model change takes effect.
+pub const EFFECT: &str = "Applies to the next run. A run in progress keeps its provider and model; an open terminal chat keeps its endpoint until it is restarted.";
+
+/// One provider as the picker shows it. Never a key, a key file's path or
+/// an environment variable's name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ProviderView {
+    /// `lightweight-local`, a saved provider's id, or `custom`.
+    pub id: String,
+    pub name: String,
+    pub base_url: String,
+    /// `local`, `saved`, or `custom` (the active endpoint, not saved).
+    pub kind: &'static str,
+    pub active: bool,
+    /// `absent`, `ready`, or why the configured key cannot be used.
+    pub key_state: &'static str,
+    /// `file` or `env`, when a key is configured.
+    pub key_source: Option<&'static str>,
+}
+
+/// Why a provider change wrote nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProviderError {
+    /// The request is not acceptable.
+    Invalid(String),
+    /// No provider has this id.
+    NotFound(String),
+    /// Another saved provider already has this name or endpoint.
+    Duplicate(String),
+    /// A key file could not be read or written.
+    Store(String),
+}
+
+impl std::fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(message) | Self::Duplicate(message) | Self::Store(message) => {
+                f.write_str(message)
+            }
+            Self::NotFound(id) => write!(f, "no provider '{id}'"),
+        }
+    }
+}
+
+impl std::error::Error for ProviderError {}
+
+/// What an edit changes. `None` keeps a field as it is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProviderEdit {
+    pub name: Option<String>,
+    pub base_url: Option<String>,
+    /// Keep the key when the endpoint changes. Without it, a key saved for
+    /// one endpoint is never sent to another: it is released.
+    pub keep_key: bool,
+}
+
+/// What a change leaves for after the config is saved ([`finish`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Outcome {
+    /// The provider whose stored key file the change released. It is
+    /// removed only after the save, so a refused save keeps every key it
+    /// names.
+    pub release_key: Option<String>,
+    /// The model the active profile uses from now (`None`: automatic).
+    pub profile_model: Option<Option<String>>,
+    /// Clear the active profile's own endpoint, so it follows the active
+    /// provider.
+    pub clear_profile_endpoint: bool,
+}
+
+fn view(
+    config: &Config,
+    id: String,
+    name: String,
+    base_url: String,
+    kind: &'static str,
+) -> ProviderView {
+    let key = provider_keys::bound_key(config, &base_url);
+    ProviderView {
+        active: same_url(&config.inference.base_url, &base_url),
+        key_state: secret_state(key),
+        key_source: key.map(|secret| match secret {
+            SecretRef::Env { .. } => "env",
+            SecretRef::File { .. } => "file",
+        }),
+        id,
+        name,
+        base_url,
+        kind,
+    }
+}
+
+/// Every provider the picker offers: the local endpoint, each saved
+/// provider, and the active endpoint when it is neither.
+pub fn list(config: &Config) -> Vec<ProviderView> {
+    let mut providers = vec![view(
+        config,
+        LOCAL_PROVIDER_ID.to_owned(),
+        "Lightweight local".to_owned(),
+        LOCAL_URL.to_owned(),
+        "local",
+    )];
+    providers.extend(config.inference.saved_providers.iter().map(|saved| {
+        view(
+            config,
+            provider_keys::key_id(&saved.name),
+            saved.name.clone(),
+            saved.base_url.clone(),
+            "saved",
+        )
+    }));
+    if !providers.iter().any(|provider| provider.active) {
+        providers.push(view(
+            config,
+            CUSTOM_PROVIDER_ID.to_owned(),
+            "Custom endpoint".to_owned(),
+            config.inference.base_url.clone(),
+            "custom",
+        ));
+    }
+    providers
+}
+
+/// One provider by id, as [`list`] shows it.
+pub fn get(config: &Config, id: &str) -> Result<ProviderView, ProviderError> {
+    list(config)
+        .into_iter()
+        .find(|provider| provider.id == id)
+        .ok_or_else(|| ProviderError::NotFound(id.to_owned()))
+}
+
+fn valid_name(name: &str) -> Result<String, ProviderError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(ProviderError::Invalid(
+            "enter a name for this provider".to_owned(),
+        ));
+    }
+    if name.chars().count() > 64 || name.chars().any(char::is_control) {
+        return Err(ProviderError::Invalid(
+            "a provider name has at most 64 characters and no control characters".to_owned(),
+        ));
+    }
+    let id = provider_keys::key_id(name);
+    if id == LOCAL_PROVIDER_ID || id == CUSTOM_PROVIDER_ID {
+        return Err(ProviderError::Invalid(format!(
+            "the provider name {name:?} is reserved"
+        )));
+    }
+    Ok(name.to_owned())
+}
+
+fn valid_url(base_url: &str) -> Result<String, ProviderError> {
+    let url = base_url.trim().trim_end_matches('/');
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"));
+    match rest {
+        Some(rest)
+            if !rest.is_empty()
+                && !url
+                    .chars()
+                    .any(|character| character.is_whitespace() || character.is_control()) =>
+        {
+            Ok(url.to_owned())
+        }
+        _ => Err(ProviderError::Invalid(
+            "enter an http:// or https:// URL".to_owned(),
+        )),
+    }
+}
+
+fn valid_model(model: Option<&str>) -> Result<Option<String>, ProviderError> {
+    let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
+        return Ok(None);
+    };
+    if model.chars().count() > 256 || model.chars().any(char::is_control) {
+        return Err(ProviderError::Invalid(
+            "a model id has at most 256 characters and no control characters".to_owned(),
+        ));
+    }
+    Ok(Some(model.to_owned()))
+}
+
+/// Refuse a name or endpoint another saved provider (not `except`) has: two
+/// providers sharing a key id would share one key file, and two sharing an
+/// endpoint would make its key ambiguous.
+fn refuse_duplicate(
+    config: &Config,
+    name: &str,
+    base_url: &str,
+    except: Option<usize>,
+) -> Result<(), ProviderError> {
+    if same_url(base_url, LOCAL_URL) {
+        return Err(ProviderError::Duplicate(
+            "that is the local Lightweight endpoint, which is always offered".to_owned(),
+        ));
+    }
+    let id = provider_keys::key_id(name);
+    for (index, saved) in config.inference.saved_providers.iter().enumerate() {
+        if Some(index) == except {
+            continue;
+        }
+        if provider_keys::key_id(&saved.name) == id {
+            return Err(ProviderError::Duplicate(format!(
+                "the saved provider {:?} already has that name",
+                saved.name
+            )));
+        }
+        if same_url(&saved.base_url, base_url) {
+            return Err(ProviderError::Duplicate(format!(
+                "the saved provider {:?} already uses that endpoint",
+                saved.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn position(config: &Config, id: &str) -> Result<usize, ProviderError> {
+    if id == LOCAL_PROVIDER_ID {
+        return Err(ProviderError::Invalid(
+            "the local Lightweight endpoint cannot be edited or removed".to_owned(),
+        ));
+    }
+    config
+        .inference
+        .saved_providers
+        .iter()
+        .position(|saved| provider_keys::key_id(&saved.name) == id)
+        .ok_or_else(|| ProviderError::NotFound(id.to_owned()))
+}
+
+/// Copy the stored key of `from` to `to`'s file, owner-only. The old file
+/// is released after the save.
+fn move_key(paths: &LightagentPaths, from: &str, to: &str) -> Result<SecretRef, ProviderError> {
+    let failed = |error: std::io::Error| {
+        ProviderError::Store(format!(
+            "the provider API key could not be moved: {}",
+            error.kind()
+        ))
+    };
+    let key = std::fs::read(paths.provider_key_file(from)).map_err(failed)?;
+    paths::write_private(&paths.provider_key_file(to), &key).map_err(failed)?;
+    Ok(provider_keys::stored_reference(paths, to))
+}
+
+/// Save a new provider at `base_url`. It has no key until one is saved for
+/// it, unless it is the active endpoint, whose configured key was saved for
+/// this very endpoint. The active endpoint does not change.
+pub fn create(
+    config: &mut Config,
+    name: &str,
+    base_url: &str,
+) -> Result<ProviderView, ProviderError> {
+    let name = valid_name(name)?;
+    let base_url = valid_url(base_url)?;
+    refuse_duplicate(config, &name, &base_url, None)?;
+    let api_key = provider_keys::bound_key(config, &base_url).cloned();
+    let id = provider_keys::key_id(&name);
+    config.inference.saved_providers.push(SavedProvider {
+        name,
+        base_url,
+        api_key,
+    });
+    get(config, &id)
+}
+
+/// Rename provider `id` or move it to another endpoint.
+///
+/// - A rename keeps its key: a key in the shared store moves to the new
+///   name's file.
+/// - A new endpoint releases the key, unless `keep_key` says to keep it.
+/// - When it is the active endpoint, the active endpoint follows it.
+///
+/// Profiles whose own `routing.base_url` names the old endpoint keep it and
+/// send it no key from then on, unless another saved provider is there.
+pub fn update(
+    config: &mut Config,
+    paths: &LightagentPaths,
+    id: &str,
+    edit: &ProviderEdit,
+) -> Result<(ProviderView, Outcome), ProviderError> {
+    let index = position(config, id)?;
+    let current = config.inference.saved_providers[index].clone();
+    let name = edit
+        .name
+        .as_deref()
+        .map(valid_name)
+        .transpose()?
+        .unwrap_or_else(|| current.name.clone());
+    let base_url = edit
+        .base_url
+        .as_deref()
+        .map(valid_url)
+        .transpose()?
+        .unwrap_or_else(|| current.base_url.clone());
+    refuse_duplicate(config, &name, &base_url, Some(index))?;
+    let was_active = same_url(&config.inference.base_url, &current.base_url);
+    let (old_id, new_id) = (
+        provider_keys::key_id(&current.name),
+        provider_keys::key_id(&name),
+    );
+    let mut api_key = provider_keys::bound_key(config, &current.base_url).cloned();
+    let stored = api_key.as_ref() == Some(&provider_keys::stored_reference(paths, &old_id));
+    let mut outcome = Outcome::default();
+    if !same_url(&base_url, &current.base_url) && !edit.keep_key {
+        api_key = None;
+        if stored {
+            outcome.release_key = Some(old_id.clone());
+        }
+    } else if stored && new_id != old_id {
+        api_key = Some(move_key(paths, &old_id, &new_id)?);
+        outcome.release_key = Some(old_id.clone());
+    }
+    let saved = &mut config.inference.saved_providers[index];
+    saved.name = name;
+    saved.base_url = base_url.clone();
+    saved.api_key = api_key.clone();
+    if was_active {
+        config.inference.base_url = base_url;
+        config.inference.api_key = api_key;
+    }
+    Ok((get(config, &new_id)?, outcome))
+}
+
+/// Remove provider `id`. Its stored key is released after the save. When
+/// it was the active endpoint, the local endpoint becomes active, with no
+/// key and automatic model selection, and the active profile follows.
+pub fn remove(
+    config: &mut Config,
+    paths: &LightagentPaths,
+    id: &str,
+) -> Result<Outcome, ProviderError> {
+    let index = position(config, id)?;
+    let removed = config.inference.saved_providers.remove(index);
+    let was_active = same_url(&config.inference.base_url, &removed.base_url);
+    let key = if was_active {
+        config.inference.api_key.clone()
+    } else {
+        removed.api_key.clone()
+    };
+    let mut outcome = Outcome::default();
+    if key.as_ref() == Some(&provider_keys::stored_reference(paths, id)) {
+        outcome.release_key = Some(id.to_owned());
+    }
+    if was_active {
+        provider_keys::select_endpoint(config, LOCAL_URL);
+        config.inference.model = None;
+        outcome.profile_model = Some(None);
+        outcome.clear_profile_endpoint = true;
+    }
+    Ok(outcome)
+}
+
+/// Make provider `id` the active endpoint with `model` (`None`: automatic,
+/// following the model the endpoint has loaded). The endpoint takes only
+/// the key bound to it (`provider_keys::select_endpoint`). The active
+/// profile follows: its own endpoint is cleared and it uses `model`.
+/// Applies to the next run ([`EFFECT`]).
+pub fn select(
+    config: &mut Config,
+    id: &str,
+    model: Option<&str>,
+) -> Result<(ProviderView, Outcome), ProviderError> {
+    let base_url = get(config, id)?.base_url;
+    let model = valid_model(model)?;
+    provider_keys::select_endpoint(config, &base_url);
+    config.inference.model = model.clone();
+    let outcome = Outcome {
+        release_key: None,
+        profile_model: Some(model),
+        clear_profile_endpoint: true,
+    };
+    Ok((get(config, id)?, outcome))
+}
+
+/// Use `model` on the active endpoint (`None`: automatic). The active
+/// profile uses it too; its own endpoint is left as it is. Applies to the
+/// next run ([`EFFECT`]).
+pub fn select_model(config: &mut Config, model: Option<&str>) -> Result<Outcome, ProviderError> {
+    let model = valid_model(model)?;
+    config.inference.model = model.clone();
+    Ok(Outcome {
+        release_key: None,
+        profile_model: Some(model),
+        clear_profile_endpoint: false,
+    })
+}
+
+/// Finish `outcome` once the config is saved: release a key file, then
+/// point the active profile at the new endpoint and model.
+pub fn finish(paths: &LightagentPaths, outcome: &Outcome) -> Result<(), String> {
+    if let Some(id) = &outcome.release_key {
+        provider_keys::remove_key(paths, id)?;
+    }
+    if outcome.profile_model.is_none() && !outcome.clear_profile_endpoint {
+        return Ok(());
+    }
+    let profiles = ProfileStore::new(paths.root());
+    let Some(active) = profiles.active().map_err(|error| error.to_string())? else {
+        return Ok(());
+    };
+    let mut profile = profiles.load(&active).map_err(|error| error.to_string())?;
+    if outcome.clear_profile_endpoint {
+        profile.routing.base_url = None;
+    }
+    if let Some(model) = &outcome.profile_model {
+        profile.routing.model = model.clone().unwrap_or_else(|| "default".to_owned());
+    }
+    profiles.save(&profile).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch() -> LightagentPaths {
+        LightagentPaths::rooted_at(std::env::temp_dir().join(format!(
+            "lightagent-saved-providers-{}",
+            crate::ids::RunId::new().as_str()
+        )))
+    }
+
+    #[test]
+    fn providers_are_listed_without_keys_and_saved_once() {
+        let mut config = Config::default();
+        let local = list(&config);
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[0].id, LOCAL_PROVIDER_ID);
+        assert!(local[0].active);
+        let lab = create(&mut config, " Lab ", "https://lab.example/v1/").expect("create");
+        assert_eq!(
+            (lab.id.as_str(), lab.name.as_str(), lab.base_url.as_str()),
+            ("lab", "Lab", "https://lab.example/v1")
+        );
+        assert!(!lab.active);
+        assert_eq!(lab.key_state, "absent");
+        for (name, url) in [
+            ("lab", "https://other.example"),
+            ("LAB!", "https://other.example"),
+            ("Other", "https://lab.example/v1/"),
+            ("Local", LOCAL_URL),
+        ] {
+            assert!(
+                matches!(create(&mut config, name, url), Err(ProviderError::Duplicate(_))),
+                "{name} {url}"
+            );
+        }
+        for (name, url) in [
+            ("", "https://x.example"),
+            ("Custom", "https://x.example"),
+            ("lightweight local", "https://x.example"),
+            ("X", "ftp://x.example"),
+            ("X", "https://"),
+            ("X", "https://a b.example"),
+        ] {
+            assert!(
+                matches!(create(&mut config, name, url), Err(ProviderError::Invalid(_))),
+                "{name} {url}"
+            );
+        }
+        assert_eq!(config.inference.saved_providers.len(), 1);
+        config.inference.saved_providers[0].api_key = Some(SecretRef::env("LAB_KEY"));
+        let text = serde_json::to_string(&list(&config)).expect("JSON");
+        assert!(!text.contains("LAB_KEY"), "{text}");
+        // An unsaved active endpoint is listed as custom.
+        config.inference.base_url = "https://elsewhere.example".to_owned();
+        let custom = get(&config, CUSTOM_PROVIDER_ID).expect("custom");
+        assert!(custom.active);
+        assert_eq!(custom.kind, "custom");
+    }
+
+    #[test]
+    fn selecting_binds_the_endpoint_key_and_the_profile_follows() {
+        let mut config = Config::default();
+        config.inference.api_key = Some(SecretRef::env("LOCAL_KEY"));
+        create(&mut config, "Lab", "https://lab.example/v1").expect("create");
+        config.inference.saved_providers[0].api_key = Some(SecretRef::env("LAB_KEY"));
+        let (lab, outcome) = select(&mut config, "lab", Some(" m2 ")).expect("select");
+        assert!(lab.active);
+        assert_eq!(config.inference.base_url, "https://lab.example/v1");
+        assert_eq!(config.inference.api_key, Some(SecretRef::env("LAB_KEY")));
+        assert_eq!(config.inference.model.as_deref(), Some("m2"));
+        assert_eq!(outcome.profile_model, Some(Some("m2".to_owned())));
+        assert!(outcome.clear_profile_endpoint);
+        // Back to the local endpoint: the lab key does not follow.
+        let (_, outcome) = select(&mut config, LOCAL_PROVIDER_ID, None).expect("local");
+        assert_eq!(config.inference.api_key, None);
+        assert_eq!(config.inference.model, None);
+        assert_eq!(outcome.profile_model, Some(None));
+        assert!(matches!(
+            select(&mut config, "nope", None),
+            Err(ProviderError::NotFound(_))
+        ));
+        let outcome = select_model(&mut config, Some("m1")).expect("model");
+        assert_eq!(config.inference.model.as_deref(), Some("m1"));
+        assert!(!outcome.clear_profile_endpoint);
+        assert!(select_model(&mut config, Some("bad\nmodel")).is_err());
+        assert_eq!(config.inference.model.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn a_rename_moves_the_stored_key_and_a_new_endpoint_releases_it() {
+        let paths = scratch();
+        let mut config = Config::default();
+        create(&mut config, "Lab", "https://lab.example/v1").expect("create");
+        select(&mut config, "lab", None).expect("select");
+        let secret = provider_keys::store_key(&paths, "lab", "lab-key-value").expect("store");
+        provider_keys::use_key(&mut config, Some(secret));
+
+        // A rename: the key moves to the new name's file.
+        let edit = ProviderEdit {
+            name: Some("Lab Two".to_owned()),
+            ..ProviderEdit::default()
+        };
+        let (view, outcome) = update(&mut config, &paths, "lab", &edit).expect("rename");
+        assert_eq!((view.id.as_str(), view.key_state), ("lab-two", "ready"));
+        assert_eq!(outcome.release_key.as_deref(), Some("lab"));
+        assert_eq!(
+            config.inference.api_key,
+            Some(provider_keys::stored_reference(&paths, "lab-two"))
+        );
+        finish(&paths, &outcome).expect("finish");
+        assert!(!paths.provider_key_file("lab").exists());
+
+        // A new endpoint without keep_key: the key is released.
+        let edit = ProviderEdit {
+            base_url: Some("https://new.example/v1".to_owned()),
+            ..ProviderEdit::default()
+        };
+        let (view, outcome) = update(&mut config, &paths, "lab-two", &edit).expect("move");
+        assert_eq!(view.key_state, "absent");
+        assert!(view.active);
+        assert_eq!(config.inference.base_url, "https://new.example/v1");
+        assert_eq!(config.inference.api_key, None);
+        assert_eq!(outcome.release_key.as_deref(), Some("lab-two"));
+        finish(&paths, &outcome).expect("finish");
+        assert!(!paths.provider_key_file("lab-two").exists());
+
+        // keep_key carries the key to a new endpoint, only when asked.
+        let secret = provider_keys::store_key(&paths, "lab-two", "lab-key-value").expect("store");
+        provider_keys::use_key(&mut config, Some(secret.clone()));
+        let edit = ProviderEdit {
+            base_url: Some("https://newer.example/v1".to_owned()),
+            keep_key: true,
+            ..ProviderEdit::default()
+        };
+        let (view, outcome) = update(&mut config, &paths, "lab-two", &edit).expect("keep");
+        assert_eq!(view.key_state, "ready");
+        assert_eq!(config.inference.api_key, Some(secret));
+        assert_eq!(outcome.release_key, None);
+
+        // Removing the active provider releases its key and leaves the local
+        // endpoint active, keyless.
+        let outcome = remove(&mut config, &paths, "lab-two").expect("remove");
+        assert!(config.inference.saved_providers.is_empty());
+        assert_eq!(config.inference.base_url, LOCAL_URL);
+        assert_eq!(config.inference.api_key, None);
+        assert_eq!(outcome.release_key.as_deref(), Some("lab-two"));
+        assert!(outcome.clear_profile_endpoint);
+        finish(&paths, &outcome).expect("finish");
+        assert!(!paths.provider_key_file("lab-two").exists());
+        assert!(matches!(
+            remove(&mut config, &paths, LOCAL_PROVIDER_ID),
+            Err(ProviderError::Invalid(_))
+        ));
+        assert!(matches!(
+            remove(&mut config, &paths, "lab-two"),
+            Err(ProviderError::NotFound(_))
+        ));
+        let _ = std::fs::remove_dir_all(paths.root());
+    }
+}
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+use lightagent_store::{
+--- with
+use lightagent_core::saved_providers;
+use lightagent_store::{
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+            get(get_provider_credential)
+                .put(put_provider_credential)
+                .delete(delete_provider_credential),
+        )
+--- with
+            get(get_provider_credential)
+                .put(put_provider_credential)
+                .delete(delete_provider_credential),
+        )
+        .route(
+            "/api/lightagent/v1/provider/active",
+            axum::routing::put(select_provider),
+        )
+        .route(
+            "/api/lightagent/v1/provider/model",
+            axum::routing::put(select_provider_model),
+        )
+        .route(
+            "/api/lightagent/v1/providers",
+            get(list_providers).post(create_provider),
+        )
+        .route(
+            "/api/lightagent/v1/providers/{id}",
+            get(show_provider)
+                .patch(update_provider)
+                .delete(remove_provider),
+        )
+        .route(
+            "/api/lightagent/v1/providers/{id}/check",
+            post(check_saved_provider),
+        )
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+/// `lightagent config jev-routing-report`: the same dry run, from the same
+--- with
+/// A new saved provider, as `lightagent setup provider` creates one.
+#[derive(Deserialize)]
+struct NewProvider {
+    name: String,
+    base_url: String,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// An edit of a saved provider; an absent field stays as it is.
+#[derive(Deserialize)]
+struct ProviderEditBody {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    /// Keep the key when the endpoint changes; otherwise it is released.
+    #[serde(default)]
+    keep_key: bool,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// The provider to make active, and its model (`null`: automatic).
+#[derive(Deserialize)]
+struct SelectProvider {
+    id: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// The model to use on the active endpoint (`null`: automatic).
+#[derive(Deserialize)]
+struct SelectModel {
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RevisionQuery {
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// Every provider the picker offers, the active one and its model, the
+/// revision a change must name, and when a change applies. Never a key.
+fn providers_view(
+    config: &lightagent_core::Config,
+    revision: &ConfigRevision,
+) -> serde_json::Value {
+    let providers = saved_providers::list(config);
+    let active = providers
+        .iter()
+        .find(|provider| provider.active)
+        .map(|provider| provider.id.clone());
+    json!({
+        "providers": providers,
+        "active": active,
+        "model": config.inference.model,
+        "revision": revision.as_str(),
+        "effect": saved_providers::EFFECT,
+    })
+}
+
+/// A refused provider change: invalid input (400), no such provider (404),
+/// a name or endpoint another saved provider has (409, reason
+/// `duplicate`), or a key file that could not be moved (500).
+fn provider_error(error: saved_providers::ProviderError) -> Response {
+    use saved_providers::ProviderError;
+    match &error {
+        ProviderError::Invalid(message) => bad_request(message),
+        ProviderError::NotFound(_) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+        ProviderError::Duplicate(message) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": message, "reason": "duplicate" })),
+        )
+            .into_response(),
+        ProviderError::Store(message) => internal(message),
+    }
+}
+
+/// Apply a provider change in one config update, finish what waits for the
+/// save (a released key file, the active profile), and answer with the
+/// providers at the new revision. A stale `expected_revision` gets 409 and
+/// changes nothing.
+fn change_providers(
+    state: &AppState,
+    expected: Option<&str>,
+    status: StatusCode,
+    change: impl FnOnce(
+        &mut lightagent_core::Config,
+        &LightagentPaths,
+    ) -> Result<saved_providers::Outcome, saved_providers::ProviderError>,
+) -> Response {
+    let (Some(store), Some(root)) = (&state.config_store, home(state)) else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let paths = LightagentPaths::rooted_at(root);
+    let expected = expected.map(ConfigRevision::parse);
+    match store.update(expected.as_ref(), |config| change(config, &paths)) {
+        Ok((outcome, revision)) => {
+            if let Err(message) = saved_providers::finish(&paths, &outcome) {
+                return internal(&message);
+            }
+            match store.load() {
+                Ok(config) => (status, Json(providers_view(&config, &revision))).into_response(),
+                Err(error) => config_error(error),
+            }
+        }
+        Err(UpdateError::Change(error)) => provider_error(error),
+        Err(UpdateError::Store(error)) => config_error(error),
+    }
+}
+
+/// The providers `lightagent setup provider` offers.
+async fn list_providers(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => Json(providers_view(&config, &revision)).into_response(),
+        Err(error) => config_error(error),
+    }
+}
+
+async fn show_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => match saved_providers::get(&config, &id) {
+            Ok(provider) => Json(json!({
+                "provider": provider,
+                "revision": revision.as_str(),
+                "effect": saved_providers::EFFECT,
+            }))
+            .into_response(),
+            Err(error) => provider_error(error),
+        },
+        Err(error) => config_error(error),
+    }
+}
+
+async fn create_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<NewProvider>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    change_providers(
+        &state,
+        body.expected_revision.as_deref(),
+        StatusCode::CREATED,
+        |config, _| {
+            saved_providers::create(config, &body.name, &body.base_url)
+                .map(|_| saved_providers::Outcome::default())
+        },
+    )
+}
+
+async fn update_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<ProviderEditBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let edit = saved_providers::ProviderEdit {
+        name: body.name,
+        base_url: body.base_url,
+        keep_key: body.keep_key,
+    };
+    change_providers(
+        &state,
+        body.expected_revision.as_deref(),
+        StatusCode::OK,
+        |config, paths| saved_providers::update(config, paths, &id, &edit).map(|(_, outcome)| outcome),
+    )
+}
+
+async fn remove_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<RevisionQuery>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    change_providers(
+        &state,
+        query.expected_revision.as_deref(),
+        StatusCode::OK,
+        |config, paths| saved_providers::remove(config, paths, &id),
+    )
+}
+
+async fn select_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<SelectProvider>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    change_providers(
+        &state,
+        body.expected_revision.as_deref(),
+        StatusCode::OK,
+        |config, _| {
+            saved_providers::select(config, &body.id, body.model.as_deref())
+                .map(|(_, outcome)| outcome)
+        },
+    )
+}
+
+async fn select_provider_model(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<SelectModel>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    change_providers(
+        &state,
+        body.expected_revision.as_deref(),
+        StatusCode::OK,
+        |config, _| saved_providers::select_model(config, body.model.as_deref()),
+    )
+}
+
+/// An explicit check of one provider's endpoint, with that endpoint's own
+/// key only, ending within `timeout_secs` (1-30, default 10).
+async fn check_saved_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<CheckBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let base_url = match store.load() {
+        Ok(config) => match saved_providers::get(&config, &id) {
+            Ok(provider) => provider.base_url,
+            Err(error) => return provider_error(error),
+        },
+        Err(error) => return config_error(error),
+    };
+    let seconds = body.timeout_secs.unwrap_or(10).clamp(1, 30);
+    match state
+        .manager
+        .check_endpoint(base_url, std::time::Duration::from_secs(seconds))
+        .await
+    {
+        Ok(check) => Json(check).into_response(),
+        Err(error) => unavailable(&error),
+    }
+}
+
+/// `lightagent config jev-routing-report`: the same dry run, from the same
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    ) -> Result<serde_json::Value, String> {
+        Err("provider endpoint checks are not available in this embedding".to_owned())
+    }
+--- with
+    ) -> Result<serde_json::Value, String> {
+        Err("provider endpoint checks are not available in this embedding".to_owned())
+    }
+
+    /// An explicit check of the endpoint at `base_url` with the key bound to
+    /// that endpoint, ending within `timeout`: what it answered, never a
+    /// key. The default refuses.
+    async fn check_endpoint(
+        &self,
+        _base_url: String,
+        _timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        Err("provider endpoint checks are not available in this embedding".to_owned())
+    }
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+        self.factory.check_provider(timeout).await
+    }
+--- with
+        self.factory.check_provider(timeout).await
+    }
+
+    /// An explicit, bounded check of the endpoint at `base_url` (a saved
+    /// provider's), with that endpoint's own key.
+    pub async fn check_endpoint(
+        &self,
+        base_url: String,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        self.factory.check_endpoint(base_url, timeout).await
+    }
+=== replace crates/lightagent/src/serve.rs
+--- find
+        let check = crate::providers::check_active(&config, timeout).await;
+        serde_json::to_value(check).map_err(|error| error.to_string())
+    }
+--- with
+        let check = crate::providers::check_active(&config, timeout).await;
+        serde_json::to_value(check).map_err(|error| error.to_string())
+    }
+
+    async fn check_endpoint(
+        &self,
+        base_url: String,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let config = ConfigStore::at(&paths)
+            .load()
+            .map_err(|error| error.to_string())?;
+        let check = crate::providers::check_endpoint(&config, &base_url, timeout).await;
+        serde_json::to_value(check).map_err(|error| error.to_string())
+    }
+=== replace crates/lightagent/src/providers.rs
+--- find
+pub(crate) async fn check_active(config: &Config, timeout: Duration) -> EndpointCheck {
+    let base_url = config.inference.base_url.clone();
+--- with
+pub(crate) async fn check_active(config: &Config, timeout: Duration) -> EndpointCheck {
+    check_endpoint(config, &config.inference.base_url, timeout).await
+}
+
+/// Check the endpoint at `base_url` (the active one, or a saved
+/// provider's) the same way, with the key bound to that endpoint and no
+/// other.
+pub(crate) async fn check_endpoint(
+    config: &Config,
+    base_url: &str,
+    timeout: Duration,
+) -> EndpointCheck {
+    let base_url = base_url.to_owned();
+=== replace crates/lightagent/src/setup.rs
+--- find
+use lightagent_core::{SavedProvider, SecretRef};
+--- with
+use lightagent_core::SecretRef;
+use lightagent_core::saved_providers::{self, Outcome};
+=== replace crates/lightagent/src/setup.rs
+--- find
+        let changed = configure_tui(selected, &mut config, paths, &theme).await?;
+        if changed {
+            revision = save_setup(&store, &revision, &config)?;
+            eprintln!("Saved.\n");
+--- with
+        let changed = configure_tui(selected, &mut config, paths, &theme).await?;
+        if let Some(outcome) = changed {
+            revision = save_setup(&store, &revision, &config)?;
+            // What waits for the save: a released key file, the active
+            // profile's endpoint and model.
+            saved_providers::finish(paths, &outcome)?;
+            eprintln!("Saved.\n");
+=== replace crates/lightagent/src/setup.rs
+--- find
+) -> Result<bool, String> {
+    match section {
+        Section::Profiles => configure_profiles_tui(config, paths, theme),
+        Section::Provider => configure_gateway_tui(config, paths, theme).await,
+        Section::Tools => configure_tools_tui(config, theme),
+        Section::Web => configure_web_tui(config, theme),
+        Section::Tui => configure_terminal_ui_tui(config, theme),
+        Section::Approvals => configure_approvals_tui(config, paths, theme),
+    }
+}
+--- with
+) -> Result<Option<Outcome>, String> {
+    // A section other than the provider has nothing to finish after the save.
+    let changed =
+        |result: Result<bool, String>| result.map(|changed| changed.then(Outcome::default));
+    match section {
+        Section::Profiles => changed(configure_profiles_tui(config, paths, theme)),
+        Section::Provider => configure_gateway_tui(config, paths, theme).await,
+        Section::Tools => changed(configure_tools_tui(config, theme)),
+        Section::Web => changed(configure_web_tui(config, theme)),
+        Section::Tui => changed(configure_terminal_ui_tui(config, theme)),
+        Section::Approvals => changed(configure_approvals_tui(config, paths, theme)),
+    }
+}
+=== replace crates/lightagent/src/setup.rs
+--- find
+fn provider_key_id(name: &str) -> String {
+    lightagent_core::provider_keys::key_id(name)
+}
+
+--- with
+=== replace crates/lightagent/src/setup.rs
+--- find
+async fn configure_gateway_tui(
+    config: &mut Config,
+    paths: &LightagentPaths,
+    theme: &ColorfulTheme,
+) -> Result<bool, String> {
+    const LOCAL_URL: &str = "http://127.0.0.1:11434";
+    eprintln!("\nProvider & model for Lightagent CLI");
+    eprintln!("↑↓ navigate  ENTER select  ESC cancel\n");
+
+    let mut providers = vec![format!("Lightweight local  ({LOCAL_URL})")];
+    providers.extend(
+        config
+            .inference
+            .saved_providers
+            .iter()
+            .map(|saved| format!("{}  ({})", saved.name, saved.base_url)),
+    );
+    let custom_index = providers.len();
+    providers.push("Custom endpoint  (enter URL manually)".to_owned());
+    let remove_index = if config.inference.saved_providers.is_empty() {
+        None
+    } else {
+        let index = providers.len();
+        providers.push("Remove a saved custom provider".to_owned());
+        Some(index)
+    };
+    let default = if config.inference.base_url == LOCAL_URL {
+        0
+    } else {
+        config
+            .inference
+            .saved_providers
+            .iter()
+            .position(|saved| saved.base_url == config.inference.base_url)
+            .map_or(custom_index, |index| index + 1)
+    };
+    let Some(selected) = Select::with_theme(theme)
+        .with_prompt("Provider")
+        .items(providers)
+        .default(default)
+        .interact_opt()
+        .map_err(dialog_error)?
+    else {
+        return Ok(false);
+    };
+
+    if Some(selected) == remove_index {
+        let names = config
+            .inference
+            .saved_providers
+            .iter()
+            .map(|saved| format!("{}  ({})", saved.name, saved.base_url))
+            .collect::<Vec<_>>();
+        let Some(remove) = Select::with_theme(theme)
+            .with_prompt("Remove saved provider")
+            .items(names)
+            .default(0)
+            .interact_opt()
+            .map_err(dialog_error)?
+        else {
+            return Ok(false);
+        };
+        let removed = config.inference.saved_providers.remove(remove);
+        if config.inference.base_url == removed.base_url {
+            config.inference.base_url = LOCAL_URL.to_owned();
+            config.inference.api_key = None;
+            config.inference.model = None;
+            update_active_profile(paths, |profile| {
+                profile.routing.base_url = None;
+                profile.routing.model = "default".to_owned();
+            })?;
+        }
+        eprintln!("Removed {}.", removed.name);
+        return Ok(true);
+    }
+
+    let (base_url, mut api_key, provider_id) = if selected == 0 {
+        (LOCAL_URL.to_owned(), None, "lightweight-local".to_owned())
+    } else if selected < custom_index {
+        let saved = &config.inference.saved_providers[selected - 1];
+        (
+            saved.base_url.clone(),
+            saved.api_key.clone(),
+            provider_key_id(&saved.name),
+        )
+    } else {
+        let name = Input::<String>::with_theme(theme)
+            .with_prompt("Provider name")
+            .validate_with(|value: &String| -> Result<(), &str> {
+                if value.trim().is_empty() {
+                    Err("enter a name for this provider")
+                } else {
+                    Ok(())
+                }
+            })
+            .interact_text()
+            .map_err(dialog_error)?;
+        let base_url = Input::<String>::with_theme(theme)
+            .with_prompt("OpenAI-compatible base URL")
+            .validate_with(|value: &String| -> Result<(), &str> {
+                if value.starts_with("http://") || value.starts_with("https://") {
+                    Ok(())
+                } else {
+                    Err("enter an http:// or https:// URL")
+                }
+            })
+            .interact_text()
+            .map_err(dialog_error)?;
+        let api_key = None;
+        let saved = SavedProvider {
+            name: name.trim().to_owned(),
+            base_url: base_url.trim_end_matches('/').to_owned(),
+            api_key: api_key.clone(),
+        };
+        if let Some(existing) = config
+            .inference
+            .saved_providers
+            .iter_mut()
+            .find(|item| item.name.eq_ignore_ascii_case(&saved.name))
+        {
+            *existing = saved;
+        } else {
+            config.inference.saved_providers.push(saved);
+        }
+        (base_url, api_key, provider_key_id(&name))
+    };
+
+    let mut models = provider_models(&base_url, api_key.as_ref()).await;
+    if api_key.is_none()
+        && models
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.to_string().contains("401 Unauthorized"))
+    {
+        let save_key = Confirm::with_theme(theme)
+            .with_prompt("This provider requires an API key. Paste and save it privately?")
+            .default(true)
+            .interact_opt()
+            .map_err(dialog_error)?
+            .unwrap_or(false);
+        if save_key {
+            api_key = Some(store_provider_key_tui(paths, &provider_id, theme)?);
+            models = provider_models(&base_url, api_key.as_ref()).await;
+        }
+    }
+    let models = match models {
+        Ok(models) => models,
+        Err(error) => {
+            eprintln!("Could not list models: {error}");
+            Vec::new()
+        }
+    };
+    let mut items = vec!["Automatic — follow the loaded model".to_owned()];
+    items.extend(models.iter().cloned());
+    let default = config
+        .inference
+        .model
+        .as_ref()
+        .and_then(|current| models.iter().position(|model| model == current))
+        .map_or(0, |index| index + 1);
+    let Some(selected) = Select::with_theme(theme)
+        .with_prompt("Model")
+        .items(items)
+        .default(default)
+        .interact_opt()
+        .map_err(dialog_error)?
+    else {
+        return Ok(false);
+    };
+    let model = selected.checked_sub(1).map(|index| models[index].clone());
+    if let Some(saved) = config
+        .inference
+        .saved_providers
+        .iter_mut()
+        .find(|saved| saved.base_url == base_url)
+    {
+        saved.api_key = api_key.clone();
+    }
+    config.inference.base_url = base_url;
+    config.inference.api_key = api_key;
+    config.inference.model = model.clone();
+    update_active_profile(paths, |profile| {
+        profile.routing.base_url = None;
+        profile.routing.model = model.unwrap_or_else(|| "default".to_owned());
+    })?;
+    Ok(true)
+}
+--- with
+async fn configure_gateway_tui(
+    config: &mut Config,
+    paths: &LightagentPaths,
+    theme: &ColorfulTheme,
+) -> Result<Option<Outcome>, String> {
+    eprintln!("\nProvider & model for Lightagent CLI");
+    eprintln!("↑↓ navigate  ENTER select  ESC cancel\n");
+
+    // The shared list, as the desktop's Settings shows it: the local
+    // endpoint first, then each saved provider.
+    let listed = saved_providers::list(config)
+        .into_iter()
+        .filter(|provider| provider.kind != "custom")
+        .collect::<Vec<_>>();
+    let mut providers = listed
+        .iter()
+        .map(|provider| format!("{}  ({})", provider.name, provider.base_url))
+        .collect::<Vec<_>>();
+    let custom_index = providers.len();
+    providers.push("Custom endpoint  (enter URL manually)".to_owned());
+    let remove_index = if listed.len() > 1 {
+        let index = providers.len();
+        providers.push("Remove a saved custom provider".to_owned());
+        Some(index)
+    } else {
+        None
+    };
+    let default = listed
+        .iter()
+        .position(|provider| provider.active)
+        .unwrap_or(custom_index);
+    let Some(selected) = Select::with_theme(theme)
+        .with_prompt("Provider")
+        .items(providers)
+        .default(default)
+        .interact_opt()
+        .map_err(dialog_error)?
+    else {
+        return Ok(None);
+    };
+
+    if Some(selected) == remove_index {
+        let saved = &listed[1..];
+        let names = saved
+            .iter()
+            .map(|provider| format!("{}  ({})", provider.name, provider.base_url))
+            .collect::<Vec<_>>();
+        let Some(remove) = Select::with_theme(theme)
+            .with_prompt("Remove saved provider")
+            .items(names)
+            .default(0)
+            .interact_opt()
+            .map_err(dialog_error)?
+        else {
+            return Ok(None);
+        };
+        // The shared removal: the stored key is deleted after the save, and
+        // a removed active provider leaves the local endpoint active.
+        let outcome = saved_providers::remove(config, paths, &saved[remove].id)
+            .map_err(|error| error.to_string())?;
+        eprintln!("Removed {}.", saved[remove].name);
+        return Ok(Some(outcome));
+    }
+
+    let (provider_id, base_url) = if selected < custom_index {
+        (listed[selected].id.clone(), listed[selected].base_url.clone())
+    } else {
+        let name = Input::<String>::with_theme(theme)
+            .with_prompt("Provider name")
+            .validate_with(|value: &String| -> Result<(), &str> {
+                if value.trim().is_empty() {
+                    Err("enter a name for this provider")
+                } else {
+                    Ok(())
+                }
+            })
+            .interact_text()
+            .map_err(dialog_error)?;
+        let base_url = Input::<String>::with_theme(theme)
+            .with_prompt("OpenAI-compatible base URL")
+            .validate_with(|value: &String| -> Result<(), &str> {
+                if value.starts_with("http://") || value.starts_with("https://") {
+                    Ok(())
+                } else {
+                    Err("enter an http:// or https:// URL")
+                }
+            })
+            .interact_text()
+            .map_err(dialog_error)?;
+        // The shared creation refuses a name or endpoint another saved
+        // provider has: they would share a key file, or one endpoint's key.
+        match saved_providers::create(config, &name, &base_url) {
+            Ok(provider) => (provider.id, provider.base_url),
+            Err(error) => {
+                eprintln!("{error}");
+                return Ok(None);
+            }
+        }
+    };
+
+    // The provider's own key only: the one bound to its endpoint.
+    let mut api_key = lightagent_core::provider_keys::bound_key(config, &base_url).cloned();
+    let mut stored_key = None;
+    let mut models = provider_models(&base_url, api_key.as_ref()).await;
+    if api_key.is_none()
+        && models
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.to_string().contains("401 Unauthorized"))
+    {
+        let save_key = Confirm::with_theme(theme)
+            .with_prompt("This provider requires an API key. Paste and save it privately?")
+            .default(true)
+            .interact_opt()
+            .map_err(dialog_error)?
+            .unwrap_or(false);
+        if save_key {
+            let secret = store_provider_key_tui(paths, &provider_id, theme)?;
+            api_key = Some(secret.clone());
+            stored_key = Some(secret);
+            models = provider_models(&base_url, api_key.as_ref()).await;
+        }
+    }
+    let models = match models {
+        Ok(models) => models,
+        Err(error) => {
+            eprintln!("Could not list models: {error}");
+            Vec::new()
+        }
+    };
+    let mut items = vec!["Automatic — follow the loaded model".to_owned()];
+    items.extend(models.iter().cloned());
+    let default = config
+        .inference
+        .model
+        .as_ref()
+        .and_then(|current| models.iter().position(|model| model == current))
+        .map_or(0, |index| index + 1);
+    let Some(selected) = Select::with_theme(theme)
+        .with_prompt("Model")
+        .items(items)
+        .default(default)
+        .interact_opt()
+        .map_err(dialog_error)?
+    else {
+        return Ok(None);
+    };
+    let model = selected.checked_sub(1).map(|index| models[index].clone());
+    // The shared selection: the endpoint takes only its own key, and the
+    // active profile follows after the save.
+    let (_, outcome) = saved_providers::select(config, &provider_id, model.as_deref())
+        .map_err(|error| error.to_string())?;
+    if let Some(secret) = stored_key {
+        lightagent_core::provider_keys::use_key(config, Some(secret));
+    }
+    Ok(Some(outcome))
+}
+=== write crates/lightagent/tests/desktop_saved_providers.rs
+//! Saved providers are one shared operation set (D4d-2b). The desktop
+//! runtime's routes create, rename, move, select and remove them and
+//! select the model, under the config's revision check, with each key
+//! bound to its endpoint; the CLI uses what the desktop wrote. Every
+//! endpoint is a local fake that records each request.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+
+const KEY: &str = "6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e";
+const LAB_KEY: &str = "saved-test-lab-key-91e4d0-not-a-real-key";
+const PROVIDERS: &str = "/api/lightagent/v1/providers";
+const ACTIVE: &str = "/api/lightagent/v1/provider/active";
+const MODEL: &str = "/api/lightagent/v1/provider/model";
+const CREDENTIAL: &str = "/api/lightagent/v1/provider/credential";
+const MODELS: &str = r#"{"object":"list","data":[{"id":"m1"},{"id":"m2"}]}"#;
+const WAIT: Duration = Duration::from_secs(20);
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-saved-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+/// One authenticated request: the status, the raw body and its JSON. No
+/// response may carry the provider key.
+fn call(runtime: &Runtime, method: &str, path: &str, body: Option<&str>) -> (u16, String, Value) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    assert!(!raw.contains(LAB_KEY), "{method} {path} returned the key");
+    let json = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    (status, raw, json)
+}
+
+fn send(runtime: &Runtime, method: &str, path: &str, body: Value) -> (u16, String, Value) {
+    call(runtime, method, path, Some(&body.to_string()))
+}
+
+fn cli(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent")
+}
+
+fn cli_ok(home: &Path, args: &[&str]) -> String {
+    let output = cli(home, args);
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn read_json(path: &Path) -> Value {
+    serde_json::from_slice(&std::fs::read(path).expect("read")).expect("JSON")
+}
+
+fn read_head(stream: &mut TcpStream) -> String {
+    let mut request = Vec::new();
+    let mut buffer = [0u8; 1024];
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => request.extend_from_slice(&buffer[..read]),
+        }
+    }
+    String::from_utf8_lossy(&request).into_owned()
+}
+
+/// A fake OpenAI-compatible endpoint. It answers every request with the
+/// model list and keeps each request's head until it is dropped.
+struct Recorder {
+    url: String,
+    requests: Arc<Mutex<Vec<String>>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Recorder {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        listener.set_nonblocking(true).expect("non-blocking");
+        let url = format!("http://{}", listener.local_addr().expect("address"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (log, done) = (Arc::clone(&requests), Arc::clone(&stop));
+        std::thread::spawn(move || {
+            while !done.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                        let head = read_head(&mut stream);
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{MODELS}",
+                            MODELS.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        if let Ok(mut log) = log.lock() {
+                            log.push(head);
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            url,
+            requests,
+            stop,
+        }
+    }
+
+    fn drain(&self) -> Vec<String> {
+        std::mem::take(&mut *self.requests.lock().expect("log"))
+    }
+
+    /// The requests that arrive within `wait`: it waits for the first, then
+    /// a little longer for any that follow it.
+    fn collect(&self, wait: Duration) -> Vec<String> {
+        let deadline = Instant::now() + wait;
+        while self.requests.lock().expect("log").is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        self.drain()
+    }
+}
+
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The bearer token a request carried, if any.
+fn bearer(request: &str) -> Option<String> {
+    request.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim().eq_ignore_ascii_case("authorization").then(|| {
+            let value = value.trim();
+            value
+                .strip_prefix("Bearer ")
+                .or_else(|| value.strip_prefix("bearer "))
+                .unwrap_or(value)
+                .to_owned()
+        })
+    })
+}
+
+/// The endpoint received requests, and every one carried `expected`, or no
+/// key at all when `expected` is `None`.
+fn assert_keys(requests: &[String], expected: Option<&str>, what: &str) {
+    assert!(
+        !requests.is_empty(),
+        "{what}: the endpoint received no request"
+    );
+    for request in requests {
+        assert_eq!(bearer(request).as_deref(), expected, "{what}: {request}");
+    }
+}
+
+/// Save `key` for the active endpoint through the shared credential
+/// operation.
+fn save_key(runtime: &Runtime, key: &str) {
+    let (_, _, status) = call(runtime, "GET", CREDENTIAL, None);
+    let body = json!({ "key": key, "expected_revision": status["revision"] });
+    let (status, raw, _) = send(runtime, "PUT", CREDENTIAL, body);
+    assert_eq!(status, 200, "{raw}");
+}
+
+fn provider<'a>(view: &'a Value, id: &str) -> Option<&'a Value> {
+    view["providers"]
+        .as_array()?
+        .iter()
+        .find(|provider| provider["id"] == id)
+}
+
+fn key_file(home: &Path, id: &str) -> PathBuf {
+    home.join("secrets").join(format!("provider-{id}.key"))
+}
+
+fn revision(runtime: &Runtime) -> Value {
+    let (_, _, view) = call(runtime, "GET", PROVIDERS, None);
+    view["revision"].clone()
+}
+
+#[test]
+fn saved_providers_are_shared_revision_checked_and_keep_keys_bound() {
+    let home = scratch_home("ops");
+    cli_ok(&home, &["profile", "create", "work", "--model", "m1"]);
+    cli_ok(&home, &["profile", "use", "work"]);
+    let runtime = start(&home);
+    let (lab, moved, other) = (Recorder::start(), Recorder::start(), Recorder::start());
+    let profile_file = home.join("profiles").join("work").join("profile.json");
+
+    // The list: the local endpoint, active, keyless; a change applies to the
+    // next run.
+    let (status, raw, view) = call(&runtime, "GET", PROVIDERS, None);
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(view["active"], "lightweight-local", "{view}");
+    assert!(
+        view["effect"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("next run"),
+        "{view}"
+    );
+
+    // Create, on the current revision: listed, keyless, not selected.
+    let read_at = view["revision"].clone();
+    let body = json!({ "name": "Lab", "base_url": lab.url, "expected_revision": read_at });
+    let (status, raw, view) = send(&runtime, "POST", PROVIDERS, body);
+    assert_eq!(status, 201, "{raw}");
+    let created = provider(&view, "lab").expect("lab listed");
+    assert_eq!(created["key_state"], "absent");
+    assert_eq!(created["active"], false);
+    assert_eq!(view["active"], "lightweight-local");
+    // A save on the revision read before that create is refused.
+    let body = json!({ "name": "Other", "base_url": other.url, "expected_revision": read_at });
+    let (status, raw, _) = send(&runtime, "POST", PROVIDERS, body);
+    assert_eq!(status, 409, "{raw}");
+    // Duplicates and invalid input are refused and write nothing.
+    let before = std::fs::read(home.join("config.json")).expect("config");
+    for (body, code) in [
+        (json!({ "name": "LAB!", "base_url": other.url }), 409),
+        (
+            json!({ "name": "Other", "base_url": format!("{}/", lab.url) }),
+            409,
+        ),
+        (json!({ "name": "Custom", "base_url": other.url }), 400),
+        (
+            json!({ "name": "Other", "base_url": "ftp://models.example" }),
+            400,
+        ),
+    ] {
+        let (status, raw, _) = send(&runtime, "POST", PROVIDERS, body.clone());
+        assert_eq!(status, code, "{body}: {raw}");
+    }
+    assert_eq!(
+        std::fs::read(home.join("config.json")).expect("config"),
+        before,
+        "a refused create wrote the config"
+    );
+
+    // Select it with a model: the active profile follows, and the CLI uses
+    // it. It has no key yet, so none is sent.
+    let (status, raw, view) = send(&runtime, "PUT", ACTIVE, json!({ "id": "lab", "model": "m2" }));
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(view["active"], "lab");
+    assert_eq!(view["model"], "m2");
+    let profile = read_json(&profile_file);
+    assert_eq!(profile["routing"]["model"], "m2", "{profile}");
+    assert!(profile["routing"]["base_url"].is_null(), "{profile}");
+    lab.drain();
+    assert_eq!(cli_ok(&home, &["--json", "models"]), r#"["m1","m2"]"#);
+    assert_keys(&lab.collect(WAIT), None, "the selected provider, keyless");
+
+    // Its key, saved through the shared credential operation, goes to its
+    // endpoint only: the provider's own check and the CLI.
+    save_key(&runtime, LAB_KEY);
+    assert!(key_file(&home, "lab").exists());
+    let (status, raw, check) = send(
+        &runtime,
+        "POST",
+        &format!("{PROVIDERS}/lab/check"),
+        json!({ "timeout_secs": 5 }),
+    );
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(check["key_sent"], true, "{check}");
+    assert_keys(&lab.collect(WAIT), Some(LAB_KEY), "the provider's check");
+
+    // Another saved provider, checked by id: its endpoint gets no key.
+    let body = json!({ "name": "Other", "base_url": other.url });
+    let (status, raw, _) = send(&runtime, "POST", PROVIDERS, body);
+    assert_eq!(status, 201, "{raw}");
+    let (_, raw, check) = send(
+        &runtime,
+        "POST",
+        &format!("{PROVIDERS}/other/check"),
+        json!({ "timeout_secs": 5 }),
+    );
+    assert_eq!(check["key_sent"], false, "{raw}");
+    assert_keys(&other.collect(WAIT), None, "another provider's check");
+
+    // A rename keeps the key: it moves to the new name's file.
+    let (status, raw, view) = send(
+        &runtime,
+        "PATCH",
+        &format!("{PROVIDERS}/lab"),
+        json!({ "name": "Lab Two" }),
+    );
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(view["active"], "lab-two");
+    assert_eq!(
+        provider(&view, "lab-two").expect("renamed")["key_state"],
+        "ready"
+    );
+    assert!(!key_file(&home, "lab").exists());
+    assert!(key_file(&home, "lab-two").exists());
+    assert_eq!(cli_ok(&home, &["--json", "models"]), r#"["m1","m2"]"#);
+    assert_keys(&lab.collect(WAIT), Some(LAB_KEY), "the renamed provider");
+
+    // A new endpoint releases the key: it is never sent there.
+    let (status, raw, view) = send(
+        &runtime,
+        "PATCH",
+        &format!("{PROVIDERS}/lab-two"),
+        json!({ "base_url": moved.url }),
+    );
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(
+        provider(&view, "lab-two").expect("moved")["key_state"],
+        "absent"
+    );
+    assert!(!key_file(&home, "lab-two").exists());
+    let (_, _, credential) = call(&runtime, "GET", CREDENTIAL, None);
+    assert_eq!(credential["state"], "absent", "{credential}");
+    moved.drain();
+    assert_eq!(cli_ok(&home, &["--json", "models"]), r#"["m1","m2"]"#);
+    assert_keys(&moved.collect(WAIT), None, "a moved provider");
+
+    // keep_key carries the key to a new endpoint, only when asked.
+    save_key(&runtime, LAB_KEY);
+    let (status, raw, view) = send(
+        &runtime,
+        "PATCH",
+        &format!("{PROVIDERS}/lab-two"),
+        json!({ "base_url": lab.url, "keep_key": true }),
+    );
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(
+        provider(&view, "lab-two").expect("kept")["key_state"],
+        "ready"
+    );
+    lab.drain();
+    assert_eq!(cli_ok(&home, &["--json", "models"]), r#"["m1","m2"]"#);
+    assert_keys(&lab.collect(WAIT), Some(LAB_KEY), "keep_key");
+
+    // Ordered concurrency: a change against a revision read before a CLI
+    // write is refused and writes nothing; on the current revision it
+    // applies, and the active profile follows.
+    let read_at = revision(&runtime);
+    cli_ok(&home, &["config", "set", "inference.model", "m1"]);
+    let body = json!({ "model": "m2", "expected_revision": read_at });
+    let (status, raw, _) = send(&runtime, "PUT", MODEL, body);
+    assert_eq!(status, 409, "{raw}");
+    assert_eq!(read_json(&home.join("config.json"))["inference"]["model"], "m1");
+    let body = json!({ "model": null, "expected_revision": revision(&runtime) });
+    let (status, raw, view) = send(&runtime, "PUT", MODEL, body);
+    assert_eq!(status, 200, "{raw}");
+    assert!(view["model"].is_null(), "{view}");
+    assert_eq!(read_json(&profile_file)["routing"]["model"], "default");
+
+    // Removing the active provider releases its key and leaves the local
+    // endpoint active, keyless, with automatic model selection.
+    let (status, raw, view) = call(&runtime, "DELETE", &format!("{PROVIDERS}/lab-two"), None);
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(view["active"], "lightweight-local");
+    assert!(provider(&view, "lab-two").is_none());
+    assert!(!key_file(&home, "lab-two").exists());
+    let (_, _, credential) = call(&runtime, "GET", CREDENTIAL, None);
+    assert_eq!(credential["state"], "absent", "{credential}");
+
+    // Unknown and reserved ids.
+    let (status, raw, _) = send(
+        &runtime,
+        "PATCH",
+        &format!("{PROVIDERS}/nope"),
+        json!({ "name": "X" }),
+    );
+    assert_eq!(status, 404, "{raw}");
+    let (status, raw, _) = call(
+        &runtime,
+        "DELETE",
+        &format!("{PROVIDERS}/lightweight-local"),
+        None,
+    );
+    assert_eq!(status, 400, "{raw}");
+    let (status, raw, shown) = call(&runtime, "GET", &format!("{PROVIDERS}/other"), None);
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(shown["provider"]["base_url"], other.url);
+}
+=== replace docs/desktop/contract/operations.json
+--- find
+   "id": "provider.credential.remove",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/provider/credential"
+  },
+--- with
+   "id": "provider.credential.remove",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/provider/credential"
+  },
+  {
+   "id": "provider.active.set",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/provider/active"
+  },
+  {
+   "id": "provider.model.set",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/provider/model"
+  },
+  {
+   "id": "providers.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/providers"
+  },
+  {
+   "id": "providers.create",
+   "method": "POST",
+   "path": "/api/lightagent/v1/providers"
+  },
+  {
+   "id": "providers.get",
+   "method": "GET",
+   "path": "/api/lightagent/v1/providers/{id}"
+  },
+  {
+   "id": "providers.update",
+   "method": "PATCH",
+   "path": "/api/lightagent/v1/providers/{id}"
+  },
+  {
+   "id": "providers.remove",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/providers/{id}"
+  },
+  {
+   "id": "providers.check",
+   "method": "POST",
+   "path": "/api/lightagent/v1/providers/{id}/check"
+  },
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "total_rows": 323,
+--- with
+  "total_rows": 331,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "api": 41,
+--- with
+   "api": 49,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "applicable": 287,
+--- with
+   "applicable": 295,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  {
+   "id": "api.put.config.key",
+--- with
+  {
+   "id": "api.get.providers",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/providers",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "The providers the picker offers (the local endpoint, each saved provider, an unsaved active endpoint), the active one and its model, with each key's state only; never a key",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/providers"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: GET /providers",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.post.providers",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/providers",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "Save a new provider (name and endpoint, revision-checked); a name or endpoint another saved provider has is refused",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/providers"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: POST /providers",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.providers.id",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/providers/{id}",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "One provider's details, with its key's state only",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/providers/{id}"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: GET /providers/{id}",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.patch.providers.id",
+   "kind": "api",
+   "surface": "PATCH /api/lightagent/v1/providers/{id}",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "Rename a saved provider (its stored key moves with it) or move it to another endpoint (its key is released unless keep_key), revision-checked",
+   "tree_key": null,
+   "tokens": [
+    "PATCH /api/lightagent/v1/providers/{id}"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: PATCH /providers/{id}",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.delete.providers.id",
+   "kind": "api",
+   "surface": "DELETE /api/lightagent/v1/providers/{id}",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "Remove a saved provider and release its stored key; a removed active provider leaves the local endpoint active",
+   "tree_key": null,
+   "tokens": [
+    "DELETE /api/lightagent/v1/providers/{id}"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: DELETE /providers/{id}",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.post.providers.id.check",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/providers/{id}/check",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "An explicit, bounded check of one provider's endpoint with that endpoint's own key; a redirect is reported, not followed",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/providers/{id}/check"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: POST /providers/{id}/check",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.put.provider.active",
+   "kind": "api",
+   "surface": "PUT /api/lightagent/v1/provider/active",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "Select the active provider and model; the endpoint takes only its own key and the active profile follows; applies to the next run",
+   "tree_key": null,
+   "tokens": [
+    "PUT /api/lightagent/v1/provider/active"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: PUT /provider/active",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.put.provider.model",
+   "kind": "api",
+   "surface": "PUT /api/lightagent/v1/provider/model",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "Select the model on the active endpoint (null: automatic); the active profile follows; applies to the next run",
+   "tree_key": null,
+   "tokens": [
+    "PUT /api/lightagent/v1/provider/model"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: PUT /provider/model",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.put.config.key",
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Total rows: 323
+--- with
+- Total rows: 331
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| api | 41 |
+--- with
+| api | 49 |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| applicable | 287 |
+--- with
+| applicable | 295 |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.put.config.key` | `PUT /api/lightagent/v1/config/{key}` | applicable | no | (backend reuse) | api: PUT /config/{key} | not-started | `crates/lightagent-api/src/lib.rs` |
+--- with
+| `api.get.providers` | `GET /api/lightagent/v1/providers` | applicable | no | (backend reuse) | api: GET /providers | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.post.providers` | `POST /api/lightagent/v1/providers` | applicable | no | (backend reuse) | api: POST /providers | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.get.providers.id` | `GET /api/lightagent/v1/providers/{id}` | applicable | no | (backend reuse) | api: GET /providers/{id} | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.patch.providers.id` | `PATCH /api/lightagent/v1/providers/{id}` | applicable | no | (backend reuse) | api: PATCH /providers/{id} | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.delete.providers.id` | `DELETE /api/lightagent/v1/providers/{id}` | applicable | no | (backend reuse) | api: DELETE /providers/{id} | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.post.providers.id.check` | `POST /api/lightagent/v1/providers/{id}/check` | applicable | no | (backend reuse) | api: POST /providers/{id}/check | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.put.provider.active` | `PUT /api/lightagent/v1/provider/active` | applicable | no | (backend reuse) | api: PUT /provider/active | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.put.provider.model` | `PUT /api/lightagent/v1/provider/model` | applicable | no | (backend reuse) | api: PUT /provider/model | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.put.config.key` | `PUT /api/lightagent/v1/config/{key}` | applicable | no | (backend reuse) | api: PUT /config/{key} | not-started | `crates/lightagent-api/src/lib.rs` |
+=== end
