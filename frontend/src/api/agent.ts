@@ -14,6 +14,60 @@ export interface SkillInfo {
   description: string;
 }
 
+/** Where an extension is installed: every profile's root, or the active profile's. */
+export type ExtensionScope = "global" | "profile";
+
+export interface ExtensionSummary {
+  name: string;
+  version: string;
+  description: string;
+  active: boolean;
+  scope: ExtensionScope;
+  skills_dir: string;
+  mcp_servers: string[];
+}
+
+export interface ExtensionListing {
+  /** The master switch, `extensions.enabled`. */
+  enabled: boolean;
+  extensions: ExtensionSummary[];
+}
+
+/** Where an install came from, as it was recorded. */
+export type ExtensionSource =
+  | { kind: "local"; path: string }
+  | { kind: "git"; url: string; subdir: string; revision: string };
+
+/** What an MCP server would run or reach. Environment and header values are never sent. */
+export type ExtensionMcpServer =
+  | { transport: "stdio"; name: string; command: string; args: string[]; env: string[] }
+  | { transport: "http"; name: string; url: string; headers: string[]; auth: boolean };
+
+export interface ExtensionDetail {
+  name: string;
+  version: string;
+  description: string;
+  active: boolean;
+  scope: ExtensionScope;
+  dir: string;
+  instructions: string;
+  mcp_servers: string[];
+  mcp: ExtensionMcpServer[];
+  skills: string[];
+  source: ExtensionSource | null;
+  mcp_enabled: boolean;
+}
+
+export interface ExtensionInstalled {
+  name: string;
+  dir: string;
+  scope: ExtensionScope;
+  mcp_servers: string[];
+  active: boolean;
+  mcp_enabled: boolean;
+  source: ExtensionSource;
+}
+
 /** One specialist role's readiness, from `GET /workers`. */
 export interface WorkerReadiness {
   role: string;
@@ -450,6 +504,25 @@ export interface ConfigValue {
 export const agentApi = {
   tools: () => jsonRequest<{ tools: ToolInfo[] }>("/tools"),
   skills: () => jsonRequest<{ skills: SkillInfo[] }>("/skills"),
+  /** `lightagent extensions list|show|install|enable|disable|uninstall`, the same operations. */
+  extensions: () => jsonRequest<ExtensionListing>("/extensions"),
+  extension: (name: string) =>
+    jsonRequest<ExtensionDetail>(`/extensions/${encodeURIComponent(name)}`),
+  installExtension: (source: string, scope: ExtensionScope, activateMcp: boolean) =>
+    jsonRequest<ExtensionInstalled>("/extensions", {
+      method: "POST",
+      body: JSON.stringify({ source, scope, activate_mcp: activateMcp }),
+    }),
+  setExtensionEnabled: (name: string, enabled: boolean) =>
+    jsonRequest<{ name: string; active: boolean; extensions_enabled: boolean }>(
+      `/extensions/${encodeURIComponent(name)}/enabled`,
+      { method: "PUT", body: JSON.stringify({ enabled }) },
+    ),
+  uninstallExtension: (name: string, scope: ExtensionScope) =>
+    jsonRequest<{ name: string; removed_from: string }>(
+      `/extensions/${encodeURIComponent(name)}?scope=${scope}`,
+      { method: "DELETE" },
+    ),
   workers: () => jsonRequest<{ workers: WorkerReadiness[] }>("/workers"),
   settings: () => jsonRequest<LightagentSettings>("/settings"),
   saveSettings: (settings: LightagentSettings) =>

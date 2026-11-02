@@ -5,10 +5,11 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 ## Coverage
 
 - Denominator: 227
-- Implemented: 34 of 227
+- Implemented: 53 of 227
 - Pending D1 decision rows: 0
 - D5a note (2026-11-02, rows 21-24): `slash.approve`, `slash.reject`, `slash.stop`, `slash.continue` and `key.steer` are implemented at `e164dde`: browser UI e2e (e2e/runs.mjs), host-level (desktop/e2e/runs.py, switch.py) and backend (desktop_continue.rs) evidence; native WebView interaction is D8 and not claimed. #98's regenerate (`api.post.sessions.id.regenerate`) has host-level R1 evidence and stays not counted until its browser and native checks (R1 is met at host level; R2-R5 are D8)
-- Total rows: 334
+- D6 note (2026-11-02, rows 26-27): the 13 `cli.extensions.*` rows, the 5 `extension.manifest.*` rows and `extension.roots` are implemented at `c89c989` through `lightagent_extensions::manage`: backend (crates/lightagent/tests/desktop_extensions.rs, CLI and API alike), host-level (desktop/e2e/runs.py `extensions`) and browser UI (e2e/extensions.mjs) evidence; native WebView interaction is D8 and not claimed. `config.extensions` waits for a master-switch control (row 28); the five `api.*.extensions*` rows are backend rows and not counted
+- Total rows: 339
 
 | Kind | Rows |
 |---|---|
@@ -114,12 +115,12 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.profile.preset` | `lightagent profile preset` | applicable | yes | Profiles/Workspaces: preset (admin) | ops::Profiles::preset; api: POST /profiles/{id}/preset | implemented | `crates/lightagent/src/lib.rs:265` |
 | `cli.profile.delete` | `lightagent profile delete` | applicable | yes | Profiles/Workspaces: delete (typed confirmation) | ops::Profiles::delete; api: DELETE /profiles/{id} | implemented | `crates/lightagent/src/lib.rs:267` |
 | `cli.extensions` | `lightagent extensions` | applicable | dup→`cli.extensions.list` | Tools/MCP/Extensions | extract: extensions.rs | not-started | `crates/lightagent/src/lib.rs:112` |
-| `cli.extensions.list` | `lightagent extensions list` | applicable | yes | Tools/MCP/Extensions: extensions | extract: extensions::list() | not-started | `crates/lightagent/src/lib.rs:273` |
-| `cli.extensions.show` | `lightagent extensions show` | applicable | yes | Tools/MCP/Extensions: detail | extract: extensions::show() | not-started | `crates/lightagent/src/lib.rs:275` |
-| `cli.extensions.enable` | `lightagent extensions enable` | applicable | yes | Tools/MCP/Extensions: toggle | extract: extensions::enable() | not-started | `crates/lightagent/src/lib.rs:277` |
-| `cli.extensions.disable` | `lightagent extensions disable` | applicable | yes | Tools/MCP/Extensions: toggle | extract: extensions::disable() | not-started | `crates/lightagent/src/lib.rs:279` |
-| `cli.extensions.install` | `lightagent extensions install` | applicable | yes | Tools/MCP/Extensions: install (folder picker or HTTPS URL) | extract: extensions::install() | not-started | `crates/lightagent/src/lib.rs:281` |
-| `cli.extensions.uninstall` | `lightagent extensions uninstall` | applicable | yes | Tools/MCP/Extensions: uninstall (confirm) | extract: extensions::uninstall() | not-started | `crates/lightagent/src/lib.rs:288` |
+| `cli.extensions.list` | `lightagent extensions list` | applicable | yes | Tools/MCP/Extensions: extensions | extract: extensions::list() | implemented | `crates/lightagent/src/lib.rs:273` |
+| `cli.extensions.show` | `lightagent extensions show` | applicable | yes | Tools/MCP/Extensions: detail | extract: extensions::show() | implemented | `crates/lightagent/src/lib.rs:275` |
+| `cli.extensions.enable` | `lightagent extensions enable` | applicable | yes | Tools/MCP/Extensions: toggle | extract: extensions::enable() | implemented | `crates/lightagent/src/lib.rs:277` |
+| `cli.extensions.disable` | `lightagent extensions disable` | applicable | yes | Tools/MCP/Extensions: toggle | extract: extensions::disable() | implemented | `crates/lightagent/src/lib.rs:279` |
+| `cli.extensions.install` | `lightagent extensions install` | applicable | yes | Tools/MCP/Extensions: install (folder picker or HTTPS URL) | extract: extensions::install() | implemented | `crates/lightagent/src/lib.rs:281` |
+| `cli.extensions.uninstall` | `lightagent extensions uninstall` | applicable | yes | Tools/MCP/Extensions: uninstall (confirm) | extract: extensions::uninstall() | implemented | `crates/lightagent/src/lib.rs:288` |
 | `cli.sessions` | `lightagent sessions` | applicable | dup→`cli.sessions.list` | Conversations | api: GET /sessions | not-started | `crates/lightagent/src/lib.rs:117` |
 | `cli.sessions.list` | `lightagent sessions list` | applicable | yes | Conversations: sidebar | api: GET /sessions | not-started | `crates/lightagent/src/lib.rs:379` |
 | `cli.sessions.show` | `lightagent sessions show` | applicable | yes | Conversations: open session | api: GET /sessions/{id} | not-started | `crates/lightagent/src/lib.rs:381` |
@@ -194,8 +195,8 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.profile.create.opt.name` | `lightagent profile create --name` | applicable | yes | Profiles/Workspaces: create form — input 'name' | ops::Profiles::create; api: POST /profiles | implemented | `crates/lightagent/src/lib.rs:253` |
 | `cli.profile.create.opt.persona` | `lightagent profile create --persona` | applicable | yes | Profiles/Workspaces: create form — input 'persona' | ops::Profiles::create; api: POST /profiles | implemented | `crates/lightagent/src/lib.rs:253` |
 | `cli.profile.create.opt.model` | `lightagent profile create --model` | applicable | yes | Profiles/Workspaces: create form — input 'model' | ops::Profiles::create; api: POST /profiles | implemented | `crates/lightagent/src/lib.rs:253` |
-| `cli.extensions.install.opt.profile` | `lightagent extensions install --profile` | applicable | yes | Tools/MCP/Extensions: install (folder picker or HTTPS URL) — input 'profile' | extract: extensions::install() | not-started | `crates/lightagent/src/lib.rs:281` |
-| `cli.extensions.uninstall.opt.profile` | `lightagent extensions uninstall --profile` | applicable | yes | Tools/MCP/Extensions: uninstall (confirm) — input 'profile' | extract: extensions::uninstall() | not-started | `crates/lightagent/src/lib.rs:288` |
+| `cli.extensions.install.opt.profile` | `lightagent extensions install --profile` | applicable | yes | Tools/MCP/Extensions: install (folder picker or HTTPS URL) — input 'profile' | extract: extensions::install() | implemented | `crates/lightagent/src/lib.rs:281` |
+| `cli.extensions.uninstall.opt.profile` | `lightagent extensions uninstall --profile` | applicable | yes | Tools/MCP/Extensions: uninstall (confirm) — input 'profile' | extract: extensions::uninstall() | implemented | `crates/lightagent/src/lib.rs:288` |
 | `cli.workers.status.opt.profile` | `lightagent workers status --profile` | applicable | yes | Runs/Agents: roles — input 'profile' | api: GET /workers | not-started | `crates/lightagent/src/lib.rs:217` |
 | `cli.workers.assign.opt.worker` | `lightagent workers assign --worker` | applicable | yes | Runs/Agents: assign role — input 'worker' | extract: workers_cmd(Assign) | not-started | `crates/lightagent/src/lib.rs:223` |
 | `cli.workers.assign.opt.builtin` | `lightagent workers assign --builtin` | applicable | yes | Runs/Agents: assign role — input 'builtin' | extract: workers_cmd(Assign) | not-started | `crates/lightagent/src/lib.rs:223` |
@@ -257,11 +258,11 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.profile.preset.arg.id` | `lightagent profile preset <id>` | applicable | yes | Profiles/Workspaces: preset (admin) — input 'id' | ops::Profiles::preset; api: POST /profiles/{id}/preset | implemented | `crates/lightagent/src/lib.rs:265` |
 | `cli.profile.preset.arg.preset` | `lightagent profile preset <preset>` | applicable | yes | Profiles/Workspaces: preset (admin) — input 'preset' | ops::Profiles::preset; api: POST /profiles/{id}/preset | implemented | `crates/lightagent/src/lib.rs:265` |
 | `cli.profile.delete.arg.id` | `lightagent profile delete <id>` | applicable | yes | Profiles/Workspaces: delete (typed confirmation) — input 'id' | ops::Profiles::delete; api: DELETE /profiles/{id} | implemented | `crates/lightagent/src/lib.rs:267` |
-| `cli.extensions.show.arg.name` | `lightagent extensions show <name>` | applicable | yes | Tools/MCP/Extensions: detail — input 'name' | extract: extensions::show() | not-started | `crates/lightagent/src/lib.rs:275` |
-| `cli.extensions.enable.arg.name` | `lightagent extensions enable <name>` | applicable | yes | Tools/MCP/Extensions: toggle — input 'name' | extract: extensions::enable() | not-started | `crates/lightagent/src/lib.rs:277` |
-| `cli.extensions.disable.arg.name` | `lightagent extensions disable <name>` | applicable | yes | Tools/MCP/Extensions: toggle — input 'name' | extract: extensions::disable() | not-started | `crates/lightagent/src/lib.rs:279` |
-| `cli.extensions.install.arg.source` | `lightagent extensions install <source>` | applicable | yes | Tools/MCP/Extensions: install (folder picker or HTTPS URL) — input 'source' | extract: extensions::install() | not-started | `crates/lightagent/src/lib.rs:281` |
-| `cli.extensions.uninstall.arg.name` | `lightagent extensions uninstall <name>` | applicable | yes | Tools/MCP/Extensions: uninstall (confirm) — input 'name' | extract: extensions::uninstall() | not-started | `crates/lightagent/src/lib.rs:288` |
+| `cli.extensions.show.arg.name` | `lightagent extensions show <name>` | applicable | yes | Tools/MCP/Extensions: detail — input 'name' | extract: extensions::show() | implemented | `crates/lightagent/src/lib.rs:275` |
+| `cli.extensions.enable.arg.name` | `lightagent extensions enable <name>` | applicable | yes | Tools/MCP/Extensions: toggle — input 'name' | extract: extensions::enable() | implemented | `crates/lightagent/src/lib.rs:277` |
+| `cli.extensions.disable.arg.name` | `lightagent extensions disable <name>` | applicable | yes | Tools/MCP/Extensions: toggle — input 'name' | extract: extensions::disable() | implemented | `crates/lightagent/src/lib.rs:279` |
+| `cli.extensions.install.arg.source` | `lightagent extensions install <source>` | applicable | yes | Tools/MCP/Extensions: install (folder picker or HTTPS URL) — input 'source' | extract: extensions::install() | implemented | `crates/lightagent/src/lib.rs:281` |
+| `cli.extensions.uninstall.arg.name` | `lightagent extensions uninstall <name>` | applicable | yes | Tools/MCP/Extensions: uninstall (confirm) — input 'name' | extract: extensions::uninstall() | implemented | `crates/lightagent/src/lib.rs:288` |
 | `cli.sessions.show.arg.id` | `lightagent sessions show <id>` | applicable | yes | Conversations: open session — input 'id' | api: GET /sessions/{id} | not-started | `crates/lightagent/src/lib.rs:381` |
 | `cli.sessions.delete.arg.id` | `lightagent sessions delete <id>` | applicable | yes | Conversations: delete (confirm) — input 'id' | api: DELETE /sessions/{id} | not-started | `crates/lightagent/src/lib.rs:383` |
 | `cli.workers.assign.arg.role` | `lightagent workers assign <role>` | applicable | yes | Runs/Agents: assign role — input 'role' | extract: workers_cmd(Assign) | not-started | `crates/lightagent/src/lib.rs:223` |
@@ -392,12 +393,12 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 
 | ID | Surface | Applicability | Counts | UI path | Backend | Status | Source |
 |---|---|---|---|---|---|---|---|
-| `extension.manifest.name` | `extension.json name` | applicable | yes | Tools/MCP/Extensions: extension detail | extract: extensions::show() | not-started | `crates/lightagent-extensions/src/lib.rs:51` |
-| `extension.manifest.version` | `extension.json version` | applicable | yes | Tools/MCP/Extensions: extension detail | extract: extensions::show() | not-started | `crates/lightagent-extensions/src/lib.rs:53` |
-| `extension.manifest.description` | `extension.json description` | applicable | yes | Tools/MCP/Extensions: extension detail | extract: extensions::show() | not-started | `crates/lightagent-extensions/src/lib.rs:55` |
-| `extension.manifest.instructions` | `extension.json instructions` | applicable | yes | Tools/MCP/Extensions: extension detail | extract: extensions::show() | not-started | `crates/lightagent-extensions/src/lib.rs:57` |
-| `extension.manifest.mcp_servers` | `extension.json mcp_servers` | applicable | yes | Tools/MCP/Extensions: extension detail | extract: extensions::show() | not-started | `crates/lightagent-extensions/src/lib.rs:59` |
-| `extension.roots` | `<home>/extensions and <profile>/extensions` | applicable | yes | Tools/MCP/Extensions: scope badge (global/profile) | extract: extensions::list() | not-started | `crates/lightagent-extensions/src/lib.rs:17` |
+| `extension.manifest.name` | `extension.json name` | applicable | yes | Tools/MCP/Extensions: extension detail | extract: extensions::show() | implemented | `crates/lightagent-extensions/src/lib.rs:51` |
+| `extension.manifest.version` | `extension.json version` | applicable | yes | Tools/MCP/Extensions: extension detail | extract: extensions::show() | implemented | `crates/lightagent-extensions/src/lib.rs:53` |
+| `extension.manifest.description` | `extension.json description` | applicable | yes | Tools/MCP/Extensions: extension detail | extract: extensions::show() | implemented | `crates/lightagent-extensions/src/lib.rs:55` |
+| `extension.manifest.instructions` | `extension.json instructions` | applicable | yes | Tools/MCP/Extensions: extension detail | extract: extensions::show() | implemented | `crates/lightagent-extensions/src/lib.rs:57` |
+| `extension.manifest.mcp_servers` | `extension.json mcp_servers` | applicable | yes | Tools/MCP/Extensions: extension detail | extract: extensions::show() | implemented | `crates/lightagent-extensions/src/lib.rs:59` |
+| `extension.roots` | `<home>/extensions and <profile>/extensions` | applicable | yes | Tools/MCP/Extensions: scope badge (global/profile) | extract: extensions::list() | implemented | `crates/lightagent-extensions/src/lib.rs:17` |
 
 ## skill-registration
 

@@ -1292,6 +1292,92 @@ to 5 s, as designed.
 that recorded, the D5 gate is met at backend, host and browser level.
 Coverage: **34 of 227**.
 
+## Row 25 — D5 close-out: a paused run is found from its session
+
+**The pause/continue lifecycle, reviewed case by case** (owner's list, 2026-11-02):
+
+| Case | Evidence | New in row 25 |
+|---|---|---|
+| Ownership and permissions | `continue` goes through `authorized_run` with `RunsWrite`, the same check as cancel and approve (row 23) | `active_run` is named only through `authorized_run` with `RunsRead` |
+| Two simultaneous Continue requests resume once | the status mutex: the first takes `awaiting_continue` → `running`, the second gets 409 | `desktop_continue.rs`: two concurrent continues → exactly one 200 and one 409; the provider sees exactly two requests |
+| Extension values validated, limits respected | the only input is `mode` (`extend`/`answer`); extend renews the configured `agent.wall_clock_secs`, never a client amount | an undefined mode is refused (4xx, not 409) and the run stays paused |
+| Stop releases a paused run's lease | row 23 `a_paused_run_can_be_cancelled…`: the next turn is admitted | — |
+| Profile switch and shutdown | `awaiting_continue` is not terminal, so it is an active run: the switch is refused (or stops runs when asked), and close-with-active-runs asks | — |
+| A disconnected client cannot leave an undiscoverable paused run | **gap found and closed**: before, only the operator-only `GET /runs` (no session) knew it, and the session's next turn got a bare 409 | `GET /sessions/{id}` and the busy 409 carry `active_run` {id, status}; the Agent screen follows it; browser: a reload while paused brings the card back and Answer now sends `answer` |
+| Another runtime must not mark a live turn Interrupted | row 23 `a_second_runtime_leaves_a_live_turn_alone` | — |
+| Interrupted work and tool side effects never replayed | row 22 crash scenarios, `desktop_interrupted.rs` | — |
+
+A paused run still holds its session until it is continued, stopped, or its
+runtime exits (then it is recorded Interrupted, never rerun). No time limit
+is added: the terminal has none, and the run is now always reachable.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | `076` failed on a partial-line find (nothing created); `076b` applied; branch `desktop/d5c-paused-discovery`, draft PR #119 | `65a65dc` / `d08a0c5` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41456237007 |
+| 2026-11-02 | `check`: the render job **failed** on the new reload step: a reloaded Agent screen opens on its welcome screen, which has no conversation composer (the paused run had been created and shown). All other jobs passed | `65a65dc` | https://github.com/dlroqa/Lightagent/actions/runs/41456445238 |
+| 2026-11-02 | `078`: the step picks the conversation from the list; the branch moved without force | `ed0ae47` / `904dbf5` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41458025671 |
+| 2026-11-02 | `check`, `desktop`, `jev evaluation`, `subagents`: **success** | `ed0ae47` | https://github.com/dlroqa/Lightagent/actions/runs/41458389710, https://github.com/dlroqa/Lightagent/actions/runs/41458389511 |
+
+## D6 — Tools, MCP, extensions and skills: inventory map
+
+Audited at `c89c989` against `crates/lightagent/src/{extensions,lib,chat}.rs`,
+`crates/lightagent-extensions`, `crates/lightagent-core/src/config.rs`
+(`McpConfig`, `McpServerEntry`, `ToolsConfig`, `ExtensionsConfig`),
+`crates/lightagent-mcp` and the API routes. Counted rows only; group,
+slash-alias and backend `api.*` rows are not counted.
+
+| Inventory rows (counted) | Shared backend operation | API route | Contract op | UI | Evidence required | Slice |
+|---|---|---|---|---|---|---|
+| `cli.extensions.{list,show,enable,disable,install,uninstall}` and their args/options (13), `extension.manifest.*` (5), `extension.roots` | `lightagent_extensions::manage` (new, row 26; the CLI prints its results) | `GET\|POST /extensions`, `GET\|DELETE /extensions/{name}`, `PUT /extensions/{name}/enabled` | `extensions.*` | Tools → Extensions | backend CLI = API, host, browser | rows 26-27: **done** |
+| `config.extensions` (master switch and disabled list) | `config_keys` `extensions.enabled`; `manage::set_enabled` | `/config/{key}`, `/extensions/{name}/enabled` | `config.set`, `extensions.set_enabled` | the card shows the master switch's state; no switch control yet | a switch control with browser evidence | row 28 |
+| `mcp.server.stdio{,.command,.args,.env}`, `mcp.server.http{,.url,.headers,.auth,.untrusted_profiles,.credential_profiles}`, `config.mcp` | none today (config file only): new `lightagent_core::mcp_servers` (view with env/header values withheld, add, update keeping withheld values, remove, enabled, timeout), validated as `Config::validate` does; an explicit check (connect and list tools) through the factory, with the resolver runs use | `GET\|PUT /mcp`, `POST /mcp/servers`, `PUT\|DELETE /mcp/servers/{name}`, `POST /mcp/servers/{name}/check` | `mcp.*` | Tools → MCP servers (connection state, tools found, errors; a stdio check says it runs the command) | backend: config written equals a hand-written one, invalid entries refused, unreachable/failed server reported, no secret value returned; host; browser | rows 28-29 |
+| `cli.tools.list`, `setup.tools.mode`, `config.tools` | `GET /tools` gains the CLI's permission column (auto/ask/block, same `PolicyEngine`); `/settings` file tools and terminal | existing | `tools.list`, `settings.*` | Tools → Enabled tools; Settings local tools | `tools list --json` = `GET /tools`; browser | row 30 |
+| `slash.skills`, `skills.roots` | `GET /skills` gains scope and source (global, profile, extension) | existing | `skills.list` | Tools → Installed skills | backend + browser | row 30 |
+| GitHub skill installation | **new scope**: no CLI operation installs a bare skill. Extension install from HTTPS Git exists (row 26 records the commit) | — | — | — | layout detection (`extension.json` root, `skills/<name>/SKILL.md`, a single `SKILL.md`), unsupported layouts reported, nothing executed, a failed update keeps the valid install | row 31, labelled new scope |
+
+## Row 26 — D6-1: extension operations shared by the CLI, the API and the desktop
+
+- `lightagent_extensions::manage`: list, show, set_enabled, install,
+  uninstall over the same roots and configuration, with typed errors (404,
+  400, 409, 502, 500 over the API). The CLI's text output is unchanged; its
+  JSON gains `scope`, and `show` gains `mcp` and `source`.
+- An install writes `.lightagent-source.json` (folder, or HTTPS repository,
+  sub-folder and the commit from `git rev-parse HEAD`) and is undone if that
+  record or the settings cannot be saved. git runs with
+  `GIT_ALLOW_PROTOCOL=https`, no prompt; nothing fetched is executed.
+- MCP is switched on by an install only when asked (`activate_mcp`): the
+  CLI asks, as it always has; the API defaults to no.
+- `show` gives each MCP server's command and args or URL; of its env and
+  headers only the names, of its auth only whether there is one.
+- The host refuses `extensions.install`, `extensions.uninstall` and
+  `extensions.set_enabled` during a profile switch.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | `077`; branch `desktop/d6a-extension-ops`, draft PR #120 | `9e25804` / `7c0ba3c` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41457764339 |
+| 2026-11-02 | Row 25's `078` brought in by a server-side merge (`POST /merges`) | `63f1fba` / `81f1323` | — |
+| 2026-11-02 | `check (linux-x64)`: **failure**, clippy `result_large_err` on two helpers returning `Result<_, Response>` | `63f1fba` | https://github.com/dlroqa/Lightagent/actions/runs/41458378742 |
+| 2026-11-02 | `080`: the helpers return `Box<Response>`, as `authorized_run` does; the branch moved without force | `3e558b8` / `3be3399` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41459136182 |
+| 2026-11-02 | `check`, `desktop`, `jev evaluation`, `subagents`: **success** (24 of 24) | `3e558b8` | https://github.com/dlroqa/Lightagent/actions/runs/41459281969, https://github.com/dlroqa/Lightagent/actions/runs/41459281958 |
+
+## Row 27 — D6-2: the Extensions card on the Tools screen
+
+- Scope badge, Active/Inactive in words, MCP-server count; Details (folder,
+  source with commit, skills, what each MCP server runs, env and header
+  names only, whether MCP is on); Install (absolute folder or https:// Git
+  URL, every profile or this profile, "Turn MCP on" unchecked by default,
+  refusals under the field); Disable/Enable; Uninstall asks first.
+- Evidence: browser `e2e/extensions.mjs` on the real harness; host
+  `desktop/e2e/runs.py` `extensions`; backend row 26. Native WebView: D8.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | `079` → `b467489`; row 26's fix merged in server-side; branch `desktop/d6b-extensions-ui`, draft PR #121 | `c89c989` / `aa51c9c` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41459032922 |
+| 2026-11-02 | `check` (render with the extensions check, all four platforms), `desktop` (host `extensions` scenario), `jev evaluation`, `subagents`: **success** first run | `c89c989` | https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996 |
+
+Coverage: 19 rows implemented (the 13 `cli.extensions.*` rows, the 5
+`extension.manifest.*` rows, `extension.roots`): **53 of 227**.
+
 ## Artifacts and retention
 
 | Artifact | Run | Retention |
@@ -1336,6 +1422,8 @@ Coverage: **34 of 227**.
 
   | 2026-11-02T13:26:47Z | `d5a2-interrupted` `da950d1`, `d5a3-continue` `0d37299`, `d5a4-run-controls-ui` `e164dde`, `tools/source-edit` `4c05f6e` (lower slices unchanged) | rows 23-24 validated; fetch only (remote-tracking refs), working tree `master` `12582a0` clean |
 
+  | 2026-11-02T14:32:30Z | `d5c-paused-discovery` `ed0ae47`, `d6a-extension-ops` `3e558b8`, `d6b-extensions-ui` `c89c989`, `tools/source-edit` `e1144b6` (lower slices unchanged) | rows 25-27 validated; fetch only (remote-tracking refs), working tree `master` `12582a0` clean |
+
   A documentation commit cannot record itself. Each row names the heads
   that existed when the sync ran. The commit that carries a row is
   backed up by the next sync.
@@ -1351,11 +1439,17 @@ The owner's order of 2026-11-02 (fourth continuation, DESKTOP_CLAUDE_PROMPT.md �
 3. Row 23 (Continue over the API, steering semantics, locks) and row 24
    (Continue card, Stop in the conversation, browser coverage) are done. The
    D5 gate is met at backend, host and browser level; native WebView is D8.
-4. **Next: D6** (tools, MCP, extensions and skills), then D7-D10 in
-   dependency order. D8 keeps the native WebView checks (Settings, profile
-   switching, close with active runs, run controls, response actions
-   R2-R5). Before merge approval (D10), the exact candidate merge sequence is
-   simulated on hosted runners and every candidate tree validated.
+4. D6 has started. Row 25 closed D5 (a paused run is reachable from its
+   session; the lifecycle reviewed). Rows 26-27 (extensions: shared
+   operations, then the card) are done, at 53 of 227.
+5. **Next: row 28**, MCP servers through a new shared operation set (see
+   "D6 — Tools, MCP, extensions and skills: inventory map"), then the MCP
+   card, the tools and skills views, and GitHub skill installation as
+   labelled new scope; then D7-D10 in dependency order. D8 keeps the native
+   WebView checks (Settings, profile switching, close with active runs, run
+   controls, response actions R2-R5, the Extensions card). Before merge
+   approval (D10), the exact candidate merge sequence is simulated on
+   hosted runners and every candidate tree validated.
 
 Previous order (DESKTOP_CLAUDE_PROMPT.md §5), kept for reference:
 

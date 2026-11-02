@@ -36,7 +36,10 @@ tree are recorded here.
 | 22 | D5a-2 a turn its runtime did not live to record is Interrupted, never rerun | https://github.com/dlroqa/Lightagent/pull/116 | `desktop/d5a2-interrupted` | `desktop/d5a1-host-runs` | `c6fd6ac` | `c6fd6ac` |
 | 23 | D5a-3 time-budget pause and Continue over the API; steering semantics; every OS lock unlocks on drop | https://github.com/dlroqa/Lightagent/pull/117 | `desktop/d5a3-continue` | `desktop/d5a2-interrupted` (`da950d1`) | `0d37299` | `0d37299` |
 | 24 | D5a-4 Continue card, Stop in the conversation, browser coverage of the run controls | https://github.com/dlroqa/Lightagent/pull/118 | `desktop/d5a4-run-controls-ui` | `desktop/d5a3-continue` (via merge commit `3bd001c`) | `e164dde` | `e164dde` |
-| 25+ | D6, then D7-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+| 25 | D5 close-out: a paused run is found from its session (`active_run`); the lifecycle reviewed | https://github.com/dlroqa/Lightagent/pull/119 | `desktop/d5c-paused-discovery` | `desktop/d5a4-run-controls-ui` (`8dc7d5b`) | `ed0ae47` | `ed0ae47` |
+| 26 | D6-1 extension operations shared by the CLI, the API and the desktop | https://github.com/dlroqa/Lightagent/pull/120 | `desktop/d6a-extension-ops` | `desktop/d5c-paused-discovery` (via merge commit `63f1fba`) | `3e558b8` | `3e558b8` |
+| 27 | D6-2 the Extensions card on the Tools screen | https://github.com/dlroqa/Lightagent/pull/121 | `desktop/d6b-extensions-ui` | `desktop/d6a-extension-ops` (via merge commit `c89c989`) | `c89c989` | `c89c989` |
+| 28+ | D6-3 MCP servers (shared operations, then the card), tools and skills views, GitHub skill installation (new scope); then D7-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
 
 D5b (rows 19-20) comes before D5a (rows 21-23) because D5a depends on it,
 not the reverse. D5b uses no D5a operation, and the owner ordered it next

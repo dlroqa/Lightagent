@@ -11,6 +11,7 @@ import { checkJevStates } from "./jev.mjs";
 import { checkProfileStates } from "./profiles.mjs";
 import { checkConfigEditor } from "./config.mjs";
 import { checkSettingsStates } from "./settings.mjs";
+import { checkExtensions } from "./extensions.mjs";
 
 const BASE = (process.env.PANEL_BASE ?? "http://127.0.0.1:8735").replace(/\/+$/, "");
 const OUT_DIR = process.env.OUT_DIR ?? "screens";
@@ -376,6 +377,12 @@ async function main() {
     failures.push(...(await checkJevStates(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`jev states: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Installs and removes an extension: after the routes above have rendered.
+  try {
+    failures.push(...(await checkExtensions(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`extensions: ${err instanceof Error ? err.message : String(err)}`);
   }
   // Changes the profile store: after the routes above have rendered.
   try {
