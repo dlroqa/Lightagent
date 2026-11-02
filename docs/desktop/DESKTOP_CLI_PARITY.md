@@ -5,7 +5,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 ## Coverage
 
 - Denominator: 227
-- Implemented: 29 of 227
+- Implemented: 34 of 227
 - Pending D1 decision rows: 0
 - D5a note (2026-11-02, rows 21-24): `slash.approve`, `slash.reject`, `slash.stop`, `slash.continue` and `key.steer` are implemented at `e164dde`: browser UI e2e (e2e/runs.mjs), host-level (desktop/e2e/runs.py, switch.py) and backend (desktop_continue.rs) evidence; native WebView interaction is D8 and not claimed. #98's regenerate (`api.post.sessions.id.regenerate`) has host-level R1 evidence and stays not counted until its browser and native checks (R1 is met at host level; R2-R5 are D8)
 - Total rows: 334

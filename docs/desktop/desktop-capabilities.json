@@ -5236,11 +5236,7 @@
    "desktop_status": "implemented",
    "verification": "Two steers typed during a run are queued and sent in order once it ends, nothing sent meanwhile (UI e2e: e2e/runs.mjs, browser only); server side through the desktop host: a busy steer is refused and not saved, concurrent submissions admit exactly one, queued turns run in order (runs.py steering). The queue is held by the page and does not survive it, as the terminal queue does not survive its process; native WebView automation pending D8 (not claimed)",
    "tested_sha": "e164dde7b172b1c74d84b423cadd9479ee1d7cdc",
-   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41451624446 (check, standalone Web UI render: e2e/runs.mjs); https://github.com/dlroqa/Lightagent/actions/runs/41451624678 (desktop: desktop/e2e/runs.py, switch.py)"=== replace docs/desktop/DESKTOP_CLI_PARITY.md
---- find
-- Implemented: 29 of 227
---- with
-- Implemented: 34 of 227
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41451624446 (check, standalone Web UI render: e2e/runs.mjs); https://github.com/dlroqa/Lightagent/actions/runs/41451624678 (desktop: desktop/e2e/runs.py, switch.py)"
   },
   {
    "id": "key.approval-answer",
