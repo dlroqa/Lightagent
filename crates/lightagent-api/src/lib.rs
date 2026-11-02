@@ -2269,11 +2269,15 @@ async fn start_run(
                 history = admitted;
                 body.message = prompt;
             }
+            // The lease goes before the busy entry, so a session free here
+            // is free in every process.
             Ok(Err(refused)) => {
+                drop(lease);
                 busy.remove(&id);
                 return refused.into_response();
             }
             Err(error) => {
+                drop(lease);
                 busy.remove(&id);
                 return internal(&error.to_string());
             }
@@ -2312,6 +2316,7 @@ async fn start_run(
                     match started {
                         Ok(run) => run,
                         Err(denial) => {
+                            drop(run_lease.take());
                             if let Some(id) = &session_id {
                                 state.busy_sessions.lock().await.remove(id);
                             }
@@ -2358,8 +2363,8 @@ async fn record_run_in_session(
     busy: Arc<Mutex<HashSet<SessionId>>>,
     id: SessionId,
     replacing: Option<String>,
-    // Released when this returns, after the busy entry.
-    _lease: Option<lightagent_store::RunLease>,
+    // Released just before the busy entry, once the run is recorded.
+    mut lease: Option<lightagent_store::RunLease>,
 ) {
     let mut seen = 0;
     loop {
@@ -2396,6 +2401,9 @@ async fn record_run_in_session(
                 }
                 Err(error) => eprintln!("could not save agent session {id:?}: {error}"),
             }
+            // The lease goes first: once the busy entry is gone, the session
+            // is free in every process.
+            drop(lease.take());
             busy.lock().await.remove(&id);
             break;
         }
