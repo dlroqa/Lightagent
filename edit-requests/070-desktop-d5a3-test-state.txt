@@ -1,0 +1,28 @@
+=== base a398bfbb3f63810664ac4a6e15635ab4d13b2585
+=== message
+D5a-3: the test-only detached run state gets its continuation sender
+
+`RunState::detached` (unit tests only) builds the state directly and was
+missing the new `continues` field (check run 41442503903: E0063 in the
+lib test build on every platform).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+        let (decisions, _) = mpsc::unbounded_channel();
+        Arc::new(Self {
+--- with
+        let (decisions, _) = mpsc::unbounded_channel();
+        let (continues, _) = mpsc::unbounded_channel();
+        Arc::new(Self {
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+            cancel: cancel.clone(),
+            decisions,
+            authorization: RunAuthorization::unconditional(cancel),
+--- with
+            cancel: cancel.clone(),
+            decisions,
+            continues,
+            authorization: RunAuthorization::unconditional(cancel),
+=== end
