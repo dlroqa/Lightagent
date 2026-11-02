@@ -87,7 +87,15 @@ export async function checkSettingsStates(browser, base, outDir) {
     } else {
       await page.getByTestId("provider-credential-state").waitFor({ timeout: 5000 });
       await keyField.fill(PROVIDER_KEY);
-      await page.getByRole("button", { name: "Save API key", exact: true }).click();
+      const saveKey = page.getByRole("button", { name: "Save API key", exact: true });
+      // The card loaded before the writes above, so its revision is stale:
+      // the save is refused, and the entry stays in the field.
+      await saveKey.click();
+      await page.getByText("so the key was not saved", { exact: false }).waitFor({ timeout: 5000 });
+      if (await keyField.inputValue() !== PROVIDER_KEY) failures.push("settings: a refused key save lost the entry");
+      if ((await credentialNow()).state !== "absent") failures.push("settings: a refused key save stored the key");
+      // On the current revision it is stored.
+      await saveKey.click();
       await page.getByText("Provider API key saved.", { exact: true }).waitFor({ timeout: 5000 });
       let credential = await credentialNow();
       if (credential.state !== "ready") failures.push(`settings: after saving, the key is ${credential.state}`);

@@ -241,7 +241,7 @@ mod secret_tests {
             assert_eq!(secret.for_request(), Err(problem), "{secret:?}");
             assert_eq!(secret_state(Some(&secret)), problem.as_str());
             let message = problem.to_string();
-            assert!(!message.contains("LIGHTAGENT_TEST"), "{message}");
+            assert!(!message.contains("FOR_REQUEST_UNSET"), "{message}");
             assert!(!message.contains(&dir.display().to_string()), "{message}");
         }
         assert_eq!(secret_state(None), "absent");
