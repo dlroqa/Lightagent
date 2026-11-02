@@ -1,0 +1,1204 @@
+=== base 7378a33eb35ed257b279ef539ce1b3d445054090
+=== message
+D6-4: an explicit MCP server check, and the MCP card
+
+- check_mcp_server (crates/lightagent/src/chat.rs) connects one server
+  exactly as an operator run connects it: the run resolver
+  (plan_mcp_servers), the configured timeout, the same HTTP client (no
+  redirects), an extension's folder as a stdio server's working folder.
+  It lists the server's tools (at most 200 names) and disconnects; the
+  stdio child is killed when its connection drops (kill_on_drop), also
+  when the outer limit (three times the timeout) gives up. Error text is
+  bounded to 600 characters and every env, header and auth value the
+  server is configured with is replaced by [redacted]. It changes no
+  setting: a check never switches MCP on.
+- It runs only on request: POST /mcp/servers/{name}/check through
+  RunFactory::check_mcp (operator only; 404 for an unknown name). Viewing
+  or listing servers (GET /mcp) never starts one.
+- The MCP card on the Tools screen: MCP on or off, with turning it on
+  confirmed first and explained (agent runs may then start every
+  configured server); the timeout; each server's command and args or URL
+  with env, header and auth names only; Check, which for a stdio server
+  first shows the exact command that will start and asks to confirm;
+  Remove with confirmation; an Add form for every field.
+- Evidence: backend (desktop_mcp.rs: a fake HTTP MCP server is checked
+  and its tool listed, nothing changes; on unix a stdio probe starts only
+  on check, its stderr secret is redacted and its process is gone after);
+  host (runs.py `mcp`: listing starts nothing, a check starts it once,
+  redacted, process gone, MCP stays off); browser (e2e/mcp.mjs).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent/src/chat.rs
+--- find
+/// Connect the configured MCP servers and return their tools, or an empty list.
+--- with
+/// The most tool names an MCP check reports.
+const CHECK_TOOLS_SHOWN: usize = 200;
+/// The most characters of an MCP check's error.
+const CHECK_ERROR_CHARS: usize = 600;
+
+/// The values an MCP server is configured with that must never be shown:
+/// its environment and header values and its auth secret.
+fn mcp_secret_values(entry: &lightagent_core::McpServerEntry) -> Vec<String> {
+    let mut values: Vec<String> = match entry {
+        lightagent_core::McpServerEntry::Stdio { env, .. } => env.values().cloned().collect(),
+        lightagent_core::McpServerEntry::Http { headers, auth, .. } => {
+            let mut values: Vec<String> = headers.values().cloned().collect();
+            if let Some(lightagent_core::SecretLookup::Value(value)) =
+                auth.as_ref().map(lightagent_core::SecretRef::lookup)
+            {
+                values.push(value);
+            }
+            values
+        }
+    };
+    values.retain(|value| value.len() >= 4);
+    values
+}
+
+fn mcp_redacted(text: &str, secrets: &[String]) -> String {
+    let mut text = text.to_owned();
+    for secret in secrets {
+        text = text.replace(secret.as_str(), "[redacted]");
+    }
+    text.chars().take(CHECK_ERROR_CHARS).collect()
+}
+
+/// An explicit check of the MCP server `name` (D6-4), connected exactly as
+/// an operator run connects it: the same resolver, timeout and HTTP client,
+/// and an extension's folder as a stdio server's working folder. It lists
+/// the server's tools and disconnects; a stdio server's process is killed
+/// when its connection drops. A stdio server's command is started, so only
+/// an explicit request calls this: viewing or listing servers never does.
+/// It changes no setting. `None` when neither the configuration nor an
+/// active extension declares the name.
+pub(crate) async fn check_mcp_server(
+    config: &Config,
+    extensions: &ExtensionStore,
+    name: &str,
+) -> Option<serde_json::Value> {
+    let configured = config
+        .mcp
+        .servers
+        .iter()
+        .find(|entry| entry.name() == name)
+        .map(|entry| (entry, "configuration".to_owned()));
+    let (entry, declared_by) = configured.or_else(|| {
+        extensions.active(&config.extensions).find_map(|ext| {
+            ext.mcp_servers
+                .iter()
+                .find(|entry| entry.name() == name)
+                .map(|entry| (entry, format!("extension {}", ext.name)))
+        })
+    })?;
+    let transport = match entry {
+        lightagent_core::McpServerEntry::Stdio { .. } => "stdio",
+        lightagent_core::McpServerEntry::Http { .. } => "http",
+    };
+    let secrets = mcp_secret_values(entry);
+    let report = |ok: bool, tools: Vec<String>, more: usize, error: Option<String>, ms: u64| {
+        serde_json::json!({
+            "name": name, "transport": transport, "declared_by": declared_by,
+            "ok": ok, "tools": tools, "more_tools": more, "error": error,
+            "elapsed_ms": ms, "mcp_enabled": config.mcp.enabled,
+        })
+    };
+    let started = Instant::now();
+    let elapsed = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let (specs, refused) = plan_mcp_servers(config, extensions, RemoteAccess::Operator);
+    if let Some(refusal) = refused.iter().find(|refusal| refusal.server == name) {
+        return Some(report(false, Vec::new(), 0, Some(refusal.to_string()), elapsed()));
+    }
+    let Some(spec) = specs.into_iter().find(|spec| spec.name == name) else {
+        return Some(report(
+            false,
+            Vec::new(),
+            0,
+            Some("the server could not be prepared as a run would connect it".to_owned()),
+            elapsed(),
+        ));
+    };
+    let timeout = Duration::from_secs(config.mcp.timeout_secs.clamp(1, 600));
+    lightagent_provider_lightweight::ensure_provider();
+    let client = match reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return Some(report(
+                false,
+                Vec::new(),
+                0,
+                Some(format!("could not build the MCP HTTP client: {error}")),
+                elapsed(),
+            ));
+        }
+    };
+    // Bounded twice: each request by the timeout, and the whole check here.
+    // Giving up drops the connection, which kills a stdio server.
+    let limit = timeout.saturating_mul(3);
+    let connected =
+        tokio::time::timeout(limit, McpHub::connect(vec![spec], timeout, client)).await;
+    let checked = match connected {
+        Err(_) => report(
+            false,
+            Vec::new(),
+            0,
+            Some(format!("no answer within {} seconds", limit.as_secs())),
+            elapsed(),
+        ),
+        Ok(hub) => match hub.errors.first() {
+            Some((_, error)) => report(
+                false,
+                Vec::new(),
+                0,
+                Some(mcp_redacted(error, &secrets)),
+                elapsed(),
+            ),
+            None => {
+                let mut tools: Vec<String> = hub
+                    .tools
+                    .iter()
+                    .map(|tool| tool.definition().name.clone())
+                    .collect();
+                tools.sort();
+                let more = tools.len().saturating_sub(CHECK_TOOLS_SHOWN);
+                tools.truncate(CHECK_TOOLS_SHOWN);
+                // The tools hold the connection; dropping the hub ends it.
+                drop(hub);
+                report(true, tools, more, None, elapsed())
+            }
+        },
+    };
+    Some(checked)
+}
+
+/// Connect the configured MCP servers and return their tools, or an empty list.
+=== replace crates/lightagent/src/serve.rs
+--- find
+    async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
+--- with
+    async fn check_mcp(&self, name: String) -> Result<Option<serde_json::Value>, String> {
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let config = ConfigStore::at(&paths)
+            .load()
+            .map_err(|error| error.to_string())?;
+        let profiles = ProfileStore::new(&self.root);
+        let profile = resolve_profile(&profiles, &config, None)?;
+        let profile_dir = profiles.handle(&profile.id).dir().to_path_buf();
+        let extensions = load_extensions(&self.root, &profile_dir);
+        Ok(crate::chat::check_mcp_server(&config, &extensions, &name).await)
+    }
+
+    async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    /// The window to pack a session's history against before a run of
+--- with
+    /// An explicit check of the MCP server `name`, connected as an operator
+    /// run connects it (D6-4): its tools, or why it failed; `None` when no
+    /// server has the name. A stdio server's command is started, so this
+    /// runs only on an explicit request. The default refuses.
+    async fn check_mcp(&self, _name: String) -> Result<Option<serde_json::Value>, String> {
+        Err("MCP server checks are not available in this embedding".to_owned())
+    }
+
+    /// The window to pack a session's history against before a run of
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    ) -> Result<serde_json::Value, String> {
+        self.factory.check_endpoint(base_url, timeout).await
+    }
+--- with
+    ) -> Result<serde_json::Value, String> {
+        self.factory.check_endpoint(base_url, timeout).await
+    }
+
+    /// An explicit check of the MCP server `name` (see [`RunFactory::check_mcp`]).
+    pub async fn check_mcp(&self, name: String) -> Result<Option<serde_json::Value>, String> {
+        self.factory.check_mcp(name).await
+    }
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+            axum::routing::put(update_mcp_server).delete(remove_mcp_server),
+        )
+--- with
+            axum::routing::put(update_mcp_server).delete(remove_mcp_server),
+        )
+        .route(
+            "/api/lightagent/v1/mcp/servers/{name}/check",
+            post(check_mcp_server),
+        )
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+/// Where the extension operations act: this runtime's Lightagent home.
+--- with
+/// Check one MCP server on request: it is connected exactly as an operator
+/// run connects it (a stdio server's command is started), its tools are
+/// listed, and it is disconnected. No setting changes.
+async fn check_mcp_server(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    match state.manager.check_mcp(name.clone()).await {
+        Ok(Some(check)) => Json(check).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": format!("no MCP server named {name:?} is configured or declared by an active extension")
+            })),
+        )
+            .into_response(),
+        Err(error) => internal(&error),
+    }
+}
+
+/// Where the extension operations act: this runtime's Lightagent home.
+=== replace docs/desktop/contract/operations.json
+--- find
+  {
+   "id": "mcp.servers.remove",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/mcp/servers/{name}"
+  },
+--- with
+  {
+   "id": "mcp.servers.remove",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/mcp/servers/{name}"
+  },
+  {
+   "id": "mcp.servers.check",
+   "method": "POST",
+   "path": "/api/lightagent/v1/mcp/servers/{name}/check"
+  },
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  {
+   "id": "api.get.sessions",
+--- with
+  {
+   "id": "api.post.mcp.servers.name.check",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/mcp/servers/{name}/check",
+   "source": "crates/lightagent-api/src/lib.rs:150",
+   "behavior": "Explicitly connect one MCP server as an operator run would, list its tools and disconnect; a stdio server's command is started; values redacted; no setting changes (D6-4)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/mcp/servers/{name}/check"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the configuration capabilities it serves (mcp.server.*)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: crate lightagent chat::check_mcp_server via RunFactory::check_mcp",
+   "permission": "local-operator",
+   "data_scope": "home|profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.sessions",
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Total rows: 344
+--- with
+- Total rows: 345
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.delete.mcp.servers.name` | `DELETE /api/lightagent/v1/mcp/servers/{name}` | applicable | no | (backend reuse) | shared: lightagent_core::mcp_servers::remove | not-started | `crates/lightagent-api/src/lib.rs:144` |
+--- with
+| `api.delete.mcp.servers.name` | `DELETE /api/lightagent/v1/mcp/servers/{name}` | applicable | no | (backend reuse) | shared: lightagent_core::mcp_servers::remove | not-started | `crates/lightagent-api/src/lib.rs:144` |
+| `api.post.mcp.servers.name.check` | `POST /api/lightagent/v1/mcp/servers/{name}/check` | applicable | no | (backend reuse) | shared: chat::check_mcp_server via RunFactory::check_mcp | not-started | `crates/lightagent-api/src/lib.rs:150` |
+=== replace crates/lightagent/tests/desktop_mcp.rs
+--- find
+    assert_eq!(names, vec![json!("files")]);
+}
+--- with
+    assert_eq!(names, vec![json!("files")]);
+}
+
+/// A minimal streamable-HTTP MCP server with one tool, `ping`.
+fn spawn_http_mcp() -> u16 {
+    fn reply(body: &str) -> Option<String> {
+        let message: Value = serde_json::from_str(body).ok()?;
+        let id = message.get("id").cloned().unwrap_or(Value::Null);
+        match message.get("method").and_then(Value::as_str).unwrap_or("") {
+            "initialize" => Some(json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}}}}).to_string()),
+            "notifications/initialized" => None,
+            "tools/list" => Some(json!({"jsonrpc":"2.0","id":id,"result":{"tools":[{"name":"ping","description":"Ping","inputSchema":{"type":"object"}}]}}).to_string()),
+            _ => Some(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"no"}}).to_string()),
+        }
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut buffer = Vec::new();
+            let mut chunk = [0u8; 2048];
+            let mut body = String::new();
+            loop {
+                if let Some(end) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&buffer[..end]).to_ascii_lowercase();
+                    let length: usize = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse().ok())
+                        .unwrap_or(0);
+                    if buffer.len() >= end + 4 + length {
+                        body = String::from_utf8_lossy(&buffer[end + 4..end + 4 + length]).into_owned();
+                        break;
+                    }
+                }
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                }
+            }
+            let response = match reply(&body) {
+                Some(json) => format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                    json.len()
+                ),
+                None => "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
+            };
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    port
+}
+
+#[test]
+fn a_check_connects_only_on_request_lists_tools_and_changes_nothing() {
+    let (home, runtime) = setup("check");
+    let port = spawn_http_mcp();
+    let server = json!({
+        "transport": "http", "name": "docs", "url": format!("http://127.0.0.1:{port}/mcp"),
+        "headers": { "X-Api-Key": HEADER_SECRET }
+    });
+    assert_eq!(add(&runtime, server).0, 201);
+    let before = config_text(&home);
+
+    let (status, raw) = call(&runtime, "POST", &format!("{MCP}/servers/docs/check"), None);
+    assert_eq!(status, 200, "{raw}");
+    assert!(!raw.contains(HEADER_SECRET), "{raw}");
+    let checked = parsed(&raw);
+    assert_eq!(checked["ok"], true, "{checked}");
+    assert_eq!(checked["transport"], "http", "{checked}");
+    assert_eq!(checked["declared_by"], "configuration", "{checked}");
+    assert_eq!(checked["mcp_enabled"], false, "{checked}");
+    let tools = checked["tools"].as_array().expect("tools");
+    assert!(
+        tools.iter().any(|tool| tool.as_str().is_some_and(|name| name.ends_with("ping"))),
+        "{checked}"
+    );
+    assert_eq!(config_text(&home), before, "a check changed config.json");
+    assert_eq!(
+        call(&runtime, "POST", &format!("{MCP}/servers/missing/check"), None).0,
+        404
+    );
+
+    // A stdio server starts only when checked; its stderr secret is
+    // redacted, and its process is gone afterwards.
+    #[cfg(unix)]
+    {
+        let pidfile = home.join("probe.pid");
+        let server = json!({
+            "transport": "stdio", "name": "probe", "command": "sh",
+            "args": ["-c", "echo $$ > \"$1\"; echo \"token $TOKEN\" >&2; exec sleep 300", "probe", pidfile],
+            "env": { "TOKEN": STDIO_SECRET }
+        });
+        assert_eq!(add(&runtime, server).0, 201);
+        assert_eq!(
+            call(&runtime, "PUT", MCP, Some(r#"{"timeout_secs":2}"#)).0,
+            200
+        );
+        assert_eq!(call(&runtime, "GET", MCP, None).0, 200);
+        assert!(!pidfile.exists(), "listing the servers started one");
+        let (status, raw) = call(&runtime, "POST", &format!("{MCP}/servers/probe/check"), None);
+        assert_eq!(status, 200, "{raw}");
+        assert!(!raw.contains(STDIO_SECRET), "{raw}");
+        let checked = parsed(&raw);
+        assert_eq!(checked["ok"], false, "{checked}");
+        assert!(checked["error"].is_string(), "{checked}");
+        let pid = std::fs::read_to_string(&pidfile).expect("the check started the server");
+        let pid = pid.trim().to_owned();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let state = Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid])
+                .output()
+                .expect("ps");
+            let state = String::from_utf8_lossy(&state.stdout).trim().to_owned();
+            if state.is_empty() || state.starts_with('Z') {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the server process {pid} is still running ({state})"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(mcp_section(&home)["enabled"], false, "a check switched MCP on");
+    }
+}
+=== replace frontend/src/api/agent.ts
+--- find
+export interface ExtensionInstalled {
+--- with
+/** The `mcp` section as the server shows it: names only, never a value. */
+export type McpServerView =
+  | { transport: "stdio"; name: string; command: string; args: string[]; env: string[] }
+  | {
+      transport: "http";
+      name: string;
+      url: string;
+      headers: string[];
+      auth: { kind: "env"; var: string } | { kind: "file" } | null;
+      untrusted_profiles: string[];
+      credential_profiles: string[];
+    };
+
+export interface McpState {
+  mcp: { enabled: boolean; timeout_secs: number; servers: McpServerView[] };
+  revision: string;
+  effect: string;
+}
+
+/** A server as a write states it; a `null` value keeps the saved one. */
+export type McpServerInput =
+  | { transport: "stdio"; name: string; command: string; args: string[]; env: Record<string, string | null> }
+  | {
+      transport: "http";
+      name: string;
+      url: string;
+      headers: Record<string, string | null>;
+      auth: { kind: "none" } | { kind: "keep" } | { kind: "env"; var: string };
+      untrusted_profiles: string[];
+      credential_profiles: string[];
+    };
+
+/** What an explicit check found. */
+export interface McpCheck {
+  name: string;
+  transport: "stdio" | "http";
+  declared_by: string;
+  ok: boolean;
+  tools: string[];
+  more_tools: number;
+  error: string | null;
+  elapsed_ms: number;
+  mcp_enabled: boolean;
+}
+
+export interface ExtensionInstalled {
+=== replace frontend/src/api/agent.ts
+--- find
+  uninstallExtension: (name: string, scope: ExtensionScope) =>
+    jsonRequest<{ name: string; removed_from: string }>(
+      `/extensions/${encodeURIComponent(name)}?scope=${scope}`,
+      { method: "DELETE" },
+    ),
+--- with
+  uninstallExtension: (name: string, scope: ExtensionScope) =>
+    jsonRequest<{ name: string; removed_from: string }>(
+      `/extensions/${encodeURIComponent(name)}?scope=${scope}`,
+      { method: "DELETE" },
+    ),
+  /** MCP servers through the shared operations; values are never returned. */
+  mcp: () => jsonRequest<McpState>("/mcp"),
+  setMcp: (change: { enabled?: boolean; timeout_secs?: number }, revision: string) =>
+    jsonRequest<McpState>("/mcp", {
+      method: "PUT",
+      body: JSON.stringify({ ...change, expected_revision: revision }),
+    }),
+  addMcpServer: (server: McpServerInput, revision: string) =>
+    jsonRequest<McpState>("/mcp/servers", {
+      method: "POST",
+      body: JSON.stringify({ server, expected_revision: revision }),
+    }),
+  removeMcpServer: (name: string) =>
+    jsonRequest<McpState>(`/mcp/servers/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  /** Connects the server now; a stdio server's command is started. */
+  checkMcpServer: (name: string) =>
+    jsonRequest<McpCheck>(`/mcp/servers/${encodeURIComponent(name)}/check`, { method: "POST" }),
+=== replace frontend/src/screens/AgentTools.tsx
+--- find
+import { ExtensionsCard } from "../components/Extensions";
+--- with
+import { ExtensionsCard } from "../components/Extensions";
+import { McpCard } from "../components/Mcp";
+=== replace frontend/src/screens/AgentTools.tsx
+--- find
+        <ExtensionsCard />
+--- with
+        <ExtensionsCard />
+        <McpCard />
+=== write frontend/src/components/Mcp.tsx
+import { useEffect, useState } from "react";
+
+import { agentApi, type McpCheck, type McpServerInput, type McpServerView, type McpState } from "../api/agent";
+import { Empty, Pill } from "./Bits";
+import { Card } from "./Card";
+
+function errorText(cause: unknown): string {
+  return (cause instanceof Error ? cause.message : String(cause)).replace(/^\d{3}:\s*/, "");
+}
+
+/** `NAME=value` or `Name: value` lines into a map; blank lines are skipped. */
+function pairs(text: string, separator: "=" | ":"): Record<string, string> | string {
+  const out: Record<string, string> = {};
+  for (const line of text.split("\n").map((value) => value.trim()).filter(Boolean)) {
+    const at = line.indexOf(separator);
+    if (at <= 0) return `"${line}" needs the form name${separator}value`;
+    out[line.slice(0, at).trim()] = line.slice(at + 1).trim();
+  }
+  return out;
+}
+
+function list(text: string): string[] {
+  return text.split(",").map((value) => value.trim()).filter(Boolean);
+}
+
+/** What a server would run or reach, with names only. */
+function Target({ server }: { server: McpServerView }) {
+  if (server.transport === "stdio") {
+    return (
+      <div className="muted" style={{ overflowWrap: "anywhere" }}>
+        Runs <code>{[server.command, ...server.args].join(" ")}</code>
+        {server.env.length > 0 && <> · environment: {server.env.join(", ")} (values hidden)</>}
+      </div>
+    );
+  }
+  return (
+    <div className="muted" style={{ overflowWrap: "anywhere" }}>
+      Connects to <code>{server.url}</code>
+      {server.headers.length > 0 && <> · headers: {server.headers.join(", ")} (values hidden)</>}
+      {server.auth && <> · auth: {server.auth.kind === "env" ? `environment variable ${server.auth.var}` : "a saved key file"}</>}
+      {server.untrusted_profiles.length > 0 && <> · other profiles allowed: {server.untrusted_profiles.join(", ")}</>}
+      {server.credential_profiles.length > 0 && <> · credentials for: {server.credential_profiles.join(", ")}</>}
+    </div>
+  );
+}
+
+function CheckResult({ check }: { check: McpCheck }) {
+  const runs = check.mcp_enabled ? "" : " Agent runs do not use it while MCP is off.";
+  if (check.ok) {
+    const names = check.tools.length ? check.tools.join(", ") : "no tools";
+    return (
+      <div className="notice notice--info" role="status">
+        Connected in {check.elapsed_ms} ms and disconnected. {check.tools.length + check.more_tools} tool
+        {check.tools.length + check.more_tools === 1 ? "" : "s"}: {names}
+        {check.more_tools > 0 ? ` and ${check.more_tools} more` : ""}.{runs}
+      </div>
+    );
+  }
+  return (
+    <div className="notice notice--warn" role="alert">
+      Could not connect: {check.error ?? "no answer"}.{runs}
+    </div>
+  );
+}
+
+/**
+ * MCP servers through the shared operations: the switch (turning it on is
+ * confirmed), the timeout, each configured server with values withheld,
+ * an explicit Check (a stdio server's command is shown and confirmed
+ * first), removal, and an Add form. Nothing here starts a server except
+ * Check.
+ */
+export function McpCard() {
+  const [state, setState] = useState<McpState | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [confirmOn, setConfirmOn] = useState(false);
+  const [timeout, setTimeoutValue] = useState("");
+  const [confirmCheck, setConfirmCheck] = useState<string | null>(null);
+  const [checking, setChecking] = useState<string | null>(null);
+  const [checks, setChecks] = useState<Record<string, McpCheck>>({});
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  const [transport, setTransport] = useState<"stdio" | "http">("stdio");
+  const [name, setName] = useState("");
+  const [command, setCommand] = useState("");
+  const [args, setArgs] = useState("");
+  const [env, setEnv] = useState("");
+  const [url, setUrl] = useState("");
+  const [headers, setHeaders] = useState("");
+  const [authVar, setAuthVar] = useState("");
+  const [untrusted, setUntrusted] = useState("");
+  const [credential, setCredential] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
+
+  async function load() {
+    try {
+      const next = await agentApi.mcp();
+      setState(next);
+      setTimeoutValue(String(next.mcp.timeout_secs));
+      setLoadError(null);
+    } catch (cause) {
+      setLoadError(errorText(cause));
+    }
+  }
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  async function act(action: (revision: string) => Promise<McpState>, done: string) {
+    if (!state || busy) return;
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const next = await action(state.revision);
+      setState(next);
+      setTimeoutValue(String(next.mcp.timeout_secs));
+      setMessage(`${done} ${next.effect}`);
+    } catch (cause) {
+      setError(errorText(cause));
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function check(server: string) {
+    setConfirmCheck(null);
+    setChecking(server);
+    setError(null);
+    try {
+      const result = await agentApi.checkMcpServer(server);
+      setChecks((current) => ({ ...current, [server]: result }));
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setChecking(null);
+    }
+  }
+
+  function addServer() {
+    setFormError(null);
+    let server: McpServerInput;
+    if (transport === "stdio") {
+      const values = pairs(env, "=");
+      if (typeof values === "string") {
+        setFormError(values);
+        return;
+      }
+      server = {
+        transport, name: name.trim(), command: command.trim(),
+        args: args.split("\n").map((value) => value.trim()).filter(Boolean), env: values,
+      };
+    } else {
+      const values = pairs(headers, ":");
+      if (typeof values === "string") {
+        setFormError(values);
+        return;
+      }
+      server = {
+        transport, name: name.trim(), url: url.trim(), headers: values,
+        auth: authVar.trim() ? { kind: "env", var: authVar.trim() } : { kind: "none" },
+        untrusted_profiles: list(untrusted), credential_profiles: list(credential),
+      };
+    }
+    if (!state || busy) return;
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    agentApi.addMcpServer(server, state.revision)
+      .then((next) => {
+        setState(next);
+        setMessage(`Added ${server.name}. Nothing was started. ${next.effect}`);
+        setName(""); setCommand(""); setArgs(""); setEnv(""); setUrl(""); setHeaders(""); setAuthVar("");
+        setUntrusted(""); setCredential("");
+      })
+      .catch(async (cause) => {
+        setFormError(errorText(cause));
+        await load();
+      })
+      .finally(() => setBusy(false));
+  }
+
+  const enabled = state?.mcp.enabled ?? false;
+  const ready = Boolean(state) && !busy;
+  return (
+    <Card title="MCP servers">
+      <div data-testid="mcp-card">
+        <p className="card__note">
+          Model Context Protocol servers the agent can use as tools, from the same configuration the terminal reads.
+          Values of environment variables and headers are never shown. Nothing here starts a server except Check.
+        </p>
+        {loadError && (
+          <div className="notice notice--warn" role="alert">
+            MCP settings are unavailable: {loadError}{" "}
+            <button type="button" className="btn" onClick={() => void load()}>Retry</button>
+          </div>
+        )}
+        {error && <div className="notice notice--warn" role="alert">{error}</div>}
+        {message && <div className="notice notice--info" role="status">{message}</div>}
+        {!state && !loadError && <span className="muted">Loading MCP settings…</span>}
+        {state && (
+          <>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <strong>MCP</strong>
+              <Pill tone={enabled ? "warn" : "neutral"}>{enabled ? "On" : "Off"}</Pill>
+              {enabled ? (
+                <button type="button" className="btn" disabled={!ready}
+                  onClick={() => void act((revision) => agentApi.setMcp({ enabled: false }, revision), "MCP is off.")}>
+                  Turn MCP off
+                </button>
+              ) : !confirmOn ? (
+                <button type="button" className="btn" disabled={!ready} onClick={() => setConfirmOn(true)}>
+                  Turn MCP on
+                </button>
+              ) : (
+                <>
+                  <button type="button" className="btn btn--danger" disabled={!ready}
+                    onClick={() => void act((revision) => agentApi.setMcp({ enabled: true }, revision), "MCP is on.")
+                      .then(() => setConfirmOn(false))}>
+                    Confirm: turn MCP on
+                  </button>
+                  <button type="button" className="btn" disabled={busy} onClick={() => setConfirmOn(false)}>
+                    Keep MCP off
+                  </button>
+                </>
+              )}
+            </div>
+            {confirmOn && !enabled && (
+              <p className="muted" style={{ margin: "6px 0 0" }}>
+                With MCP on, each agent run starts or connects every server below and every server an active
+                extension declares, and offers their tools. Each tool call still follows the approval policy.
+              </p>
+            )}
+            <div className="field" style={{ marginTop: 10 }}>
+              <label className="field__label" htmlFor="mcp-timeout">Timeout for each request (seconds)</label>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <input id="mcp-timeout" className="input" type="number" min={1} max={600} value={timeout}
+                  disabled={!ready} style={{ maxWidth: 120 }} onChange={(event) => setTimeoutValue(event.target.value)} />
+                <button type="button" className="btn" disabled={!ready || Number(timeout) === state.mcp.timeout_secs}
+                  onClick={() => void act((revision) => agentApi.setMcp({ timeout_secs: Number(timeout) }, revision),
+                    `Timeout set to ${timeout} seconds.`)}>
+                  Save timeout
+                </button>
+              </div>
+            </div>
+            {state.mcp.servers.length === 0 ? (
+              <Empty title="No MCP servers configured" hint="Add one below. Servers an extension declares are shown in its details." />
+            ) : (
+              <ul style={{ listStyle: "none", padding: 0, margin: "12px 0", display: "grid", gap: 12 }}>
+                {state.mcp.servers.map((server) => (
+                  <li key={server.name} data-testid={`mcp-${server.name}`} style={{ minWidth: 0 }}>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                      <strong>{server.name}</strong>
+                      <Pill tone="info">{server.transport === "stdio" ? "Local command" : "HTTP"}</Pill>
+                    </div>
+                    <Target server={server} />
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                      {confirmCheck === server.name ? (
+                        <>
+                          <button type="button" className="btn btn--danger" disabled={checking !== null}
+                            onClick={() => void check(server.name)}>
+                            {`Confirm: start and check ${server.name}`}
+                          </button>
+                          <button type="button" className="btn" onClick={() => setConfirmCheck(null)}>Cancel</button>
+                        </>
+                      ) : (
+                        <button type="button" className="btn" disabled={checking !== null || busy}
+                          aria-busy={checking === server.name || undefined} aria-label={`Check ${server.name}`}
+                          onClick={() => server.transport === "stdio" ? setConfirmCheck(server.name) : void check(server.name)}>
+                          {checking === server.name ? "Checking…" : "Check"}
+                        </button>
+                      )}
+                      {confirmRemove === server.name ? (
+                        <>
+                          <button type="button" className="btn btn--danger" disabled={busy}
+                            onClick={() => void act((_revision) => agentApi.removeMcpServer(server.name), `Removed ${server.name}.`)
+                              .then(() => setConfirmRemove(null))}>
+                            {`Confirm: remove ${server.name}`}
+                          </button>
+                          <button type="button" className="btn" disabled={busy} onClick={() => setConfirmRemove(null)}>
+                            {`Keep ${server.name}`}
+                          </button>
+                        </>
+                      ) : (
+                        <button type="button" className="btn" disabled={busy} aria-label={`Remove ${server.name}`}
+                          onClick={() => setConfirmRemove(server.name)}>
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                    {confirmCheck === server.name && server.transport === "stdio" && (
+                      <p className="muted" style={{ margin: "6px 0 0", overflowWrap: "anywhere" }}>
+                        Checking starts <code>{[server.command, ...server.args].join(" ")}</code> on this computer, as you,
+                        lists its tools and stops it. It changes no setting.
+                      </p>
+                    )}
+                    {checks[server.name] && <CheckResult check={checks[server.name]} />}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <fieldset style={{ border: 0, padding: 0, margin: "16px 0 0", minWidth: 0 }}>
+              <legend className="field__label">Add an MCP server</legend>
+              <fieldset style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+                <legend className="field__label">Kind</legend>
+                <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <input type="radio" name="mcp-transport" checked={transport === "stdio"} disabled={!ready}
+                    onChange={() => setTransport("stdio")} />
+                  Local command (stdio)
+                </label>
+                <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <input type="radio" name="mcp-transport" checked={transport === "http"} disabled={!ready}
+                    onChange={() => setTransport("http")} />
+                  HTTP endpoint
+                </label>
+              </fieldset>
+              <div className="field">
+                <label className="field__label" htmlFor="mcp-name">Name</label>
+                <input id="mcp-name" className="input" value={name} spellCheck={false} disabled={!ready}
+                  onChange={(event) => setName(event.target.value)} />
+              </div>
+              {transport === "stdio" ? (
+                <>
+                  <div className="field">
+                    <label className="field__label" htmlFor="mcp-command">Command</label>
+                    <input id="mcp-command" className="input" value={command} spellCheck={false} disabled={!ready}
+                      onChange={(event) => setCommand(event.target.value)} />
+                  </div>
+                  <div className="field">
+                    <label className="field__label" htmlFor="mcp-args">Arguments (one per line)</label>
+                    <textarea id="mcp-args" className="input" rows={2} value={args} spellCheck={false} disabled={!ready}
+                      onChange={(event) => setArgs(event.target.value)} />
+                  </div>
+                  <div className="field">
+                    <label className="field__label" htmlFor="mcp-env">Environment (NAME=value per line)</label>
+                    <textarea id="mcp-env" className="input" rows={2} value={env} spellCheck={false} disabled={!ready}
+                      autoComplete="off" onChange={(event) => setEnv(event.target.value)} />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="field">
+                    <label className="field__label" htmlFor="mcp-url">URL</label>
+                    <input id="mcp-url" className="input" type="url" placeholder="https://" value={url} spellCheck={false}
+                      disabled={!ready} onChange={(event) => setUrl(event.target.value)} />
+                  </div>
+                  <div className="field">
+                    <label className="field__label" htmlFor="mcp-headers">Headers (Name: value per line)</label>
+                    <textarea id="mcp-headers" className="input" rows={2} value={headers} spellCheck={false}
+                      disabled={!ready} autoComplete="off" onChange={(event) => setHeaders(event.target.value)} />
+                  </div>
+                  <div className="field">
+                    <label className="field__label" htmlFor="mcp-auth">Bearer key from environment variable (optional)</label>
+                    <input id="mcp-auth" className="input" value={authVar} spellCheck={false} disabled={!ready}
+                      onChange={(event) => setAuthVar(event.target.value)} />
+                  </div>
+                  <div className="field">
+                    <label className="field__label" htmlFor="mcp-untrusted">Other profiles that may use it (comma-separated)</label>
+                    <input id="mcp-untrusted" className="input" value={untrusted} spellCheck={false} disabled={!ready}
+                      onChange={(event) => setUntrusted(event.target.value)} />
+                  </div>
+                  <div className="field">
+                    <label className="field__label" htmlFor="mcp-credential">Profiles that may send its credentials (comma-separated)</label>
+                    <input id="mcp-credential" className="input" value={credential} spellCheck={false} disabled={!ready}
+                      onChange={(event) => setCredential(event.target.value)} />
+                  </div>
+                </>
+              )}
+              {formError && (
+                <div role="alert" style={{ fontSize: 11.5, color: "var(--danger)", marginTop: 4 }}>{formError}</div>
+              )}
+              <p className="muted" style={{ margin: "6px 0 0" }}>Adding a server starts nothing and does not turn MCP on.</p>
+              <button type="button" className="btn" style={{ marginTop: 10 }}
+                disabled={!ready || !name.trim() || (transport === "stdio" ? !command.trim() : !url.trim())}
+                onClick={addServer}>
+                Add server
+              </button>
+            </fieldset>
+          </>
+        )}
+      </div>
+    </Card>
+  );
+}
+=== write e2e/mcp.mjs
+// The MCP card against the real harness (D6-4): adding a server starts
+// nothing; viewing the Tools screen starts nothing; Check of a stdio server
+// shows the command and asks first, then starts it once, and no
+// environment value reaches the page; an HTTP server is checked and its
+// tool listed; turning MCP on is confirmed first; removal asks first.
+// crates/lightagent/tests/desktop_mcp.rs proves the API's writes are the
+// configuration the CLI loads.
+
+import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const STDIO = "render-probe-stdio";
+const HTTP = "render-probe-http";
+const ENV_SECRET = "render-mcp-env-6a1d-not-a-real-value";
+const HEADER_SECRET = "render-mcp-header-2f9b-not-a-real-value";
+
+async function mcpNow(base) {
+  return (await fetch(`${base}/api/lightagent/v1/mcp`)).json();
+}
+
+/** A minimal streamable-HTTP MCP server with one tool, `ping`. */
+async function httpMcp() {
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    let message = {};
+    try {
+      message = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+    } catch {
+      message = {};
+    }
+    const reply = (result) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ jsonrpc: "2.0", id: message.id ?? null, ...result }));
+    };
+    if (message.method === "initialize") return reply({ result: { protocolVersion: "2025-06-18", capabilities: { tools: {} } } });
+    if (message.method === "tools/list") {
+      return reply({ result: { tools: [{ name: "ping", description: "Ping", inputSchema: { type: "object" } }] } });
+    }
+    if (typeof message.method === "string" && message.method.startsWith("notifications/")) {
+      response.writeHead(202);
+      return response.end();
+    }
+    return reply({ error: { code: -32601, message: "no" } });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { server, url: `http://127.0.0.1:${server.address().port}/mcp` };
+}
+
+async function until(probe, timeout = 15000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (await probe()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  return Boolean(await probe());
+}
+
+export async function checkMcp(browser, base, outDir) {
+  const failures = [];
+  const dir = await mkdtemp(join(tmpdir(), "lightagent-render-mcp-"));
+  const marker = join(dir, "started");
+  const script = `require("fs").writeFileSync(${JSON.stringify(marker)}, "started"); process.stderr.write("token " + process.env.TOKEN + "\\n"); process.exit(3);`;
+  const http = await httpMcp();
+  const original = await mcpNow(base);
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1300 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const card = page.getByTestId("mcp-card");
+  const stdioRow = page.getByTestId(`mcp-${STDIO}`);
+  const httpRow = page.getByTestId(`mcp-${HTTP}`);
+  const leaks = async () => {
+    const everything = await page.evaluate(() =>
+      document.documentElement.outerHTML + JSON.stringify(localStorage) + JSON.stringify(sessionStorage));
+    return [ENV_SECRET, HEADER_SECRET].filter((secret) => everything.includes(secret));
+  };
+  const step = async (name, body) => {
+    try {
+      await body();
+    } catch (err) {
+      failures.push(`mcp: ${name}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+      await page.screenshot({ path: `${outDir}/mcp-failed-${name.replace(/\W+/g, "-")}.png` }).catch(() => {});
+    }
+  };
+  try {
+    if (original.mcp.enabled) throw new Error("the harness has MCP on before the check");
+    await page.goto(`${base}/#/tools`);
+    await card.waitFor({ timeout: 15000 });
+
+    await step("adding a stdio server starts nothing", async () => {
+      await card.getByRole("radio", { name: "Local command (stdio)" }).check();
+      await page.locator("#mcp-name").fill(STDIO);
+      await page.locator("#mcp-command").fill(process.execPath);
+      await page.locator("#mcp-args").fill(`-e\n${script}`);
+      await page.locator("#mcp-env").fill(`TOKEN=${ENV_SECRET}`);
+      await card.getByRole("button", { name: "Add server" }).click();
+      await card.getByRole("status").filter({ hasText: `Added ${STDIO}` }).first().waitFor({ timeout: 10000 });
+      await page.reload();
+      await stdioRow.waitFor({ timeout: 15000 });
+      if (existsSync(marker)) throw new Error("adding or viewing the server started it");
+      const now = await mcpNow(base);
+      if (now.mcp.enabled) throw new Error("adding a server turned MCP on");
+      if (JSON.stringify(now).includes(ENV_SECRET)) throw new Error("the API returned the environment value");
+      const leaked = await leaks();
+      if (leaked.length) throw new Error(`the page holds ${leaked.join(", ")}`);
+    });
+
+    await step("a stdio check asks first, then starts it once", async () => {
+      await stdioRow.getByRole("button", { name: `Check ${STDIO}` }).click();
+      await stdioRow.getByText("Checking starts").waitFor({ timeout: 5000 });
+      if (!(await stdioRow.innerText()).includes(process.execPath)) throw new Error("the confirmation does not show the command");
+      if (existsSync(marker)) throw new Error("the server started before it was confirmed");
+      await page.screenshot({ path: `${outDir}/mcp-confirm-check.png` });
+      await stdioRow.getByRole("button", { name: `Confirm: start and check ${STDIO}` }).click();
+      await stdioRow.getByRole("alert").filter({ hasText: "Could not connect" }).waitFor({ timeout: 30000 });
+      if (!existsSync(marker)) throw new Error("the confirmed check did not start the server");
+      const leaked = await leaks();
+      if (leaked.length) throw new Error(`the page holds ${leaked.join(", ")}`);
+      if ((await mcpNow(base)).mcp.enabled) throw new Error("a check turned MCP on");
+    });
+
+    await step("an HTTP server is checked and its tool listed", async () => {
+      await card.getByRole("radio", { name: "HTTP endpoint" }).check();
+      await page.locator("#mcp-name").fill(HTTP);
+      await page.locator("#mcp-url").fill(http.url);
+      await page.locator("#mcp-headers").fill(`X-Api-Key: ${HEADER_SECRET}`);
+      await card.getByRole("button", { name: "Add server" }).click();
+      await httpRow.waitFor({ timeout: 10000 });
+      await httpRow.getByRole("button", { name: `Check ${HTTP}` }).click();
+      const connected = httpRow.getByRole("status").filter({ hasText: "Connected" });
+      await connected.waitFor({ timeout: 30000 });
+      if (!(await connected.innerText()).includes("ping")) throw new Error("the tool is not listed");
+      await page.screenshot({ path: `${outDir}/mcp-checked.png` });
+      const leaked = await leaks();
+      if (leaked.length) throw new Error(`the page holds ${leaked.join(", ")}`);
+    });
+
+    await step("removal asks first", async () => {
+      for (const [name, row] of [[STDIO, stdioRow], [HTTP, httpRow]]) {
+        await row.getByRole("button", { name: `Remove ${name}` }).click();
+        await row.getByRole("button", { name: `Keep ${name}` }).click();
+        if (!(await mcpNow(base)).mcp.servers.some((server) => server.name === name)) throw new Error(`Keep removed ${name}`);
+        await row.getByRole("button", { name: `Remove ${name}` }).click();
+        await row.getByRole("button", { name: `Confirm: remove ${name}` }).click();
+        if (!(await until(async () => !(await mcpNow(base)).mcp.servers.some((server) => server.name === name)))) {
+          throw new Error(`Confirm did not remove ${name}`);
+        }
+      }
+    });
+
+    await step("turning MCP on is confirmed first", async () => {
+      await card.getByRole("button", { name: "Turn MCP on" }).click();
+      await card.getByText("each agent run starts or connects every server").waitFor({ timeout: 5000 });
+      if ((await mcpNow(base)).mcp.enabled) throw new Error("MCP turned on before it was confirmed");
+      await card.getByRole("button", { name: "Keep MCP off" }).click();
+      await card.getByRole("button", { name: "Turn MCP on" }).click();
+      await card.getByRole("button", { name: "Confirm: turn MCP on" }).click();
+      if (!(await until(async () => (await mcpNow(base)).mcp.enabled === true))) throw new Error("Confirm did not turn MCP on");
+      await card.getByRole("button", { name: "Turn MCP off" }).click();
+      if (!(await until(async () => (await mcpNow(base)).mcp.enabled === false))) throw new Error("Turn MCP off did not");
+    });
+
+    if (errors.length) failures.push(`mcp: page errors: ${errors.join("; ")}`);
+  } finally {
+    await page.close();
+    // Leave the harness as it was, even after a failed step.
+    for (const name of [STDIO, HTTP]) {
+      await fetch(`${base}/api/lightagent/v1/mcp/servers/${name}`, { method: "DELETE" }).catch(() => {});
+    }
+    await fetch(`${base}/api/lightagent/v1/mcp`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: original.mcp.enabled, timeout_secs: original.mcp.timeout_secs }),
+    }).catch(() => {});
+    http.server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+  return failures;
+}
+=== replace e2e/render.mjs
+--- find
+import { checkExtensions } from "./extensions.mjs";
+--- with
+import { checkExtensions } from "./extensions.mjs";
+import { checkMcp } from "./mcp.mjs";
+=== replace e2e/render.mjs
+--- find
+  // Changes the profile store: after the routes above have rendered.
+--- with
+  // Adds, checks and removes MCP servers: after the routes above have rendered.
+  try {
+    failures.push(...(await checkMcp(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`mcp: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Changes the profile store: after the routes above have rendered.
+=== replace desktop/e2e/runs.py
+--- find
+            ("extensions", lambda: scenario_extensions(host, cli)),
+--- with
+            ("extensions", lambda: scenario_extensions(host, cli)),
+            ("mcp", lambda: scenario_mcp(host)),
+=== replace desktop/e2e/runs.py
+--- find
+def main():
+--- with
+def scenario_mcp(host):
+    """D6-4 through the host transport: a stdio server is added and listed
+    without starting; a check starts it once, reports why it failed with no
+    environment value, and its process is gone afterwards; MCP stays off."""
+    import shutil
+    import tempfile
+
+    check = Checks("mcp")
+    work = tempfile.mkdtemp(prefix="lightagent-e2e-mcp-")
+    pidfile = os.path.join(work, "pid")
+    secret = "e2e-mcp-env-value-5c1e"
+    script = ("import os, sys, time; open(sys.argv[1], 'w').write(str(os.getpid())); "
+              "sys.stderr.write('token ' + os.environ.get('TOKEN', '') + '\\n'); sys.stderr.flush(); time.sleep(300)")
+
+    def gone(pid):
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            try:
+                with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
+                    state = handle.read().rsplit(")", 1)[1].split()[0]
+            except OSError:
+                return True
+            if state == "Z":
+                return True
+            time.sleep(0.1)
+        return False
+
+    try:
+        status, _ = host.fetch("PUT", f"{API}/mcp", {"timeout_secs": 2})
+        check.expect("timeout set through the host", status == 200, status)
+        server = {"transport": "stdio", "name": "hostprobe", "command": sys.executable,
+                  "args": ["-c", script, pidfile], "env": {"TOKEN": secret}}
+        status, added = host.fetch("POST", f"{API}/mcp/servers", {"server": server})
+        check.expect("added through the host, value withheld", status == 201 and secret not in json.dumps(added),
+                     (status, added))
+        status, listed = host.fetch("GET", f"{API}/mcp")
+        check.expect("listing starts nothing", status == 200 and not os.path.exists(pidfile),
+                     (status, os.path.exists(pidfile)))
+        status, result = host.fetch("POST", f"{API}/mcp/servers/hostprobe/check")
+        started = os.path.exists(pidfile)
+        check.expect("a check starts it and reports the failure without the value",
+                     status == 200 and started and (result or {}).get("ok") is False and secret not in json.dumps(result),
+                     (status, result, started))
+        pid = None
+        if started:
+            with open(pidfile, encoding="utf-8") as handle:
+                pid = handle.read().strip()
+        check.expect("its process is gone after the check", pid is not None and gone(pid), pid)
+        status, view = host.fetch("GET", f"{API}/mcp")
+        check.expect("a check does not turn MCP on", ((view or {}).get("mcp") or {}).get("enabled") is False, view)
+        status, _ = host.fetch("DELETE", f"{API}/mcp/servers/hostprobe")
+        check.expect("removed through the host", status == 200, status)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return check
+
+
+def main():
+=== end
