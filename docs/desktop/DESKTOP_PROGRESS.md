@@ -1378,6 +1378,120 @@ slash-alias and backend `api.*` rows are not counted.
 Coverage: 19 rows implemented (the 13 `cli.extensions.*` rows, the 5
 `extension.manifest.*` rows, `extension.roots`): **53 of 227**.
 
+## Row 28 — D6-3: MCP server configuration through one shared operation set
+
+- `lightagent_core::mcp_servers`: view (env and header values and auth
+  secrets withheld; names and the auth reference's kind shown), add,
+  update (`null` or auth `keep` keeps a withheld value; keeping something
+  never saved is refused), remove, set (enabled, timeout 1-600 s). Every
+  write is validated whether MCP is on or off, by `Config::validate`'s
+  rules plus a tool-namespace-safe name, through `ConfigStore::update` on
+  the caller's revision.
+- API (operator): `GET|PUT /mcp`, `POST /mcp/servers`,
+  `PUT|DELETE /mcp/servers/{name}`; contract `mcp.*`.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | `082`; branch `desktop/d6c-mcp-ops`, draft PR #122 | `7378a33` / `ab88f64` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41465935346 |
+| 2026-11-02 | `check`: 12 of 13 jobs passed; `check (macos-arm64)` job 125347244973 **cancelled by infrastructure**: GitHub's annotation "The job was not acquired by Runner of type hosted even after multiple attempts" (macOS arm64 capacity notices); no log exists. Only that job was rerun (attempt 2, job 125447936741): **success**. The attempt-1 record stays in the run history | `7378a33` | https://github.com/dlroqa/Lightagent/actions/runs/41466088883 |
+
+## Row 29 — D6-4: an explicit MCP server check, and the MCP card
+
+- `chat::check_mcp_server` connects one server as an operator run does
+  (`plan_mcp_servers`, the configured timeout, the same HTTP client with no
+  redirects, an extension's folder as working folder), lists its tools (at
+  most 200), and disconnects; the stdio child is killed on drop
+  (`kill_on_drop` and `Drop`), also when the outer limit (3× timeout)
+  gives up. Errors are cut at 600 characters with every configured env,
+  header and auth value replaced. It changes no setting.
+- Only on request: `POST /mcp/servers/{name}/check`. Listing servers
+  (`GET /mcp`) or opening any screen starts nothing (see row 30 for the
+  catalog).
+- MCP card: on/off (turning on is confirmed, and explained), timeout,
+  servers with names only, Check (a stdio check first shows the exact
+  command and asks to confirm), Remove (confirmed), Add (starts nothing).
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | `083`; branch `desktop/d6d-mcp-check`, draft PR #123 | `1063a88` / `ddd9857` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41497555661 |
+| 2026-11-02 | `check`: **failure**, TS2322 (`checks[name]` is possibly undefined under strict index access) | `1063a88` | https://github.com/dlroqa/Lightagent/actions/runs/41497733333 |
+| 2026-11-02 | `085` → `98d497b`: **success** (24 of 24) | `98d497b` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41498643954 |
+
+## Row 30 — D6-5: effective tool permissions, an MCP-free catalog, skills with their source
+
+- `tool_permission` (one rule): `lightagent tools list` and
+  `RunFactory::tool_catalog` evaluate each tool under the active profile's
+  approval policy (auto/ask/block). `GET /tools` adds `permission` and
+  `mcp` (off/skipped/connected).
+- **Defect found and fixed:** the Agent screen and Settings fetched
+  `GET /tools` when opened, and building that catalog connects every MCP
+  server when MCP is on, so opening either screen started every stdio MCP
+  server. `?mcp=skip` builds the catalog with MCP off; the Web UI always
+  uses it; the Tools screen lists MCP tools only after "Include MCP server
+  tools", which says it starts their commands. Other API clients keep the
+  connecting default, as `tools list` does.
+- `GET /skills` lists what a run loads (global, active extensions', the
+  profile's; later overrides) with each skill's source and version. The
+  active extensions' skills were missing before.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | `084`; branch `desktop/d6e-tools-skills`, draft PR #124 | `c06a651` / `ec93e11` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41498319035 |
+| 2026-11-02 | `085` merged in (`d7a4491`); render **failure**: the existing tools-recovery check's glob no longer matched `/tools?mcp=skip` | `d7a4491` | https://github.com/dlroqa/Lightagent/actions/runs/41498996321 |
+| 2026-11-02 | `087` (regex route) → `d4650af` | `d4650af` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41500383127 |
+| 2026-11-02 | Row 31's host run **failed**: "query parameter mcp is not allowed for tools.list". The desktop host refuses query parameters its contract does not list, so in the desktop app the catalog could not load. The same rule refused the Extensions card's `?scope=` on uninstall (row 27). Fixed where each was introduced: `088` on row 27 (`extensions.uninstall` query `scope`; the host scenario now uninstalls with `?scope=global`) merged forward through rows 28-31; `089` on row 30 (`tools.list` query `mcp`) merged into row 31 | `5cc2dad` (r27), `7ddb855` (r28), `f9b5be6` (r29), `831d05f` (r30) | https://github.com/dlroqa/Lightagent/actions/runs/41501324410, source-edit https://github.com/dlroqa/Lightagent/actions/runs/41503092346, https://github.com/dlroqa/Lightagent/actions/runs/41503223111 |
+
+## Row 31 — D6-6 (new scope): import skills from a repository or folder
+
+Tracked as scope beyond the audited CLI (no CLI operation installed bare
+skills): one backend inventory row, never counted; the CLI-parity
+denominator stays 227.
+
+- Layouts: `extension.json`, `SKILL.md`, `skills/<name>/SKILL.md`,
+  `<name>/SKILL.md`; anything else is refused naming what was looked for.
+  SKILL.md ≤ 512 KiB, ≤ 200 skills, valid unique names, no links anywhere.
+- Git: https only, `GIT_ALLOW_PROTOCOL=https`, no prompt, LFS smudge off;
+  optional revision validated and fetched shallowly; the commit is
+  recorded. Nothing fetched is run.
+- Packaged as a generated, inert extension: installation is separate from
+  activation (inactive unless `activate`) and grants no tool permission.
+- `replace` installs beside, exchanges, saves activation; any failure puts
+  the old copy back.
+- **Not exercised in CI:** fetching from a real Git host; revision
+  handling is covered by validation unit tests only.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | `086`; branch `desktop/d6f-skill-import`, draft PR #125; later merges of rows 30's and 27's fixes | `814e5ec` → `62e87e6` / `25fbf86` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41499829596 |
+
+## Extensions and MCP: CLI and desktop differences, and when changes apply
+
+- **Install and MCP.** `lightagent extensions install` switches
+  `mcp.enabled` on when the bundle declares MCP servers, and prints that it
+  did (unchanged CLI behavior). The API and the desktop do so only when
+  asked (`activate_mcp`; the card's "Turn MCP on" checkbox starts
+  unchecked), and the MCP card's own switch asks for confirmation. The
+  difference is deliberate: the desktop never turns on execution as a side
+  effect. A skills import never turns MCP on.
+- **Enable, disable and running processes.** MCP servers are connected per
+  run: each run builds its registry (`serve.rs` start-run →
+  `configured_registry_for` → `mcp_tools`) and drops it at the end. So
+  enabling or disabling an extension, installing or removing one, and any
+  MCP configuration change apply from the next run, with no restart or
+  reconnect. A turn already running keeps the servers it connected until it
+  ends. A check (row 29) connects and disconnects on its own.
+
+## Carried requirements (unchanged)
+
+- D7: diagnostics-bundle secret-redaction checks.
+- D8: native WebView checks for Settings, profiles, close with active runs,
+  run controls, response actions R2-R5, and now the Extensions, MCP and
+  skills-import controls (confirmations, keyboard use, narrow windows).
+
+Coverage at `62e87e6`: **64 of 227** (11 rows added: the MCP server and `config.mcp` rows, `cli.tools.list`, `slash.skills`, `skills.roots`).
+
+Reruns: besides the reruns this session made (job 125447936741 for #122, job 125475716344 for #123), attempt-2 reruns of the subagents runs 41503194650, 41503200320, 41503201249 ("Tester broker": the fixture run stayed queued past the test's window while five PRs' runs filled the runners) and of check run 41503194699 (macos-arm64 runner not acquired) were started from the owner's account outside this session; all passed. Their attempt-1 records remain in the run histories.
+
 ## Artifacts and retention
 
 | Artifact | Run | Retention |
@@ -1424,6 +1538,8 @@ Coverage: 19 rows implemented (the 13 `cli.extensions.*` rows, the 5
 
   | 2026-11-02T14:32:30Z | `d5c-paused-discovery` `ed0ae47`, `d6a-extension-ops` `3e558b8`, `d6b-extensions-ui` `c89c989`, `tools/source-edit` `e1144b6` (lower slices unchanged) | rows 25-27 validated; fetch only (remote-tracking refs), working tree `master` `12582a0` clean |
 
+  | 2026-11-02T20:06:04Z | `d6b-extensions-ui` `5cc2dad`, `d6c-mcp-ops` `7ddb855`, `d6d-mcp-check` `f9b5be6`, `d6e-tools-skills` `831d05f`, `d6f-skill-import` `62e87e6`, `tools/source-edit` `f5537ff` (lower slices unchanged) | rows 28-31 and the row 27 fix; fetch only (remote-tracking refs), working tree `master` `12582a0` clean |
+
   A documentation commit cannot record itself. Each row names the heads
   that existed when the sync ran. The commit that carries a row is
   backed up by the next sync.
@@ -1442,12 +1558,15 @@ The owner's order of 2026-11-02 (fourth continuation, DESKTOP_CLAUDE_PROMPT.md �
 4. D6 has started. Row 25 closed D5 (a paused run is reachable from its
    session; the lifecycle reviewed). Rows 26-27 (extensions: shared
    operations, then the card) are done, at 53 of 227.
-5. **Next: row 28**, MCP servers through a new shared operation set (see
-   "D6 — Tools, MCP, extensions and skills: inventory map"), then the MCP
-   card, the tools and skills views, and GitHub skill installation as
-   labelled new scope; then D7-D10 in dependency order. D8 keeps the native
-   WebView checks (Settings, profile switching, close with active runs, run
-   controls, response actions R2-R5, the Extensions card). Before merge
+5. Rows 28-31 are done (MCP configuration, the MCP check and card, tool
+   permissions and the MCP-free catalog, skills with their source, and
+   skill import as new scope), at 64 of 227.
+6. **Next:** the D6 close-out (browser evidence for the three remaining MCP
+   fields, a `config.extensions` master switch), then D7 (remaining CLI
+   parity, including the diagnostics bundle and its redaction checks) and
+   D8-D10 in dependency order. D8 keeps the native WebView checks
+   (Settings, profile switching, close with active runs, run controls,
+   response actions R2-R5, Extensions, MCP and skill import). Before merge
    approval (D10), the exact candidate merge sequence is simulated on
    hosted runners and every candidate tree validated.
 

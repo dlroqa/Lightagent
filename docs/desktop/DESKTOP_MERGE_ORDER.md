@@ -39,7 +39,13 @@ tree are recorded here.
 | 25 | D5 close-out: a paused run is found from its session (`active_run`); the lifecycle reviewed | https://github.com/dlroqa/Lightagent/pull/119 | `desktop/d5c-paused-discovery` | `desktop/d5a4-run-controls-ui` (`8dc7d5b`) | `ed0ae47` | `ed0ae47` |
 | 26 | D6-1 extension operations shared by the CLI, the API and the desktop | https://github.com/dlroqa/Lightagent/pull/120 | `desktop/d6a-extension-ops` | `desktop/d5c-paused-discovery` (via merge commit `63f1fba`) | `3e558b8` | `3e558b8` |
 | 27 | D6-2 the Extensions card on the Tools screen | https://github.com/dlroqa/Lightagent/pull/121 | `desktop/d6b-extensions-ui` | `desktop/d6a-extension-ops` (via merge commit `c89c989`) | `c89c989` | `c89c989` |
-| 28+ | D6-3 MCP servers (shared operations, then the card), tools and skills views, GitHub skill installation (new scope); then D7-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+| 28 | D6-3 MCP server configuration through one shared operation set | https://github.com/dlroqa/Lightagent/pull/122 | `desktop/d6c-mcp-ops` | `desktop/d6b-extensions-ui` (via merge commit `7ddb855`) | `7ddb855` | `7ddb855` |
+| 29 | D6-4 an explicit MCP server check, and the MCP card | https://github.com/dlroqa/Lightagent/pull/123 | `desktop/d6d-mcp-check` | `desktop/d6c-mcp-ops` (via merge commit `f9b5be6`) | `f9b5be6` | `f9b5be6` (macos-arm64 jobs waiting for runner capacity when this was written) |
+| 30 | D6-5 effective tool permissions, an MCP-free catalog, skills with their source | https://github.com/dlroqa/Lightagent/pull/124 | `desktop/d6e-tools-skills` | `desktop/d6d-mcp-check` (via merge commit `ef1984d`) | `831d05f` | `831d05f` |
+| 31 | D6-6 (new scope) import skills from a repository or folder | https://github.com/dlroqa/Lightagent/pull/125 | `desktop/d6f-skill-import` | `desktop/d6e-tools-skills` (via merge commit `62e87e6`) | `62e87e6` | `62e87e6` |
+| 32+ | D6 close-out (the three MCP auth/profile fields' browser evidence, the `config.extensions` switch), then D7-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+
+Row 27's head is now `5cc2dad` (the uninstall `scope` contract fix, `088`); its last fully tested head is recorded in DESKTOP_PROGRESS.md when its macos-arm64 jobs finish.
 
 D5b (rows 19-20) comes before D5a (rows 21-23) because D5a depends on it,
 not the reverse. D5b uses no D5a operation, and the owner ordered it next
