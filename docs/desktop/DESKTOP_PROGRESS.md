@@ -29,7 +29,8 @@ next update names its run.
 | Row 9: response actions delivery (#98 with its adoption) | **CI-validated** at `a51449c` (`desktop` after one re-run of an infrastructure-failed bundling job; see "Row 9") | `desktop/d4c1-response-actions` (stacked on D4c) | https://github.com/dlroqa/Lightagent/pull/102 | `a51449ce66790a1092459167545ac645cf226290`, plus this documentation commit | `a51449c` / tree `ab20d7eb19eecbc47a60a0a9e4a4df1bd85926aa` |
 | Row 10: session writes (#100) | **CI-validated** at `aebd5d6` (check and desktop, every job) | `desktop/d4c2-session-writes` (stacked on row 9 `fbd008c`) | https://github.com/dlroqa/Lightagent/pull/103 | `aebd5d631238b1b8a302df1ec1aa7bba27972369`, plus the documentation commit `3310dfc` | `aebd5d6` / tree `e9066c30eac669165e9deb505ee67a0884659df8` |
 | Row 11: D4 acceptance (golden files, ordered concurrency, fail-closed keys, routing report, kept Settings edits) | **CI-validated** at `205f01b` (check and desktop, every job, first run). The D4c gate items are met, except those carried forward (see "Row 11") | `desktop/d4c3-config-acceptance` (stacked on row 10 `3310dfc`) | https://github.com/dlroqa/Lightagent/pull/104 | `205f01b731e0a3149ff465bc894aa97605284c76`, plus the documentation commit `597604d` (check and desktop passed on it) | `205f01b` / tree `b5bf552d9d4e75630b3c3ecda78c58071d15a87f` |
-| Row 12: D4d-1 provider credentials (shared write-only operation; unusable keys fail closed) | **CI-validated** at `6988f6c` (check and desktop, every job) | `desktop/d4d1-credentials` (stacked on row 11 `597604d`) | https://github.com/dlroqa/Lightagent/pull/106 | `6988f6c3256b46d8cc55704e5c3bc2c9e4016b90`, plus this documentation commit | `6988f6c` / tree `bcdfc0b89c6f27047bee39608db9374cc618dad9` |
+| Row 12: D4d-1 provider credentials (shared write-only operation; unusable keys fail closed) | **CI-validated** at `6988f6c` (check and desktop, every job) | `desktop/d4d1-credentials` (stacked on row 11 `597604d`) | https://github.com/dlroqa/Lightagent/pull/106 | `6988f6c3256b46d8cc55704e5c3bc2c9e4016b90`, plus the documentation commit `8f0717d` (check and desktop passed on it) | `6988f6c` / tree `bcdfc0b89c6f27047bee39608db9374cc618dad9` |
+| Row 13: D4d-2a endpoint check (explicit, bounded, no redirect with the key) | **CI-validated** at `e6f4506` (check and desktop, every job) | `desktop/d4d2-endpoint-check` (stacked on row 12 `8f0717d`) | https://github.com/dlroqa/Lightagent/pull/107 | `e6f45069c88120c530caeb975b66026d780016dd`, plus this documentation commit | `e6f4506` / tree `e33be00726f6236d4e21c8410fe540a2de9283ca` |
 | D4d–D10 | not started | — | — | — | — |
 
 The latest progress record is the copy on the highest stacked desktop branch.
@@ -793,7 +794,35 @@ not claimed.
 | 2026-11-02 | `jev evaluation` and `subagents`: **success**. The fixture `fail` and `verify` dispatches failed by design | `6988f6c` | https://github.com/dlroqa/Lightagent/actions/runs/41378487683, https://github.com/dlroqa/Lightagent/actions/runs/41378487629 |
 | 2026-11-02 | Parity: `setup.provider.key` is implemented: **24 of 227** | — | DESKTOP_CLI_PARITY.md |
 
-**Next in D4d:**
+## Row 13 — D4d-2a: the endpoint check
+
+- **`LightweightProvider::for_check`:** a client used only for explicit
+  checks. It never follows a redirect, so the key reaches the configured
+  endpoint only, and a 3xx is reported as that endpoint's answer. Every
+  request is bounded. Runs keep their client.
+- **`providers::check_active`:** the one shared check. It lists the active
+  endpoint's models with that endpoint's own configured key, bounded as a
+  whole. An unusable key fails closed with nothing sent. The result has
+  `ok`, `models`, `error`, `key_sent` and `elapsed_ms`, and never a key.
+- **Where it is used:**
+  - `lightagent models` is this check. It now reports a redirect instead of
+    following it, and gives up after 10 s.
+  - `POST /provider/check` (admin scope; `timeout_secs` 1–30, default 10)
+    runs it through the run factory. It is contract operation
+    `provider.check`, with a backend inventory row (323 rows).
+  - **Settings:** "Check connection" runs only when clicked. That is
+    browser evidence; native WebView verification is D8.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Edit request `048`: **failure** before any commit. A find block was part of a line (the whole-line rule) | — | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41380624787 |
+| 2026-11-02 | `048b` (that block given its whole line, nothing else changed): 26 edits; branch `desktop/d4d2-endpoint-check` moved without force; draft PR #107 | `e6f4506` / `e33be00` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41380687270 |
+| 2026-11-02 | `check` on `e6f4506`: **success**, every job. `an_endpoint_check_is_explicit_bounded_and_sends_the_key_to_that_endpoint_only` passed on all four platforms: key sent to the endpoint and in no response; API models = CLI; 401; 302 not followed and its target untouched; a silent endpoint cut off at 2 s; an unusable key fails closed. Render `[ok]` | `e6f4506` | https://github.com/dlroqa/Lightagent/actions/runs/41380804834 |
+| 2026-11-02 | `desktop` on `e6f4506`: **success**, every job | `e6f4506` | https://github.com/dlroqa/Lightagent/actions/runs/41380804835 |
+| 2026-11-02 | `jev evaluation` and `subagents`: **success**. The fixture `fail` and `verify` dispatches failed by design | `e6f4506` | https://github.com/dlroqa/Lightagent/actions/runs/41380804791, https://github.com/dlroqa/Lightagent/actions/runs/41380804768 |
+| 2026-11-02 | Parity: `cli.models` is implemented: **25 of 227** | — | DESKTOP_CLI_PARITY.md |
+
+**Next in D4d** (the endpoint check above is done):
 - **D4d-2:** provider and model selection, and saved providers, through
   shared operations (`setup.provider.url`, `.saved`, `.model`,
   `cli.models`).

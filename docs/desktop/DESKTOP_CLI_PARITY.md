@@ -5,7 +5,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 ## Coverage
 
 - Denominator: 227
-- Implemented: 24 of 227
+- Implemented: 25 of 227
 - Pending D1 decision rows: 0
 - Total rows: 323
 
@@ -72,6 +72,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.config.set.arg.value` | `0e46892` | Advanced configuration card Value field, invalid value refused with the CLI's words (UI e2e; API = CLI (crates/lightagent/tests/desktop_config.rs, all four platforms)); desktop: contract operations config.show/get/set; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41359276745), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41359276774) |
 | `cli.config.jev-routing-report` | `205f01b` | Settings dry-run table under the routing permission lists the server's report (UI e2e: e2e/settings.mjs); API = CLI `--json` report (crates/lightagent/tests/desktop_config.rs, all four platforms); desktop: contract operation jev.routing_report; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41370767535), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41370767531) |
 | `setup.provider.key` | `6988f6c` | Settings Provider API key card: save, stale save refused with the entry kept, replace, remove after confirmation, key gone from the page (UI e2e, browser only); API = CLI, write-only, unusable keys fail closed (crates/lightagent/tests/desktop_credentials.rs, all four platforms); desktop: contract operations provider.credential.*; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41378487660), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41378487692) |
+| `cli.models` | `e6f4506` | Settings Check connection, only when asked (UI e2e, browser only); API = CLI models through one bounded check: key to that endpoint only, redirect reported not followed, silent endpoint cut off, unusable key fails closed (crates/lightagent/tests/desktop_providers.rs, all four platforms); desktop: contract operation provider.check; native WebView automation pending D8 (not claimed) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41380804834), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41380804835) |
 
 ## What the drift check cannot detect automatically
 
@@ -95,7 +96,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.config.get` | `lightagent config get` | applicable | yes | Settings: advanced key editor (typed) | extract: config_cmd(Get) | implemented | `crates/lightagent/src/lib.rs:199` |
 | `cli.config.set` | `lightagent config set` | applicable | yes | Settings: advanced key editor (typed, validated) | api: PUT /settings (subset); extract: config_cmd(Set) | implemented | `crates/lightagent/src/lib.rs:201` |
 | `cli.config.jev-routing-report` | `lightagent config jev-routing-report` | applicable | yes | Settings/Diagnostics: Jev routing report | shared: lightagent_core::config_keys::jev_routing_report; api: GET /jev/routing-report | implemented | `crates/lightagent/src/lib.rs:203` |
-| `cli.models` | `lightagent models` | applicable | yes | Providers/Models | extract: lib.rs models(); api: GET /provider (capabilities only) | not-started | `crates/lightagent/src/lib.rs:99` |
+| `cli.models` | `lightagent models` | applicable | yes | Providers/Models | shared: providers::check_active; api: POST /provider/check | implemented | `crates/lightagent/src/lib.rs:99` |
 | `cli.tools` | `lightagent tools` | applicable | dup→`cli.tools.list` | Tools/MCP/Extensions | api: GET /tools | not-started | `crates/lightagent/src/lib.rs:101` |
 | `cli.tools.list` | `lightagent tools list` | applicable | yes | Tools/MCP/Extensions: tool catalog | api: GET /tools | not-started | `crates/lightagent/src/lib.rs:211` |
 | `cli.profile` | `lightagent profile` | applicable | dup→`cli.profile.list` | Profiles/Workspaces | extract: lib.rs profiles_cmd() | not-started | `crates/lightagent/src/lib.rs:106` |
