@@ -1,0 +1,795 @@
+=== base 8f0717d2f05ab1422bca4cf479afee65a244bcbb
+=== message
+D4d-2a: one explicit, bounded endpoint check that never follows a redirect with the key
+
+An endpoint check is an explicit action shared by the terminal and the
+desktop:
+
+- `LightweightProvider::for_check` builds a client that never follows a
+  redirect, so the configured key is sent to the configured endpoint
+  only (a redirect is reported as the provider's answer), and bounds
+  every request by the caller's timeout. Runs keep their own client.
+- `providers::check_active` lists the active endpoint's models with its
+  own configured key, bounded as a whole by the timeout. A configured key
+  that cannot be used fails closed with nothing sent. The result says
+  whether a key was sent and how long the check took, and never holds a
+  key.
+- `lightagent models` is that check. POST /provider/check (admin scope,
+  `timeout_secs` 1-30, default 10) runs the same check through the run
+  factory; contract operation `provider.check`, inventory row (backend).
+- Settings: "Check connection" in the provider card, which shows what the
+  endpoint answered.
+
+Hosted tests (the desktop runtime and the CLI in separate processes,
+against fake endpoints): the saved key reaches the endpoint in the
+request and appears in no response; the API's models are the CLI's;
+a 401 is reported; a redirect is not followed and its target receives
+no connection; a silent endpoint is cut off at the requested bound; an
+unusable key fails closed with no connection.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-provider-lightweight/src/provider.rs
+--- find
+        let client = reqwest::Client::builder()
+            .build()
+            .map_err(|err| ProviderError::Transport(err.to_string()))?;
+        Ok(Self { client, config })
+    }
+--- with
+        let client = reqwest::Client::builder()
+            .build()
+            .map_err(|err| ProviderError::Transport(err.to_string()))?;
+        Ok(Self { client, config })
+    }
+
+    /// A provider for an explicit endpoint check. It makes the same requests,
+    /// but never follows a redirect, so the bearer key reaches the configured
+    /// endpoint only and a redirect is reported as that endpoint's answer;
+    /// and no request outlasts `timeout`. Runs use [`Self::new`].
+    pub fn for_check(
+        config: ProviderConfig,
+        timeout: std::time::Duration,
+    ) -> Result<Self, ProviderError> {
+        tls::ensure_provider();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(timeout)
+            .timeout(timeout)
+            .build()
+            .map_err(|err| ProviderError::Transport(err.to_string()))?;
+        Ok(Self { client, config })
+    }
+=== write crates/lightagent/src/providers.rs
+//! Provider operations shared by the terminal CLI and the HTTP API (and so
+//! the desktop's Settings): one explicit way to check an endpoint.
+
+use std::time::{Duration, Instant};
+
+use lightagent_core::{Config, SecretRef};
+use lightagent_provider_lightweight::{LightweightProvider, ProviderConfig};
+use serde::Serialize;
+
+/// How long an endpoint check waits when the caller names no bound.
+pub(crate) const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What an explicit endpoint check found. It never holds a key.
+#[derive(Debug, Serialize)]
+pub(crate) struct EndpointCheck {
+    pub base_url: String,
+    pub ok: bool,
+    pub models: Vec<String>,
+    pub error: Option<String>,
+    /// Whether the configured key was sent (to this endpoint only).
+    pub key_sent: bool,
+    pub elapsed_ms: u64,
+}
+
+/// Check the active endpoint (`inference.base_url`) by listing its models,
+/// with its own configured key. A configured key that cannot be used fails
+/// closed: nothing is sent. A redirect is not followed, so the key reaches
+/// this endpoint only, and the whole check ends within `timeout`.
+pub(crate) async fn check_active(config: &Config, timeout: Duration) -> EndpointCheck {
+    let base_url = config.inference.base_url.clone();
+    let started = Instant::now();
+    let finish = |models: Vec<String>, error: Option<String>, key_sent: bool| EndpointCheck {
+        base_url: base_url.clone(),
+        ok: error.is_none(),
+        models,
+        error,
+        key_sent,
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    };
+    let key = match config
+        .inference
+        .api_key
+        .as_ref()
+        .map_or(Ok(None), SecretRef::for_request)
+    {
+        Ok(key) => key,
+        Err(problem) => {
+            return finish(
+                Vec::new(),
+                Some(format!("inference: {problem}; nothing was sent")),
+                false,
+            );
+        }
+    };
+    let key_sent = key.is_some();
+    let mut provider_config = ProviderConfig::new(base_url.clone(), "default");
+    if let Some(key) = key {
+        provider_config = provider_config.with_api_key(key);
+    }
+    let provider = match LightweightProvider::for_check(provider_config, timeout) {
+        Ok(provider) => provider,
+        Err(error) => return finish(Vec::new(), Some(error.to_string()), false),
+    };
+    match tokio::time::timeout(timeout, provider.models()).await {
+        Ok(Ok(models)) => finish(models, None, key_sent),
+        Ok(Err(error)) => finish(Vec::new(), Some(error.to_string()), key_sent),
+        Err(_) => finish(
+            Vec::new(),
+            Some(format!(
+                "the provider did not answer within {} s",
+                timeout.as_secs()
+            )),
+            key_sent,
+        ),
+    }
+}
+=== replace crates/lightagent/src/lib.rs
+--- find
+mod ops;
+--- with
+mod ops;
+mod providers;
+=== replace crates/lightagent/src/lib.rs
+--- find
+async fn models(json: bool) -> Result<(), String> {
+    use lightagent_provider_lightweight::{LightweightProvider, ProviderConfig};
+
+    let paths = paths()?;
+    let config = load_config(&paths)?;
+    let mut provider_config = ProviderConfig::new(config.inference.base_url.clone(), "default");
+    // A configured key that cannot be used fails closed: nothing is sent.
+    if let Some(secret) = &config.inference.api_key
+        && let Some(value) = secret
+            .for_request()
+            .map_err(|error| format!("inference: {error}; nothing was sent"))?
+    {
+        provider_config = provider_config.with_api_key(value);
+    }
+    let provider = LightweightProvider::new(provider_config).map_err(|error| error.to_string())?;
+
+    match provider.models().await {
+        Ok(models) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_value(&models).map_err(|e| e.to_string())?
+                );
+            } else if models.is_empty() {
+                println!("The provider offers no models (is one loaded?).");
+            } else {
+                for model in models {
+                    println!("{model}");
+                }
+            }
+            Ok(())
+        }
+        Err(error) => Err(format!(
+            "could not reach the provider at {}: {error}",
+            config.inference.base_url
+        )),
+    }
+}
+--- with
+async fn models(json: bool) -> Result<(), String> {
+    let paths = paths()?;
+    let config = load_config(&paths)?;
+    // The shared endpoint check, as Settings runs it: bounded, no redirect
+    // followed, and a configured key that cannot be used fails closed.
+    let check = providers::check_active(&config, providers::CHECK_TIMEOUT).await;
+    if let Some(error) = check.error {
+        return Err(format!(
+            "could not reach the provider at {}: {error}",
+            check.base_url
+        ));
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_value(&check.models).map_err(|e| e.to_string())?
+        );
+    } else if check.models.is_empty() {
+        println!("The provider offers no models (is one loaded?).");
+    } else {
+        for model in check.models {
+            println!("{model}");
+        }
+    }
+    Ok(())
+}
+=== replace crates/lightagent/src/serve.rs
+--- find
+    async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
+--- with
+    async fn check_provider(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let config = ConfigStore::at(&paths)
+            .load()
+            .map_err(|error| error.to_string())?;
+        let check = crate::providers::check_active(&config, timeout).await;
+        serde_json::to_value(check).map_err(|error| error.to_string())
+    }
+
+    async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    /// Discover capabilities from the active provider.
+    async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
+        Err("provider capability discovery is not available in this embedding".to_owned())
+    }
+--- with
+    /// Discover capabilities from the active provider.
+    async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
+        Err("provider capability discovery is not available in this embedding".to_owned())
+    }
+
+    /// An explicit check of the active provider endpoint, ending within
+    /// `timeout`: what it answered, never a key. The default refuses.
+    async fn check_provider(
+        &self,
+        _timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        Err("provider endpoint checks are not available in this embedding".to_owned())
+    }
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    pub async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
+        self.factory.provider_capabilities().await
+    }
+--- with
+    pub async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
+        self.factory.provider_capabilities().await
+    }
+
+    /// An explicit, bounded check of the active provider endpoint.
+    pub async fn check_provider(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        self.factory.check_provider(timeout).await
+    }
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+        .route(
+            "/api/lightagent/v1/provider/credential",
+--- with
+        .route(
+            "/api/lightagent/v1/provider/check",
+            post(post_provider_check),
+        )
+        .route(
+            "/api/lightagent/v1/provider/credential",
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+/// A provider key typed into Settings. Write-only: no `Debug`, and never
+--- with
+/// How long an endpoint check may take, in seconds.
+#[derive(Deserialize)]
+struct CheckBody {
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+/// An explicit check of the active provider endpoint (`lightagent models`):
+/// it sends the configured key to that endpoint only, follows no redirect,
+/// and ends within `timeout_secs` (1-30, default 10).
+async fn post_provider_check(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<CheckBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let seconds = body.timeout_secs.unwrap_or(10).clamp(1, 30);
+    match state
+        .manager
+        .check_provider(std::time::Duration::from_secs(seconds))
+        .await
+    {
+        Ok(check) => Json(check).into_response(),
+        Err(error) => unavailable(&error),
+    }
+}
+
+/// A provider key typed into Settings. Write-only: no `Debug`, and never
+=== replace docs/desktop/contract/operations.json
+--- find
+  {
+   "id": "provider.credential.get",
+--- with
+  {
+   "id": "provider.check",
+   "method": "POST",
+   "path": "/api/lightagent/v1/provider/check"
+  },
+  {
+   "id": "provider.credential.get",
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  {
+   "id": "api.get.provider.credential",
+--- with
+  {
+   "id": "api.post.provider.check",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/provider/check",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "An explicit, bounded check of the active provider endpoint (lightagent models): no redirect followed, an unusable key fails closed",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/provider/check"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: POST /provider/check",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.provider.credential",
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "total_rows": 322,
+--- with
+  "total_rows": 323,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "api": 40,
+--- with
+   "api": 41,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "applicable": 286,
+--- with
+   "applicable": 287,
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.get.provider.credential` | `GET /api/lightagent/v1/provider/credential` | applicable | no | (backend reuse) | api: GET /provider/credential | not-started | `crates/lightagent-api/src/lib.rs` |
+--- with
+| `api.post.provider.check` | `POST /api/lightagent/v1/provider/check` | applicable | no | (backend reuse) | api: POST /provider/check | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.get.provider.credential` | `GET /api/lightagent/v1/provider/credential` | applicable | no | (backend reuse) | api: GET /provider/credential | not-started | `crates/lightagent-api/src/lib.rs` |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Total rows: 322
+--- with
+- Total rows: 323
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| api | 40 |
+--- with
+| api | 41 |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| applicable | 286 |
+--- with
+| applicable | 287 |
+=== replace frontend/src/api/agent.ts
+--- find
+/** `lightagent config jev-routing-report`: the routing-permission dry run. It changes nothing. */
+--- with
+/** What an explicit endpoint check found (`lightagent models`). It never holds a key. */
+export interface EndpointCheck {
+  base_url: string;
+  ok: boolean;
+  models: string[];
+  error: string | null;
+  key_sent: boolean;
+  elapsed_ms: number;
+}
+
+/** `lightagent config jev-routing-report`: the routing-permission dry run. It changes nothing. */
+=== replace frontend/src/api/agent.ts
+--- find
+  removeProviderCredential: () =>
+    jsonRequest<ProviderCredentialStatus>("/provider/credential", { method: "DELETE" }),
+--- with
+  removeProviderCredential: () =>
+    jsonRequest<ProviderCredentialStatus>("/provider/credential", { method: "DELETE" }),
+  /** An explicit, bounded check of the active endpoint; it follows no redirect. */
+  checkProvider: (timeoutSecs?: number) =>
+    jsonRequest<EndpointCheck>("/provider/check", {
+      method: "POST",
+      body: JSON.stringify({ timeout_secs: timeoutSecs }),
+    }),
+=== replace frontend/src/components/ProviderCredential.tsx
+--- find
+import { agentApi, type ProviderCredentialStatus } from "../api/agent";
+--- with
+import { agentApi, type EndpointCheck, type ProviderCredentialStatus } from "../api/agent";
+=== replace frontend/src/components/ProviderCredential.tsx
+--- find
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function load() {
+--- with
+  const [message, setMessage] = useState<string | null>(null);
+  const [check, setCheck] = useState<EndpointCheck | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  async function load() {
+=== replace frontend/src/components/ProviderCredential.tsx
+--- find
+  const view = status ? STATE[status.state]
+--- with
+  // Only when asked: a check sends the saved key to the endpoint.
+  async function runCheck() {
+    setChecking(true);
+    try {
+      setCheck(await agentApi.checkProvider());
+    } catch (cause) {
+      const text = cause instanceof Error ? cause.message : String(cause);
+      setCheck({ base_url: status?.base_url ?? "", ok: false, models: [], error: text, key_sent: false, elapsed_ms: 0 });
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  const view = status ? STATE[status.state]
+=== replace frontend/src/components/ProviderCredential.tsx
+--- find
+        )}
+      </div>
+    </Card>
+  );
+}
+--- with
+        )}
+      </div>
+      <div data-testid="provider-check" style={{ marginTop: 14 }}>
+        <button type="button" className="btn" disabled={checking} aria-busy={checking || undefined}
+          onClick={() => void runCheck()}>
+          {checking ? "Checking the connection…" : "Check connection"}
+        </button>
+        {check && (
+          <p role="status" className="muted" style={{ marginTop: 8 }}>
+            {check.ok
+              ? `Reachable in ${check.elapsed_ms} ms, ${check.key_sent ? "with the saved key" : "without a key"}: ${check.models.length ? check.models.join(", ") : "no model is loaded"}.`
+              : `Not reachable: ${check.error ?? "no answer"}`}
+          </p>
+        )}
+      </div>
+    </Card>
+  );
+}
+=== replace e2e/settings.mjs
+--- find
+      if (credential.state !== "absent") failures.push(`settings: after removing, the key is ${credential.state}`);
+    }
+--- with
+      if (credential.state !== "absent") failures.push(`settings: after removing, the key is ${credential.state}`);
+    }
+
+    // The endpoint check runs only when asked, and says what the endpoint answered.
+    await page.getByRole("button", { name: "Check connection", exact: true }).click();
+    const checked = page.getByTestId("provider-check").getByRole("status");
+    await checked.waitFor({ timeout: 40000 });
+    const checkText = await checked.innerText();
+    if (!/^(Reachable in|Not reachable:)/.test(checkText)) failures.push(`settings: the endpoint check showed "${checkText}"`);
+    if (checkText.includes(PROVIDER_KEY) || checkText.includes(PROVIDER_KEY_2)) failures.push("settings: the endpoint check shows a key");
+=== write crates/lightagent/tests/desktop_providers.rs
+//! An endpoint check is the same for the CLI (`lightagent models`) and the
+//! desktop runtime (POST /provider/check): the configured key goes to the
+//! configured endpoint and nowhere else, a redirect is reported rather than
+//! followed, a silent endpoint is cut off at the requested bound, and a
+//! configured key that cannot be used sends nothing. Every endpoint here is
+//! a local fake.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const KEY: &str = "4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c";
+const PROVIDER_KEY: &str = "check-test-provider-key-a41c7e-not-a-real-key";
+const CREDENTIAL: &str = "/api/lightagent/v1/provider/credential";
+const CHECK: &str = "/api/lightagent/v1/provider/check";
+const MODELS: &str = r#"{"object":"list","data":[{"id":"m1"},{"id":"m2"}]}"#;
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-providers-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: serde_json::Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+/// One authenticated request: the status, the raw body and its JSON.
+fn call(
+    runtime: &Runtime,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> (u16, String, serde_json::Value) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    let json = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    (status, raw, json)
+}
+
+fn cli(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent")
+}
+
+fn cli_ok(home: &Path, args: &[&str]) -> String {
+    let output = cli(home, args);
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn http_response(status: &str, extra_headers: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\n{extra_headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// A fake endpoint that answers one request with `response` (or, with
+/// `None`, holds it unanswered for a while) and returns the request it got.
+fn fake(response: Option<String>) -> (String, JoinHandle<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let url = format!("http://{}", listener.local_addr().expect("address"));
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("timeout");
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            match stream.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => request.extend_from_slice(&buffer[..read]),
+            }
+        }
+        match response {
+            Some(response) => {
+                let _ = stream.write_all(response.as_bytes());
+            }
+            None => std::thread::sleep(Duration::from_secs(15)),
+        }
+        String::from_utf8_lossy(&request).into_owned()
+    });
+    (url, handle)
+}
+
+/// An endpoint that only records whether anything connected to it.
+fn untouched() -> (TcpListener, String) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    listener.set_nonblocking(true).expect("non-blocking");
+    let url = format!("http://{}", listener.local_addr().expect("address"));
+    (listener, url)
+}
+
+fn contacted(listener: &TcpListener) -> bool {
+    match listener.accept() {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+        Err(error) => panic!("accept: {error}"),
+    }
+}
+
+fn use_endpoint(home: &Path, url: &str) {
+    cli_ok(home, &["config", "set", "inference.base_url", url]);
+}
+
+fn sends_key(request: &str) -> bool {
+    request
+        .to_ascii_lowercase()
+        .contains(&format!("authorization: bearer {}", PROVIDER_KEY.to_ascii_lowercase()))
+}
+
+#[test]
+fn an_endpoint_check_is_explicit_bounded_and_sends_the_key_to_that_endpoint_only() {
+    let home = scratch_home("check");
+    let runtime = start(&home);
+    // The provider key, saved through the shared operation.
+    let (_, _, status) = call(&runtime, "GET", CREDENTIAL, None);
+    let body = serde_json::json!({ "key": PROVIDER_KEY, "expected_revision": status["revision"] })
+        .to_string();
+    let (status, raw, _) = call(&runtime, "PUT", CREDENTIAL, Some(&body));
+    assert_eq!(status, 200, "{raw}");
+
+    // Reachable: the key goes to this endpoint, and the API's models are the CLI's.
+    let (url, endpoint) = fake(Some(http_response("200 OK", "", MODELS)));
+    use_endpoint(&home, &url);
+    let (status, raw, check) = call(&runtime, "POST", CHECK, Some(r#"{"timeout_secs":5}"#));
+    assert_eq!(status, 200, "{raw}");
+    assert!(!raw.contains(PROVIDER_KEY), "{raw}");
+    assert_eq!(check["ok"], true, "{check}");
+    assert_eq!(check["models"], serde_json::json!(["m1", "m2"]));
+    assert_eq!(check["key_sent"], true);
+    let request = endpoint.join().expect("endpoint");
+    assert!(request.starts_with("GET /v1/models "), "{request}");
+    assert!(sends_key(&request), "the check did not send the saved key");
+    let (url, endpoint) = fake(Some(http_response("200 OK", "", MODELS)));
+    use_endpoint(&home, &url);
+    assert_eq!(cli_ok(&home, &["--json", "models"]), r#"["m1","m2"]"#);
+    assert!(sends_key(&endpoint.join().expect("endpoint")));
+
+    // A provider error is reported, by the API and the CLI alike.
+    for runner in ["api", "cli"] {
+        let (url, endpoint) = fake(Some(http_response(
+            "401 Unauthorized",
+            "",
+            r#"{"error":"no"}"#,
+        )));
+        use_endpoint(&home, &url);
+        let text = if runner == "api" {
+            let (_, _, check) = call(&runtime, "POST", CHECK, Some(r#"{"timeout_secs":5}"#));
+            assert_eq!(check["ok"], false, "{check}");
+            check["error"].as_str().unwrap_or_default().to_owned()
+        } else {
+            let output = cli(&home, &["models"]);
+            assert!(!output.status.success());
+            String::from_utf8_lossy(&output.stderr).into_owned()
+        };
+        assert!(text.contains("401"), "{runner}: {text}");
+        assert!(!text.contains(PROVIDER_KEY), "{runner}: {text}");
+        endpoint.join().expect("endpoint");
+    }
+
+    // A redirect is reported and not followed: its target gets nothing.
+    for runner in ["api", "cli"] {
+        let (target, target_url) = untouched();
+        let (url, endpoint) = fake(Some(http_response(
+            "302 Found",
+            &format!("Location: {target_url}/v1/models\r\n"),
+            "",
+        )));
+        use_endpoint(&home, &url);
+        let text = if runner == "api" {
+            let (_, _, check) = call(&runtime, "POST", CHECK, Some(r#"{"timeout_secs":5}"#));
+            assert_eq!(check["ok"], false, "{check}");
+            check["error"].as_str().unwrap_or_default().to_owned()
+        } else {
+            let output = cli(&home, &["models"]);
+            assert!(!output.status.success());
+            String::from_utf8_lossy(&output.stderr).into_owned()
+        };
+        assert!(text.contains("302"), "{runner}: {text}");
+        assert!(sends_key(&endpoint.join().expect("endpoint")));
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!contacted(&target), "{runner}: the redirect was followed");
+    }
+
+    // A silent endpoint is cut off at the requested bound.
+    let (url, endpoint) = fake(None);
+    use_endpoint(&home, &url);
+    let started = Instant::now();
+    let (status, raw, check) = call(&runtime, "POST", CHECK, Some(r#"{"timeout_secs":2}"#));
+    let took = started.elapsed();
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(check["ok"], false, "{check}");
+    assert!(took < Duration::from_secs(10), "the check took {took:?}");
+    let text = check["error"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("within 2 s") || text.to_ascii_lowercase().contains("timed out"),
+        "{text}"
+    );
+    drop(endpoint);
+
+    // A configured key that cannot be used sends nothing.
+    let (silent, url) = untouched();
+    use_endpoint(&home, &url);
+    let config_file = home.join("config.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config_file).expect("read")).expect("config JSON");
+    value["inference"]["api_key"] =
+        serde_json::json!({ "kind": "file", "path": home.join("missing-check-key") });
+    std::fs::write(&config_file, serde_json::to_vec_pretty(&value).expect("JSON")).expect("write");
+    let (_, _, check) = call(&runtime, "POST", CHECK, Some(r#"{"timeout_secs":5}"#));
+    assert_eq!(check["ok"], false, "{check}");
+    assert_eq!(check["key_sent"], false);
+    assert!(
+        check["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("cannot be read"),
+        "{check}"
+    );
+    assert!(!contacted(&silent), "an unusable key still contacted the endpoint");
+}
+=== end
