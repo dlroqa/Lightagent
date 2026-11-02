@@ -414,6 +414,59 @@ def scenario_crash(host, provider, workspace, report):
     return check
 
 
+def scenario_extensions(host, cli):
+    """D6 through the host transport: install, list, show, disable, refuse and
+    uninstall an extension; the CLI sees each change; an environment value
+    of its MCP server never crosses the host; MCP stays off unasked."""
+    import shutil
+    import tempfile
+
+    check = Checks("extensions")
+    source = tempfile.mkdtemp(prefix="lightagent-e2e-extension-")
+    bundle = os.path.join(source, "host-probe")
+    secret = "e2e-extension-env-value"
+
+    def cli_list():
+        return json.loads(harness.run_cli(cli, "--json", "extensions", "list"))
+
+    try:
+        os.makedirs(os.path.join(bundle, "skills", "greet"))
+        with open(os.path.join(bundle, "extension.json"), "w", encoding="utf-8") as handle:
+            json.dump({
+                "name": "host-probe", "version": "1.0.0", "description": "Host probe",
+                "mcp_servers": [{"transport": "stdio", "name": "probe", "command": "probe-server",
+                                 "env": {"TOKEN": secret}}],
+            }, handle)
+        with open(os.path.join(bundle, "skills", "greet", "SKILL.md"), "w", encoding="utf-8") as handle:
+            handle.write("---\nname: greet\ndescription: Say hello\n---\nSay hello.\n")
+        status, installed = host.fetch("POST", f"{API}/extensions", {"source": bundle})
+        installed = installed or {}
+        check.expect("installed through the host, MCP left off",
+                     status == 201 and installed.get("name") == "host-probe" and installed.get("mcp_enabled") is False,
+                     (status, installed))
+        status, listed = host.fetch("GET", f"{API}/extensions")
+        check.expect("the host and the CLI list the same", status == 200 and listed == cli_list(), (status, listed))
+        status, shown = host.fetch("GET", f"{API}/extensions/host-probe")
+        commands = [server.get("command") for server in (shown or {}).get("mcp", [])]
+        check.expect("shown with its server's command, never an environment value",
+                     status == 200 and commands == ["probe-server"] and secret not in json.dumps(shown),
+                     (status, shown))
+        status, toggled = host.fetch("PUT", f"{API}/extensions/host-probe/enabled", {"enabled": False})
+        by_cli = [ext.get("active") for ext in cli_list().get("extensions", [])]
+        check.expect("disabled through the host, inactive for the CLI",
+                     status == 200 and (toggled or {}).get("active") is False and by_cli == [False],
+                     (status, toggled, by_cli))
+        status, refused = host.fetch("POST", f"{API}/extensions", {"source": "relative/folder"})
+        check.expect("a relative source is refused", status == 400, (status, refused))
+        status, removed = host.fetch("DELETE", f"{API}/extensions/host-probe")
+        left = cli_list().get("extensions")
+        check.expect("uninstalled through the host, gone for the CLI", status == 200 and left == [],
+                     (status, removed, left))
+    finally:
+        shutil.rmtree(source, ignore_errors=True)
+    return check
+
+
 def main():
     out = os.path.abspath(sys.argv[1])
     cli = sys.argv[2]
@@ -440,6 +493,7 @@ def main():
             ("regenerate", lambda: scenario_regenerate(host, provider, workspace)),
             ("continue", lambda: scenario_continue(host, provider, workspace)),
             ("steering", lambda: scenario_steering(host, provider, workspace)),
+            ("extensions", lambda: scenario_extensions(host, cli)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]
