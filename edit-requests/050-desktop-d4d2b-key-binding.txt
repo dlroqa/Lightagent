@@ -1,0 +1,680 @@
+=== base 2bed55cd5329d80b9f438cc685ac829c85dc8804
+=== message
+D4d-2b: a provider key goes only to the endpoint it was saved for
+
+A configured provider key is bound to one endpoint. Before this change,
+every inference path attached the global `inference.api_key` to whatever
+endpoint the run used, so a profile's own `routing.base_url`, or an
+endpoint changed with `config set inference.base_url`, received the
+previous endpoint's key.
+
+- `provider_keys::bound_key(config, base_url)` is the only key a request
+  to `base_url` may carry: the active endpoint's key when it is the
+  active endpoint, a saved provider's key when it is that provider's
+  endpoint, and otherwise none.
+- Every inference request takes it: desktop and `serve` runs, the
+  history probe, the provider view (models and the runtime catalog), the
+  terminal chat, its routed requests and its subagent factory, the
+  endpoint check (`lightagent models`, POST /provider/check) and setup's
+  model listing. A bound key that cannot be used still fails closed.
+- `provider_keys::select_endpoint(config, base_url)` changes the active
+  endpoint: the same endpoint keeps its key, a saved provider's endpoint
+  takes that provider's key, and any other endpoint has none. `config set
+  inference.base_url` (CLI and PUT /config/{key}), `init --base-url` and
+  line-mode setup use it, so the previous key is never carried over.
+
+Behaviour change, on purpose: a profile whose `routing.base_url` is
+neither the active endpoint nor a saved provider's now sends no key, and
+an endpoint changed with `config set` needs its key saved again. The
+endpoint-check test saved the key once and then moved the endpoint; it
+now asserts the key was not carried and saves it for each endpoint.
+
+Hosted tests (crates/lightagent/tests/desktop_key_binding.rs, the
+desktop runtime and the CLI in separate processes, against recording
+fake endpoints): for profiles on the active endpoint, on a saved
+provider's endpoint and on an unsaved endpoint, the desktop provider
+view, a desktop run and the CLI chat each send that endpoint's own key or
+none; the same endpoint spelled with a trailing slash keeps its key; a
+new endpoint set by the CLI or by the desktop config route gets no key
+in the check or `models`; a saved provider's endpoint gets its own key.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-core/src/provider_keys.rs
+--- find
+/// Remove the key stored for `provider_id`. Returns whether a file was
+--- with
+/// The key reference bound to `base_url`, the only key a request to that
+/// endpoint may carry: the active endpoint's (`inference.api_key`) when
+/// `base_url` is the active endpoint, a saved provider's when it is that
+/// provider's endpoint, and otherwise none. A profile that overrides the
+/// endpoint therefore never receives another endpoint's key.
+pub fn bound_key<'a>(config: &'a Config, base_url: &str) -> Option<&'a SecretRef> {
+    if same_url(&config.inference.base_url, base_url) {
+        return config.inference.api_key.as_ref();
+    }
+    config
+        .inference
+        .saved_providers
+        .iter()
+        .find(|saved| same_url(&saved.base_url, base_url))
+        .and_then(|saved| saved.api_key.as_ref())
+}
+
+/// Make `base_url` the active endpoint, with the key bound to it: the same
+/// endpoint keeps its key, a saved provider's endpoint takes that
+/// provider's key, and any other endpoint has none. The previous
+/// endpoint's key is never carried to a different endpoint.
+pub fn select_endpoint(config: &mut Config, base_url: &str) {
+    if !same_url(&config.inference.base_url, base_url) {
+        config.inference.api_key = config
+            .inference
+            .saved_providers
+            .iter()
+            .find(|saved| same_url(&saved.base_url, base_url))
+            .and_then(|saved| saved.api_key.clone());
+    }
+    config.inference.base_url = base_url.to_owned();
+}
+
+/// Remove the key stored for `provider_id`. Returns whether a file was
+=== replace crates/lightagent-core/src/provider_keys.rs
+--- find
+    fn a_key_is_stored_owner_only_replaced_and_removed() {
+--- with
+    fn a_key_is_bound_to_its_endpoint_and_never_carried_to_another() {
+        let mut config = Config::default();
+        config.inference.base_url = "https://a.example/v1".to_owned();
+        config.inference.api_key = Some(SecretRef::env("A_KEY"));
+        config.inference.saved_providers.push(SavedProvider {
+            name: "Lab".to_owned(),
+            base_url: "https://lab.example/v1/".to_owned(),
+            api_key: Some(SecretRef::env("LAB_KEY")),
+        });
+        // A request takes its own endpoint's key, or none.
+        assert_eq!(
+            bound_key(&config, "https://a.example/v1/"),
+            Some(&SecretRef::env("A_KEY"))
+        );
+        assert_eq!(
+            bound_key(&config, "https://lab.example/v1"),
+            Some(&SecretRef::env("LAB_KEY"))
+        );
+        assert_eq!(bound_key(&config, "https://elsewhere.example/v1"), None);
+        // The same endpoint keeps its key.
+        select_endpoint(&mut config, "https://a.example/v1/");
+        assert_eq!(config.inference.api_key, Some(SecretRef::env("A_KEY")));
+        // Another endpoint does not take the previous one's key.
+        select_endpoint(&mut config, "https://elsewhere.example/v1");
+        assert_eq!(config.inference.base_url, "https://elsewhere.example/v1");
+        assert_eq!(config.inference.api_key, None);
+        // A saved provider's endpoint takes that provider's key.
+        select_endpoint(&mut config, "https://lab.example/v1");
+        assert_eq!(config.inference.api_key, Some(SecretRef::env("LAB_KEY")));
+        // A saved provider without a key leaves the endpoint without one.
+        config.inference.saved_providers[0].api_key = None;
+        select_endpoint(&mut config, "https://a.example/v1");
+        assert_eq!(config.inference.api_key, None);
+    }
+
+    #[test]
+    fn a_key_is_stored_owner_only_replaced_and_removed() {
+=== replace crates/lightagent-core/src/config_keys.rs
+--- find
+        "inference.base_url" => config.inference.base_url = value.to_string(),
+--- with
+        // A key bound to the previous endpoint is never carried to a new one.
+        "inference.base_url" => crate::provider_keys::select_endpoint(config, value),
+=== replace crates/lightagent/src/lib.rs
+--- find
+            if let Some(base_url) = base_url {
+                config.inference.base_url = base_url;
+            }
+--- with
+            if let Some(base_url) = base_url {
+                // The endpoint's own key only, never the previous endpoint's.
+                lightagent_core::provider_keys::select_endpoint(config, &base_url);
+            }
+=== replace crates/lightagent/src/setup.rs
+--- find
+    let base_url = prompt.input("Gateway URL", &config.inference.base_url)?;
+    config.inference.base_url = base_url.clone();
+--- with
+    let base_url = prompt.input("Gateway URL", &config.inference.base_url)?;
+    // The endpoint's own key only: a key saved for another endpoint is never
+    // carried to this one.
+    lightagent_core::provider_keys::select_endpoint(config, &base_url);
+=== replace crates/lightagent/src/providers.rs
+--- find
+    let key = match config
+        .inference
+        .api_key
+        .as_ref()
+        .map_or(Ok(None), SecretRef::for_request)
+    {
+--- with
+    let key = match lightagent_core::provider_keys::bound_key(config, &base_url)
+        .map_or(Ok(None), SecretRef::for_request)
+    {
+=== replace crates/lightagent/src/serve.rs
+--- find
+        let mut provider_config =
+            ProviderConfig::new(base_url, model).with_tool_names(config.inference.tool_names);
+        // An unreadable key file: no probe without the credential it names.
+        if let Some(key) = config
+            .inference
+            .api_key
+            .as_ref()
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+            .ok()?
+--- with
+        let mut provider_config = ProviderConfig::new(base_url.clone(), model)
+            .with_tool_names(config.inference.tool_names);
+        // An unreadable key file: no probe without the credential it names.
+        // Only this endpoint's own key, never another endpoint's.
+        if let Some(key) = lightagent_core::provider_keys::bound_key(&config, &base_url)
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+            .ok()?
+=== replace crates/lightagent/src/serve.rs
+--- find
+        let api_key = config
+            .inference
+            .api_key
+            .as_ref()
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+            .map_err(|error| format!("inference: {error}"))?;
+--- with
+        // The profile's endpoint takes only the key bound to it.
+        let api_key = lightagent_core::provider_keys::bound_key(&config, &base_url)
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+            .map_err(|error| format!("inference: {error}"))?;
+=== replace crates/lightagent/src/serve.rs
+--- find
+        // never a request without the credential it was configured with.
+        let api_key = match config
+            .inference
+            .api_key
+            .as_ref()
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+        {
+--- with
+        // never a request without the credential it was configured with.
+        // The key is the one bound to this run's endpoint, never another's.
+        let api_key = match lightagent_core::provider_keys::bound_key(&config, &base_url)
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+        {
+=== replace crates/lightagent/src/chat.rs
+--- find
+    // (see `run`), so none is sent from here either.
+    let api_key = config
+        .inference
+        .api_key
+        .as_ref()
+        .and_then(|secret| secret.for_request().ok().flatten());
+--- with
+    // (see `run`), so none is sent from here either. Only the key bound to
+    // this endpoint, never another endpoint's.
+    let api_key = lightagent_core::provider_keys::bound_key(config, &base_url)
+        .and_then(|secret| secret.for_request().ok().flatten());
+=== replace crates/lightagent/src/chat.rs
+--- find
+    let api_key = config
+        .inference
+        .api_key
+        .as_ref()
+        .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+        .map_err(|error| {
+            format!("inference: {error}; replace or remove the key (lightagent setup provider)")
+--- with
+    // The key is the one bound to this profile's endpoint, never another's.
+    let api_key = lightagent_core::provider_keys::bound_key(&config, &base_url)
+        .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+        .map_err(|error| {
+            format!("inference: {error}; replace or remove the key (lightagent setup provider)")
+=== replace crates/lightagent/src/chat.rs
+--- find
+                    // Never a routed request without the configured key.
+                    let Ok(routed_key) = config
+                        .inference
+                        .api_key
+                        .as_ref()
+                        .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+--- with
+                    // Never a routed request without the configured key, and
+                    // only the key bound to the routed endpoint.
+                    let Ok(routed_key) = lightagent_core::provider_keys::bound_key(&config, &url)
+                        .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+=== replace crates/lightagent/tests/desktop_providers.rs
+--- find
+fn use_endpoint(home: &Path, url: &str) {
+    cli_ok(home, &["config", "set", "inference.base_url", url]);
+}
+--- with
+/// Point the configuration at `url` and save the provider key for it. A key
+/// saved for one endpoint is never carried to another, so each new endpoint
+/// starts with none and gets the key saved again.
+fn use_endpoint(runtime: &Runtime, home: &Path, url: &str) {
+    cli_ok(home, &["config", "set", "inference.base_url", url]);
+    let (_, _, status) = call(runtime, "GET", CREDENTIAL, None);
+    assert_eq!(
+        status["state"], "absent",
+        "a key was carried to {url}: {status}"
+    );
+    let body = serde_json::json!({ "key": PROVIDER_KEY, "expected_revision": status["revision"] })
+        .to_string();
+    let (status, raw, _) = call(runtime, "PUT", CREDENTIAL, Some(&body));
+    assert_eq!(status, 200, "{raw}");
+}
+=== replace crates/lightagent/tests/desktop_providers.rs count=6
+--- find
+use_endpoint(&home, &url);
+--- with
+use_endpoint(&runtime, &home, &url);
+=== write crates/lightagent/tests/desktop_key_binding.rs
+//! A provider key is bound to the endpoint it was saved for (D4d-2b). The
+//! active endpoint's key goes to the active endpoint only, a saved
+//! provider's key to that provider's endpoint only, and any other endpoint
+//! (such as a profile's own `routing.base_url`) receives no key. Changing
+//! the endpoint never carries the previous endpoint's key to the new one.
+//! Proved for the desktop runtime (provider view, run, check, config route)
+//! and the CLI (`chat`, `models`, `config set`) in separate processes,
+//! against local fakes that record every request.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const KEY: &str = "5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d";
+const ACTIVE_KEY: &str = "binding-test-active-key-7d21c9-not-a-real-key";
+const LAB_KEY: &str = "binding-test-lab-key-3b80f4-not-a-real-key";
+const CREDENTIAL: &str = "/api/lightagent/v1/provider/credential";
+const CHECK: &str = "/api/lightagent/v1/provider/check";
+const MODELS: &str = r#"{"object":"list","data":[{"id":"m1"},{"id":"m2"}]}"#;
+const WAIT: Duration = Duration::from_secs(20);
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-binding-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: serde_json::Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+/// One authenticated request: the status, the raw body and its JSON.
+fn call(
+    runtime: &Runtime,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> (u16, String, serde_json::Value) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    let json = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    (status, raw, json)
+}
+
+fn cli(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent")
+}
+
+fn cli_ok(home: &Path, args: &[&str]) -> String {
+    let output = cli(home, args);
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn read_head(stream: &mut TcpStream) -> String {
+    let mut request = Vec::new();
+    let mut buffer = [0u8; 1024];
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => request.extend_from_slice(&buffer[..read]),
+        }
+    }
+    String::from_utf8_lossy(&request).into_owned()
+}
+
+/// A fake OpenAI-compatible endpoint. It answers every request with the
+/// model list and keeps each request's head until it is dropped.
+struct Recorder {
+    url: String,
+    requests: Arc<Mutex<Vec<String>>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Recorder {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        listener.set_nonblocking(true).expect("non-blocking");
+        let url = format!("http://{}", listener.local_addr().expect("address"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (log, done) = (Arc::clone(&requests), Arc::clone(&stop));
+        std::thread::spawn(move || {
+            while !done.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                        let head = read_head(&mut stream);
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{MODELS}",
+                            MODELS.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        if let Ok(mut log) = log.lock() {
+                            log.push(head);
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            url,
+            requests,
+            stop,
+        }
+    }
+
+    /// The requests received so far, removed from the record.
+    fn drain(&self) -> Vec<String> {
+        std::mem::take(&mut *self.requests.lock().expect("log"))
+    }
+
+    /// The requests that arrive within `wait`: it waits for the first, then
+    /// a little longer for any that follow it.
+    fn collect(&self, wait: Duration) -> Vec<String> {
+        let deadline = Instant::now() + wait;
+        while self.requests.lock().expect("log").is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        self.drain()
+    }
+}
+
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The bearer token a request carried, if any.
+fn bearer(request: &str) -> Option<String> {
+    request.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim().eq_ignore_ascii_case("authorization").then(|| {
+            let value = value.trim();
+            value
+                .strip_prefix("Bearer ")
+                .or_else(|| value.strip_prefix("bearer "))
+                .unwrap_or(value)
+                .to_owned()
+        })
+    })
+}
+
+/// The endpoint received requests, and every one carried `expected`, or no
+/// key at all when `expected` is `None`.
+fn assert_keys(requests: &[String], expected: Option<&str>, what: &str) {
+    assert!(
+        !requests.is_empty(),
+        "{what}: the endpoint received no request"
+    );
+    for request in requests {
+        assert_eq!(bearer(request).as_deref(), expected, "{what}: {request}");
+    }
+}
+
+fn edit_json(path: &Path, change: impl FnOnce(&mut serde_json::Value)) {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).expect("read")).expect("JSON");
+    change(&mut value);
+    std::fs::write(path, serde_json::to_vec_pretty(&value).expect("JSON")).expect("write");
+}
+
+/// Save `key` for the active endpoint through the shared operation.
+fn save_key(runtime: &Runtime, key: &str) {
+    let (_, _, status) = call(runtime, "GET", CREDENTIAL, None);
+    let body =
+        serde_json::json!({ "key": key, "expected_revision": status["revision"] }).to_string();
+    let (status, raw, _) = call(runtime, "PUT", CREDENTIAL, Some(&body));
+    assert_eq!(status, 200, "{raw}");
+}
+
+fn key_state(runtime: &Runtime) -> String {
+    let (_, _, status) = call(runtime, "GET", CREDENTIAL, None);
+    status["state"].as_str().unwrap_or_default().to_owned()
+}
+
+/// A saved provider "Lab" at `url`, with its own key in a file.
+fn save_lab(home: &Path, url: &str) {
+    let lab_key = home.join("lab-provider-key");
+    std::fs::write(&lab_key, LAB_KEY).expect("lab key");
+    edit_json(&home.join("config.json"), |config| {
+        config["inference"]["saved_providers"] = serde_json::json!([
+            { "name": "Lab", "base_url": url, "api_key": { "kind": "file", "path": lab_key } }
+        ]);
+    });
+}
+
+#[test]
+fn each_endpoint_receives_only_the_key_bound_to_it() {
+    let home = scratch_home("profiles");
+    let active = Recorder::start();
+    let lab = Recorder::start();
+    let other = Recorder::start();
+    cli_ok(&home, &["config", "set", "inference.base_url", &active.url]);
+    let runtime = start(&home);
+    save_key(&runtime, ACTIVE_KEY);
+    assert_eq!(key_state(&runtime), "ready");
+    save_lab(&home, &lab.url);
+
+    // Profiles on the active endpoint, on the saved provider's endpoint, and
+    // on an endpoint no key was saved for.
+    let profiles = [
+        ("plain", None, &active, Some(ACTIVE_KEY)),
+        ("lab", Some(lab.url.clone()), &lab, Some(LAB_KEY)),
+        ("elsewhere", Some(other.url.clone()), &other, None),
+    ];
+    for (id, url, _, _) in &profiles {
+        let id = *id;
+        cli_ok(&home, &["profile", "create", id, "--model", "m1"]);
+        if let Some(url) = url {
+            let manifest = home.join("profiles").join(id).join("profile.json");
+            edit_json(&manifest, |profile| {
+                profile["routing"]["base_url"] = serde_json::json!(url);
+            });
+        }
+    }
+
+    for (id, _, endpoint, expected) in profiles {
+        for recorder in [&active, &lab, &other] {
+            recorder.drain();
+        }
+        // The desktop's provider view of the active profile: its models and
+        // the runtime catalog.
+        cli_ok(&home, &["profile", "use", id]);
+        let (status, raw, _) = call(&runtime, "GET", "/api/lightagent/v1/provider", None);
+        assert!(
+            !raw.contains(ACTIVE_KEY) && !raw.contains(LAB_KEY),
+            "{id}: {raw}"
+        );
+        assert_keys(
+            &endpoint.collect(WAIT),
+            expected,
+            &format!("{id}: provider view ({status})"),
+        );
+
+        // A desktop run of that profile.
+        let body = serde_json::json!({ "message": "hello", "profile": id }).to_string();
+        let (status, raw, _) = call(&runtime, "POST", "/api/lightagent/v1/runs", Some(&body));
+        assert!((200..300).contains(&status), "{id}: {status} {raw}");
+        assert_keys(
+            &endpoint.collect(WAIT),
+            expected,
+            &format!("{id}: desktop run"),
+        );
+
+        // The terminal chat of that profile, in its own process.
+        let output = cli(&home, &["chat", "--profile", id]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains(ACTIVE_KEY) && !stderr.contains(LAB_KEY),
+            "{id}: {stderr}"
+        );
+        assert_keys(
+            &endpoint.collect(WAIT),
+            expected,
+            &format!("{id}: CLI chat"),
+        );
+    }
+}
+
+#[test]
+fn changing_the_endpoint_never_carries_the_previous_key() {
+    let home = scratch_home("select");
+    let first = Recorder::start();
+    cli_ok(&home, &["config", "set", "inference.base_url", &first.url]);
+    let runtime = start(&home);
+    save_key(&runtime, ACTIVE_KEY);
+
+    // The same endpoint, spelled with a trailing slash, keeps its key.
+    let same = format!("{}/", first.url);
+    cli_ok(&home, &["config", "set", "inference.base_url", &same]);
+    assert_eq!(key_state(&runtime), "ready");
+    first.drain();
+    cli_ok(&home, &["--json", "models"]);
+    assert_keys(
+        &first.collect(WAIT),
+        Some(ACTIVE_KEY),
+        "the same endpoint",
+    );
+
+    // A new endpoint set by the CLI: no key is configured, and none is sent
+    // by the CLI or by the desktop's check.
+    let second = Recorder::start();
+    cli_ok(&home, &["config", "set", "inference.base_url", &second.url]);
+    assert_eq!(key_state(&runtime), "absent");
+    cli_ok(&home, &["--json", "models"]);
+    assert_keys(&second.collect(WAIT), None, "a new endpoint: CLI models");
+    let (_, raw, check) = call(&runtime, "POST", CHECK, Some(r#"{"timeout_secs":5}"#));
+    assert_eq!(check["key_sent"], false, "{raw}");
+    assert_keys(&second.collect(WAIT), None, "a new endpoint: desktop check");
+
+    // A new endpoint set through the desktop's config route: the same rule.
+    let third = Recorder::start();
+    let body = serde_json::json!({ "value": third.url }).to_string();
+    let (status, raw, _) = call(
+        &runtime,
+        "PUT",
+        "/api/lightagent/v1/config/inference.base_url",
+        Some(&body),
+    );
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(key_state(&runtime), "absent");
+    let (_, raw, check) = call(&runtime, "POST", CHECK, Some(r#"{"timeout_secs":5}"#));
+    assert_eq!(check["key_sent"], false, "{raw}");
+    assert_keys(
+        &third.collect(WAIT),
+        None,
+        "a new endpoint set by the desktop",
+    );
+
+    // A saved provider's endpoint takes that provider's own key.
+    let lab = Recorder::start();
+    save_lab(&home, &lab.url);
+    cli_ok(&home, &["config", "set", "inference.base_url", &lab.url]);
+    assert_eq!(key_state(&runtime), "ready");
+    cli_ok(&home, &["--json", "models"]);
+    assert_keys(
+        &lab.collect(WAIT),
+        Some(LAB_KEY),
+        "a saved provider's endpoint",
+    );
+}
+=== end
