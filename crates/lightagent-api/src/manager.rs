@@ -1307,6 +1307,7 @@ impl RunState {
     pub(crate) fn detached() -> Arc<Self> {
         let cancel = CancellationToken::new();
         let (decisions, _) = mpsc::unbounded_channel();
+        let (continues, _) = mpsc::unbounded_channel();
         Arc::new(Self {
             id: new_run_id(),
             owner: RunOwner::operator_only(),
@@ -1316,6 +1317,7 @@ impl RunState {
             notify: Notify::new(),
             cancel: cancel.clone(),
             decisions,
+            continues,
             authorization: RunAuthorization::unconditional(cancel),
             recheck: watch::Sender::new(0),
             gap: StdMutex::new(None),
