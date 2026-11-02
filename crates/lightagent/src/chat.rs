@@ -640,6 +640,154 @@ pub(crate) fn web_research_instructions(config: &Config) -> Option<&'static str>
     )
 }
 
+/// The most tool names an MCP check reports.
+const CHECK_TOOLS_SHOWN: usize = 200;
+/// The most characters of an MCP check's error.
+const CHECK_ERROR_CHARS: usize = 600;
+
+/// The values an MCP server is configured with that must never be shown:
+/// its environment and header values and its auth secret.
+fn mcp_secret_values(entry: &lightagent_core::McpServerEntry) -> Vec<String> {
+    let mut values: Vec<String> = match entry {
+        lightagent_core::McpServerEntry::Stdio { env, .. } => env.values().cloned().collect(),
+        lightagent_core::McpServerEntry::Http { headers, auth, .. } => {
+            let mut values: Vec<String> = headers.values().cloned().collect();
+            if let Some(lightagent_core::SecretLookup::Value(value)) =
+                auth.as_ref().map(lightagent_core::SecretRef::lookup)
+            {
+                values.push(value);
+            }
+            values
+        }
+    };
+    values.retain(|value| value.len() >= 4);
+    values
+}
+
+fn mcp_redacted(text: &str, secrets: &[String]) -> String {
+    let mut text = text.to_owned();
+    for secret in secrets {
+        text = text.replace(secret.as_str(), "[redacted]");
+    }
+    text.chars().take(CHECK_ERROR_CHARS).collect()
+}
+
+/// An explicit check of the MCP server `name` (D6-4), connected exactly as
+/// an operator run connects it: the same resolver, timeout and HTTP client,
+/// and an extension's folder as a stdio server's working folder. It lists
+/// the server's tools and disconnects; a stdio server's process is killed
+/// when its connection drops. A stdio server's command is started, so only
+/// an explicit request calls this: viewing or listing servers never does.
+/// It changes no setting. `None` when neither the configuration nor an
+/// active extension declares the name.
+pub(crate) async fn check_mcp_server(
+    config: &Config,
+    extensions: &ExtensionStore,
+    name: &str,
+) -> Option<serde_json::Value> {
+    let configured = config
+        .mcp
+        .servers
+        .iter()
+        .find(|entry| entry.name() == name)
+        .map(|entry| (entry, "configuration".to_owned()));
+    let (entry, declared_by) = configured.or_else(|| {
+        extensions.active(&config.extensions).find_map(|ext| {
+            ext.mcp_servers
+                .iter()
+                .find(|entry| entry.name() == name)
+                .map(|entry| (entry, format!("extension {}", ext.name)))
+        })
+    })?;
+    let transport = match entry {
+        lightagent_core::McpServerEntry::Stdio { .. } => "stdio",
+        lightagent_core::McpServerEntry::Http { .. } => "http",
+    };
+    let secrets = mcp_secret_values(entry);
+    let report = |ok: bool, tools: Vec<String>, more: usize, error: Option<String>, ms: u64| {
+        serde_json::json!({
+            "name": name, "transport": transport, "declared_by": declared_by,
+            "ok": ok, "tools": tools, "more_tools": more, "error": error,
+            "elapsed_ms": ms, "mcp_enabled": config.mcp.enabled,
+        })
+    };
+    let started = Instant::now();
+    let elapsed = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let (specs, refused) = plan_mcp_servers(config, extensions, RemoteAccess::Operator);
+    if let Some(refusal) = refused.iter().find(|refusal| refusal.server == name) {
+        return Some(report(
+            false,
+            Vec::new(),
+            0,
+            Some(refusal.to_string()),
+            elapsed(),
+        ));
+    }
+    let Some(spec) = specs.into_iter().find(|spec| spec.name == name) else {
+        return Some(report(
+            false,
+            Vec::new(),
+            0,
+            Some("the server could not be prepared as a run would connect it".to_owned()),
+            elapsed(),
+        ));
+    };
+    let timeout = Duration::from_secs(config.mcp.timeout_secs.clamp(1, 600));
+    lightagent_provider_lightweight::ensure_provider();
+    let client = match reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return Some(report(
+                false,
+                Vec::new(),
+                0,
+                Some(format!("could not build the MCP HTTP client: {error}")),
+                elapsed(),
+            ));
+        }
+    };
+    // Bounded twice: each request by the timeout, and the whole check here.
+    // Giving up drops the connection, which kills a stdio server.
+    let limit = timeout.saturating_mul(3);
+    let connected = tokio::time::timeout(limit, McpHub::connect(vec![spec], timeout, client)).await;
+    let checked = match connected {
+        Err(_) => report(
+            false,
+            Vec::new(),
+            0,
+            Some(format!("no answer within {} seconds", limit.as_secs())),
+            elapsed(),
+        ),
+        Ok(hub) => match hub.errors.first() {
+            Some((_, error)) => report(
+                false,
+                Vec::new(),
+                0,
+                Some(mcp_redacted(error, &secrets)),
+                elapsed(),
+            ),
+            None => {
+                let mut tools: Vec<String> = hub
+                    .tools
+                    .iter()
+                    .map(|tool| tool.definition().name.clone())
+                    .collect();
+                tools.sort();
+                let more = tools.len().saturating_sub(CHECK_TOOLS_SHOWN);
+                tools.truncate(CHECK_TOOLS_SHOWN);
+                // The tools hold the connection; dropping the hub ends it.
+                drop(hub);
+                report(true, tools, more, None, elapsed())
+            }
+        },
+    };
+    Some(checked)
+}
+
 /// Connect the configured MCP servers and return their tools, or an empty list.
 ///
 /// Shared by `chat` and `serve`. A server that cannot be reached is logged and

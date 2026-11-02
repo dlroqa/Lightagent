@@ -279,6 +279,18 @@ impl RunFactory for LightweightRunFactory {
         serde_json::to_value(check).map_err(|error| error.to_string())
     }
 
+    async fn check_mcp(&self, name: String) -> Result<Option<serde_json::Value>, String> {
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let config = ConfigStore::at(&paths)
+            .load()
+            .map_err(|error| error.to_string())?;
+        let profiles = ProfileStore::new(&self.root);
+        let profile = resolve_profile(&profiles, &config, None)?;
+        let profile_dir = profiles.handle(&profile.id).dir().to_path_buf();
+        let extensions = load_extensions(&self.root, &profile_dir);
+        Ok(crate::chat::check_mcp_server(&config, &extensions, &name).await)
+    }
+
     async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
         let paths = LightagentPaths::rooted_at(&self.root);
         let config = ConfigStore::at(&paths)

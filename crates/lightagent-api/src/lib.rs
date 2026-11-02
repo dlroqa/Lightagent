@@ -148,6 +148,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::put(update_mcp_server).delete(remove_mcp_server),
         )
         .route(
+            "/api/lightagent/v1/mcp/servers/{name}/check",
+            post(check_mcp_server),
+        )
+        .route(
             "/api/lightagent/v1/profiles",
             get(list_profiles).post(create_profile),
         )
@@ -1986,6 +1990,30 @@ async fn remove_mcp_server(
     mcp_change(&state, None, false, |config| {
         lightagent_core::mcp_servers::remove(config, &name)
     })
+}
+
+/// Check one MCP server on request: it is connected exactly as an operator
+/// run connects it (a stdio server's command is started), its tools are
+/// listed, and it is disconnected. No setting changes.
+async fn check_mcp_server(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    match state.manager.check_mcp(name.clone()).await {
+        Ok(Some(check)) => Json(check).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": format!("no MCP server named {name:?} is configured or declared by an active extension")
+            })),
+        )
+            .into_response(),
+        Err(error) => internal(&error),
+    }
 }
 
 /// Where the extension operations act: this runtime's Lightagent home.

@@ -164,6 +164,11 @@
    "path": "/api/lightagent/v1/mcp/servers/{name}"
   },
   {
+   "id": "mcp.servers.check",
+   "method": "POST",
+   "path": "/api/lightagent/v1/mcp/servers/{name}/check"
+  },
+  {
    "id": "profiles.list",
    "method": "GET",
    "path": "/api/lightagent/v1/profiles"

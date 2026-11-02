@@ -464,6 +464,14 @@ pub trait RunFactory: Send + Sync + 'static {
         Err("provider endpoint checks are not available in this embedding".to_owned())
     }
 
+    /// An explicit check of the MCP server `name`, connected as an operator
+    /// run connects it (D6-4): its tools, or why it failed; `None` when no
+    /// server has the name. A stdio server's command is started, so this
+    /// runs only on an explicit request. The default refuses.
+    async fn check_mcp(&self, _name: String) -> Result<Option<serde_json::Value>, String> {
+        Err("MCP server checks are not available in this embedding".to_owned())
+    }
+
     /// The window to pack a session's history against before a run of
     /// `profile` (the active one when `None`) with `model`, resolved as the
     /// run itself resolves its budget. `None`, the default, leaves the
@@ -992,6 +1000,11 @@ impl RunManager {
         timeout: std::time::Duration,
     ) -> Result<serde_json::Value, String> {
         self.factory.check_endpoint(base_url, timeout).await
+    }
+
+    /// An explicit check of the MCP server `name` (see [`RunFactory::check_mcp`]).
+    pub async fn check_mcp(&self, name: String) -> Result<Option<serde_json::Value>, String> {
+        self.factory.check_mcp(name).await
     }
 
     /// The token limit to pack a session's history with before a run of

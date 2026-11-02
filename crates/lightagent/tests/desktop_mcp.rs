@@ -340,3 +340,147 @@ fn edits_keep_withheld_values_and_refusals_write_nothing() {
         .collect();
     assert_eq!(names, vec![json!("files")]);
 }
+
+/// A minimal streamable-HTTP MCP server with one tool, `ping`.
+fn spawn_http_mcp() -> u16 {
+    fn reply(body: &str) -> Option<String> {
+        let message: Value = serde_json::from_str(body).ok()?;
+        let id = message.get("id").cloned().unwrap_or(Value::Null);
+        match message.get("method").and_then(Value::as_str).unwrap_or("") {
+            "initialize" => Some(json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}}}}).to_string()),
+            "notifications/initialized" => None,
+            "tools/list" => Some(json!({"jsonrpc":"2.0","id":id,"result":{"tools":[{"name":"ping","description":"Ping","inputSchema":{"type":"object"}}]}}).to_string()),
+            _ => Some(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"no"}}).to_string()),
+        }
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut buffer = Vec::new();
+            let mut chunk = [0u8; 2048];
+            let mut body = String::new();
+            loop {
+                if let Some(end) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&buffer[..end]).to_ascii_lowercase();
+                    let length: usize = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse().ok())
+                        .unwrap_or(0);
+                    if buffer.len() >= end + 4 + length {
+                        body = String::from_utf8_lossy(&buffer[end + 4..end + 4 + length])
+                            .into_owned();
+                        break;
+                    }
+                }
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                }
+            }
+            let response = match reply(&body) {
+                Some(json) => format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                    json.len()
+                ),
+                None => "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_owned(),
+            };
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    port
+}
+
+#[test]
+fn a_check_connects_only_on_request_lists_tools_and_changes_nothing() {
+    let (home, runtime) = setup("check");
+    let port = spawn_http_mcp();
+    let server = json!({
+        "transport": "http", "name": "docs", "url": format!("http://127.0.0.1:{port}/mcp"),
+        "headers": { "X-Api-Key": HEADER_SECRET }
+    });
+    assert_eq!(add(&runtime, server).0, 201);
+    let before = config_text(&home);
+
+    let (status, raw) = call(&runtime, "POST", &format!("{MCP}/servers/docs/check"), None);
+    assert_eq!(status, 200, "{raw}");
+    assert!(!raw.contains(HEADER_SECRET), "{raw}");
+    let checked = parsed(&raw);
+    assert_eq!(checked["ok"], true, "{checked}");
+    assert_eq!(checked["transport"], "http", "{checked}");
+    assert_eq!(checked["declared_by"], "configuration", "{checked}");
+    assert_eq!(checked["mcp_enabled"], false, "{checked}");
+    let tools = checked["tools"].as_array().expect("tools");
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool.as_str().is_some_and(|name| name.ends_with("ping"))),
+        "{checked}"
+    );
+    assert_eq!(config_text(&home), before, "a check changed config.json");
+    assert_eq!(
+        call(
+            &runtime,
+            "POST",
+            &format!("{MCP}/servers/missing/check"),
+            None
+        )
+        .0,
+        404
+    );
+
+    // A stdio server starts only when checked; its stderr secret is
+    // redacted, and its process is gone afterwards.
+    #[cfg(unix)]
+    {
+        let pidfile = home.join("probe.pid");
+        let server = json!({
+            "transport": "stdio", "name": "probe", "command": "sh",
+            "args": ["-c", "echo $$ > \"$1\"; echo \"token $TOKEN\" >&2; exec sleep 300", "probe", pidfile],
+            "env": { "TOKEN": STDIO_SECRET }
+        });
+        assert_eq!(add(&runtime, server).0, 201);
+        assert_eq!(
+            call(&runtime, "PUT", MCP, Some(r#"{"timeout_secs":2}"#)).0,
+            200
+        );
+        assert_eq!(call(&runtime, "GET", MCP, None).0, 200);
+        assert!(!pidfile.exists(), "listing the servers started one");
+        let (status, raw) = call(
+            &runtime,
+            "POST",
+            &format!("{MCP}/servers/probe/check"),
+            None,
+        );
+        assert_eq!(status, 200, "{raw}");
+        assert!(!raw.contains(STDIO_SECRET), "{raw}");
+        let checked = parsed(&raw);
+        assert_eq!(checked["ok"], false, "{checked}");
+        assert!(checked["error"].is_string(), "{checked}");
+        let pid = std::fs::read_to_string(&pidfile).expect("the check started the server");
+        let pid = pid.trim().to_owned();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let state = Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid])
+                .output()
+                .expect("ps");
+            let state = String::from_utf8_lossy(&state.stdout).trim().to_owned();
+            if state.is_empty() || state.starts_with('Z') {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the server process {pid} is still running ({state})"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(
+            mcp_section(&home)["enabled"],
+            false,
+            "a check switched MCP on"
+        );
+    }
+}

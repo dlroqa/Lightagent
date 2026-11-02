@@ -7081,6 +7081,30 @@
    "actions_evidence": null
   },
   {
+   "id": "api.post.mcp.servers.name.check",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/mcp/servers/{name}/check",
+   "source": "crates/lightagent-api/src/lib.rs:150",
+   "behavior": "Explicitly connect one MCP server as an operator run would, list its tools and disconnect; a stdio server's command is started; values redacted; no setting changes (D6-4)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/mcp/servers/{name}/check"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the configuration capabilities it serves (mcp.server.*)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: crate lightagent chat::check_mcp_server via RunFactory::check_mcp",
+   "permission": "local-operator",
+   "data_scope": "home|profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
    "id": "api.get.sessions",
    "kind": "api",
    "surface": "GET /api/lightagent/v1/sessions",
