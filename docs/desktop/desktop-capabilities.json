@@ -93,11 +93,11 @@
   }
  ],
  "summary": {
-  "total_rows": 333,
+  "total_rows": 334,
   "by_kind": {
    "acp-method": 8,
    "alias": 2,
-   "api": 51,
+   "api": 52,
    "argument": 47,
    "command": 86,
    "config": 14,
@@ -112,7 +112,7 @@
    "value": 6
   },
   "by_applicability": {
-   "applicable": 297,
+   "applicable": 298,
    "host-owned": 7,
    "not-applicable": 29
   },
@@ -5056,7 +5056,7 @@
    "counts_toward_parity": true,
    "duplicate_of": null,
    "ui": "Conversations: continue",
-   "backend": "MISSING in API: no continue operation (new backend operation required, D5)",
+   "backend": "api: POST /runs/{id}/continue, for a run started with on_time_budget pause (D5a-3); resumes the same execution",
    "permission": "local-operator",
    "data_scope": "profile",
    "desktop_status": "not-started",
@@ -5230,7 +5230,7 @@
    "counts_toward_parity": true,
    "duplicate_of": null,
    "ui": "Conversations: composer stays enabled during a run → queued steer",
-   "backend": "MISSING in API: no steering operation (new backend operation required, D5)",
+   "backend": "client-held FIFO queue over api: POST /runs, as the terminal holds it; no backend queue (D5a-3)",
    "permission": "local-operator",
    "data_scope": "profile",
    "desktop_status": "not-started",
@@ -6809,6 +6809,30 @@
    "duplicate_of": null,
    "ui": "(backend reuse)",
    "backend": "api: POST /runs/{id}/cancel",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.post.runs.id.continue",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/runs/{id}/continue",
+   "source": "crates/lightagent-api/src/lib.rs:160",
+   "behavior": "Continue a run paused on its time budget (extend or answer now): the same execution resumes (D5a-3)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/runs/{id}/continue"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: POST /runs/{id}/continue",
    "permission": "local-operator",
    "data_scope": "profile",
    "desktop_status": "not-started",

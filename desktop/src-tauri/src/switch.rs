@@ -76,7 +76,7 @@ pub fn plan(active_runs: usize, stop_runs: bool) -> Plan {
 pub fn blocked_while_switching(operation: &str) -> bool {
     matches!(
         operation,
-        "runs.create" | "sessions.regenerate" | "approvals.respond"
+        "runs.create" | "sessions.regenerate" | "approvals.respond" | "runs.continue"
     )
 }
 
@@ -429,6 +429,7 @@ mod tests {
         assert!(blocked_while_switching("runs.create"));
         assert!(blocked_while_switching("sessions.regenerate"));
         assert!(blocked_while_switching("approvals.respond"));
+        assert!(blocked_while_switching("runs.continue"));
         for reading in [
             "runs.get",
             "runs.events",

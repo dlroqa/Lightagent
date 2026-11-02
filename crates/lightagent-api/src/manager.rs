@@ -38,8 +38,8 @@ use lightagent_core::identity::{
 };
 use lightagent_core::provider::ProviderMessage;
 use lightagent_core::{
-    AgentEvent, AgentEventSink, AgentLoop, AgentProvider, ApprovalDecision, ApprovalId, ProfileId,
-    RunId, RunOutcome, StopReason, ToolInvoker,
+    AgentEvent, AgentEventSink, AgentLoop, AgentProvider, ApprovalDecision, ApprovalId,
+    Continuation, ProfileId, RunId, RunOutcome, StopReason, ToolInvoker, WallClockPolicy,
 };
 use serde::Serialize;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
@@ -55,6 +55,10 @@ pub enum RunStatus {
     Running,
     /// The run is paused, waiting on an approval decision.
     AwaitingApproval,
+    /// The run is paused on its time budget, waiting to be continued
+    /// ([`RunState::continue_with`]) or cancelled. Only a run started with
+    /// [`RunOptions::pause_on_time_budget`] pauses.
+    AwaitingContinue,
     /// The run finished normally.
     Completed,
     /// The run was cancelled.
@@ -83,6 +87,22 @@ pub struct StartRun {
     /// The working directory for this run (an ACP session's `cwd`); when set it
     /// becomes the confined workspace root instead of the profile's default.
     pub cwd: Option<String>,
+}
+
+/// How a run is started, beyond its request.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunOptions {
+    /// Pause when the time budget runs out with tool results the model has
+    /// not read yet, instead of wrapping up, until the run is continued or
+    /// cancelled. The default wraps up, as every run did before.
+    pub pause_on_time_budget: bool,
+}
+
+/// What a factory needs to honor [`RunOptions`]: the time-budget policy and
+/// where continuations arrive.
+pub struct RunControls {
+    pub on_wall_clock: WallClockPolicy,
+    pub continues: UnboundedReceiver<Continuation>,
 }
 
 /// Who started a run and as which profile, fixed when the run is created.
@@ -168,6 +188,7 @@ pub struct RunState {
     notify: Notify,
     cancel: CancellationToken,
     decisions: mpsc::UnboundedSender<ApprovalDecision>,
+    continues: mpsc::UnboundedSender<Continuation>,
     authorization: RunAuthorization,
     /// Bumped by the supervisor so open event streams re-check their
     /// subscriber at once instead of at their next periodic check.
@@ -246,6 +267,23 @@ impl RunState {
             return false;
         }
         self.decisions.send(decision).is_ok()
+    }
+
+    /// Continue a run paused on its time budget: the same execution carries
+    /// on from where it stopped. Returns whether the run was paused and took
+    /// the continuation; a revoked run takes none.
+    pub async fn continue_with(&self, how: Continuation) -> bool {
+        if self.authorization.revoked().is_some() {
+            return false;
+        }
+        let mut status = self.status.lock().await;
+        if *status != RunStatus::AwaitingContinue || self.continues.send(how).is_err() {
+            return false;
+        }
+        *status = RunStatus::Running;
+        drop(status);
+        self.notify.notify_waiters();
+        true
     }
 
     /// The run's authorization, re-checked during the run.
@@ -502,6 +540,31 @@ pub trait RunFactory: Send + Sync + 'static {
         }
         self.run_as(request, trust, sink, cancel, decisions).await
     }
+
+    /// Drive a run started with [`RunOptions`]; `controls` carries the
+    /// time-budget policy and the continuations. The default ignores them
+    /// and runs as before (supervised when `authorization` is set), so a
+    /// factory that cannot pause never does.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_controlled(
+        &self,
+        request: StartRun,
+        trust: RunTrust,
+        authorization: Option<RunAuthorization>,
+        controls: RunControls,
+        sink: AgentEventSink,
+        cancel: CancellationToken,
+        decisions: UnboundedReceiver<ApprovalDecision>,
+    ) -> RunStatus {
+        drop(controls);
+        match authorization {
+            Some(authorization) => {
+                self.run_supervised(request, trust, authorization, sink, cancel, decisions)
+                    .await
+            }
+            None => self.run_as(request, trust, sink, cancel, decisions).await,
+        }
+    }
 }
 
 /// End a run whose authorization was withdrawn: say why (the code only) and
@@ -554,8 +617,37 @@ pub async fn drive_supervised<P: AgentProvider, I: ToolInvoker>(
     message: String,
     sink: AgentEventSink,
     cancel: CancellationToken,
+    decisions: UnboundedReceiver<ApprovalDecision>,
+    authorization: RunAuthorization,
+) -> RunStatus {
+    drive_controlled(
+        agent,
+        history,
+        message,
+        sink,
+        cancel,
+        decisions,
+        authorization,
+        None,
+    )
+    .await
+}
+
+/// [`drive_supervised`] for a run that may pause on its time budget (its
+/// loop built with [`WallClockPolicy::Pause`]): a pause waits for a
+/// continuation from `continues` or a cancel, and the authorization is
+/// checked again before a continuation is acted on. With `continues` `None`
+/// a pause ends the run, as before.
+#[allow(clippy::too_many_arguments)]
+pub async fn drive_controlled<P: AgentProvider, I: ToolInvoker>(
+    agent: AgentLoop<P, I>,
+    history: Vec<ProviderMessage>,
+    message: String,
+    sink: AgentEventSink,
+    cancel: CancellationToken,
     mut decisions: UnboundedReceiver<ApprovalDecision>,
     authorization: RunAuthorization,
+    mut continues: Option<UnboundedReceiver<Continuation>>,
 ) -> RunStatus {
     if let Err(denial) = authorization.verify() {
         return revoked(&sink, denial);
@@ -579,14 +671,42 @@ pub async fn drive_supervised<P: AgentProvider, I: ToolInvoker>(
     loop {
         match outcome {
             RunOutcome::Completed { events } => return status_from_events(&events),
-            // Only a `WallClockPolicy::Pause` run pauses out of time, and the API
-            // keeps the default wrap-up policy; should one arrive anyway, the
-            // time budget is spent and the run is over.
-            RunOutcome::OutOfTime { .. } => {
-                let _ = sink.send(AgentEvent::RunCompleted {
-                    reason: StopReason::WallClockExceeded,
-                });
-                return RunStatus::Completed;
+            // Only a `WallClockPolicy::Pause` run pauses out of time. With no
+            // way to be continued, the time budget is spent and the run is over.
+            RunOutcome::OutOfTime { suspended, .. } => {
+                let Some(continues) = continues.as_mut() else {
+                    let _ = sink.send(AgentEvent::RunCompleted {
+                        reason: StopReason::WallClockExceeded,
+                    });
+                    return RunStatus::Completed;
+                };
+                tokio::select! {
+                    () = cancel.cancelled() => {
+                        return match authorization.revoked() {
+                            Some(denial) => revoked(&sink, denial),
+                            None => {
+                                let _ = sink.send(AgentEvent::RunCompleted { reason: StopReason::Cancelled });
+                                RunStatus::Cancelled
+                            }
+                        };
+                    }
+                    how = continues.recv() => match how {
+                        Some(how) => {
+                            if let Err(denial) = authorization.verify() {
+                                return revoked(&sink, denial);
+                            }
+                            outcome = match agent.continue_out_of_time(suspended, how, cancel.clone()).await {
+                                Ok(outcome) => outcome,
+                                Err(error) => {
+                                    let _ = sink.send(AgentEvent::Error { message: error.to_string() });
+                                    let _ = sink.send(AgentEvent::RunCompleted { reason: StopReason::Error });
+                                    return RunStatus::Failed;
+                                }
+                            };
+                        }
+                        None => return RunStatus::Cancelled,
+                    }
+                }
             }
             RunOutcome::AwaitingApproval { suspended, .. } => {
                 tokio::select! {
@@ -908,7 +1028,33 @@ impl RunManager {
     /// authorized the owner for `request.profile`. The run is not
     /// revocable: only cancellation stops it.
     pub async fn start_as(&self, request: StartRun, owner: RunOwner) -> Arc<RunState> {
-        self.launch(request, owner, None).await
+        self.launch(request, owner, None, RunOptions::default())
+            .await
+    }
+
+    /// [`start_as`](Self::start_as), with `options`.
+    pub async fn start_as_with(
+        &self,
+        request: StartRun,
+        owner: RunOwner,
+        options: RunOptions,
+    ) -> Arc<RunState> {
+        self.launch(request, owner, None, options).await
+    }
+
+    /// [`start_supervised`](Self::start_supervised), with `options`.
+    pub async fn start_supervised_with(
+        &self,
+        request: StartRun,
+        owner: RunOwner,
+        check: RevocationCheck,
+        generation: Option<u64>,
+        options: RunOptions,
+    ) -> Result<Arc<RunState>, Denial> {
+        check()?;
+        Ok(self
+            .launch(request, owner, Some((check, generation)), options)
+            .await)
     }
 
     /// Start a revocable run. `check` reads the current identity state and is
@@ -923,7 +1069,14 @@ impl RunManager {
         generation: Option<u64>,
     ) -> Result<Arc<RunState>, Denial> {
         check()?;
-        Ok(self.launch(request, owner, Some((check, generation))).await)
+        Ok(self
+            .launch(
+                request,
+                owner,
+                Some((check, generation)),
+                RunOptions::default(),
+            )
+            .await)
     }
 
     async fn launch(
@@ -931,10 +1084,12 @@ impl RunManager {
         request: StartRun,
         owner: RunOwner,
         revocable: Option<(RevocationCheck, Option<u64>)>,
+        options: RunOptions,
     ) -> Arc<RunState> {
         let id = new_run_id();
         let trust = owner.trust();
         let (decisions_tx, decisions_rx) = mpsc::unbounded_channel();
+        let (continues_tx, continues_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let supervised = revocable.is_some();
         let authorization = match revocable {
@@ -952,6 +1107,7 @@ impl RunManager {
             notify: Notify::new(),
             cancel,
             decisions: decisions_tx,
+            continues: continues_tx,
             authorization,
             recheck: watch::Sender::new(0),
             #[cfg(test)]
@@ -991,6 +1147,9 @@ impl RunManager {
                                 .await;
                             forward_state.set_status(RunStatus::AwaitingApproval).await;
                         }
+                        AgentEvent::WallClockPaused { .. } => {
+                            forward_state.set_status(RunStatus::AwaitingContinue).await;
+                        }
                         AgentEvent::ToolCallStarted { .. } | AgentEvent::Content { .. } => {
                             // Any progress past a pause means it resolved.
                             forward_state.set_pending(None).await;
@@ -1002,7 +1161,24 @@ impl RunManager {
                 }
             });
 
-            let status = if supervised {
+            let status = if options.pause_on_time_budget {
+                let controls = RunControls {
+                    on_wall_clock: WallClockPolicy::Pause,
+                    continues: continues_rx,
+                };
+                let authorization = supervised.then(|| run_state.authorization.clone());
+                factory
+                    .run_controlled(
+                        request,
+                        trust,
+                        authorization,
+                        controls,
+                        sink_tx,
+                        cancel,
+                        decisions_rx,
+                    )
+                    .await
+            } else if supervised {
                 let authorization = run_state.authorization.clone();
                 factory
                     .run_supervised(request, trust, authorization, sink_tx, cancel, decisions_rx)

@@ -321,7 +321,7 @@ const RUNS_DIR: &str = ".runs";
 /// for a lease its holder is releasing at that moment. A turn that holds the
 /// lease is never waited for beyond this. A released lease does not stay
 /// held while a child that another thread is starting keeps a copy of the
-/// lock file: [`RunLease`] unlocks before it closes.
+/// lock file: the lock unlocks before it closes ([`paths::ExclusiveLock`]).
 const RUN_LEASE_GRACE: Duration = Duration::from_millis(500);
 
 /// The right to run one turn on a session, held across processes: an
@@ -330,17 +330,7 @@ const RUN_LEASE_GRACE: Duration = Duration::from_millis(500);
 /// the store's short write lock, which is never held while a turn runs.
 #[derive(Debug)]
 pub struct RunLease {
-    file: std::fs::File,
-}
-
-impl Drop for RunLease {
-    // Unlock, then close. The lock belongs to the open file, which a child
-    // that another thread is starting shares until its exec closes its copy;
-    // closing only this handle would keep the lease held until then.
-    // Unlocking releases it at once, whoever else still has the file open.
-    fn drop(&mut self) {
-        let _ = self.file.unlock();
-    }
+    _lock: paths::ExclusiveLock,
 }
 
 /// The stop reason recorded for a turn whose process ended before it could
@@ -538,7 +528,7 @@ impl SessionStore {
     /// store's lock wait. One lock for the whole store rather than one per
     /// session, so a deletion and a later writer are ordered as well, and no
     /// lock file outlives a deleted session.
-    fn lock(&self) -> Result<std::fs::File, StoreError> {
+    fn lock(&self) -> Result<paths::ExclusiveLock, StoreError> {
         paths::create_private_dir(&self.directory).map_err(|err| StoreError::Directory {
             path: self.directory.clone(),
             reason: err.to_string(),
@@ -568,7 +558,7 @@ impl SessionStore {
         })?;
         let path = directory.join(format!("{}.lock", id.as_str()));
         match paths::lock_exclusive(&path, RUN_LEASE_GRACE) {
-            Ok(file) => Ok(RunLease { file }),
+            Ok(lock) => Ok(RunLease { _lock: lock }),
             Err(paths::LockError::Busy) => Err(StoreError::Busy { path: directory }),
             Err(paths::LockError::Io(err)) => Err(StoreError::Directory {
                 path,

@@ -8,13 +8,13 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 - Implemented: 29 of 227
 - Pending D1 decision rows: 0
 - D5a note (2026-11-02, rows 21-22): the operations behind `slash.approve`, `slash.reject` and `slash.stop` (and #98's regenerate) now have host-level end-to-end evidence through the desktop host (desktop/e2e/runs.py, switch.py). They are not counted until a UI path is verified (browser UI e2e at least; native WebView in D8). `slash.continue` and `key.steer` remain not started (row 23)
-- Total rows: 333
+- Total rows: 334
 
 | Kind | Rows |
 |---|---|
 | acp-method | 8 |
 | alias | 2 |
-| api | 51 |
+| api | 52 |
 | argument | 47 |
 | command | 86 |
 | config | 14 |
@@ -30,7 +30,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 
 | Applicability | Rows |
 |---|---|
-| applicable | 297 |
+| applicable | 298 |
 | host-owned | 7 |
 | not-applicable | 29 |
 
@@ -345,7 +345,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `slash.approve` | `/approve` | applicable | yes | Conversations: approval card | api: POST /approvals/{run} | not-started | `crates/lightagent/src/slash.rs:83` |
 | `slash.reject` | `/reject` | applicable | yes | Conversations: approval card | api: POST /approvals/{run} | not-started | `crates/lightagent/src/slash.rs:84` |
 | `slash.stop` | `/stop` | applicable | yes | Conversations: stop | api: POST /runs/{id}/cancel | not-started | `crates/lightagent/src/slash.rs:85` |
-| `slash.continue` | `/continue` | applicable | yes | Conversations: continue | MISSING in API: no continue operation (new backend operation required, D5) | not-started | `crates/lightagent/src/slash.rs:86` |
+| `slash.continue` | `/continue` | applicable | yes | Conversations: continue | api: POST /runs/{id}/continue, for a run started with on_time_budget pause (D5a-3); resumes the same execution | not-started | `crates/lightagent/src/slash.rs:86` |
 | `slash.update` | `/update` | not-applicable (D1-Q2) | no | (decision D1-Q2) |  | not-started | `crates/lightagent/src/slash.rs:87` |
 | `slash.exit` | `/exit` | not-applicable | no | Window/session close is native |  | not-started | `crates/lightagent/src/slash.rs:88` |
 
@@ -357,7 +357,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `key.ctrl-c` | `chat key: ctrl-c` | not-applicable | no | Native window close / Stop button (slash.stop) |  | not-started | `crates/lightagent/src/chat.rs:1963` |
 | `key.ctrl-d` | `chat key: ctrl-d` | not-applicable | no | Native window close |  | not-started | `crates/lightagent/src/chat.rs:1964` |
 | `key.line-editing` | `chat key: line-editing` | not-applicable | no | Provided by the native text field |  | not-started | `crates/lightagent/src/chat.rs:1973` |
-| `key.steer` | `chat key: steer` | applicable | yes | Conversations: composer stays enabled during a run → queued steer | MISSING in API: no steering operation (new backend operation required, D5) | not-started | `crates/lightagent/src/chat.rs:2955` |
+| `key.steer` | `chat key: steer` | applicable | yes | Conversations: composer stays enabled during a run → queued steer | client-held FIFO queue over api: POST /runs, as the terminal holds it; no backend queue (D5a-3) | not-started | `crates/lightagent/src/chat.rs:2955` |
 | `key.approval-answer` | `chat key: approval-answer` | applicable | dup→`slash.approve` |  |  | not-started | `crates/lightagent/src/chat.rs:2031` |
 
 ## acp-method
@@ -459,6 +459,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `api.get.runs.id` | `GET /api/lightagent/v1/runs/{id}` | applicable | no | (backend reuse) | api: GET /runs/{id} | not-started | `crates/lightagent-api/src/lib.rs:91` |
 | `api.get.runs.id.events` | `GET /api/lightagent/v1/runs/{id}/events` | applicable | no | (backend reuse) | api: GET /runs/{id}/events | not-started | `crates/lightagent-api/src/lib.rs:92` |
 | `api.post.runs.id.cancel` | `POST /api/lightagent/v1/runs/{id}/cancel` | applicable | no | (backend reuse) | api: POST /runs/{id}/cancel | not-started | `crates/lightagent-api/src/lib.rs:93` |
+| `api.post.runs.id.continue` | `POST /api/lightagent/v1/runs/{id}/continue` | applicable | no | (backend reuse) | api: POST /runs/{id}/continue | not-started | `crates/lightagent-api/src/lib.rs:160` |
 | `api.get.sessions` | `GET /api/lightagent/v1/sessions` | applicable | no | (backend reuse) | api: GET /sessions | not-started | `crates/lightagent-api/src/lib.rs:94` |
 | `api.post.sessions` | `POST /api/lightagent/v1/sessions` | applicable | no | (backend reuse) | api: POST /sessions | not-started | `crates/lightagent-api/src/lib.rs:94` |
 | `api.get.runs` | `GET /api/lightagent/v1/runs` | applicable | no | (backend reuse) | api: GET /runs | not-started | `crates/lightagent-api/src/lib.rs:90` |

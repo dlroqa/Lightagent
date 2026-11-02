@@ -50,7 +50,7 @@ use serde_json::json;
 use tokio::sync::Mutex;
 
 pub use auth::{AuthConfig, IdentityAuthority, IdentityState, Scope};
-pub use manager::{RunFactory, RunManager, RunOwner, RunState, RunStatus, StartRun};
+pub use manager::{RunFactory, RunManager, RunOptions, RunOwner, RunState, RunStatus, StartRun};
 
 /// The shared state every handler reads.
 #[derive(Clone)]
@@ -157,6 +157,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/lightagent/v1/runs/{id}", get(get_run))
         .route("/api/lightagent/v1/runs/{id}/events", get(run_events))
         .route("/api/lightagent/v1/runs/{id}/cancel", post(cancel_run))
+        .route("/api/lightagent/v1/runs/{id}/continue", post(continue_run))
         .route(
             "/api/lightagent/v1/sessions",
             get(list_sessions).post(create_session),
@@ -1929,6 +1930,37 @@ struct CreateRunBody {
     session_id: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    on_time_budget: OnTimeBudget,
+}
+
+/// What a run does when its time budget runs out while tool results the
+/// model has not read are waiting.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum OnTimeBudget {
+    /// Answer from what it gathered, without tools, and end (as before).
+    #[default]
+    WrapUp,
+    /// Pause until continued (`POST /runs/{id}/continue`) or cancelled.
+    Pause,
+}
+
+/// How to continue a run paused on its time budget.
+#[derive(Deserialize)]
+struct ContinueBody {
+    #[serde(default)]
+    mode: ContinueMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ContinueMode {
+    /// Renew the time budget and carry on, with tools, where it stopped.
+    #[default]
+    Extend,
+    /// Answer now from what it gathered, without tools, and end.
+    Answer,
 }
 
 /// Regenerating names the run whose answer it replaces, so a request made
@@ -1985,6 +2017,7 @@ async fn regenerate_run(
         profile: body.profile,
         session_id: Some(id),
         model: body.model,
+        on_time_budget: OnTimeBudget::WrapUp,
     };
     let turn = Turn::Regenerate {
         run_id: body.run_id,
@@ -2292,6 +2325,9 @@ async fn start_run(
         run_lease = Some(lease);
         session_id = Some(id);
     }
+    let options = RunOptions {
+        pause_on_time_budget: body.on_time_budget == OnTimeBudget::Pause,
+    };
     let request = StartRun {
         message: body.message,
         history,
@@ -2317,7 +2353,13 @@ async fn start_run(
                     let check = identity.run_check(caller, owner.clone());
                     let started = state
                         .manager
-                        .start_supervised(request, owner, check, identity.generation())
+                        .start_supervised_with(
+                            request,
+                            owner,
+                            check,
+                            identity.generation(),
+                            options,
+                        )
                         .await;
                     match started {
                         Ok(run) => run,
@@ -2330,10 +2372,15 @@ async fn start_run(
                         }
                     }
                 }
-                None => state.manager.start_as(request, owner).await,
+                None => state.manager.start_as_with(request, owner, options).await,
             }
         }
-        None => state.manager.start(request).await,
+        None => {
+            state
+                .manager
+                .start_as_with(request, RunOwner::operator_only(), options)
+                .await
+        }
     };
     if let Some(id) = &session_id {
         let replacing = match turn {
@@ -2566,6 +2613,36 @@ async fn cancel_run(
         Ok((run, _)) => {
             run.cancel();
             Json(json!({ "id": run.id(), "cancelled": true })).into_response()
+        }
+        Err(response) => *response,
+    }
+}
+
+/// Continue a run paused on its time budget. The same execution carries on
+/// from where it stopped (its conversation, the tool results the model has
+/// not read, its turn and tool-call counts): this is not a new turn. 409
+/// unless the run is paused.
+async fn continue_run(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<ContinueBody>,
+) -> Response {
+    match authorized_run(&state, &headers, &id, Scope::RunsWrite).await {
+        Ok((run, _)) => {
+            let how = match body.mode {
+                ContinueMode::Extend => lightagent_core::Continuation::Extend,
+                ContinueMode::Answer => lightagent_core::Continuation::WrapUp,
+            };
+            if run.continue_with(how).await {
+                Json(json!({ "id": run.id(), "continued": true })).into_response()
+            } else {
+                (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "run is not paused on its time budget" })),
+                )
+                    .into_response()
+            }
         }
         Err(response) => *response,
     }
