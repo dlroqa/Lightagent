@@ -22,6 +22,7 @@ mod jev;
 mod markdown;
 mod memory;
 mod ops;
+mod providers;
 mod rag;
 mod remote_credentials;
 mod serve;
@@ -1396,42 +1397,30 @@ fn init(
 // --- models -----------------------------------------------------------------
 
 async fn models(json: bool) -> Result<(), String> {
-    use lightagent_provider_lightweight::{LightweightProvider, ProviderConfig};
-
     let paths = paths()?;
     let config = load_config(&paths)?;
-    let mut provider_config = ProviderConfig::new(config.inference.base_url.clone(), "default");
-    // A configured key that cannot be used fails closed: nothing is sent.
-    if let Some(secret) = &config.inference.api_key
-        && let Some(value) = secret
-            .for_request()
-            .map_err(|error| format!("inference: {error}; nothing was sent"))?
-    {
-        provider_config = provider_config.with_api_key(value);
-    }
-    let provider = LightweightProvider::new(provider_config).map_err(|error| error.to_string())?;
-
-    match provider.models().await {
-        Ok(models) => {
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_value(&models).map_err(|e| e.to_string())?
-                );
-            } else if models.is_empty() {
-                println!("The provider offers no models (is one loaded?).");
-            } else {
-                for model in models {
-                    println!("{model}");
-                }
-            }
-            Ok(())
-        }
-        Err(error) => Err(format!(
+    // The shared endpoint check, as Settings runs it: bounded, no redirect
+    // followed, and a configured key that cannot be used fails closed.
+    let check = providers::check_active(&config, providers::CHECK_TIMEOUT).await;
+    if let Some(error) = check.error {
+        return Err(format!(
             "could not reach the provider at {}: {error}",
-            config.inference.base_url
-        )),
+            check.base_url
+        ));
     }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_value(&check.models).map_err(|e| e.to_string())?
+        );
+    } else if check.models.is_empty() {
+        println!("The provider offers no models (is one loaded?).");
+    } else {
+        for model in check.models {
+            println!("{model}");
+        }
+    }
+    Ok(())
 }
 
 /// The clap command tree, pinned in `docs/desktop/cli-tree.txt` so the

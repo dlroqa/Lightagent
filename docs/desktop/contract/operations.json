@@ -39,6 +39,11 @@
    "path": "/api/lightagent/v1/jev/routing-report"
   },
   {
+   "id": "provider.check",
+   "method": "POST",
+   "path": "/api/lightagent/v1/provider/check"
+  },
+  {
    "id": "provider.credential.get",
    "method": "GET",
    "path": "/api/lightagent/v1/provider/credential"
