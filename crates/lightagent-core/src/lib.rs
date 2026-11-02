@@ -39,6 +39,7 @@ pub mod saved_providers;
 pub mod skills;
 pub mod tool_stream;
 pub mod workers;
+pub mod workspaces;
 
 pub use allocation::{
     Account, AllocationReport, Demand, OutputPlan, PlannedShare, ShareReport, TurnPurpose,

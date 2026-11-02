@@ -187,6 +187,47 @@ export async function checkSettingsStates(browser, base, outDir) {
       failures.push("providers: the harness endpoint was not restored");
     }
 
+    // The workspace folder: one validated, revision-checked setting shared
+    // with setup. The card loaded before the writes above, so its first save
+    // is refused and the entry stays; a relative folder is refused; an
+    // absolute one is saved, then cleared.
+    const workspaceNow = async () => (await fetch(`${base}/api/lightagent/v1/workspace`)).json();
+    const startedWorkspace = await workspaceNow();
+    const workspaceCard = page.getByTestId("workspace-card");
+    const folderField = page.locator("#workspace-folder");
+    const saveFolder = page.getByRole("button", { name: "Save folder", exact: true });
+    await folderField.fill("relative/folder");
+    await saveFolder.click();
+    await workspaceCard.getByText("so the folder was not saved", { exact: false }).waitFor({ timeout: 5000 });
+    if (await folderField.inputValue() !== "relative/folder") failures.push("workspace: a refused save lost the entry");
+    await saveFolder.click();
+    await workspaceCard.getByRole("alert").filter({ hasText: "absolute folder path" }).waitFor({ timeout: 5000 });
+    if ((await workspaceNow()).workspace.configured !== startedWorkspace.workspace.configured) {
+      failures.push("workspace: a relative folder was saved");
+    }
+    const effective = startedWorkspace.workspace.effective;
+    if (!effective) {
+      failures.push("workspace: the active profile has no effective folder");
+    } else {
+      const chosen = `${effective.replace(/[\\/]workspace$/, "")}/e2e-workspace`;
+      await folderField.fill(chosen);
+      await saveFolder.click();
+      await workspaceCard.getByText("Workspace folder saved.", { exact: false }).waitFor({ timeout: 5000 });
+      const saved = await workspaceNow();
+      if (saved.workspace.configured !== chosen || saved.workspace.source !== "config") {
+        failures.push(`workspace: after saving, the folder is ${JSON.stringify(saved.workspace)}`);
+      }
+      if (!(await workspaceCard.innerText()).includes("Applies to the next run")) {
+        failures.push("workspace: the card does not say when a change applies");
+      }
+      await page.getByRole("button", { name: "Use the profile's own folder", exact: true }).click();
+      await workspaceCard.getByText("Runs use the profile's own workspace folder.", { exact: false }).waitFor({ timeout: 5000 });
+      if ((await workspaceNow()).workspace.configured !== null) failures.push("workspace: clearing kept a folder");
+    }
+    if (startedWorkspace.workspace.configured) {
+      await put(base, "/workspace", { path: startedWorkspace.workspace.configured });
+    }
+
     // A saved secret is in none of the renderer's state.
     const current = await settingsNow(base);
     const saved = await put(base, "/settings", { ...current, jev: { ...current.jev, api_key: SECRET } });

@@ -7,13 +7,13 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 - Denominator: 227
 - Implemented: 28 of 227
 - Pending D1 decision rows: 0
-- Total rows: 331
+- Total rows: 333
 
 | Kind | Rows |
 |---|---|
 | acp-method | 8 |
 | alias | 2 |
-| api | 49 |
+| api | 51 |
 | argument | 47 |
 | command | 86 |
 | config | 14 |
@@ -29,7 +29,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 
 | Applicability | Rows |
 |---|---|
-| applicable | 295 |
+| applicable | 297 |
 | host-owned | 7 |
 | not-applicable | 29 |
 
@@ -485,6 +485,8 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `api.post.providers.id.check` | `POST /api/lightagent/v1/providers/{id}/check` | applicable | no | (backend reuse) | api: POST /providers/{id}/check | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.put.provider.active` | `PUT /api/lightagent/v1/provider/active` | applicable | no | (backend reuse) | api: PUT /provider/active | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.put.provider.model` | `PUT /api/lightagent/v1/provider/model` | applicable | no | (backend reuse) | api: PUT /provider/model | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.get.workspace` | `GET /api/lightagent/v1/workspace` | applicable | no | (backend reuse) | api: GET /workspace | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.put.workspace` | `PUT /api/lightagent/v1/workspace` | applicable | no | (backend reuse) | api: PUT /workspace | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.put.config.key` | `PUT /api/lightagent/v1/config/{key}` | applicable | no | (backend reuse) | api: PUT /config/{key} | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.get.approvals` | `GET /api/lightagent/v1/approvals` | applicable | no | (backend reuse) | api: GET /approvals | not-started | `crates/lightagent-api/src/lib.rs:109` |
 | `api.post.approvals.run` | `POST /api/lightagent/v1/approvals/{run}` | applicable | no | (backend reuse) | api: POST /approvals/{run} | not-started | `crates/lightagent-api/src/lib.rs:110` |

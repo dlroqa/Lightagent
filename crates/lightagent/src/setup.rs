@@ -510,12 +510,21 @@ fn configure_tools_tui(config: &mut Config, theme: &ColorfulTheme) -> Result<boo
         eprintln!("Web search will use DuckDuckGo (no account or API key required).");
     }
     if config.tools.enabled && config.tools.workspace.is_none() {
+        // The shared rule, checked as it is typed: an absolute folder that
+        // exists, or a new one inside an existing folder.
         let workspace = Input::<String>::with_theme(theme)
             .with_prompt("Workspace folder (blank uses profile workspace)")
             .allow_empty(true)
+            .validate_with(|value: &String| -> Result<(), String> {
+                if value.trim().is_empty() {
+                    Ok(())
+                } else {
+                    lightagent_core::workspaces::validate(value).map(|_| ())
+                }
+            })
             .interact_text()
             .map_err(dialog_error)?;
-        config.tools.workspace = nonempty(workspace);
+        lightagent_core::workspaces::set(config, Some(&workspace))?;
     }
     if realtime_rag && !enabled(0) {
         eprintln!("Web Search & Page Fetch were also enabled because realtime RAG uses them.");
@@ -916,7 +925,10 @@ fn configure_tools<R: BufRead, W: Write>(
             "Workspace folder (blank uses the active profile workspace)",
             current,
         )?;
-        config.tools.workspace = nonempty(workspace);
+        // A new folder takes the shared rule; an unchanged one stays as it is.
+        if workspace != current {
+            lightagent_core::workspaces::set(config, Some(&workspace))?;
+        }
     }
     Ok(())
 }
@@ -1186,16 +1198,33 @@ mod tests {
 
     #[test]
     fn tools_are_selected_without_config_keys() {
+        let project = std::env::temp_dir()
+            .join("lightagent-setup-project")
+            .display()
+            .to_string();
         let mut config = Config::default();
         let mut output = Vec::new();
         let mut prompt = Prompt {
-            reader: Cursor::new("3\n/tmp/project\n"),
+            reader: Cursor::new(format!("3\n{project}\n")),
             writer: &mut output,
         };
         configure_tools(&mut config, &mut prompt).unwrap();
         assert!(config.tools.enabled);
         assert!(config.tools.allow_terminal);
-        assert_eq!(config.tools.workspace.as_deref(), Some("/tmp/project"));
+        assert_eq!(config.tools.workspace.as_deref(), Some(project.as_str()));
+    }
+
+    #[test]
+    fn a_relative_workspace_folder_is_refused() {
+        let mut config = Config::default();
+        let mut output = Vec::new();
+        let mut prompt = Prompt {
+            reader: Cursor::new("3\nrelative/project\n"),
+            writer: &mut output,
+        };
+        let error = configure_tools(&mut config, &mut prompt).unwrap_err();
+        assert!(error.contains("absolute"), "{error}");
+        assert_eq!(config.tools.workspace, None);
     }
 
     #[test]

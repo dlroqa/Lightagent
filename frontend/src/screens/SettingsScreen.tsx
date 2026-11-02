@@ -18,6 +18,7 @@ import { Card } from "../components/Card";
 import { ConfigEditorCard } from "../components/ConfigEditor";
 import { ProviderCredentialCard } from "../components/ProviderCredential";
 import { ProvidersCard } from "../components/Providers";
+import { WorkspaceCard } from "../components/Workspace";
 import { TopBar } from "../components/Shell";
 import { usePoll } from "../hooks/usePoll";
 import { usePreferences } from "../state/preferences";
@@ -148,6 +149,7 @@ export function SettingsScreen() {
         <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))" }}>
           <ProvidersCard onChanged={() => setProviderVersion((version) => version + 1)} />
           <ProviderCredentialCard key={providerVersion} />
+          <WorkspaceCard />
           <Card title="Agent runtime">
             <p className="card__note">
               These controls are shared with the terminal CLI and apply to the next run.
