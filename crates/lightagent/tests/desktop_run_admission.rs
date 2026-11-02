@@ -1,0 +1,370 @@
+//! One turn at a time per session across every process sharing a home
+//! (D5b, #105): the desktop runtime's API (runs and regenerate), the
+//! terminal chat and ACP refuse a turn while the session's run lease is held
+//! by another process; the OS releases a lease whose holder dies; the
+//! short session-file write lock is not held during a turn; and different
+//! sessions still run at the same time. Every process here is separate:
+//! the runtime, CLI chats, an ACP server and this test.
+
+use std::fs::File;
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+
+const KEY: &str = "92a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081";
+const MODELS: &str = r#"{"object":"list","data":[{"id":"m1"}]}"#;
+const BUSY: &str = "session already has an active run";
+const ELSEWHERE: &str = "another Lightagent process";
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-admission-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+/// One authenticated request: the status, the raw body and its JSON.
+fn call(runtime: &Runtime, method: &str, path: &str, body: Option<&str>) -> (u16, String, Value) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    let json = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    (status, raw, json)
+}
+
+fn cli_ok(home: &Path, args: &[&str]) -> String {
+    let output: Output = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent");
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// A provider that answers every GET with the model list and holds every
+/// other request (a chat completion) open, so a turn stays in flight.
+fn holding_provider() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let url = format!("http://{}", listener.local_addr().expect("address"));
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            std::thread::spawn(move || {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let mut head = Vec::new();
+                let mut buffer = [0u8; 1024];
+                while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match stream.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => head.extend_from_slice(&buffer[..read]),
+                    }
+                }
+                if head.starts_with(b"GET") {
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{MODELS}",
+                        MODELS.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                } else {
+                    std::thread::sleep(Duration::from_secs(300));
+                }
+            });
+        }
+    });
+    url
+}
+
+fn new_session(runtime: &Runtime) -> String {
+    let (status, raw, created) = call(runtime, "POST", "/api/lightagent/v1/sessions", Some("{}"));
+    assert_eq!(status, 201, "{raw}");
+    created["id"].as_str().expect("session id").to_owned()
+}
+
+fn session_file(home: &Path, id: &str) -> PathBuf {
+    fn find(dir: &Path, name: &str) -> Option<PathBuf> {
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = find(&path, name) {
+                    return Some(found);
+                }
+            } else if path.file_name().is_some_and(|file| file == name) {
+                return Some(path);
+            }
+        }
+        None
+    }
+    find(home, &format!("{id}.json")).expect("the session file")
+}
+
+fn lease_file(home: &Path, id: &str) -> PathBuf {
+    session_file(home, id)
+        .parent()
+        .expect("sessions directory")
+        .join(".runs")
+        .join(format!("{id}.lock"))
+}
+
+/// Hold `id`'s run lease from this test's own process.
+fn hold_lease(home: &Path, id: &str) -> File {
+    let path = lease_file(home, id);
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("runs directory");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .expect("lease file");
+    file.try_lock().expect("the test takes the lease");
+    file
+}
+
+fn lease_is_held(home: &Path, id: &str) -> bool {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(lease_file(home, id))
+        .expect("lease file");
+    match file.try_lock() {
+        Ok(()) => false,
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        Err(std::fs::TryLockError::Error(error)) => panic!("lease probe: {error}"),
+    }
+}
+
+fn run_on(runtime: &Runtime, id: &str) -> (u16, String) {
+    let body = json!({ "message": "hello", "session_id": id }).to_string();
+    let (status, raw, _) = call(runtime, "POST", "/api/lightagent/v1/runs", Some(&body));
+    (status, raw)
+}
+
+#[test]
+fn a_lease_held_by_another_process_refuses_every_entry_point() {
+    let home = scratch_home("held");
+    cli_ok(
+        &home,
+        &["config", "set", "inference.base_url", &holding_provider()],
+    );
+    let runtime = start(&home);
+    let id = new_session(&runtime);
+    let before = std::fs::read(session_file(&home, &id)).expect("session");
+    let lease = hold_lease(&home, &id);
+
+    // The API: a run and a regeneration.
+    let (status, raw) = run_on(&runtime, &id);
+    assert_eq!(status, 409, "{raw}");
+    assert!(raw.contains(BUSY), "{raw}");
+    let (status, raw, _) = call(
+        &runtime,
+        "POST",
+        &format!("/api/lightagent/v1/sessions/{id}/regenerate"),
+        Some(r#"{"run_id":"r-any"}"#),
+    );
+    assert_eq!(status, 409, "{raw}");
+
+    // The terminal chat: refused, nothing appended, the chat stays usable.
+    let mut chat = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["chat", "--session", &id])
+        .env("LIGHTAGENT_HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start chat");
+    {
+        let mut input = chat.stdin.take().expect("chat stdin");
+        writeln!(input, "hello").expect("type");
+    }
+    let output = chat.wait_with_output().expect("chat output");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(ELSEWHERE), "{stderr}");
+    assert_eq!(
+        std::fs::read(session_file(&home, &id)).expect("session"),
+        before,
+        "a refused chat turn changed the session"
+    );
+
+    // ACP: the prompt is refused with a JSON-RPC error naming the cause.
+    let mut acp = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .arg("acp")
+        .env("LIGHTAGENT_HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start acp");
+    let mut input = acp.stdin.take().expect("acp stdin");
+    let stdout = acp.stdout.take().expect("acp stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = tx.send(line);
+        }
+    });
+    for request in [
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": 1 } }),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "session/load", "params": { "sessionId": id, "mcpServers": [] } }),
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": { "sessionId": id, "prompt": [{ "type": "text", "text": "hello" }] } }),
+    ] {
+        writeln!(input, "{request}").expect("send");
+    }
+    input.flush().expect("flush");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let answer = loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let line = rx.recv_timeout(left).expect("the prompt's answer");
+        let message: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
+        if message["id"] == 3 {
+            break message;
+        }
+    };
+    assert!(
+        answer["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(ELSEWHERE),
+        "{answer}"
+    );
+    drop(input);
+    let _ = acp.kill();
+    let _ = acp.wait();
+
+    // Released by its holder: the next turn is admitted.
+    drop(lease);
+    let (status, raw) = run_on(&runtime, &id);
+    assert_eq!(status, 202, "{raw}");
+}
+
+#[test]
+fn a_crashed_holder_releases_the_lease_and_the_write_lock_stays_free() {
+    let home = scratch_home("crash");
+    cli_ok(
+        &home,
+        &["config", "set", "inference.base_url", &holding_provider()],
+    );
+    let runtime = start(&home);
+    let id = new_session(&runtime);
+    let other = new_session(&runtime);
+
+    // A terminal chat whose turn is in flight (its provider never answers).
+    let mut chat = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["chat", "--session", &id])
+        .env("LIGHTAGENT_HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start chat");
+    let mut input = chat.stdin.take().expect("chat stdin");
+    writeln!(input, "hello").expect("type");
+    input.flush().expect("flush");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !std::fs::read_to_string(session_file(&home, &id))
+        .expect("session")
+        .contains("\"hello\"")
+    {
+        assert!(Instant::now() < deadline, "the chat turn never started");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(lease_is_held(&home, &id), "the chat's turn holds no lease");
+
+    // Refused for this session; the write lock is free during the turn; a
+    // different session runs.
+    let (status, raw) = run_on(&runtime, &id);
+    assert_eq!(status, 409, "{raw}");
+    let (status, raw, _) = call(
+        &runtime,
+        "PATCH",
+        &format!("/api/lightagent/v1/sessions/{id}"),
+        Some(r#"{"title":"renamed during a turn"}"#),
+    );
+    assert_eq!(status, 200, "{raw}");
+    let (status, raw) = run_on(&runtime, &other);
+    assert_eq!(status, 202, "{raw}");
+
+    // The holder dies: the OS releases its lease, and the next run is admitted.
+    let _ = chat.kill();
+    let _ = chat.wait();
+    drop(input);
+    let (status, raw) = run_on(&runtime, &id);
+    assert_eq!(status, 202, "{raw}");
+}

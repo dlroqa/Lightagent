@@ -1270,8 +1270,15 @@ pub async fn run(
     // away. It is kept whole — the conversation, including the tool results
     // the model has not read yet — so `continue` picks it up where it stopped.
     let mut paused: Option<PausedRun> = None;
+    // The session's run lease: held while a turn runs and while a paused run
+    // may be continued, so no other process runs a turn on this session
+    // meanwhile. Between turns this chat holds none.
+    let mut lease: Option<lightagent_store::RunLease> = None;
     let mut steering = VecDeque::new();
     loop {
+        if paused.is_none() {
+            lease = None;
+        }
         let (line, queued) = if let Some(line) = steering.pop_front() {
             (line, true)
         } else {
@@ -1632,6 +1639,22 @@ pub async fn run(
         with_turn_guidance(&mut history, turn_plan);
         // Appended to the session as it is saved now, keeping what another
         // process changed meanwhile (see `SessionStore::apply`).
+        // One turn at a time on this session across every process: the
+        // desktop app, a server, another terminal chat or an editor.
+        if lease.is_none() {
+            match session_store.lease_run(&session.id) {
+                Ok(held) => lease = Some(held),
+                Err(lightagent_store::StoreError::Busy { .. }) => {
+                    eprintln!(
+                        "· this session is running a turn in another Lightagent process (the desktop app, a server, another chat or an editor); nothing was sent. Try again when it finishes."
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    return Err(format!("could not take the session's run lease: {error}"));
+                }
+            }
+        }
         let asked = StoredMessage::new("user", &line);
         session_store
             .apply(&mut session, |saved| saved.push_message(asked.clone()))

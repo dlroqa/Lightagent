@@ -2179,6 +2179,8 @@ async fn start_run(
     let mut history = Vec::new();
     let mut profile = body.profile;
     let mut session_id = None;
+    // The session's run lease, held from admission until the run is recorded.
+    let mut run_lease = None;
     let session_store = match &session_scope {
         Some(user) => user.sessions(&state),
         None => state.sessions.clone(),
@@ -2218,6 +2220,24 @@ async fn start_run(
             )
                 .into_response();
         }
+        // One turn at a time on this session across every process that
+        // shares this home (another server, a terminal chat, an editor): its
+        // run lease, refused exactly like a session busy here.
+        let lease = match session_store.lease_run(&id) {
+            Ok(lease) => lease,
+            Err(StoreError::Busy { .. }) => {
+                busy.remove(&id);
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({"error": "session already has an active run"})),
+                )
+                    .into_response();
+            }
+            Err(error) => {
+                busy.remove(&id);
+                return internal(&error.to_string());
+            }
+        };
         // Checked, and for a new prompt saved, on the session as it is saved
         // now, under the store's lock: a change another writer made since is
         // kept. The busy entry above stays the rule for admitting runs.
@@ -2249,16 +2269,21 @@ async fn start_run(
                 history = admitted;
                 body.message = prompt;
             }
+            // The lease goes before the busy entry, so a session free here
+            // is free in every process.
             Ok(Err(refused)) => {
+                drop(lease);
                 busy.remove(&id);
                 return refused.into_response();
             }
             Err(error) => {
+                drop(lease);
                 busy.remove(&id);
                 return internal(&error.to_string());
             }
         }
         profile = Some(session_profile.clone());
+        run_lease = Some(lease);
         session_id = Some(id);
     }
     let request = StartRun {
@@ -2291,6 +2316,7 @@ async fn start_run(
                     match started {
                         Ok(run) => run,
                         Err(denial) => {
+                            drop(run_lease.take());
                             if let Some(id) = &session_id {
                                 state.busy_sessions.lock().await.remove(id);
                             }
@@ -2314,6 +2340,7 @@ async fn start_run(
             Arc::clone(&state.busy_sessions),
             id.clone(),
             replacing,
+            run_lease,
         ));
     }
     (
@@ -2336,6 +2363,8 @@ async fn record_run_in_session(
     busy: Arc<Mutex<HashSet<SessionId>>>,
     id: SessionId,
     replacing: Option<String>,
+    // Released just before the busy entry, once the run is recorded.
+    mut lease: Option<lightagent_store::RunLease>,
 ) {
     let mut seen = 0;
     loop {
@@ -2372,6 +2401,9 @@ async fn record_run_in_session(
                 }
                 Err(error) => eprintln!("could not save agent session {id:?}: {error}"),
             }
+            // The lease goes first: once the busy entry is gone, the session
+            // is free in every process.
+            drop(lease.take());
             busy.lock().await.remove(&id);
             break;
         }
@@ -3207,6 +3239,7 @@ mod tests {
             sessions.clone(),
             Arc::clone(&busy),
             id.clone(),
+            None,
             None,
         ));
         paused.await.unwrap();

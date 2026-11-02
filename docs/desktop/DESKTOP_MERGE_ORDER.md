@@ -29,8 +29,12 @@ tree are recorded here.
 | 15 | D4d-2b-2 saved providers and the model through one shared operation set | https://github.com/dlroqa/Lightagent/pull/109 | `desktop/d4d2b2-saved-providers` | `desktop/d4d2b-key-binding` | `108dac6` | `108dac6` |
 | 16 | D4d-2b-3 Providers and models card in Settings | https://github.com/dlroqa/Lightagent/pull/110 | `desktop/d4d2b3-providers-ui` | `desktop/d4d2b2-saved-providers` | `bb76e74` | `bb76e74` (subagents: one live-broker job failed, not re-run; see DESKTOP_PROGRESS.md) |
 | 17 | D4d-3 every configured remote credential fails closed | https://github.com/dlroqa/Lightagent/pull/111 | `desktop/d4d3-fail-closed` | `desktop/d4d2b3-providers-ui` | `c15e249` | `c15e249` |
-| 18+ | D4e workspaces, then D5 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
-| D5b | Cross-process run admission (https://github.com/dlroqa/Lightagent/issues/105): a per-session run lease across processes, released when its holder dies | opened in D5, before the D10 gate | — | the D5a slice | — | — |
+| 18 | D4e the tools workspace through one shared, validated operation | https://github.com/dlroqa/Lightagent/pull/112 | `desktop/d4e-workspaces` | `desktop/d4d3-fail-closed` (`bf5e56d`) | `ec1fc4e` | `ec1fc4e` |
+| 19 | D5b one turn at a time per session across every process (https://github.com/dlroqa/Lightagent/issues/105) | https://github.com/dlroqa/Lightagent/pull/113 | `desktop/d5b-run-admission` | `desktop/d4e-workspaces` | `1e657e5` | `1e657e5` |
+| 20+ | D5a (deterministic run, relay reconnect, approvals across a profile switch, sidecar crash, R1), then D6 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+
+D5b is row 19, before D5a: it uses no D5a operation, and the owner ordered
+it next (DESKTOP_CLAUDE_PROMPT.md §5).
 
 Heads change as slices receive fixes. DESKTOP_PROGRESS.md records every
 head with its runs; the D10 review package fixes the final heads and the
