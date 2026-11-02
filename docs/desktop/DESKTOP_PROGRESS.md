@@ -37,7 +37,10 @@ next update names its run.
 | Row 17: D4d-3 every configured remote credential fails closed | **CI-validated** at `c15e249` (check, desktop, jev evaluation, subagents) after a test-setup fix (see "Row 17") | `desktop/d4d3-fail-closed` (stacked on row 16) | https://github.com/dlroqa/Lightagent/pull/111 | `c15e2491cc959b64d1557bf09606e6c71701152a`, plus this documentation commit | `c15e249` / tree `aea17cf71d4615cd76c1c6903213584afb8da4a2` |
 | Row 18: D4e the tools workspace through one shared, validated operation | **CI-validated** at `ec1fc4e` (check, desktop, jev evaluation, subagents; first run) | `desktop/d4e-workspaces` (stacked on row 17's documentation commit `bf5e56d`) | https://github.com/dlroqa/Lightagent/pull/112 | `ec1fc4e1eab9428e6f8afd5e38b1b2de97c8846b` | `ec1fc4e` / tree `34e2aa7c0253a236e90394a7c6401d6faaec0c27` |
 | Row 19: D5b one turn at a time per session across every process (#105) | **CI-validated** at `1e657e5` (check, desktop, jev evaluation, subagents) after two fixes (see "Row 19") | `desktop/d5b-run-admission` (stacked on row 18) | https://github.com/dlroqa/Lightagent/pull/113 | `1e657e5b5ee471e9ee2dc9817deb176919ddaede`, plus this documentation commit | `1e657e5` / tree `686bf3a3acd773fca3b60f12704fa95ada0ec699` |
-| D5a, D6–D10 | not started | — | — | — | — |
+| Row 20: D5b follow-through, a dropped run lease is free at once | **CI-validated** at `e5363fc` (check, desktop, jev evaluation, subagents; first run) | `desktop/d5b2-lease-release` (stacked on row 19 `db44a46`) | https://github.com/dlroqa/Lightagent/pull/114 | `e5363fc9c875c6b83c1606b24542d247e25f0e3f` | `e5363fc` / tree `ce2f291600512e2105ccb47ced1895342ba44f0c` |
+| Row 21: D5a-1 the host relay resumes a broken stream; runs through the host | **CI-validated** at `64d632f` (check, desktop, jev evaluation, subagents; one macOS arm64 bundling job was never given a runner and was re-run once, passing) | `desktop/d5a1-host-runs` (stacked on row 20) | https://github.com/dlroqa/Lightagent/pull/115 | `64d632ff37f4033343baf3ce2ec663b0dae4b999` | `64d632f` / tree `169f76fb18559562563b792876203128e4f1b7e0` |
+| Row 22: D5a-2 a turn its runtime did not live to record is Interrupted, never rerun | **CI-validated** at `c6fd6ac` (check, desktop, jev evaluation, subagents; first run) | `desktop/d5a2-interrupted` (stacked on row 21) | https://github.com/dlroqa/Lightagent/pull/116 | `c6fd6aca300ca93bd276c8f4e879586c9747dd58`, plus this documentation commit | `c6fd6ac` / tree `c98ac0acbcd1f716f2a3610b111337158eddf3bd` |
+| D5a-3 (time-budget continue and steering), D6–D10 | not started | — | — | — | — |
 
 The latest progress record is the copy on the highest stacked desktop branch.
 Branches lower in the stack keep the record as of their own commit.
@@ -1052,6 +1055,122 @@ the broker's window while many workflows were starting. It passed on every
 other head. It is a live GitHub test and is not re-run; a later change
 could widen that window.
 
+## Row 20 — D5b follow-through: a dropped run lease is free at once
+
+Review of #113's 500 ms grace. The cause was found and fixed rather than
+left to the grace:
+
+- An OS file lock (`flock`, and `LockFileEx` on Windows) belongs to the
+  open file, not to one handle. On Unix, a child that another thread is
+  starting (fork, then exec) shares every open file of its parent until
+  its exec closes the copies, so a lease closed in that instant stayed held
+  until the child's exec.
+- `RunLease` now **unlocks before it closes**, which releases the lock for
+  every copy at once. The grace stays, as the documented bound for refusing
+  a held lease.
+
+| Requirement | Evidence (`e5363fc`, all four `check` platforms unless noted) |
+|---|---|
+| An active holder prevents a second turn | store lease test; `desktop_run_admission.rs` (#113): API run, regenerate, CLI chat, ACP refused while another process holds it |
+| A competing turn is refused within the bound | `run_lease.rs`: refused in under 2 s (500 ms grace plus slack) |
+| Completion, cancellation and crashes release it | `desktop_run_admission.rs` (killed chat releases); runs.py `cancel` (row 21: the next run is admitted after a cancel); row 22 crash tests |
+| Different sessions run concurrently | `run_lease.rs`; `desktop_run_admission.rs` |
+| One lease for every entry point | `SessionStore::lease_run` is the only lease, taken by the API (runs, regenerate; the desktop runtime and any `serve`), CLI chat and ACP (#113) |
+| Child processes do not keep it | `run_lease.rs`: a child started while it is held does not keep it (all platforms); Unix: a lease dropped while a child is between fork and exec is free at once, and on Linux a control lock closed without unlocking stays held by that child, proving the window is real |
+| Separate from the short write lock | store lease test (a save goes through while a turn runs) |
+
+Remaining limitation: the short write locks (`sessions/.lock`,
+`config.json.lock`) still close without an explicit unlock. Their waiters
+wait up to 5 s, so the same instant can only delay them, never refuse them.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Edit request `062`; branch `desktop/d5b2-lease-release`; draft PR #114 | `e5363fc` / `ce2f291` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41429457355 |
+| 2026-11-02 | `check`, `desktop`, `jev evaluation`, `subagents`: **success**, first run | `e5363fc` | https://github.com/dlroqa/Lightagent/actions/runs/41429597466, https://github.com/dlroqa/Lightagent/actions/runs/41429597459, https://github.com/dlroqa/Lightagent/actions/runs/41429597338, https://github.com/dlroqa/Lightagent/actions/runs/41429597555 |
+
+## Row 21 — D5a-1: the host relay resumes a broken stream; runs through the host
+
+**Product change (desktop host).** The relay of a run's event stream now
+resumes a broken stream itself:
+- It reconnects from the last event it forwarded, sending `Last-Event-ID`.
+  Nothing is skipped, and nothing at or before that id is forwarded twice.
+- Five resumes in a row that forward nothing report the break.
+- A runtime that no longer has the run ends the relay at once, with that
+  reason.
+- An ended stream counts as finished only when the runtime says the run is.
+
+The UI's own `?after=` resume remains as a second layer. The IPC command
+bodies moved into plain functions; their behavior is unchanged.
+
+**Hosted scenarios** use the real host and the real `serve --desktop`
+runtime, with a deterministic fake provider (`desktop/e2e/harness.py`):
+scripted turns, named gates, and every request recorded. A test-only stdin
+driver (`e2e_driver.rs`, `--features e2e-hooks`, never bundled) calls the
+same functions as the UI's IPC commands. Synchronization is on what the host
+relayed or the provider received.
+
+| D5 gate / R1 item | Scenario | Result at `64d632f` |
+|---|---|---|
+| Streaming and a tool call | runs.py `stream` | passed: three or more deltas, `datetime.now` ran without approval, answer saved, two provider turns |
+| Approval granted | runs.py `approve` | passed: listed as pending, nothing written before the decision, written exactly once |
+| Approval denied | runs.py `deny` | passed: never written, the model was told it was denied |
+| Cancel | runs.py `cancel` | passed: cancelled mid-stream, saved as `Cancelled`, next run admitted, the turn not resent |
+| Relay reconnect, no missing or duplicate events | runs.py `relay` | passed: two drops mid-run; delivered ids exactly `0..10` (the runtime's count); host report `resumes=2 skipped=0 error=false` |
+| Pending approval during a switch | switch.py `pending` | passed: while the switch held its gate, `runs.create`, `sessions.regenerate` and `approvals.respond` were refused; without stopping runs it was `blocked` and the approval stayed pending; stopping runs rejected it explicitly (default's saved session: `the approval for 'fs.write' was denied; the tool did not run`, `Cancelled`); in `work`, the approvals list was empty and the old run and its approval answered 404; the file was never written |
+| R1 regenerate through the host | runs.py `regenerate` | passed: a finished answer replaced the saved one (one run record, the new one); a provider failure (500), a refusal, an empty answer and a cancel kept it; a stale answer id and a busy session were refused |
+| Continue after a time-budget pause; steering | — | not covered: the API has no continue operation, and steering is held by the renderer (row 23) |
+
+Evidence classes: this is **host-level** evidence (the host transport and
+relay, plus the real runtime). It is not browser UI evidence, and not native
+WebView interaction (D8). Permission and ownership enforcement for
+regenerate is **backend/API** evidence (#98's tests: `SessionsWrite`
+required, another user's session answered as missing). The desktop host
+always calls as the operator.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Edit request `063` (prepared `52d4272`); the final commit attaches the `desktop.yml` blob `86e1720`; branch `desktop/d5a1-host-runs`; draft PR #115 | `64d632f` / `169f76f` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41431358008 |
+| 2026-11-02 | `check`, `jev evaluation`, `subagents`: **success**. `desktop`: every job passed, including `desktop profile switch and runs` (both scenario sets reported no failures), except `desktop shell (macos-arm64)`: cancelled after 15 min, "The job was not acquired by Runner of type hosted even after multiple attempts" (GitHub's macOS arm64 capacity notice). That job never ran, so it was re-run once to obtain evidence, and passed | `64d632f` | https://github.com/dlroqa/Lightagent/actions/runs/41431492275, https://github.com/dlroqa/Lightagent/actions/runs/41431492257, https://github.com/dlroqa/Lightagent/actions/runs/41431492204, https://github.com/dlroqa/Lightagent/actions/runs/41431492291 |
+
+## Row 22 — D5a-2: a turn its runtime did not live to record is Interrupted, never rerun
+
+A session turn saves its prompt when admitted and is recorded when it ends.
+A runtime that died in between left the prompt with no record.
+
+- **Run journal.** `sessions/.runs/<id>.run` is written when an API turn
+  starts and removed once the turn is recorded. One that outlives the
+  process holding the session's lease marks an interrupted turn.
+- **Recovery.** An appended turn gets a run record with stop reason
+  `Interrupted` and no answer. An interrupted regeneration leaves the saved
+  answer and its record exactly as they were. Nothing is run again.
+- **When recovery runs:** as `lightagent serve` starts (the desktop runtime
+  included), for sessions no live process holds; and under the lease,
+  before a session's next turn is admitted.
+- **Web UI:** the stop reason reads "interrupted, not run again".
+
+| D5 gate item | Evidence at `c6fd6ac` |
+|---|---|
+| A sidecar crash mid-run is reported accurately | runs.py `crash` (host-level): with an approved write done and the model's next turn in flight, the runtime is killed; the host reports the lost stream and restarts its runtime once; the session records `Interrupted` with no answer; the restarted runtime answers 404 for the old run |
+| Recovery never replays the task or its tool side effects | runs.py `crash`: two provider turns before the crash and none after; the file holds `once` only; the next run is admitted. `desktop_interrupted.rs` (separate processes, all four platforms): the next runtime records the turn as Interrupted, the provider gets no second request, and an interrupted regeneration keeps the saved answer |
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Edit request `064`; branch `desktop/d5a2-interrupted`; draft PR #116 | `c6fd6ac` / `c98ac0a` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41433988154 |
+| 2026-11-02 | `check`, `desktop`, `jev evaluation`, `subagents`: **success**, first run | `c6fd6ac` | https://github.com/dlroqa/Lightagent/actions/runs/41434134050, https://github.com/dlroqa/Lightagent/actions/runs/41434134035, https://github.com/dlroqa/Lightagent/actions/runs/41434134009, https://github.com/dlroqa/Lightagent/actions/runs/41434134043 |
+
+**Parity.** The D5a scenarios exercise the operations behind `slash.approve`,
+`slash.reject` and `slash.stop`, and #98's regenerate, through the host.
+These rows still count only once a UI path is verified: browser UI e2e at
+least, and native WebView interaction in D8. No browser test covers the
+approval card or Stop yet, so coverage stays **29 of 227**.
+
+**What remains of the D5 gate (row 23):** continue after a time-budget
+pause, which needs a new API operation, since API runs use the wrap-up time
+policy and never pause; and steering. Steering in the Web UI and the terminal
+is a client-held FIFO queue that starts the next turn when the session is
+free. Whether it needs a backend operation (the inventory's current note) is
+decided in row 23.
+
 ## Artifacts and retention
 
 | Artifact | Run | Retention |
@@ -1062,6 +1181,8 @@ could widen that window.
 | `lightagent-web-screens` (existing `check` job) | 40996392105 | repository default |
 | `desktop-shell-<target>`: e2e JSON, report, screenshots (ready and mismatch), dmg/nsis/msi/deb/AppImage | 40999470324 | 30 days |
 | `desktop-cargo-lock` | 40999470324 | 30 days |
+| `desktop-switch-e2e`: `switch-e2e/` (switch.json, reports, `driver-switch-pending.log`) and `runs-e2e/` (runs.json with the provider log, `report-runs.txt`, `driver-runs.log`) | 41431492257 (row 21), 41434134035 (row 22) | 30 days |
+| `prepared-062…`, `prepared-063…`, `prepared-064…` (commit, tree, diff) | 41429457355, 41431358008, 41433988154 | 30 days |
 
 ## Local backup
 
@@ -1088,13 +1209,27 @@ could widen that window.
   | 2026-11-02T06:42:55Z | `d4c3-config-acceptance` `597604d`, `d4d1-credentials` `8f0717d`, `d4d2-endpoint-check` `2bed55c`, `d4d2b-key-binding` `8e3919b`, `d4d2b2-saved-providers` `108dac6`, `d4d2b3-providers-ui` `bb76e74`, `d4d3-fail-closed` `c15e249`, `tools/source-edit` `4cc32f9` (lower slices unchanged) | rows 14-17 validated; fetch only (remote-tracking refs), working tree `master` `12582a0` clean |
   | 2026-11-02T07:45:56Z | `d4d3-fail-closed` `bf5e56d`, `d4e-workspaces` `ec1fc4e`, `d5b-run-admission` `1e657e5`, `tools/source-edit` `c082884` (lower slices unchanged) | rows 18-19 validated; fetch only, working tree `master` `12582a0` clean. Local copies of the governing documents refreshed from `bf5e56d` at 07:08:20Z, earlier copies kept as `*.prev-2026-11-02c.*` |
 
+  | 2026-11-02T11:24:27Z | `d5b-run-admission` `db44a46`, `d5b2-lease-release` `e5363fc`, `d5a1-host-runs` `64d632f`, `d5a2-interrupted` `c6fd6ac`, `tools/source-edit` `aef2d2e` (lower slices unchanged) | rows 20-22 validated; fetch only (remote-tracking refs), working tree `master` `12582a0` clean |
+
   A documentation commit cannot record itself. Each row names the heads
   that existed when the sync ran. The commit that carries a row is
   backed up by the next sync.
 
 ## Next
 
-The owner's order of 2026-11-02 (third continuation, DESKTOP_CLAUDE_PROMPT.md §5):
+The owner's order of 2026-11-02 (fourth continuation, DESKTOP_CLAUDE_PROMPT.md §6):
+
+1. The D5b review follow-through is done (row 20).
+2. D5a is split by dependency: row 21 (host relay resume plus run
+   scenarios, R1) and row 22 (sidecar crash: interrupted, never rerun) are
+   done.
+3. **Row 23 (next), D5a-3:** continue after a time-budget pause (a new API
+   operation and run state, with host scenarios), and the steering decision
+   and evidence. Then the D5 gate is reviewed as a whole.
+4. D6-D10 in dependency order. D8 keeps the native WebView checks (Settings,
+   profile switching, close with active runs, response actions R2-R5).
+
+Previous order (DESKTOP_CLAUDE_PROMPT.md §5), kept for reference:
 
 1. D4d-2b and the fail-closed conversion are done (rows 14-17).
 2. D4e, workspaces, is done (row 18).

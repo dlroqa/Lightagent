@@ -7,6 +7,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 - Denominator: 227
 - Implemented: 29 of 227
 - Pending D1 decision rows: 0
+- D5a note (2026-11-02, rows 21-22): the operations behind `slash.approve`, `slash.reject` and `slash.stop` (and #98's regenerate) now have host-level end-to-end evidence through the desktop host (desktop/e2e/runs.py, switch.py). They are not counted until a UI path is verified (browser UI e2e at least; native WebView in D8). `slash.continue` and `key.steer` remain not started (row 23)
 - Total rows: 333
 
 | Kind | Rows |
