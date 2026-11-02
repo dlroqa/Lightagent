@@ -1,0 +1,25 @@
+=== base ef1984d5d7864506717afcfa4f5cc3c491497641
+=== message
+D6-5: the desktop host accepts `mcp` on the tool catalog
+
+The Web UI asks for `/tools?mcp=skip`, and the desktop host refuses a
+query parameter its contract does not list (host run 41501324410:
+"query parameter mcp is not allowed for tools.list"), so in the desktop
+app the Agent, Settings and Tools screens could not load the catalog.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace docs/desktop/contract/operations.json
+--- find
+   "id": "tools.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/tools"
+  },
+--- with
+   "id": "tools.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/tools",
+   "query": [
+    "mcp"
+   ]
+  },
+=== end
