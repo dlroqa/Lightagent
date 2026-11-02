@@ -1,0 +1,20 @@
+=== base 1063a88ebba956bb1ad9225981a44af1fc5cea27
+=== message
+D6-4: the check result takes a missing check (TS2322)
+
+check run 41497733333: `checks[name]` is `McpCheck | undefined` under the
+strict index setting, so CheckResult takes `undefined` and shows nothing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace frontend/src/components/Mcp.tsx
+--- find
+function CheckResult({ check }: { check: McpCheck }) {
+--- with
+function CheckResult({ check }: { check: McpCheck | undefined }) {
+  if (!check) return null;
+=== replace frontend/src/components/Mcp.tsx
+--- find
+                    {checks[server.name] && <CheckResult check={checks[server.name]} />}
+--- with
+                    <CheckResult check={checks[server.name]} />
+=== end
