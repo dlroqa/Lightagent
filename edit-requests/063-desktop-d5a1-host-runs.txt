@@ -1,0 +1,1523 @@
+=== base e5363fc9c875c6b83c1606b24542d247e25f0e3f
+=== message
+D5a-1: the host's relay resumes a broken stream; runs through the host
+
+The host's relay of a run's event stream used to end at the first break
+(the connection failing, or ending while the run was still working) and
+leave the UI to resume it. It now resumes the stream itself, from the last
+event it forwarded, with `Last-Event-ID`. The runtime numbers each event by
+its position in the run, so nothing is skipped, and an event at or before
+the last one forwarded is never forwarded again (a server that replays
+from the start is deduplicated). Five resumes in a row that forward nothing
+report the break; a runtime that no longer has the run (a restart) ends the
+relay at once with that reason. A stream that ends is finished only when
+the runtime says the run is (a run cancelled during an approval wait ends
+with no terminal event).
+
+Hosted run scenarios through the host and the real runtime, with a
+deterministic fake provider:
+- desktop/src-tauri/src/e2e_driver.rs (test builds only, `e2e-hooks`):
+  JSON commands on stdin, each calling the same function as the UI's IPC
+  command (`fetch`, `subscribe`, `poll`, `unsubscribe`, the switch), plus
+  two test hooks: drop a relay's connection, and hold a switch at its gate.
+  The commands' bodies moved out of the `#[tauri::command]` wrappers into
+  plain functions; behavior is unchanged.
+- desktop/e2e/harness.py: the fake provider (scripted turns, named gates,
+  every request recorded) and the driver client.
+- desktop/e2e/runs.py: streaming and a tool, approval granted and denied,
+  cancel, two relay drops mid-run, and regenerate (R1: replacement; a
+  provider failure, a refusal, an empty answer and a cancel keep the saved
+  answer; a stale answer id and a busy session are refused).
+- desktop/e2e/switch.py: a pending approval during a switch (refused while
+  the switch holds its gate; blocked without stopping runs; rejected
+  explicitly when runs are stopped; the new runtime knows nothing of it).
+- desktop.yml: the switch job runs both (`if: success() || failure()`).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace desktop/src-tauri/src/main.rs
+--- find
+mod contract;
+mod sidecar;
+--- with
+mod contract;
+#[cfg(feature = "e2e-hooks")]
+mod e2e_driver;
+mod sidecar;
+=== replace desktop/src-tauri/src/main.rs
+--- find
+/// How often the host checks that its runtime is still alive.
+const WATCH_INTERVAL: Duration = Duration::from_millis(500);
+--- with
+/// How often the host checks that its runtime is still alive.
+const WATCH_INTERVAL: Duration = Duration::from_millis(500);
+/// How many resumes in a row may forward nothing before a broken relay
+/// reports the break.
+const RELAY_ATTEMPTS: u32 = 5;
+/// The pause before resuming a broken relay; it doubles with each resume
+/// in a row that forwards nothing.
+const RELAY_BACKOFF: Duration = Duration::from_millis(100);
+/// Why a relay ends when its runtime no longer has the run.
+const RUN_GONE: &str =
+    "the runtime has no such run: a runtime restart ends the runs it was working on";
+=== replace desktop/src-tauri/src/main.rs
+--- find
+    task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+}
+--- with
+    task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    /// Drops the relay's current connection to the runtime, which the relay
+    /// then resumes. Only the test driver uses it, to break a relay on
+    /// purpose.
+    interrupt: Notify,
+}
+=== replace desktop/src-tauri/src/main.rs
+--- find
+#[tauri::command]
+fn runtime_status(host: tauri::State<'_, Arc<Host>>) -> RuntimeStatus {
+    let mut status = RuntimeStatus {
+--- with
+#[tauri::command]
+fn runtime_status(host: tauri::State<'_, Arc<Host>>) -> RuntimeStatus {
+    status(host.inner())
+}
+
+fn status(host: &Host) -> RuntimeStatus {
+    let mut status = RuntimeStatus {
+=== replace desktop/src-tauri/src/main.rs
+--- find
+    filename: Option<String>,
+) -> Result<FetchResult, String> {
+    let operation = host.contract.resolve(&method, &target)?.clone();
+--- with
+    filename: Option<String>,
+) -> Result<FetchResult, String> {
+    fetch(host.inner(), method, target, body, body_base64, filename).await
+}
+
+/// One contract operation on the runtime: the UI's `api_fetch` (and the
+/// test driver) call exactly this.
+async fn fetch(
+    host: &Host,
+    method: String,
+    target: String,
+    body: Option<String>,
+    body_base64: Option<String>,
+    filename: Option<String>,
+) -> Result<FetchResult, String> {
+    let operation = host.contract.resolve(&method, &target)?.clone();
+=== replace desktop/src-tauri/src/main.rs
+--- find
+#[tauri::command]
+async fn api_subscribe(host: tauri::State<'_, Arc<Host>>, target: String) -> Result<u64, String> {
+    let operation = host.contract.resolve("GET", &target)?;
+    if !operation.stream {
+        return Err(format!("{} is not a stream", operation.id));
+    }
+    let (base, authorization) = host.connection()?;
+    let request = host
+        .http
+        .get(format!("{base}{target}"))
+        .header(reqwest::header::AUTHORIZATION, authorization)
+        .header(reqwest::header::ACCEPT, "text/event-stream");
+    let id = host.next_subscription.fetch_add(1, Ordering::Relaxed);
+    let subscription = Arc::new(Subscription::default());
+    lock(&host.subscriptions).insert(id, Arc::clone(&subscription));
+    let relay = Arc::clone(&subscription);
+    let task = tauri::async_runtime::spawn(async move {
+        let outcome = relay_stream(request, &relay).await;
+        {
+            let mut state = lock(&relay.state);
+            state.closed = true;
+            state.error = outcome.err();
+        }
+        relay.notify.notify_waiters();
+    });
+    *lock(&subscription.task) = Some(task);
+    Ok(id)
+}
+
+async fn relay_stream(
+    request: reqwest::RequestBuilder,
+    subscription: &Subscription,
+) -> Result<(), String> {
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("the runtime did not answer: {}", error.without_url()))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "the runtime refused the stream ({})",
+            response.status().as_u16()
+        ));
+    }
+    let mut parser = sse::SseParser::default();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("the stream broke: {}", error.without_url()))?;
+        let events = parser.push(&chunk);
+        if !events.is_empty() {
+            lock(&subscription.state).events.extend(events);
+            subscription.notify.notify_waiters();
+        }
+    }
+    Ok(())
+}
+--- with
+#[tauri::command]
+async fn api_subscribe(host: tauri::State<'_, Arc<Host>>, target: String) -> Result<u64, String> {
+    subscribe(host.inner(), target)
+}
+
+/// Start relaying a stream operation: the UI's `api_subscribe` (and the
+/// test driver) call exactly this.
+fn subscribe(host: &Arc<Host>, target: String) -> Result<u64, String> {
+    let operation = host.contract.resolve("GET", &target)?;
+    if !operation.stream {
+        return Err(format!("{} is not a stream", operation.id));
+    }
+    host.connection()?;
+    let id = host.next_subscription.fetch_add(1, Ordering::Relaxed);
+    let subscription = Arc::new(Subscription::default());
+    lock(&host.subscriptions).insert(id, Arc::clone(&subscription));
+    let relay = Arc::clone(&subscription);
+    let owner = Arc::clone(host);
+    let task = tauri::async_runtime::spawn(async move {
+        let outcome = relay_stream(&owner, &target, &relay).await;
+        {
+            let mut state = lock(&relay.state);
+            state.closed = true;
+            state.error = outcome.err();
+        }
+        relay.notify.notify_waiters();
+    });
+    *lock(&subscription.task) = Some(task);
+    Ok(id)
+}
+
+/// How one connection of a relay ended.
+enum Leg {
+    /// The runtime ended the stream after the run's last event.
+    Done,
+    /// The connection failed, was dropped, or ended while the run was still
+    /// working. `progress`: it forwarded at least one new event.
+    Broken { reason: String, progress: bool },
+}
+
+/// What the runtime says about a relayed run once its stream has ended.
+enum RunCheck {
+    Finished,
+    Working,
+    Gone,
+    Unknown(String),
+}
+
+/// Relay a run's event stream into `subscription`. A break is resumed from
+/// the last event forwarded, with `Last-Event-ID`: the runtime numbers each
+/// event by its position in the run, so nothing is skipped, and an event at
+/// or before the last one forwarded is never forwarded again. After
+/// [`RELAY_ATTEMPTS`] resumes in a row that forward nothing, the break is
+/// reported.
+async fn relay_stream(host: &Host, target: &str, subscription: &Subscription) -> Result<(), String> {
+    let mut last = None;
+    let mut failures = 0;
+    let (mut resumes, mut skipped) = (0u32, 0usize);
+    let outcome = loop {
+        match relay_leg(host, target, subscription, &mut last, &mut skipped).await {
+            Ok(Leg::Done) => break Ok(()),
+            Err(reason) => break Err(reason),
+            Ok(Leg::Broken { reason, progress }) => {
+                failures = if progress { 1 } else { failures + 1 };
+                if failures > RELAY_ATTEMPTS {
+                    break Err(format!("{reason}; the stream could not be resumed"));
+                }
+                resumes += 1;
+                tokio::time::sleep(RELAY_BACKOFF * 2u32.pow(failures - 1)).await;
+            }
+        }
+    };
+    let path = target.split('?').next().unwrap_or(target);
+    let last = last.map_or_else(|| "none".to_owned(), |id: u64| id.to_string());
+    host.e2e.note_once(
+        "RELAY_END",
+        &format!(
+            "target={path} resumes={resumes} skipped={skipped} last={last} error={}",
+            outcome.is_err()
+        ),
+    );
+    outcome
+}
+
+/// One connection of a relay, resumed after `last` when there is one.
+async fn relay_leg(
+    host: &Host,
+    target: &str,
+    subscription: &Subscription,
+    last: &mut Option<u64>,
+    skipped: &mut usize,
+) -> Result<Leg, String> {
+    let broken = |reason: String, progress: bool| -> Result<Leg, String> {
+        Ok(Leg::Broken { reason, progress })
+    };
+    let (base, authorization) = match host.connection() {
+        Ok(connection) => connection,
+        Err(reason) => return broken(reason, false),
+    };
+    let mut request = host
+        .http
+        .get(format!("{base}{target}"))
+        .header(reqwest::header::AUTHORIZATION, authorization)
+        .header(reqwest::header::ACCEPT, "text/event-stream");
+    if let Some(last) = *last {
+        request = request.header("Last-Event-ID", last.to_string());
+    }
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return broken(
+                format!("the runtime did not answer: {}", error.without_url()),
+                false,
+            );
+        }
+    };
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(RUN_GONE.to_owned());
+    }
+    if !response.status().is_success() {
+        return Err(format!(
+            "the runtime refused the stream ({})",
+            response.status().as_u16()
+        ));
+    }
+    let mut parser = sse::SseParser::default();
+    let mut stream = response.bytes_stream();
+    let mut progress = false;
+    loop {
+        let next = std::pin::pin!(stream.next());
+        let dropped = std::pin::pin!(subscription.interrupt.notified());
+        let chunk = match futures_util::future::select(next, dropped).await {
+            futures_util::future::Either::Left((chunk, _)) => chunk,
+            futures_util::future::Either::Right(((), _)) => {
+                return broken("the relay's connection was dropped".to_owned(), progress);
+            }
+        };
+        match chunk {
+            Some(Ok(chunk)) => {
+                let events = parser.push(&chunk);
+                let total = events.len();
+                let fresh: Vec<_> = events
+                    .into_iter()
+                    .filter(|event| advance(last, event))
+                    .collect();
+                *skipped += total - fresh.len();
+                if !fresh.is_empty() {
+                    progress = true;
+                    lock(&subscription.state).events.extend(fresh);
+                    subscription.notify.notify_waiters();
+                }
+            }
+            Some(Err(error)) => {
+                return broken(
+                    format!("the stream broke: {}", error.without_url()),
+                    progress,
+                );
+            }
+            None => break,
+        }
+    }
+    match check_run(host, target).await {
+        RunCheck::Finished => Ok(Leg::Done),
+        RunCheck::Working => broken(
+            "the stream ended while the run was still working".to_owned(),
+            progress,
+        ),
+        RunCheck::Gone => Err(RUN_GONE.to_owned()),
+        RunCheck::Unknown(reason) => broken(reason, progress),
+    }
+}
+
+/// Whether `event` follows the last event forwarded, recording it as the
+/// last if so. An event without a numeric id cannot repeat one.
+fn advance(last: &mut Option<u64>, event: &sse::SseEvent) -> bool {
+    match event.id.as_deref().and_then(|id| id.parse::<u64>().ok()) {
+        Some(id) if last.is_some_and(|seen| id <= seen) => false,
+        Some(id) => {
+            *last = Some(id);
+            true
+        }
+        None => true,
+    }
+}
+
+/// Ask the runtime about the run a stream relayed, once the stream ended.
+async fn check_run(host: &Host, target: &str) -> RunCheck {
+    let path = target.split('?').next().unwrap_or(target);
+    let Some(run) = path.strip_suffix("/events") else {
+        return RunCheck::Finished;
+    };
+    let (base, authorization) = match host.connection() {
+        Ok(connection) => connection,
+        Err(reason) => return RunCheck::Unknown(reason),
+    };
+    let response = match host
+        .http
+        .get(format!("{base}{run}"))
+        .header(reqwest::header::AUTHORIZATION, authorization)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return RunCheck::Unknown(format!(
+                "the runtime did not answer: {}",
+                error.without_url()
+            ));
+        }
+    };
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return RunCheck::Gone;
+    }
+    let body = response.text().await.unwrap_or_default();
+    let run: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    match run["status"].as_str() {
+        Some("completed" | "cancelled" | "failed") => RunCheck::Finished,
+        Some(_) => RunCheck::Working,
+        None => RunCheck::Unknown("the runtime's answer about the run was unreadable".to_owned()),
+    }
+}
+=== replace desktop/src-tauri/src/main.rs
+--- find
+    wait_ms: u64,
+) -> Result<PollResult, String> {
+    let entry = lock(&host.subscriptions)
+--- with
+    wait_ms: u64,
+) -> Result<PollResult, String> {
+    poll(host.inner(), subscription, wait_ms).await
+}
+
+/// The events relayed since the last poll, waiting up to `wait_ms` for one.
+async fn poll(host: &Host, subscription: u64, wait_ms: u64) -> Result<PollResult, String> {
+    let entry = lock(&host.subscriptions)
+=== replace desktop/src-tauri/src/main.rs
+--- find
+#[tauri::command]
+fn api_unsubscribe(host: tauri::State<'_, Arc<Host>>, subscription: u64) {
+    if let Some(entry) = lock(&host.subscriptions).remove(&subscription)
+--- with
+#[tauri::command]
+fn api_unsubscribe(host: tauri::State<'_, Arc<Host>>, subscription: u64) {
+    unsubscribe(host.inner(), subscription);
+}
+
+fn unsubscribe(host: &Host, subscription: u64) {
+    if let Some(entry) = lock(&host.subscriptions).remove(&subscription)
+=== replace desktop/src-tauri/src/main.rs
+--- find
+                #[cfg(feature = "e2e-hooks")]
+                switch::run_e2e_switches(&host);
+--- with
+                #[cfg(feature = "e2e-hooks")]
+                e2e_driver::start(&host);
+                #[cfg(feature = "e2e-hooks")]
+                switch::run_e2e_switches(&host);
+=== replace desktop/src-tauri/src/main.rs
+--- find
+        tauri::RunEvent::Exit => {
+            if let Some(host) = app.try_state::<Arc<Host>>() {
+                host.stop_runtime();
+            }
+        }
+        _ => {}
+    });
+}
+--- with
+        tauri::RunEvent::Exit => {
+            if let Some(host) = app.try_state::<Arc<Host>>() {
+                host.stop_runtime();
+            }
+        }
+        _ => {}
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(id: Option<&str>) -> sse::SseEvent {
+        sse::SseEvent {
+            id: id.map(str::to_owned),
+            event: "model.delta".into(),
+            data: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_resumed_relay_forwards_each_event_once_in_order() {
+        let mut last = None;
+        let first: Vec<bool> = ["0", "1", "2"]
+            .iter()
+            .map(|id| advance(&mut last, &event(Some(id))))
+            .collect();
+        assert_eq!(first, [true, true, true]);
+        // A runtime that replays from the start after a resume: only what
+        // is new passes.
+        let replayed: Vec<bool> = ["0", "1", "2", "3"]
+            .iter()
+            .map(|id| advance(&mut last, &event(Some(id))))
+            .collect();
+        assert_eq!(replayed, [false, false, false, true]);
+        assert_eq!(last, Some(3));
+        assert!(advance(&mut last, &event(None)));
+        assert_eq!(last, Some(3));
+    }
+}
+=== replace desktop/src-tauri/src/switch.rs
+--- find
+    let _switching = Switching::begin(host)?;
+    let runs = active_runs(host)
+--- with
+    let _switching = Switching::begin(host)?;
+    #[cfg(feature = "e2e-hooks")]
+    crate::e2e_driver::switch_gate(&id).await;
+    let runs = active_runs(host)
+=== write desktop/src-tauri/src/e2e_driver.rs
+//! A test-only driver for hosted end-to-end runs. Compiled only into test
+//! builds (`--features e2e-hooks`), never into the bundled app.
+//!
+//! With `LIGHTAGENT_DESKTOP_E2E_DRIVER=1` the host reads one JSON command
+//! per line on stdin and answers each on stdout as `E2E_DRIVER {json}`,
+//! carrying the command's `id`. Each command calls the function the UI's IPC
+//! command calls (`fetch`, `subscribe`, `poll`, `unsubscribe`, the switch),
+//! so a harness drives the host's own contract check, transport, relay and
+//! switch against the real runtime, without a WebView. Commands run
+//! concurrently.
+//!
+//! Two hooks exist only here: `drop_relay` drops a relay's connection to the
+//! runtime (the relay must resume it); and with
+//! `LIGHTAGENT_DESKTOP_E2E_SWITCH_GATE=1` every switch, once it has raised
+//! its run gate, announces `{"event":"switch_held"}` and waits for
+//! `release_switch`, so operations during a switch are tried at a known
+//! moment.
+
+use std::io::{BufRead as _, Write as _};
+use std::sync::Arc;
+
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tokio::sync::Notify;
+
+use crate::{Host, lock};
+
+static SWITCH_GATE: Notify = Notify::const_new();
+
+#[derive(Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum Op {
+    Status,
+    Fetch {
+        method: String,
+        target: String,
+        #[serde(default)]
+        body: Option<String>,
+    },
+    Subscribe {
+        target: String,
+    },
+    Poll {
+        subscription: u64,
+        wait_ms: u64,
+    },
+    Unsubscribe {
+        subscription: u64,
+    },
+    DropRelay {
+        subscription: u64,
+    },
+    Switch {
+        profile: String,
+        cancel_runs: bool,
+    },
+    ReleaseSwitch,
+}
+
+/// Start reading commands, when the driver is asked for.
+pub fn start(host: &Arc<Host>) {
+    if std::env::var_os("LIGHTAGENT_DESKTOP_E2E_DRIVER").is_none() {
+        return;
+    }
+    let host = Arc::clone(host);
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            let command: Value = match serde_json::from_str(&line) {
+                Ok(command) => command,
+                Err(error) => {
+                    say(&json!({ "ok": false, "error": format!("unreadable command: {error}") }));
+                    continue;
+                }
+            };
+            let id = command["id"].clone();
+            let host = Arc::clone(&host);
+            tauri::async_runtime::spawn(async move {
+                let answer = match serde_json::from_value::<Op>(command) {
+                    Ok(op) => run(&host, op).await,
+                    Err(error) => Err(format!("unknown command: {error}")),
+                };
+                say(&match answer {
+                    Ok(result) => json!({ "id": id, "ok": true, "result": result }),
+                    Err(error) => json!({ "id": id, "ok": false, "error": error }),
+                });
+            });
+        }
+    });
+    say(&json!({ "event": "driver_ready" }));
+}
+
+async fn run(host: &Arc<Host>, op: Op) -> Result<Value, String> {
+    Ok(match op {
+        Op::Status => json!(crate::status(host)),
+        Op::Fetch {
+            method,
+            target,
+            body,
+        } => json!(crate::fetch(host, method, target, body, None, None).await?),
+        Op::Subscribe { target } => json!(crate::subscribe(host, target)?),
+        Op::Poll {
+            subscription,
+            wait_ms,
+        } => json!(crate::poll(host, subscription, wait_ms).await?),
+        Op::Unsubscribe { subscription } => {
+            crate::unsubscribe(host, subscription);
+            Value::Null
+        }
+        Op::DropRelay { subscription } => {
+            let entry = lock(&host.subscriptions)
+                .get(&subscription)
+                .cloned()
+                .ok_or("unknown subscription")?;
+            entry.interrupt.notify_one();
+            Value::Null
+        }
+        Op::Switch {
+            profile,
+            cancel_runs,
+        } => json!(crate::switch::switch(host, profile, cancel_runs).await?),
+        Op::ReleaseSwitch => {
+            SWITCH_GATE.notify_one();
+            Value::Null
+        }
+    })
+}
+
+/// Hold a switch, its run gate raised, until `release_switch`, when asked to.
+pub async fn switch_gate(profile: &str) {
+    if std::env::var_os("LIGHTAGENT_DESKTOP_E2E_SWITCH_GATE").is_none() {
+        return;
+    }
+    say(&json!({ "event": "switch_held", "profile": profile }));
+    SWITCH_GATE.notified().await;
+}
+
+fn say(message: &Value) {
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "E2E_DRIVER {message}");
+    let _ = out.flush();
+}
+=== write desktop/e2e/harness.py
+"""Shared pieces of the desktop host's end-to-end scenarios (runs.py, switch.py).
+
+FakeProvider is a deterministic OpenAI-compatible provider on loopback. It
+streams scripted turns, holds a turn at a named gate until the harness opens
+it, and records every request, so a scenario synchronizes on what reached
+the provider rather than on elapsed time.
+
+Host drives a test build of the desktop host (`--features e2e-hooks`)
+through its stdin driver (desktop/src-tauri/src/e2e_driver.rs). Each command
+calls the function the UI's IPC command calls, so this is evidence about the
+host and the real runtime behind it, not about the WebView.
+"""
+
+import json
+import os
+import re
+import subprocess
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# The longest one step waits. A hang fails that step; it never stalls the job.
+WAIT = 120
+API = "/api/lightagent/v1"
+
+
+def normal(name):
+    """A tool name without separators, so `fs.write` matches `fs_write`."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def content_of(message):
+    content = message.get("content")
+    if isinstance(content, list):
+        return "".join(part.get("text", "") for part in content if isinstance(part, dict))
+    return content or ""
+
+
+class FakeProvider:
+    """GET /v1/models, and POST /v1/chat/completions streamed from a script.
+
+    The scenario is the `[e2e:<name>]` marker in the conversation's latest
+    user message; the turn is how many assistant messages follow it.
+    `scripts[name](provider, turn, index)` returns the steps: ("text", s),
+    ("refusal", s), ("tool", internal_name, arguments), ("finish", reason),
+    ("gate", name) to wait until the harness opens that gate, or a first
+    ("status", code) to fail the request with that HTTP status.
+    """
+
+    def __init__(self):
+        self.log = []
+        self.condition = threading.Condition()
+        self.gates = {}
+        self.modes = {}
+        self.scripts = {}
+        provider = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                if self.path.startswith("/v1/models"):
+                    provider.reply(self, 200, {"object": "list", "data": [{"id": "fake-model"}]})
+                else:
+                    provider.reply(self, 404, {"error": "not found"})
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                try:
+                    request = json.loads(self.rfile.read(length) or b"{}")
+                except ValueError:
+                    request = {}
+                provider.serve(self, request)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def record(self, **entry):
+        with self.condition:
+            entry["t"] = round(time.time(), 3)
+            self.log.append(entry)
+            self.condition.notify_all()
+
+    def requests(self, scenario):
+        with self.condition:
+            return [e for e in self.log if e["event"] == "request" and e["scenario"] == scenario]
+
+    def wait_for(self, event, scenario, timeout=WAIT, **match):
+        """Wait until the log holds `event` for `scenario` (matching `match`)."""
+        deadline = time.time() + timeout
+
+        def found():
+            return any(
+                e["event"] == event and e["scenario"] == scenario and all(e.get(k) == v for k, v in match.items())
+                for e in self.log
+            )
+
+        with self.condition:
+            while not found():
+                left = deadline - time.time()
+                if left <= 0:
+                    return False
+                self.condition.wait(left)
+            return True
+
+    def gate(self, name):
+        with self.condition:
+            return self.gates.setdefault(name, threading.Event())
+
+    def open(self, name):
+        self.gate(name).set()
+
+    def close(self):
+        with self.condition:
+            gates = list(self.gates.values())
+        for gate in gates:
+            gate.set()
+        self.server.shutdown()
+
+    def reply(self, handler, code, value):
+        body = json.dumps(value).encode()
+        handler.send_response(code)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+
+    def chunk(self, handler, delta, finish=None):
+        choice = {"index": 0, "delta": delta}
+        if finish:
+            choice["finish_reason"] = finish
+        handler.wfile.write(f"data: {json.dumps({'choices': [choice]})}\n\n".encode())
+        handler.wfile.flush()
+
+    def serve(self, handler, request):
+        messages = request.get("messages") or []
+        users = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+        last = users[-1] if users else -1
+        found = re.search(r"\[e2e:([a-z0-9-]+)\]", content_of(messages[last]) if users else "")
+        scenario = found.group(1) if found else "none"
+        turn = sum(1 for m in messages[last + 1:] if m.get("role") == "assistant")
+        tools = {}
+        for tool in request.get("tools") or []:
+            name = (tool.get("function") or {}).get("name")
+            if name:
+                tools[normal(name)] = name
+        index = len(self.requests(scenario))
+        self.record(event="request", scenario=scenario, turn=turn, index=index, tools=sorted(tools.values()))
+        script = self.scripts.get(scenario)
+        steps = script(self, turn, index) if script else [("text", "ok"), ("finish", "stop")]
+        if steps and steps[0][0] == "status":
+            self.reply(handler, steps[0][1], {"error": {"message": "the fake provider failed on purpose"}})
+            self.record(event="failed", scenario=scenario, turn=turn)
+            return
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+        handler.close_connection = True
+        calls = 0
+        try:
+            self.chunk(handler, {"role": "assistant"})
+            for step in steps:
+                kind = step[0]
+                if kind == "text":
+                    self.chunk(handler, {"content": step[1]})
+                elif kind == "refusal":
+                    self.chunk(handler, {"refusal": step[1]})
+                elif kind == "tool":
+                    call = {
+                        "index": calls,
+                        "id": f"call_{scenario}_{index}_{calls}",
+                        "type": "function",
+                        "function": {"name": tools.get(normal(step[1]), step[1]), "arguments": json.dumps(step[2])},
+                    }
+                    self.chunk(handler, {"tool_calls": [call]})
+                    calls += 1
+                elif kind == "gate":
+                    self.record(event="gate", scenario=scenario, gate=step[1])
+                    if not self.gate(step[1]).wait(WAIT):
+                        self.record(event="gate-timeout", scenario=scenario, gate=step[1])
+                        return
+                elif kind == "finish":
+                    self.chunk(handler, {}, finish=step[1])
+            handler.wfile.write(b"data: [DONE]\n\n")
+            handler.wfile.flush()
+            self.record(event="finished", scenario=scenario, turn=turn)
+        except OSError:
+            self.record(event="disconnected", scenario=scenario, turn=turn)
+
+
+class HostError(Exception):
+    pass
+
+
+class Host:
+    """A host test build, driven over its stdin (e2e_driver.rs)."""
+
+    def __init__(self, command, env, log_path):
+        self.log = open(log_path, "w", encoding="utf-8")
+        self.logging = threading.Lock()
+        self.process = subprocess.Popen(
+            command, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1
+        )
+        self.answers = {}
+        self.events = []
+        self.condition = threading.Condition()
+        self.sending = threading.Lock()
+        self.next_id = 0
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _note(self, direction, text):
+        with self.logging:
+            if not self.log.closed:
+                self.log.write(f"{time.time():.3f} {direction} {text}\n")
+                self.log.flush()
+
+    def _read(self):
+        for line in self.process.stdout:
+            if not line.startswith("E2E_DRIVER "):
+                continue
+            text = line[len("E2E_DRIVER "):].strip()
+            self._note("<", text)
+            try:
+                message = json.loads(text)
+            except ValueError:
+                continue
+            with self.condition:
+                if message.get("id") is not None:
+                    self.answers[message["id"]] = message
+                else:
+                    self.events.append(message)
+                self.condition.notify_all()
+        with self.condition:
+            self.events.append({"event": "exited"})
+            self.condition.notify_all()
+
+    def send(self, op, **args):
+        with self.sending:
+            self.next_id += 1
+            ident = self.next_id
+            line = json.dumps({"id": ident, "op": op, **args})
+            self._note(">", line)
+            self.process.stdin.write(line + "\n")
+            self.process.stdin.flush()
+        return ident
+
+    def answer(self, ident, timeout=WAIT):
+        deadline = time.time() + timeout
+        with self.condition:
+            while ident not in self.answers:
+                left = deadline - time.time()
+                if left <= 0 or self.process.poll() is not None:
+                    raise HostError(f"no answer to command {ident}")
+                self.condition.wait(min(left, 1.0))
+            message = self.answers.pop(ident)
+        if not message.get("ok"):
+            raise HostError(message.get("error") or "the command failed")
+        return message.get("result")
+
+    def call(self, op, timeout=WAIT, **args):
+        return self.answer(self.send(op, **args), timeout)
+
+    def wait_event(self, name, timeout=WAIT):
+        """Wait for, and take, the oldest unsolicited driver event `name`."""
+        deadline = time.time() + timeout
+        with self.condition:
+            while True:
+                for position, event in enumerate(self.events):
+                    if event.get("event") == name:
+                        return self.events.pop(position)
+                left = deadline - time.time()
+                if left <= 0 or self.process.poll() is not None:
+                    raise HostError(f"no {name} event")
+                self.condition.wait(min(left, 1.0))
+
+    def ready(self, timeout=WAIT):
+        self.wait_event("driver_ready", timeout)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            status = self.call("status")
+            if status["state"] == "ready":
+                return status
+            if status["state"] in ("failed", "mismatch", "duplicate"):
+                raise HostError(f"the runtime is {status['state']}: {status.get('detail')}")
+            time.sleep(0.2)
+        raise HostError("the runtime did not become ready")
+
+    def fetch(self, method, target, body=None):
+        result = self.call("fetch", method=method, target=target, body=None if body is None else json.dumps(body))
+        try:
+            value = json.loads(result["body"]) if result["body"] else None
+        except ValueError:
+            value = result["body"]
+        return result["status"], value
+
+    def try_fetch(self, method, target, body=None):
+        """A fetch, or ("refused", message) when the host itself refuses it."""
+        try:
+            return self.fetch(method, target, body)
+        except HostError as error:
+            return "refused", str(error)
+
+    def new_session(self):
+        status, body = self.fetch("POST", f"{API}/sessions", {})
+        if status != 201:
+            raise HostError(f"sessions.create: {status} {body}")
+        return body["id"]
+
+    def start_run(self, session, message):
+        status, body = self.fetch("POST", f"{API}/runs", {"message": message, "session_id": session})
+        if status != 202:
+            raise HostError(f"runs.create: {status} {body}")
+        return body["id"]
+
+    def session(self, session):
+        status, body = self.fetch("GET", f"{API}/sessions/{session}")
+        if status != 200:
+            raise HostError(f"sessions.get: {status} {body}")
+        return body
+
+    def workspace(self):
+        status, body = self.fetch("GET", f"{API}/workspace")
+        if status != 200:
+            raise HostError(f"workspace.get: {status} {body}")
+        return body["workspace"]["effective"]
+
+    def stop(self):
+        try:
+            self.process.stdin.close()
+        except OSError:
+            pass
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+        with self.logging:
+            self.log.close()
+
+
+class Stream:
+    """A run's events as the host relays them (subscribe, then poll)."""
+
+    def __init__(self, host, run):
+        self.host = host
+        self.run = run
+        self.subscription = host.call("subscribe", target=f"{API}/runs/{run}/events")
+        self.events = []
+        self.closed = False
+        self.error = None
+
+    def poll(self, wait_ms=2000):
+        batch = self.host.call("poll", subscription=self.subscription, wait_ms=wait_ms)
+        self.events.extend(batch["events"])
+        if batch["closed"]:
+            self.closed, self.error = True, batch["error"]
+
+    def until(self, predicate, timeout=WAIT):
+        deadline = time.time() + timeout
+        while not predicate(self) and not self.closed and time.time() < deadline:
+            self.poll()
+        return predicate(self)
+
+    def finish(self, timeout=WAIT):
+        self.until(lambda stream: stream.closed, timeout)
+        return self
+
+    def drop(self):
+        self.host.call("drop_relay", subscription=self.subscription)
+
+    def names(self):
+        return [event["event"] for event in self.events]
+
+    def has(self, name):
+        return name in self.names()
+
+    def ids(self):
+        return [int(event["id"]) for event in self.events if event.get("id") not in (None, "")]
+
+    def data(self, name):
+        found = []
+        for event in self.events:
+            if event["event"] == name:
+                try:
+                    found.append(json.loads(event["data"]))
+                except ValueError:
+                    found.append(event["data"])
+        return found
+
+    def text(self):
+        return "".join(item.get("content") or "" for item in self.data("model.delta") if isinstance(item, dict))
+
+
+class Checks:
+    """Named expectations for one scenario; a failure says what was seen."""
+
+    def __init__(self, scenario):
+        self.scenario = scenario
+        self.results = {}
+        self.failures = []
+
+    def expect(self, name, ok, seen=None):
+        self.results[name] = {"ok": bool(ok), "seen": seen}
+        if not ok:
+            self.failures.append(f"{self.scenario}: {name} (seen: {seen!r})")
+
+
+def run_cli(cli, *args):
+    out = subprocess.run([cli, *args], capture_output=True, text=True, timeout=60)
+    if out.returncode != 0:
+        raise RuntimeError(f"lightagent {' '.join(args)}: {out.stderr.strip()[:300]}")
+    return out.stdout
+
+
+def prepare_home(cli, home, provider):
+    """Point the home at the fake provider and enable the tools. The approval
+    policy stays the default (balanced): a file write asks first."""
+    run_cli(cli, "config", "set", "inference.base_url", provider.url)
+    path = os.path.join(home, "config.json")
+    with open(path, encoding="utf-8") as handle:
+        config = json.load(handle)
+    config.setdefault("tools", {})["enabled"] = True
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=2)
+
+
+def session_file(home, session):
+    """A session as saved on disk, whichever profile's store holds it."""
+    for root, _dirs, files in os.walk(home):
+        if f"{session}.json" in files:
+            with open(os.path.join(root, f"{session}.json"), encoding="utf-8") as handle:
+                return json.load(handle)
+    return None
+
+
+def answers(session):
+    return [m.get("content") for m in (session or {}).get("messages", []) if m.get("role") == "assistant"]
+
+
+def read(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    except FileNotFoundError:
+        return None
+
+
+def wait_until(probe, timeout=WAIT, every=0.2):
+    """Re-read observable state until `probe()` is truthy; returns its last value."""
+    deadline = time.time() + timeout
+    while True:
+        value = probe()
+        if value or time.time() >= deadline:
+            return value
+        time.sleep(every)
+=== write desktop/e2e/runs.py
+"""Run scenarios through the desktop host, on a GitHub-hosted runner (D5a).
+
+Usage: python runs.py <out-dir> <lightagent-cli> -- <host command...>
+
+The host is a test build (`--features e2e-hooks`) driven over its stdin
+(harness.Host). Its runtime is the real `lightagent serve --desktop`; its
+provider is harness.FakeProvider, so every turn is deterministic. Scenarios
+synchronize on what the host relayed or the provider received, not on time.
+LIGHTAGENT_HOME, set by the caller, is isolated.
+
+  stream      deltas stream, a tool that needs no approval runs, the answer is saved
+  approve     a file write waits for approval; granted, it runs exactly once
+  deny        denied, it never runs, and the model is told so
+  cancel      a run cancelled mid-stream ends cancelled; the session takes the next run
+  relay       the host's relay is dropped twice mid-run; it resumes, and the
+              events it delivers are every event of the run, once each, in order
+  regenerate  R1 through the host: a finished answer replaces the saved one;
+              a provider failure, a refusal, an empty answer and a cancel keep
+              it; a stale answer id and a busy session are refused
+
+This is host-level evidence (host transport and relay plus the real
+runtime), not browser or native WebView evidence. Writes runs.json; exits
+non-zero when any expectation fails.
+"""
+
+import json
+import os
+import sys
+import time
+
+import harness
+from harness import API, Checks, Stream
+
+
+def scripts(provider):
+    def write(name, content):
+        return ("tool", "fs.write", {"path": name, "content": content, "append": True})
+
+    provider.scripts.update({
+        "stream": lambda p, turn, index: (
+            [("text", "Checking "), ("text", "the time. "), ("tool", "datetime.now", {}), ("finish", "tool_calls")]
+            if turn == 0 else [("text", "It is "), ("text", "now."), ("finish", "stop")]
+        ),
+        "approve": lambda p, turn, index: (
+            [write("approved.txt", "granted\n"), ("finish", "tool_calls")]
+            if turn == 0 else [("text", "Wrote it."), ("finish", "stop")]
+        ),
+        "deny": lambda p, turn, index: (
+            [write("denied.txt", "should not exist\n"), ("finish", "tool_calls")]
+            if turn == 0 else [("text", "Not written."), ("finish", "stop")]
+        ),
+        "cancel": lambda p, turn, index: [("text", "Working"), ("gate", "cancel"), ("text", " never"), ("finish", "stop")],
+        "relay": lambda p, turn, index: (
+            [("text", "one "), ("gate", "relay"), ("text", "two "), ("text", "three "),
+             ("tool", "datetime.now", {}), ("finish", "tool_calls")]
+            if turn == 0 else [("gate", "relay-2"), ("text", "four."), ("finish", "stop")]
+        ),
+        "regen": lambda p, turn, index: {
+            "first": [("text", "First answer."), ("finish", "stop")],
+            "second": [("text", "Second answer."), ("finish", "stop")],
+            "fail": [("status", 500)],
+            "refusal": [("refusal", "I can't help with that."), ("finish", "stop")],
+            "empty": [("finish", "stop")],
+            "hold": [("text", "Partial"), ("gate", "regen-hold"), ("text", " never"), ("finish", "stop")],
+        }[p.modes.get("regen", "first")],
+    })
+
+
+def recorded(host, session, runs):
+    """Wait until the session has `runs` recorded runs; return it."""
+    return harness.wait_until(lambda: (lambda s: s if len(s.get("runs", [])) >= runs else None)(host.session(session)))
+
+
+def scenario_stream(host, provider, workspace):
+    check = Checks("stream")
+    session = host.new_session()
+    run = host.start_run(session, "[e2e:stream] What time is it?")
+    stream = Stream(host, run).finish()
+    saved = recorded(host, session, 1)
+    names = stream.names()
+    outputs = stream.data("tool.output")
+    check.expect("deltas streamed before the tool", names.count("model.delta") >= 3, names)
+    check.expect("the tool ran without approval", bool(outputs) and not stream.has("approval.required"), outputs)
+    check.expect("the run completed", names[-1:] == ["run.completed"] and stream.error is None, (names[-1:], stream.error))
+    check.expect("the streamed text is the answer", stream.text() == "Checking the time. It is now.", stream.text())
+    check.expect("the answer is saved", (harness.answers(saved) or [""])[-1].endswith("It is now."), harness.answers(saved))
+    check.expect("the provider got two turns", len(provider.requests("stream")) == 2, provider.requests("stream"))
+    return check
+
+
+def scenario_approval(host, provider, workspace, approve):
+    name = "approve" if approve else "deny"
+    path = os.path.join(workspace, "approved.txt" if approve else "denied.txt")
+    check = Checks(name)
+    session = host.new_session()
+    run = host.start_run(session, f"[e2e:{name}] Write the file.")
+    stream = Stream(host, run)
+    stream.until(lambda s: s.has("approval.required"))
+    status, listing = host.fetch("GET", f"{API}/approvals")
+    pending = [row for row in (listing or {}).get("approvals", []) if row.get("run") == run and row.get("pending")]
+    before = harness.read(path)
+    status, answered = host.fetch("POST", f"{API}/approvals/{run}", {"approve": approve})
+    stream.finish()
+    check.expect("the approval is pending and listed", bool(pending), listing)
+    check.expect("nothing was written before the decision", before is None, before)
+    check.expect("the decision was delivered", status == 200 and (answered or {}).get("delivered") is True, (status, answered))
+    check.expect("the run completed", stream.has("run.completed") and stream.error is None, (stream.names()[-1:], stream.error))
+    after = harness.read(path)
+    if approve:
+        check.expect("the file was written exactly once", after == "granted\n", after)
+    else:
+        told = [o for o in stream.data("tool.output") + stream.data("tool.failed") if "denied" in json.dumps(o)]
+        check.expect("the file was never written", after is None, after)
+        check.expect("the model was told it was denied", bool(told), stream.data("tool.output") + stream.data("tool.failed"))
+    check.expect("the provider got two turns", len(provider.requests(name)) == 2, provider.requests(name))
+    return check
+
+
+def scenario_cancel(host, provider, workspace):
+    check = Checks("cancel")
+    session = host.new_session()
+    run = host.start_run(session, "[e2e:cancel] Work for a while.")
+    stream = Stream(host, run)
+    stream.until(lambda s: "Working" in s.text())
+    held = provider.wait_for("gate", "cancel", gate="cancel")
+    status, _ = host.fetch("POST", f"{API}/runs/{run}/cancel", {})
+    stream.finish()
+    _, info = host.fetch("GET", f"{API}/runs/{run}")
+    saved = recorded(host, session, 1)
+    check.expect("the provider was mid-turn", held, provider.log[-3:])
+    check.expect("the cancel was accepted", status == 200, status)
+    check.expect("the run is cancelled", (info or {}).get("status") == "cancelled", info)
+    check.expect("the saved run says cancelled", saved["runs"][-1].get("stop_reason") == "Cancelled", saved["runs"][-1])
+    # The session's lease went with the run: the next run on it is admitted.
+    deadline, follow = time.time() + 10, None
+    while time.time() < deadline:
+        follow = host.fetch("POST", f"{API}/runs", {"message": "[e2e:after-cancel] Next.", "session_id": session})
+        if follow[0] != 409:
+            break
+        time.sleep(0.1)
+    if follow and follow[0] == 202:
+        Stream(host, follow[1]["id"]).finish()
+    check.expect("the next run on the session is admitted", follow and follow[0] == 202, follow)
+    provider.open("cancel")
+    check.expect("the cancelled turn was not sent again", len(provider.requests("cancel")) == 1, provider.requests("cancel"))
+    return check
+
+
+def scenario_relay(host, provider, workspace, report):
+    check = Checks("relay")
+    session = host.new_session()
+    run = host.start_run(session, "[e2e:relay] Count to four.")
+    stream = Stream(host, run)
+    stream.until(lambda s: "one" in s.text())
+    first = provider.wait_for("gate", "relay", gate="relay")
+    stream.drop()
+    provider.open("relay")
+    stream.until(lambda s: s.has("tool.output"))
+    second = provider.wait_for("gate", "relay", gate="relay-2")
+    stream.drop()
+    provider.open("relay-2")
+    stream.finish()
+    _, info = host.fetch("GET", f"{API}/runs/{run}")
+    total = (info or {}).get("events")
+    ids = stream.ids()
+    ends = [line for line in harness.read(report).splitlines() if line.startswith("RELAY_END") and f"/runs/{run}/" in line]
+    check.expect("both drops happened mid-run", first and second, (first, second))
+    check.expect("every event once, in order", isinstance(total, int) and ids == list(range(total)), {"ids": ids, "events": total})
+    check.expect("the relay ended without an error", stream.error is None, stream.error)
+    check.expect("the host resumed twice", any("resumes=2" in line and "error=false" in line for line in ends), ends)
+    check.expect("the text arrived whole", stream.text() == "one two three four.", stream.text())
+    check.expect("the provider got two turns", len(provider.requests("relay")) == 2, provider.requests("relay"))
+    return check
+
+
+def scenario_regenerate(host, provider, workspace):
+    check = Checks("regenerate")
+    session = host.new_session()
+    provider.modes["regen"] = "first"
+    Stream(host, host.start_run(session, "[e2e:regen] Say something.")).finish()
+    saved = recorded(host, session, 1)
+    check.expect("the first answer is saved", harness.answers(saved) == ["First answer."], harness.answers(saved))
+
+    def regenerate(mode, answer):
+        provider.modes["regen"] = mode
+        return host.fetch("POST", f"{API}/sessions/{session}/regenerate", {"run_id": answer})
+
+    def settled():
+        # A stale answer id is refused as "not the latest" only once the
+        # session is free again (a busy one is refused as busy first).
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            status, body = host.fetch("POST", f"{API}/sessions/{session}/regenerate", {"run_id": "r-stale"})
+            if status == 409 and "latest" in json.dumps(body):
+                return True
+            time.sleep(0.1)
+        return False
+
+    status, created = regenerate("second", saved["runs"][-1]["run_id"])
+    replaced = Stream(host, created["id"]).finish() if status == 202 else None
+    current = harness.wait_until(lambda: (lambda s: s if harness.answers(s) == ["Second answer."] else None)(host.session(session)), timeout=30)
+    check.expect("a finished answer replaces the saved one", bool(current), host.session(session))
+    if not current:
+        return check
+    check.expect("one run record, the new one", len(current["runs"]) == 1 and current["runs"][-1]["run_id"] != saved["runs"][-1]["run_id"], current["runs"])
+    check.expect("the replacement streamed", replaced is not None and replaced.text() == "Second answer.", replaced and replaced.text())
+    check.expect("a stale answer id is refused", settled(), None)
+    answer = current["runs"][-1]["run_id"]
+
+    for mode in ("fail", "refusal", "empty"):
+        before = host.session(session)
+        status, created = regenerate(mode, answer)
+        stream = Stream(host, created["id"]).finish() if status == 202 else None
+        free = settled()
+        after = host.session(session)
+        check.expect(f"{mode}: accepted and run", status == 202 and stream is not None, (status, created))
+        check.expect(f"{mode}: the saved answer is kept", free and after["messages"] == before["messages"] and after["runs"] == before["runs"], harness.answers(after))
+
+    before = host.session(session)
+    status, created = regenerate("hold", answer)
+    stream = Stream(host, created["id"])
+    stream.until(lambda s: "Partial" in s.text())
+    busy = host.fetch("POST", f"{API}/sessions/{session}/regenerate", {"run_id": answer})
+    host.fetch("POST", f"{API}/runs/{created['id']}/cancel", {})
+    stream.finish()
+    free = settled()
+    after = host.session(session)
+    check.expect("a busy session refuses another regeneration", busy[0] == 409 and "active run" in json.dumps(busy[1]), busy)
+    check.expect("cancel: the saved answer is kept", free and after["messages"] == before["messages"] and after["runs"] == before["runs"], harness.answers(after))
+    check.expect("the saved answer is still the replacement", harness.answers(after) == ["Second answer."], harness.answers(after))
+    provider.open("regen-hold")
+    return check
+
+
+def main():
+    out = os.path.abspath(sys.argv[1])
+    cli = sys.argv[2]
+    command = sys.argv[sys.argv.index("--") + 1:]
+    os.makedirs(out, exist_ok=True)
+    home = os.environ["LIGHTAGENT_HOME"]
+    report = os.path.join(out, "report-runs.txt")
+    provider = harness.FakeProvider()
+    scripts(provider)
+    harness.prepare_home(cli, home, provider)
+    env = dict(os.environ, LIGHTAGENT_DESKTOP_E2E_DRIVER="1", LIGHTAGENT_DESKTOP_E2E_REPORT=report)
+    host = harness.Host(command, env, os.path.join(out, "driver-runs.log"))
+    results, failures = {}, []
+    try:
+        host.ready()
+        workspace = host.workspace()
+        results["workspace"] = workspace
+        scenarios = [
+            ("stream", lambda: scenario_stream(host, provider, workspace)),
+            ("approve", lambda: scenario_approval(host, provider, workspace, True)),
+            ("deny", lambda: scenario_approval(host, provider, workspace, False)),
+            ("cancel", lambda: scenario_cancel(host, provider, workspace)),
+            ("relay", lambda: scenario_relay(host, provider, workspace, report)),
+            ("regenerate", lambda: scenario_regenerate(host, provider, workspace)),
+        ]
+        for name, scenario in scenarios:
+            try:
+                check = scenario()
+                results[name] = check.results
+                failures.extend(check.failures)
+            except Exception as error:  # a scenario that breaks is a failure, and the rest still run
+                results[name] = {"error": repr(error)}
+                failures.append(f"{name}: {error!r}")
+    except Exception as error:
+        failures.append(f"setup: {error!r}")
+    finally:
+        host.stop()
+        provider.close()
+    results["provider"] = provider.log
+    results["failures"] = failures
+    with open(os.path.join(out, "runs.json"), "w", encoding="utf-8") as handle:
+        json.dump(results, handle, indent=1)
+    print(json.dumps({"failures": failures}, indent=1))
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+=== replace desktop/e2e/switch.py
+--- find
+  concurrent  two switches at once: one switches, the other is refused as busy
+--- with
+  concurrent  two switches at once: one switches, the other is refused as busy
+  pending     (driven host, fake provider; harness.py) a run waits for approval
+              of a file write. While a switch holds its gate, starting a run,
+              regenerating and answering the approval are refused. A switch
+              that does not stop runs is blocked and the approval stays
+              pending; one that stops them rejects it explicitly, and the new
+              profile's runtime knows nothing of that run or its approval.
+              The file is never written
+=== replace desktop/e2e/switch.py
+--- find
+def main():
+    out = os.path.abspath(sys.argv[1])
+--- with
+def pending_approval(out, cli, command, home):
+    """A pending approval across a profile switch (see the module docstring)."""
+    import harness
+    from harness import API
+
+    provider = harness.FakeProvider()
+    provider.scripts["switch-approve"] = lambda p, turn, index: (
+        [("tool", "fs.write", {"path": "switch.txt", "content": "written across a switch\n", "append": True}),
+         ("finish", "tool_calls")]
+        if turn == 0 else [("text", "After the decision."), ("finish", "stop")]
+    )
+    harness.prepare_home(cli, home, provider)
+    report = os.path.join(out, "report-switch-pending.txt")
+    env = dict(
+        os.environ,
+        LIGHTAGENT_DESKTOP_E2E_DRIVER="1",
+        LIGHTAGENT_DESKTOP_E2E_SWITCH_GATE="1",
+        LIGHTAGENT_DESKTOP_E2E_REPORT=report,
+    )
+    host = harness.Host(command, env, os.path.join(out, "driver-switch-pending.log"))
+    check = harness.Checks("pending")
+    seen = {}
+    try:
+        status = host.ready()
+        check.expect("starts on default", status.get("profile") == "default", status.get("profile"))
+        path = os.path.join(host.workspace(), "switch.txt")
+        session = host.new_session()
+        run = host.start_run(session, "[e2e:switch-approve] Write the file.")
+        stream = harness.Stream(host, run)
+        check.expect("the run waits for approval", stream.until(lambda s: s.has("approval.required")), stream.names())
+
+        switching = host.send("switch", profile="work", cancel_runs=False)
+        host.wait_event("switch_held")
+        during = {
+            "runs.create": host.try_fetch("POST", f"{API}/runs", {"message": "[e2e:switch-approve] Again.", "session_id": session}),
+            "sessions.regenerate": host.try_fetch("POST", f"{API}/sessions/{session}/regenerate", {"run_id": "r-any"}),
+            "approvals.respond": host.try_fetch("POST", f"{API}/approvals/{run}", {"approve": True}),
+        }
+        host.call("release_switch")
+        blocked = host.answer(switching)
+        seen["during"] = during
+        for operation, answer in during.items():
+            check.expect(f"{operation} is refused during the switch", answer[0] == "refused" and "switch is in progress" in answer[1], answer)
+        check.expect("without stopping runs the switch is blocked", blocked.get("status") == "blocked" and any(r.get("id") == run for r in blocked.get("runs", [])), blocked)
+        status = host.call("status")
+        _, approvals = host.fetch("GET", f"{API}/approvals")
+        check.expect("still serving default", status.get("profile") == "default", status.get("profile"))
+        check.expect("the approval is still pending", any(r.get("run") == run and r.get("pending") for r in approvals.get("approvals", [])), approvals)
+        check.expect("nothing written while blocked", harness.read(path) is None, harness.read(path))
+
+        switching = host.send("switch", profile="work", cancel_runs=True)
+        host.wait_event("switch_held")
+        host.call("release_switch")
+        switched = host.answer(switching)
+        stream.finish()
+        status = host.call("status")
+        check.expect("stopping the runs lets the switch happen", switched.get("status") == "switched", switched)
+        check.expect("now serving work", status.get("profile") == "work", status.get("profile"))
+        denied = [o for o in stream.data("tool.output") + stream.data("tool.failed") if "denied" in json.dumps(o)]
+        check.expect("the approval was rejected explicitly", bool(denied), stream.names())
+
+        _, approvals = host.fetch("GET", f"{API}/approvals")
+        crossed = host.fetch("POST", f"{API}/approvals/{run}", {"approve": True})
+        old = host.fetch("GET", f"{API}/runs/{run}")
+        check.expect("work's runtime has no pending approval", approvals.get("approvals") == [], approvals)
+        check.expect("the old approval cannot be answered in work", crossed[0] == 404, crossed)
+        check.expect("work's runtime does not know the old run", old[0] == 404, old)
+        check.expect("the file was never written", harness.read(path) is None, harness.read(path))
+        saved = harness.wait_until(lambda: (lambda s: s if s and s.get("runs") else None)(harness.session_file(home, session)), timeout=15)
+        seen["saved_runs"] = (saved or {}).get("runs")
+        check.expect("default's session records the stopped run", bool(saved), saved)
+    except Exception as error:
+        check.failures.append(f"pending: {error!r}")
+    finally:
+        host.stop()
+        provider.close()
+    seen["checks"] = check.results
+    seen["provider"] = provider.log
+    return seen, check.failures
+
+
+def main():
+    out = os.path.abspath(sys.argv[1])
+=== replace desktop/e2e/switch.py
+--- find
+    for name in ("ok", "start", "persist", "concurrent"):
+        entry = results.get(name)
+        if isinstance(entry, dict) and entry["runtimes_left"] != 1:
+            failures.append(f"{name}: {entry['runtimes_left']} runtimes remain under the host, expected exactly 1")
+--- with
+    for name in ("ok", "start", "persist", "concurrent"):
+        entry = results.get(name)
+        if isinstance(entry, dict) and entry["runtimes_left"] != 1:
+            failures.append(f"{name}: {entry['runtimes_left']} runtimes remain under the host, expected exactly 1")
+
+    results["pending"], pending_failures = pending_approval(out, cli, command, home)
+    failures.extend(pending_failures)
+=== replace .github/workflows/desktop.yml
+--- find
+    name: desktop profile switch (linux, e2e hooks)
+--- with
+    name: desktop profile switch and runs (linux, e2e hooks)
+=== replace .github/workflows/desktop.yml
+--- find
+      - name: Switch scenarios (ok, start failure, commit failure, concurrent)
+        run: |
+          export LIGHTAGENT_HOME="$RUNNER_TEMP/switch-home"
+          xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- \
+            python desktop/e2e/switch.py "$RUNNER_TEMP/switch-e2e" target/debug/lightagent -- desktop/target/debug/lightagent-desktop
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: desktop-switch-e2e
+          retention-days: 30
+          path: ${{ runner.temp }}/switch-e2e/
+--- with
+      - name: Switch scenarios (ok, start failure, commit failure, concurrent, pending approval)
+        run: |
+          export LIGHTAGENT_HOME="$RUNNER_TEMP/switch-home"
+          xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- \
+            python desktop/e2e/switch.py "$RUNNER_TEMP/switch-e2e" target/debug/lightagent -- desktop/target/debug/lightagent-desktop
+      - name: Run scenarios (streaming and a tool, approvals, cancel, relay drop, regenerate)
+        if: success() || failure()
+        run: |
+          export LIGHTAGENT_HOME="$RUNNER_TEMP/runs-home"
+          xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- \
+            python desktop/e2e/runs.py "$RUNNER_TEMP/runs-e2e" target/debug/lightagent -- desktop/target/debug/lightagent-desktop
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: desktop-switch-e2e
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/switch-e2e/
+            ${{ runner.temp }}/runs-e2e/
+=== end
