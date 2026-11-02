@@ -43,6 +43,8 @@ use lightagent_core::paths::create_private_dir;
 use lightagent_core::{ExtensionsConfig, McpServerEntry};
 use serde::Deserialize;
 
+pub mod manage;
+
 /// One installed extension, as discovered on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Extension {

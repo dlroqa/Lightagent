@@ -1058,6 +1058,7 @@ dependencies = [
  "axum",
  "futures-util",
  "lightagent-core",
+ "lightagent-extensions",
  "lightagent-store",
  "lightagent-tools",
  "serde",

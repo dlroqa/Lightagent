@@ -460,6 +460,11 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `api.get.runs.id.events` | `GET /api/lightagent/v1/runs/{id}/events` | applicable | no | (backend reuse) | api: GET /runs/{id}/events | not-started | `crates/lightagent-api/src/lib.rs:92` |
 | `api.post.runs.id.cancel` | `POST /api/lightagent/v1/runs/{id}/cancel` | applicable | no | (backend reuse) | api: POST /runs/{id}/cancel | not-started | `crates/lightagent-api/src/lib.rs:93` |
 | `api.post.runs.id.continue` | `POST /api/lightagent/v1/runs/{id}/continue` | applicable | no | (backend reuse) | api: POST /runs/{id}/continue | not-started | `crates/lightagent-api/src/lib.rs:160` |
+| `api.get.extensions` | `GET /api/lightagent/v1/extensions` | applicable | no | (backend reuse) | shared: lightagent_extensions::manage::list | not-started | `crates/lightagent-api/src/lib.rs:131` |
+| `api.post.extensions` | `POST /api/lightagent/v1/extensions` | applicable | no | (backend reuse) | shared: lightagent_extensions::manage::install | not-started | `crates/lightagent-api/src/lib.rs:131` |
+| `api.get.extensions.name` | `GET /api/lightagent/v1/extensions/{name}` | applicable | no | (backend reuse) | shared: lightagent_extensions::manage::show | not-started | `crates/lightagent-api/src/lib.rs:135` |
+| `api.delete.extensions.name` | `DELETE /api/lightagent/v1/extensions/{name}` | applicable | no | (backend reuse) | shared: lightagent_extensions::manage::uninstall | not-started | `crates/lightagent-api/src/lib.rs:135` |
+| `api.put.extensions.name.enabled` | `PUT /api/lightagent/v1/extensions/{name}/enabled` | applicable | no | (backend reuse) | shared: lightagent_extensions::manage::set_enabled | not-started | `crates/lightagent-api/src/lib.rs:139` |
 | `api.get.sessions` | `GET /api/lightagent/v1/sessions` | applicable | no | (backend reuse) | api: GET /sessions | not-started | `crates/lightagent-api/src/lib.rs:94` |
 | `api.post.sessions` | `POST /api/lightagent/v1/sessions` | applicable | no | (backend reuse) | api: POST /sessions | not-started | `crates/lightagent-api/src/lib.rs:94` |
 | `api.get.runs` | `GET /api/lightagent/v1/runs` | applicable | no | (backend reuse) | api: GET /runs | not-started | `crates/lightagent-api/src/lib.rs:90` |

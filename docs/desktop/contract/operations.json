@@ -114,6 +114,31 @@
    "path": "/api/lightagent/v1/skills"
   },
   {
+   "id": "extensions.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/extensions"
+  },
+  {
+   "id": "extensions.install",
+   "method": "POST",
+   "path": "/api/lightagent/v1/extensions"
+  },
+  {
+   "id": "extensions.show",
+   "method": "GET",
+   "path": "/api/lightagent/v1/extensions/{name}"
+  },
+  {
+   "id": "extensions.uninstall",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/extensions/{name}"
+  },
+  {
+   "id": "extensions.set_enabled",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/extensions/{name}/enabled"
+  },
+  {
    "id": "profiles.list",
    "method": "GET",
    "path": "/api/lightagent/v1/profiles"

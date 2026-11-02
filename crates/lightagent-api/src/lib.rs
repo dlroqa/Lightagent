@@ -42,6 +42,7 @@ use lightagent_core::{
     PlatformEndpointConfig, ProfileId, ProfileStore, SecretRef, SkillStore, UpdateError,
     skill_dirs,
 };
+use lightagent_extensions::manage as extension_ops;
 use lightagent_store::{
     Session, SessionId, SessionStore, SessionUpdateError, StoreError, StoredMessage, model_history,
 };
@@ -128,6 +129,18 @@ pub fn router(state: AppState) -> Router {
             get(get_jev_routing_report),
         )
         .route("/api/lightagent/v1/skills", get(list_skills))
+        .route(
+            "/api/lightagent/v1/extensions",
+            get(list_extensions).post(install_extension),
+        )
+        .route(
+            "/api/lightagent/v1/extensions/{name}",
+            get(show_extension).delete(uninstall_extension),
+        )
+        .route(
+            "/api/lightagent/v1/extensions/{name}/enabled",
+            axum::routing::put(set_extension_enabled),
+        )
         .route(
             "/api/lightagent/v1/profiles",
             get(list_profiles).post(create_profile),
@@ -1817,6 +1830,169 @@ async fn put_workspace(
         },
         Err(UpdateError::Change(message)) => bad_request(&message),
         Err(UpdateError::Store(error)) => config_error(error),
+    }
+}
+
+/// Where the extension operations act: this runtime's Lightagent home.
+fn extension_paths(state: &AppState) -> Result<LightagentPaths, Response> {
+    home(state)
+        .map(LightagentPaths::rooted_at)
+        .ok_or_else(|| internal("Lightagent settings are unavailable in this embedding"))
+}
+
+fn extension_config(state: &AppState) -> Result<lightagent_core::Config, Response> {
+    match &state.config_store {
+        Some(store) => store.load().map_err(config_error),
+        None => Err(internal(
+            "Lightagent settings are unavailable in this embedding",
+        )),
+    }
+}
+
+/// A refusal from the shared extension operations, by kind.
+fn extension_error(error: extension_ops::ManageError) -> Response {
+    let status = match &error {
+        extension_ops::ManageError::NotFound(_) => StatusCode::NOT_FOUND,
+        extension_ops::ManageError::Invalid(_) => StatusCode::BAD_REQUEST,
+        extension_ops::ManageError::Conflict(_) => StatusCode::CONFLICT,
+        extension_ops::ManageError::Unavailable(_) => StatusCode::BAD_GATEWAY,
+        extension_ops::ManageError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, Json(json!({ "error": error.to_string() }))).into_response()
+}
+
+/// `lightagent extensions list`, from the same shared operation.
+async fn list_extensions(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (paths, config) = match (extension_paths(&state), extension_config(&state)) {
+        (Ok(paths), Ok(config)) => (paths, config),
+        (Err(response), _) | (_, Err(response)) => return response,
+    };
+    match extension_ops::list(&paths, &config) {
+        Ok(listing) => Json(listing).into_response(),
+        Err(error) => extension_error(error),
+    }
+}
+
+/// `lightagent extensions show <name>`: the manifest, what its MCP servers
+/// would run (never an environment or header value) and its source.
+async fn show_extension(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (paths, config) = match (extension_paths(&state), extension_config(&state)) {
+        (Ok(paths), Ok(config)) => (paths, config),
+        (Err(response), _) | (_, Err(response)) => return response,
+    };
+    match extension_ops::show(&paths, &config, &name) {
+        Ok(detail) => Json(detail).into_response(),
+        Err(error) => extension_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct ExtensionEnabledBody {
+    enabled: bool,
+}
+
+/// `lightagent extensions enable|disable <name>`.
+async fn set_extension_enabled(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(body): Json<ExtensionEnabledBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let paths = match extension_paths(&state) {
+        Ok(paths) => paths,
+        Err(response) => return response,
+    };
+    match extension_ops::set_enabled(&paths, &name, body.enabled) {
+        Ok(toggled) => Json(toggled).into_response(),
+        Err(error) => extension_error(error),
+    }
+}
+
+/// An install: an absolute folder or an https:// Git URL (`#subdir` picks a
+/// folder in it), where to install it, and whether MCP may be switched on
+/// for the extension's servers. It never is unless asked.
+#[derive(Deserialize)]
+struct InstallExtensionBody {
+    source: String,
+    #[serde(default)]
+    scope: Option<extension_ops::Scope>,
+    #[serde(default)]
+    activate_mcp: bool,
+}
+
+/// `lightagent extensions install`, from the same shared operation.
+async fn install_extension(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<InstallExtensionBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let paths = match extension_paths(&state) {
+        Ok(paths) => paths,
+        Err(response) => return response,
+    };
+    // The server's working folder means nothing to a client, so a relative
+    // path is refused rather than resolved against it.
+    let remote = body.source.starts_with("https://") || body.source.starts_with("git+https://");
+    if !remote && !std::path::Path::new(&body.source).is_absolute() {
+        return bad_request("the source must be an absolute folder path or an https:// Git URL");
+    }
+    let options = extension_ops::InstallOptions {
+        scope: body.scope.unwrap_or(extension_ops::Scope::Global),
+        activate_mcp: body.activate_mcp,
+    };
+    let source = PathBuf::from(body.source);
+    match tokio::task::spawn_blocking(move || extension_ops::install(&paths, &source, options))
+        .await
+    {
+        Ok(Ok(installed)) => (StatusCode::CREATED, Json(installed)).into_response(),
+        Ok(Err(error)) => extension_error(error),
+        Err(error) => internal(&error.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct ExtensionScopeQuery {
+    #[serde(default)]
+    scope: Option<extension_ops::Scope>,
+}
+
+/// `lightagent extensions uninstall <name>` (`?scope=profile` for the active
+/// profile's own root).
+async fn uninstall_extension(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Query(query): Query<ExtensionScopeQuery>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let paths = match extension_paths(&state) {
+        Ok(paths) => paths,
+        Err(response) => return response,
+    };
+    let scope = query.scope.unwrap_or(extension_ops::Scope::Global);
+    match tokio::task::spawn_blocking(move || extension_ops::uninstall(&paths, &name, scope)).await
+    {
+        Ok(Ok(removed)) => Json(removed).into_response(),
+        Ok(Err(error)) => extension_error(error),
+        Err(error) => internal(&error.to_string()),
     }
 }
 
