@@ -575,10 +575,18 @@ async fn health() -> Response {
     Json(json!({ "status": "ok", "service": "lightagent" })).into_response()
 }
 
+/// `?mcp=skip`: build the catalog without connecting any MCP server.
+#[derive(Deserialize)]
+struct ToolListingQuery {
+    #[serde(default)]
+    mcp: Option<String>,
+}
+
 async fn list_tools(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<ProfileQuery>,
+    Query(listing): Query<ToolListingQuery>,
 ) -> Response {
     let scoped = match access(&state, &headers, Scope::ToolsRead, query.profile.as_deref()) {
         Ok(Access::Unscoped) => None,
@@ -596,7 +604,21 @@ async fn list_tools(
             Ok(tools) => Ok(tools),
             Err(_) => return operator_only(),
         },
-        None => state.manager.tools().await,
+        None => {
+            // The catalog with permissions, when the embedding builds it.
+            let include_mcp = listing.mcp.as_deref() != Some("skip");
+            if let Some(catalog) = state.manager.tool_catalog(include_mcp).await {
+                return match catalog {
+                    Ok(body) => Json(body).into_response(),
+                    Err(error) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": error })),
+                    )
+                        .into_response(),
+                };
+            }
+            state.manager.tools().await
+        }
     };
     let definitions = match listed {
         Ok(tools) => tools,
@@ -687,18 +709,40 @@ async fn list_skills(
         Err(error) => return internal(&error.to_string()),
     };
     let profiles = ProfileStore::new(root);
-    let skills = SkillStore::load(&skill_dirs(root, profiles.handle(&profile_id).dir()));
-    let skills: Vec<_> = skills
-        .names()
-        .into_iter()
-        .filter_map(|name| {
-            skills.get(&name).map(|skill| {
-                json!({
-                    "name": skill.name, "description": skill.description,
-                })
-            })
-        })
-        .collect();
+    let profile_dir = profiles.handle(&profile_id).dir().to_path_buf();
+    // What a run loads, in its order: the global skills, the active
+    // extensions' skills, then the profile's own; a later one overrides.
+    let extensions_config = config_store
+        .load()
+        .map(|config| config.extensions)
+        .unwrap_or_default();
+    let extensions = lightagent_extensions::ExtensionStore::load(
+        &lightagent_extensions::extension_dirs(root, &profile_dir),
+    );
+    let mut layers = vec![(json!({ "scope": "global" }), root.join("skills"))];
+    for ext in extensions.active(&extensions_config) {
+        layers.push((
+            json!({ "scope": "extension", "extension": ext.name }),
+            ext.skills_dir(),
+        ));
+    }
+    layers.push((json!({ "scope": "profile" }), profile_dir.join("skills")));
+    let mut found = std::collections::BTreeMap::new();
+    for (source, dir) in layers {
+        let store = SkillStore::load(&[dir]);
+        for name in store.names() {
+            if let Some(skill) = store.get(&name) {
+                found.insert(
+                    name,
+                    json!({
+                        "name": skill.name, "description": skill.description,
+                        "version": skill.version, "source": source,
+                    }),
+                );
+            }
+        }
+    }
+    let skills: Vec<_> = found.into_values().collect();
     Json(json!({ "skills": skills })).into_response()
 }
 /// A user's skill list: the authorized profile's skills, and only when a run

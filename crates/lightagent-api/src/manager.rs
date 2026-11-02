@@ -472,6 +472,14 @@ pub trait RunFactory: Send + Sync + 'static {
         Err("MCP server checks are not available in this embedding".to_owned())
     }
 
+    /// The operator's tool catalog with each tool's effective permission
+    /// (auto, ask, block), as `lightagent tools list` reports it; MCP
+    /// servers are connected (a stdio server started) only with
+    /// `include_mcp`. `None`, the default, when the embedding cannot say.
+    async fn tool_catalog(&self, _include_mcp: bool) -> Option<Result<serde_json::Value, String>> {
+        None
+    }
+
     /// The window to pack a session's history against before a run of
     /// `profile` (the active one when `None`) with `model`, resolved as the
     /// run itself resolves its budget. `None`, the default, leaves the
@@ -955,6 +963,14 @@ impl RunManager {
     /// The tools the factory currently offers to the active target.
     pub async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
         self.factory.tools().await
+    }
+    /// The operator's tool catalog with permissions (see
+    /// [`RunFactory::tool_catalog`]).
+    pub async fn tool_catalog(
+        &self,
+        include_mcp: bool,
+    ) -> Option<Result<serde_json::Value, String>> {
+        self.factory.tool_catalog(include_mcp).await
     }
     /// The tools a run of `profile` with `trust` would receive.
     pub async fn tools_for(

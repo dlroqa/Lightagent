@@ -843,17 +843,7 @@ async fn tools_list(json: bool) -> Result<(), String> {
     for name in registry.names() {
         if let Some(tool) = registry.get(&name) {
             let definition = tool.definition();
-            let request = lightagent_core::ApprovalRequest::new(
-                &definition.name,
-                definition.risk,
-                definition.scopes.clone(),
-                "{}",
-            );
-            let permission = match policy.evaluate(&request, std::time::SystemTime::now()) {
-                lightagent_core::ApprovalNeed::AutoApprove => "auto",
-                lightagent_core::ApprovalNeed::Require(_) => "ask",
-                lightagent_core::ApprovalNeed::Deny(_) => "block",
-            };
+            let permission = tool_permission(&policy, definition);
             rows.push((
                 definition.name.clone(),
                 definition.risk.as_str().to_string(),
@@ -882,6 +872,26 @@ async fn tools_list(json: bool) -> Result<(), String> {
     }
     print!("{out}");
     Ok(())
+}
+
+/// What happens when a run calls `definition` under `policy`: `auto` (it
+/// runs), `ask` (it waits for approval) or `block`. Shared by `tools list`
+/// and the API's tool catalog, so both report the same permission.
+pub(crate) fn tool_permission(
+    policy: &lightagent_core::PolicyEngine,
+    definition: &lightagent_tools::ToolDefinition,
+) -> &'static str {
+    let request = lightagent_core::ApprovalRequest::new(
+        &definition.name,
+        definition.risk,
+        definition.scopes.clone(),
+        "{}",
+    );
+    match policy.evaluate(&request, std::time::SystemTime::now()) {
+        lightagent_core::ApprovalNeed::AutoApprove => "auto",
+        lightagent_core::ApprovalNeed::Require(_) => "ask",
+        lightagent_core::ApprovalNeed::Deny(_) => "block",
+    }
 }
 
 // --- workers ----------------------------------------------------------------
