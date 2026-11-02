@@ -1383,6 +1383,12 @@ export function Agent() {
                       <ModelOptions provider={provider.data} />
                     </select>
                   </label>
+                  {running && (
+                    <button type="button" className="btn btn--danger chat-composer__send" onClick={() => void cancel()}
+                      aria-label="Stop" title="Stop the run">
+                      <Ban size={18} />
+                    </button>
+                  )}
                   <button type="button" className="btn btn--primary chat-composer__send"
                     disabled={(!draft.trim() && attachments.length === 0) || busy || serviceUnavailable} onClick={() => void send()}
                     aria-label={running || steering.length > 0 ? "Queue steer" : "Send message"}
