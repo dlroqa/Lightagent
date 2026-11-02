@@ -140,6 +140,18 @@ fn unusable(home: &Path) -> Vec<Value> {
 fn a_jev_check_with_an_unusable_key_sends_nothing() {
     let home = scratch_home("jev");
     let (listener, url) = untouched();
+    // The config file exists once something saved it: the CLI, here.
+    let created = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["config", "set", "inference.model", "m1"])
+        .env("LIGHTAGENT_HOME", &home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent");
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
     let runtime = start(&home);
     for reference in unusable(&home) {
         edit_config(&home, |config| {
