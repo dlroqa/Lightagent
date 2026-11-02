@@ -131,7 +131,10 @@
   {
    "id": "extensions.uninstall",
    "method": "DELETE",
-   "path": "/api/lightagent/v1/extensions/{name}"
+   "path": "/api/lightagent/v1/extensions/{name}",
+   "query": [
+    "scope"
+   ]
   },
   {
    "id": "extensions.set_enabled",
