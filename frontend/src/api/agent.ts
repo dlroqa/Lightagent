@@ -373,6 +373,33 @@ export interface ProviderCredentialStatus {
   revision: string;
 }
 
+/** A provider as the picker shows it: its key's state only, never the key. */
+export interface ProviderEntry {
+  id: string;
+  name: string;
+  base_url: string;
+  kind: "local" | "saved" | "custom";
+  active: boolean;
+  key_state: ProviderCredentialStatus["state"];
+  key_source: "file" | "env" | null;
+}
+
+/** The providers `lightagent setup provider` offers, the model, and when a change applies. */
+export interface ProviderList {
+  providers: ProviderEntry[];
+  active: string | null;
+  model: string | null;
+  revision: string;
+  effect: string;
+}
+
+/** A saved provider's edit; an absent field stays as it is. */
+export interface ProviderEdit {
+  name?: string;
+  base_url?: string;
+  keep_key?: boolean;
+}
+
 /** What an explicit endpoint check found (`lightagent models`). It never holds a key. */
 export interface EndpointCheck {
   base_url: string;
@@ -438,6 +465,39 @@ export const agentApi = {
     jsonRequest<EndpointCheck>("/provider/check", {
       method: "POST",
       body: JSON.stringify({ timeout_secs: timeoutSecs }),
+    }),
+  providers: () => jsonRequest<ProviderList>("/providers"),
+  /** Every provider change names the revision it was made on: 409 when it is stale. */
+  createProvider: (name: string, baseUrl: string, expectedRevision: string) =>
+    jsonRequest<ProviderList>("/providers", {
+      method: "POST",
+      body: JSON.stringify({ name, base_url: baseUrl, expected_revision: expectedRevision }),
+    }),
+  updateProvider: (id: string, edit: ProviderEdit, expectedRevision: string) =>
+    jsonRequest<ProviderList>(`/providers/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ ...edit, expected_revision: expectedRevision }),
+    }),
+  removeProvider: (id: string, expectedRevision: string) =>
+    jsonRequest<ProviderList>(
+      `/providers/${encodeURIComponent(id)}?expected_revision=${encodeURIComponent(expectedRevision)}`,
+      { method: "DELETE" },
+    ),
+  /** An explicit, bounded check of one provider's endpoint, with its own key only. */
+  checkSavedProvider: (id: string, timeoutSecs?: number) =>
+    jsonRequest<EndpointCheck>(`/providers/${encodeURIComponent(id)}/check`, {
+      method: "POST",
+      body: JSON.stringify({ timeout_secs: timeoutSecs }),
+    }),
+  selectProvider: (id: string, model: string | null, expectedRevision: string) =>
+    jsonRequest<ProviderList>("/provider/active", {
+      method: "PUT",
+      body: JSON.stringify({ id, model, expected_revision: expectedRevision }),
+    }),
+  selectProviderModel: (model: string | null, expectedRevision: string) =>
+    jsonRequest<ProviderList>("/provider/model", {
+      method: "PUT",
+      body: JSON.stringify({ model, expected_revision: expectedRevision }),
     }),
   verifyJev: () => jsonRequest<JevVerification>("/jev/verify", { method: "POST", body: "{}" }),
   profiles: () => jsonRequest<ProfileCatalog>("/profiles"),
