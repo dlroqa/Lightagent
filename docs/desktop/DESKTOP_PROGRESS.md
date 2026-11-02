@@ -27,7 +27,7 @@ next update names its run.
 | D1 spike (evidence only, never merged) | runner evidence complete | `desktop/d1-spike` | https://github.com/dlroqa/Lightagent/pull/91 | `82896bcd63f3bd6786dcea12b603241e50a3a9ea` | `82896bc` / tree `d9cde26142a63a716a58f35dc33330be0e90d8b7` |
 | D4c Configuration: one locked, revision-checked writer | **CI-validated** at `0e46892` (check and desktop, every job); the D4 gate items listed under D4c remain | `desktop/d4c-config` (stacked on D4b `7c3e988`) | https://github.com/dlroqa/Lightagent/pull/101 | `0e4689232ae0ce0653367883222b40d41b62218d`, plus this documentation commit | `0e46892` / tree `dd1faa22ddd161d99de2407a312e8ed9d0789c54` |
 | Row 9: response actions delivery (#98 with its adoption) | **CI-validated** at `a51449c` (`desktop` after one re-run of an infrastructure-failed bundling job; see "Row 9") | `desktop/d4c1-response-actions` (stacked on D4c) | https://github.com/dlroqa/Lightagent/pull/102 | `a51449ce66790a1092459167545ac645cf226290`, plus this documentation commit | `a51449c` / tree `ab20d7eb19eecbc47a60a0a9e4a4df1bd85926aa` |
-| Row 10: session writes (#100) | not started | — | — | — | — |
+| Row 10: session writes (#100) | **CI-validated** at `aebd5d6` (check and desktop, every job) | `desktop/d4c2-session-writes` (stacked on row 9 `fbd008c`) | https://github.com/dlroqa/Lightagent/pull/103 | `aebd5d631238b1b8a302df1ec1aa7bba27972369`, plus this documentation commit | `aebd5d6` / tree `e9066c30eac669165e9deb505ee67a0884659df8` |
 | D4d–D10 | not started | — | — | — | — |
 
 The latest progress record is the copy on the highest stacked desktop branch.
@@ -611,7 +611,97 @@ row 10 of the merge order.
   variant. That is a workflow change for the slice that owns the job, and it
   is not made here.
 - #99 is left open as evidence until the owner reviews #102.
-- Row 10 (#100) is not prepared yet.
+- Row 10 (#100): see "Row 10" below.
+
+## Row 10 — Session writes: one locked writer (#100)
+
+**Ownership.** On 2026-11-02 at about 00:12Z, the session that built rows 1–9
+had ended its turn at 2026-11-01T23:52:42Z with its final report, and nothing
+else was writing to the stack. One session took the implementation from
+there. The branch was created at row 9's head `fbd008c`, and the claim and
+the audit were recorded on #100.
+
+**Defect.** Every session writer loaded a session whole, changed its copy and
+saved it whole, and no lock was shared across processes. In this process,
+PATCH already refused while a run was active, so the API's in-process pairs
+were serialized by the busy set. The lost updates came from other processes:
+- the terminal chat and ACP saved a snapshot they had held for the whole
+  conversation;
+- a second server on the same profile was not covered by the busy set.
+
+`lightagent sessions delete` was an unlocked writer too.
+
+**Fix.**
+- **One store lock**, `sessions/.lock`: an exclusive OS lock that every process
+  takes. It uses D4c's primitive, now shared as `paths::lock_exclusive`.
+- **`SessionStore::update(id, change)`:** under the lock, re-read the session,
+  apply the change, and write atomically.
+  - A refused change, a failed write, or an unreadable file writes nothing.
+  - A missing session stays missing.
+- **`SessionStore::apply(session, change)`:** for clients that hold a session
+  open. The change applies to the saved state and refreshes the client's view.
+- **`save`** (new sessions) and **`delete`** take the same lock.
+- **Converted writers:**
+  - run admission;
+  - run completion;
+  - regenerate's swap;
+  - PATCH;
+  - the API and CLI deletes;
+  - the chat's prompt, turn and approval writes;
+  - ACP's prompt and completion.
+- **Locking is short.** It covers only the read-modify-write, never inference.
+  The API does that work on the blocking pool.
+- **Unchanged:** run admission (the busy set), cancellation, permission,
+  ownership, and profile isolation.
+
+**Tests (hosted, all four platforms):**
+- **Store:** a writer in another process (the test binary run again) waits for
+  the lock and keeps the holder's change. Also covered:
+  - a stale writer applies to the current session;
+  - a refused change, a failed atomic write, or an unreadable file writes
+    nothing;
+  - `Busy` after the wait;
+  - no re-creation after a delete;
+  - `apply`;
+  - history off.
+- **API:** while the test holds the lock and another process waits to rename
+  the session:
+  - a normal run finishes: rename and answer are both kept;
+  - a regeneration finishes: rename and new answer are both kept;
+  - a provider failure, then a cancellation: the rename is kept and the
+    saved answer is untouched.
+
+  Also:
+  - a record whose write fails leaves the file byte-for-byte unchanged;
+  - two concurrent prompts admit one run and save one prompt;
+  - PATCH during the run is still 409.
+- **`serve --desktop` process:** its PATCH and the CLI's delete wait for
+  another process's lock. The PATCH keeps the turn written inside the lock,
+  and a write after the delete does not re-create the session.
+- **ACP:** a rename made while an editor holds the session survives its next
+  turn.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Branch `desktop/d4c2-session-writes` created at `fbd008c`; ownership and audit recorded | — | https://github.com/dlroqa/Lightagent/issues/100 |
+| 2026-11-02 | Edit request `038`: 24 edits to 11 files; branch moved without force; draft PR #103 | `6c0b7ff` / `e5ff849` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41367313205 |
+| 2026-11-02 | `check` on `6c0b7ff`: **failure**. E0308 in `chat.rs`: the new `prompt` binding shadowed the chat loop's `prompt: TerminalPrompt` | `6c0b7ff` | https://github.com/dlroqa/Lightagent/actions/runs/41367409693 |
+| 2026-11-02 | `039`: the binding renamed to `asked` | `903528f` / `a3aafb3` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41367879919 |
+| 2026-11-02 | `check` on `903528f`: **failure**, only `check (linux-x64)`: `session_history_is_packed_against_the_resolved_window` got 409 on a follow-up prompt. The test posted the follow-up as soon as the record was visible, before the session was released. That gap always existed, but the single-threaded test runtime hid it. Every other job passed, including all new tests on the other three platforms. `desktop` was cancelled by the next push | `903528f` | https://github.com/dlroqa/Lightagent/actions/runs/41367939822, https://github.com/dlroqa/Lightagent/actions/runs/41367939797 |
+| 2026-11-02 | `040`: that test and `a_saved_session_is_reused_by_follow_up_runs_and_new_sessions_are_empty` now wait for the release, as #98's `settled` helper already does. No assertion changed | `aebd5d6` / `e9066c3` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41369131207 |
+| 2026-11-02 | `check` on `aebd5d6`: **success**, all 13 jobs. The new store, API, `serve --desktop` and ACP tests ran and passed on linux-x64, macos-arm64, macos-x64 and windows-x64 | `aebd5d6` | https://github.com/dlroqa/Lightagent/actions/runs/41369189397 |
+| 2026-11-02 | `desktop` on `aebd5d6`: **success**, all 7 jobs | `aebd5d6` | https://github.com/dlroqa/Lightagent/actions/runs/41369189399 |
+| 2026-11-02 | `jev evaluation` and `subagents`: **success**. The dispatched `subagent fixture fail` and `verify` runs fail by design (D0 baseline), as on every earlier head | `aebd5d6` | https://github.com/dlroqa/Lightagent/actions/runs/41369189555, https://github.com/dlroqa/Lightagent/actions/runs/41369189398 |
+
+Capability coverage is unchanged: **22 of 227**. Row 10 adds no capability.
+
+**Known limits (not addressed in row 10):**
+- **Run admission is per process.** Two processes can each run a turn on one
+  session at once. Both turns are kept, but they interleave. A cross-process
+  run lease is a separate follow-up.
+- **A record can be skipped.** If another writer holds the store lock longer
+  than 5 s, the recorder logs `Busy` and does not write. Nothing is
+  overwritten.
 
 ## Artifacts and retention
 
@@ -645,6 +735,7 @@ row 10 of the merge order.
   | 2026-10-30T22:37:46Z | `d0-audit` `bc01426`, `d1-architecture` `350b48b`, `d2-shell` `003a71c`, `d3a-runtime` `130dde9`, `d3b-lifecycle` `1f0ed69`, `d4a-profiles` `c544d7a`, `d4b-profile-ui` `8c27f93` | baseline re-verified before the D4b review fix; working tree clean |
   | 2026-11-01T22:27:58Z | `d4b-profile-ui` `5f364e2`, `feat/response-action-bar` `987c6db`, `integration/desktop-d4b-response-actions` `b4a61c9`, `tools/source-edit` `df11eac` (lower slices unchanged) | before recording #98's integration; fetch only, working tree `master` `12582a0` clean |
   | 2026-11-01T23:07:09Z | `d4b-profile-ui` `7c3e988`, `d4c-config` `0e46892`, `feat/response-action-bar` `987c6db`, `integration/desktop-d4b-response-actions` `b4a61c9`, `tools/source-edit` `a9f91a3` | D4c validated; fetch only, working tree clean |
+  | 2026-11-02T00:57:09Z | `d4c-config` `551e73a`, `d4c1-response-actions` `fbd008c`, `d4c2-session-writes` `aebd5d6`, `tools/source-edit` `b9cacc0` (lower slices unchanged) | row 10 validated; fetch only, working tree `master` `12582a0` clean |
 
   A documentation commit cannot record itself. Each row names the heads
   that existed when the sync ran. The commit that carries a row is
@@ -652,9 +743,26 @@ row 10 of the merge order.
 
 ## Next
 
-#98 does not replace D4c. D4c starts from the D4b head and stays in the
-established order. On 2026-11-01 no other Claude session was running on the
-owner's machine, and no D4c branch, PR or edit request existed.
+This is the order the owner set on 2026-11-02 (DESKTOP_CLAUDE_PROMPT.md §4):
 
-1. D4c: configuration (show, path, get, set, Jev routing report). Design: one locked read-modify-write with an ETag in `lightagent-core`'s `ConfigStore` (`update(expected_etag, change)`), used by `lightagent config set`, the existing `PUT /settings`, and the new config routes. A stale write gets `409 conflict`, and two processes cannot interleave. Then a Settings advanced editor with typed key and value.
-3. D4d–e: provider, models, key entry and endpoint test; workspaces.
+1. **Row 11:** the remaining D4 acceptance items, on branch
+   `desktop/d4c3-config-acceptance`, stacked on row 10.
+   - CLI and desktop configuration and profile files compared byte for byte
+     in isolated homes.
+   - Ordered concurrency: a Settings save against a revision loaded before a
+     CLI write gets 409 and writes nothing. A CLI write after a Settings save
+     keeps it.
+   - An unreadable configured secret file fails closed, with a redacted
+     error, before any request is made.
+   - No secret in the renderer's state (the DOM, browser storage, and the
+     loaded settings).
+   - `jev-routing-report` as one shared operation, an API route, and Settings
+     UI.
+   - A Settings conflict keeps the unsaved input and offers review and
+     refresh.
+
+   The diagnostics bundle does not exist until D7 (`/diagnostics`), so its
+   redaction test moves there.
+2. **D4d–e:** providers, models, protected credentials and endpoint checks;
+   then workspaces.
+3. **D5–D10,** in the plan's dependency order.
