@@ -114,6 +114,11 @@
    "path": "/api/lightagent/v1/skills"
   },
   {
+   "id": "skills.import",
+   "method": "POST",
+   "path": "/api/lightagent/v1/skills/imports"
+  },
+  {
    "id": "extensions.list",
    "method": "GET",
    "path": "/api/lightagent/v1/extensions"

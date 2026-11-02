@@ -9,7 +9,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 - Pending D1 decision rows: 0
 - D5a note (2026-11-02, rows 21-24): `slash.approve`, `slash.reject`, `slash.stop`, `slash.continue` and `key.steer` are implemented at `e164dde`: browser UI e2e (e2e/runs.mjs), host-level (desktop/e2e/runs.py, switch.py) and backend (desktop_continue.rs) evidence; native WebView interaction is D8 and not claimed. #98's regenerate (`api.post.sessions.id.regenerate`) has host-level R1 evidence and stays not counted until its browser and native checks (R1 is met at host level; R2-R5 are D8)
 - D6 note (2026-11-02, rows 26-27): the 13 `cli.extensions.*` rows, the 5 `extension.manifest.*` rows and `extension.roots` are implemented at `c89c989` through `lightagent_extensions::manage`: backend (crates/lightagent/tests/desktop_extensions.rs, CLI and API alike), host-level (desktop/e2e/runs.py `extensions`) and browser UI (e2e/extensions.mjs) evidence; native WebView interaction is D8 and not claimed. `config.extensions` waits for a master-switch control (row 28); the five `api.*.extensions*` rows are backend rows and not counted
-- Total rows: 345
+- Total rows: 346
 
 | Kind | Rows |
 |---|---|
@@ -472,6 +472,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `api.put.mcp.servers.name` | `PUT /api/lightagent/v1/mcp/servers/{name}` | applicable | no | (backend reuse) | shared: lightagent_core::mcp_servers::update | not-started | `crates/lightagent-api/src/lib.rs:144` |
 | `api.delete.mcp.servers.name` | `DELETE /api/lightagent/v1/mcp/servers/{name}` | applicable | no | (backend reuse) | shared: lightagent_core::mcp_servers::remove | not-started | `crates/lightagent-api/src/lib.rs:144` |
 | `api.post.mcp.servers.name.check` | `POST /api/lightagent/v1/mcp/servers/{name}/check` | applicable | no | (backend reuse) | shared: chat::check_mcp_server via RunFactory::check_mcp | not-started | `crates/lightagent-api/src/lib.rs:150` |
+| `api.post.skills.imports` | `POST /api/lightagent/v1/skills/imports` | applicable | no | Tools: Installed skills, Import | shared: lightagent_extensions::skill_import::import (new scope) | not-started | `crates/lightagent-api/src/lib.rs:132` |
 | `api.get.sessions` | `GET /api/lightagent/v1/sessions` | applicable | no | (backend reuse) | api: GET /sessions | not-started | `crates/lightagent-api/src/lib.rs:94` |
 | `api.post.sessions` | `POST /api/lightagent/v1/sessions` | applicable | no | (backend reuse) | api: POST /sessions | not-started | `crates/lightagent-api/src/lib.rs:94` |
 | `api.get.runs` | `GET /api/lightagent/v1/runs` | applicable | no | (backend reuse) | api: GET /runs | not-started | `crates/lightagent-api/src/lib.rs:90` |

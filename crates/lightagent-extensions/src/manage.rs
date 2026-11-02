@@ -475,7 +475,7 @@ fn fetch_and_install(source: &Path, root: &Path) -> Result<(Extension, Source), 
 /// An HTTPS Git source (`https://…` or `git+https://…`, `#subdir` optional),
 /// or `None` for a local folder. A URL with credentials, and a sub-folder
 /// that would leave the repository, are refused.
-fn git_source(source: &Path) -> Result<Option<(String, PathBuf)>, ManageError> {
+pub(crate) fn git_source(source: &Path) -> Result<Option<(String, PathBuf)>, ManageError> {
     let text = source.to_string_lossy();
     let raw = text.strip_prefix("git+").unwrap_or(&text);
     if !raw.starts_with("https://") {

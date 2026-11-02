@@ -7105,6 +7105,30 @@
    "actions_evidence": null
   },
   {
+   "id": "api.post.skills.imports",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/skills/imports",
+   "source": "crates/lightagent-api/src/lib.rs:132",
+   "behavior": "NEW SCOPE (no CLI operation): import skills from an https Git repository or a folder; layouts extension.json, SKILL.md, skills/<name>/SKILL.md, <name>/SKILL.md; installed inactive unless asked; source and commit recorded (D6-6)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/skills/imports"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "New scope beyond the audited CLI: tracked, never counted toward CLI parity",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "Tools: Installed skills, Import",
+   "backend": "shared: lightagent_extensions::skill_import::import",
+   "permission": "local-operator",
+   "data_scope": "home|profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
    "id": "api.get.sessions",
    "kind": "api",
    "surface": "GET /api/lightagent/v1/sessions",

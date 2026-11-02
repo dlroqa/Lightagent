@@ -108,6 +108,18 @@ export interface McpCheck {
   mcp_enabled: boolean;
 }
 
+/** What a skills import did. */
+export interface SkillImported {
+  name: string;
+  dir: string;
+  scope: ExtensionScope;
+  layout: "extension" | "single_skill" | "skills_folder" | "skill_folders";
+  skills: string[];
+  active: boolean;
+  replaced: boolean;
+  source: ExtensionSource;
+}
+
 export interface ExtensionInstalled {
   name: string;
   dir: string;
@@ -594,6 +606,15 @@ export const agentApi = {
     }),
   removeMcpServer: (name: string) =>
     jsonRequest<McpState>(`/mcp/servers/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  /** Import skills from a repository or folder (new scope); inactive unless `activate`. */
+  importSkills: (request: {
+    source: string;
+    revision?: string;
+    name?: string;
+    scope: ExtensionScope;
+    activate: boolean;
+    replace: boolean;
+  }) => jsonRequest<SkillImported>("/skills/imports", { method: "POST", body: JSON.stringify(request) }),
   /** Connects the server now; a stdio server's command is started. */
   checkMcpServer: (name: string) =>
     jsonRequest<McpCheck>(`/mcp/servers/${encodeURIComponent(name)}/check`, { method: "POST" }),

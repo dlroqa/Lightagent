@@ -467,6 +467,34 @@ def scenario_extensions(host, cli):
     return check
 
 
+def scenario_skills(host, cli):
+    """D6-6 (new scope) through the host transport: a skills folder imports
+    inactive, the CLI sees the extension inactive, and it is removed."""
+    import shutil
+    import tempfile
+
+    check = Checks("skills")
+    work = tempfile.mkdtemp(prefix="lightagent-e2e-skills-")
+    try:
+        skill = os.path.join(work, "host-pack", "skills", "host-skill")
+        os.makedirs(skill)
+        with open(os.path.join(skill, "SKILL.md"), "w", encoding="utf-8") as handle:
+            handle.write("---\nname: host-skill\ndescription: Host\n---\nDo it.\n")
+        status, imported = host.fetch("POST", f"{API}/skills/imports", {"source": os.path.join(work, "host-pack")})
+        imported = imported or {}
+        check.expect("imported through the host, inactive",
+                     status == 201 and imported.get("skills") == ["host-skill"] and imported.get("active") is False,
+                     (status, imported))
+        listed = json.loads(harness.run_cli(cli, "--json", "extensions", "list")).get("extensions", [])
+        check.expect("the CLI sees it inactive",
+                     [(e.get("name"), e.get("active")) for e in listed] == [("host-pack", False)], listed)
+        status, _ = host.fetch("DELETE", f"{API}/extensions/host-pack")
+        check.expect("removed through the host", status == 200, status)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return check
+
+
 def scenario_tools(host, cli):
     """D6-5 through the host transport: the catalog with permissions, built
     without connecting MCP, is what `lightagent tools list` reports."""
@@ -570,6 +598,7 @@ def main():
             ("extensions", lambda: scenario_extensions(host, cli)),
             ("mcp", lambda: scenario_mcp(host)),
             ("tools", lambda: scenario_tools(host, cli)),
+            ("skills", lambda: scenario_skills(host, cli)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]
