@@ -415,6 +415,17 @@ pub trait RunFactory: Send + Sync + 'static {
         Err("provider endpoint checks are not available in this embedding".to_owned())
     }
 
+    /// An explicit check of the endpoint at `base_url` with the key bound to
+    /// that endpoint, ending within `timeout`: what it answered, never a
+    /// key. The default refuses.
+    async fn check_endpoint(
+        &self,
+        _base_url: String,
+        _timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        Err("provider endpoint checks are not available in this embedding".to_owned())
+    }
+
     /// The window to pack a session's history against before a run of
     /// `profile` (the active one when `None`) with `model`, resolved as the
     /// run itself resolves its budget. `None`, the default, leaves the
@@ -851,6 +862,16 @@ impl RunManager {
         timeout: std::time::Duration,
     ) -> Result<serde_json::Value, String> {
         self.factory.check_provider(timeout).await
+    }
+
+    /// An explicit, bounded check of the endpoint at `base_url` (a saved
+    /// provider's), with that endpoint's own key.
+    pub async fn check_endpoint(
+        &self,
+        base_url: String,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        self.factory.check_endpoint(base_url, timeout).await
     }
 
     /// The token limit to pack a session's history with before a run of

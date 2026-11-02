@@ -7,13 +7,13 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 - Denominator: 227
 - Implemented: 25 of 227
 - Pending D1 decision rows: 0
-- Total rows: 323
+- Total rows: 331
 
 | Kind | Rows |
 |---|---|
 | acp-method | 8 |
 | alias | 2 |
-| api | 41 |
+| api | 49 |
 | argument | 47 |
 | command | 86 |
 | config | 14 |
@@ -29,7 +29,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 
 | Applicability | Rows |
 |---|---|
-| applicable | 287 |
+| applicable | 295 |
 | host-owned | 7 |
 | not-applicable | 29 |
 
@@ -473,6 +473,14 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `api.get.provider.credential` | `GET /api/lightagent/v1/provider/credential` | applicable | no | (backend reuse) | api: GET /provider/credential | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.put.provider.credential` | `PUT /api/lightagent/v1/provider/credential` | applicable | no | (backend reuse) | api: PUT /provider/credential | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.delete.provider.credential` | `DELETE /api/lightagent/v1/provider/credential` | applicable | no | (backend reuse) | api: DELETE /provider/credential | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.get.providers` | `GET /api/lightagent/v1/providers` | applicable | no | (backend reuse) | api: GET /providers | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.post.providers` | `POST /api/lightagent/v1/providers` | applicable | no | (backend reuse) | api: POST /providers | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.get.providers.id` | `GET /api/lightagent/v1/providers/{id}` | applicable | no | (backend reuse) | api: GET /providers/{id} | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.patch.providers.id` | `PATCH /api/lightagent/v1/providers/{id}` | applicable | no | (backend reuse) | api: PATCH /providers/{id} | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.delete.providers.id` | `DELETE /api/lightagent/v1/providers/{id}` | applicable | no | (backend reuse) | api: DELETE /providers/{id} | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.post.providers.id.check` | `POST /api/lightagent/v1/providers/{id}/check` | applicable | no | (backend reuse) | api: POST /providers/{id}/check | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.put.provider.active` | `PUT /api/lightagent/v1/provider/active` | applicable | no | (backend reuse) | api: PUT /provider/active | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.put.provider.model` | `PUT /api/lightagent/v1/provider/model` | applicable | no | (backend reuse) | api: PUT /provider/model | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.put.config.key` | `PUT /api/lightagent/v1/config/{key}` | applicable | no | (backend reuse) | api: PUT /config/{key} | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.get.approvals` | `GET /api/lightagent/v1/approvals` | applicable | no | (backend reuse) | api: GET /approvals | not-started | `crates/lightagent-api/src/lib.rs:109` |
 | `api.post.approvals.run` | `POST /api/lightagent/v1/approvals/{run}` | applicable | no | (backend reuse) | api: POST /approvals/{run} | not-started | `crates/lightagent-api/src/lib.rs:110` |

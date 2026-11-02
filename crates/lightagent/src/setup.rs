@@ -4,11 +4,12 @@ use std::io::{BufRead, IsTerminal as _, Write};
 
 use clap::ValueEnum;
 use dialoguer::{Confirm, Input, MultiSelect, Password, Select, theme::ColorfulTheme};
+use lightagent_core::SecretRef;
+use lightagent_core::saved_providers::{self, Outcome};
 use lightagent_core::{
     AgentProfile, ApprovalPolicy, Config, ConfigError, ConfigRevision, ConfigStore,
     DUCKDUCKGO_SEARCH_ENDPOINT, LightagentPaths, ProfileId, ProfileStore,
 };
-use lightagent_core::{SavedProvider, SecretRef};
 use lightagent_provider_lightweight::{LightweightProvider, ProviderConfig};
 
 /// A setup section that can also be opened directly from the command line.
@@ -104,8 +105,11 @@ async fn run_tui(section: Option<Section>, paths: &LightagentPaths) -> Result<()
         };
 
         let changed = configure_tui(selected, &mut config, paths, &theme).await?;
-        if changed {
+        if let Some(outcome) = changed {
             revision = save_setup(&store, &revision, &config)?;
+            // What waits for the save: a released key file, the active
+            // profile's endpoint and model.
+            saved_providers::finish(paths, &outcome)?;
             eprintln!("Saved.\n");
         } else {
             eprintln!("Cancelled; no changes saved.\n");
@@ -121,14 +125,17 @@ async fn configure_tui(
     config: &mut Config,
     paths: &LightagentPaths,
     theme: &ColorfulTheme,
-) -> Result<bool, String> {
+) -> Result<Option<Outcome>, String> {
+    // A section other than the provider has nothing to finish after the save.
+    let changed =
+        |result: Result<bool, String>| result.map(|changed| changed.then(Outcome::default));
     match section {
-        Section::Profiles => configure_profiles_tui(config, paths, theme),
+        Section::Profiles => changed(configure_profiles_tui(config, paths, theme)),
         Section::Provider => configure_gateway_tui(config, paths, theme).await,
-        Section::Tools => configure_tools_tui(config, theme),
-        Section::Web => configure_web_tui(config, theme),
-        Section::Tui => configure_terminal_ui_tui(config, theme),
-        Section::Approvals => configure_approvals_tui(config, paths, theme),
+        Section::Tools => changed(configure_tools_tui(config, theme)),
+        Section::Web => changed(configure_web_tui(config, theme)),
+        Section::Tui => changed(configure_terminal_ui_tui(config, theme)),
+        Section::Approvals => changed(configure_approvals_tui(config, paths, theme)),
     }
 }
 
@@ -269,38 +276,33 @@ async fn configure_gateway_tui(
     config: &mut Config,
     paths: &LightagentPaths,
     theme: &ColorfulTheme,
-) -> Result<bool, String> {
-    const LOCAL_URL: &str = "http://127.0.0.1:11434";
+) -> Result<Option<Outcome>, String> {
     eprintln!("\nProvider & model for Lightagent CLI");
     eprintln!("↑↓ navigate  ENTER select  ESC cancel\n");
 
-    let mut providers = vec![format!("Lightweight local  ({LOCAL_URL})")];
-    providers.extend(
-        config
-            .inference
-            .saved_providers
-            .iter()
-            .map(|saved| format!("{}  ({})", saved.name, saved.base_url)),
-    );
+    // The shared list, as the desktop's Settings shows it: the local
+    // endpoint first, then each saved provider.
+    let listed = saved_providers::list(config)
+        .into_iter()
+        .filter(|provider| provider.kind != "custom")
+        .collect::<Vec<_>>();
+    let mut providers = listed
+        .iter()
+        .map(|provider| format!("{}  ({})", provider.name, provider.base_url))
+        .collect::<Vec<_>>();
     let custom_index = providers.len();
     providers.push("Custom endpoint  (enter URL manually)".to_owned());
-    let remove_index = if config.inference.saved_providers.is_empty() {
-        None
-    } else {
+    let remove_index = if listed.len() > 1 {
         let index = providers.len();
         providers.push("Remove a saved custom provider".to_owned());
         Some(index)
-    };
-    let default = if config.inference.base_url == LOCAL_URL {
-        0
     } else {
-        config
-            .inference
-            .saved_providers
-            .iter()
-            .position(|saved| saved.base_url == config.inference.base_url)
-            .map_or(custom_index, |index| index + 1)
+        None
     };
+    let default = listed
+        .iter()
+        .position(|provider| provider.active)
+        .unwrap_or(custom_index);
     let Some(selected) = Select::with_theme(theme)
         .with_prompt("Provider")
         .items(providers)
@@ -308,15 +310,14 @@ async fn configure_gateway_tui(
         .interact_opt()
         .map_err(dialog_error)?
     else {
-        return Ok(false);
+        return Ok(None);
     };
 
     if Some(selected) == remove_index {
-        let names = config
-            .inference
-            .saved_providers
+        let saved = &listed[1..];
+        let names = saved
             .iter()
-            .map(|saved| format!("{}  ({})", saved.name, saved.base_url))
+            .map(|provider| format!("{}  ({})", provider.name, provider.base_url))
             .collect::<Vec<_>>();
         let Some(remove) = Select::with_theme(theme)
             .with_prompt("Remove saved provider")
@@ -325,30 +326,20 @@ async fn configure_gateway_tui(
             .interact_opt()
             .map_err(dialog_error)?
         else {
-            return Ok(false);
+            return Ok(None);
         };
-        let removed = config.inference.saved_providers.remove(remove);
-        if config.inference.base_url == removed.base_url {
-            config.inference.base_url = LOCAL_URL.to_owned();
-            config.inference.api_key = None;
-            config.inference.model = None;
-            update_active_profile(paths, |profile| {
-                profile.routing.base_url = None;
-                profile.routing.model = "default".to_owned();
-            })?;
-        }
-        eprintln!("Removed {}.", removed.name);
-        return Ok(true);
+        // The shared removal: the stored key is deleted after the save, and
+        // a removed active provider leaves the local endpoint active.
+        let outcome = saved_providers::remove(config, paths, &saved[remove].id)
+            .map_err(|error| error.to_string())?;
+        eprintln!("Removed {}.", saved[remove].name);
+        return Ok(Some(outcome));
     }
 
-    let (base_url, mut api_key, provider_id) = if selected == 0 {
-        (LOCAL_URL.to_owned(), None, "lightweight-local".to_owned())
-    } else if selected < custom_index {
-        let saved = &config.inference.saved_providers[selected - 1];
+    let (provider_id, base_url) = if selected < custom_index {
         (
-            saved.base_url.clone(),
-            saved.api_key.clone(),
-            provider_key_id(&saved.name),
+            listed[selected].id.clone(),
+            listed[selected].base_url.clone(),
         )
     } else {
         let name = Input::<String>::with_theme(theme)
@@ -373,25 +364,20 @@ async fn configure_gateway_tui(
             })
             .interact_text()
             .map_err(dialog_error)?;
-        let api_key = None;
-        let saved = SavedProvider {
-            name: name.trim().to_owned(),
-            base_url: base_url.trim_end_matches('/').to_owned(),
-            api_key: api_key.clone(),
-        };
-        if let Some(existing) = config
-            .inference
-            .saved_providers
-            .iter_mut()
-            .find(|item| item.name.eq_ignore_ascii_case(&saved.name))
-        {
-            *existing = saved;
-        } else {
-            config.inference.saved_providers.push(saved);
+        // The shared creation refuses a name or endpoint another saved
+        // provider has: they would share a key file, or one endpoint's key.
+        match saved_providers::create(config, &name, &base_url) {
+            Ok(provider) => (provider.id, provider.base_url),
+            Err(error) => {
+                eprintln!("{error}");
+                return Ok(None);
+            }
         }
-        (base_url, api_key, provider_key_id(&name))
     };
 
+    // The provider's own key only: the one bound to its endpoint.
+    let mut api_key = lightagent_core::provider_keys::bound_key(config, &base_url).cloned();
+    let mut stored_key = None;
     let mut models = provider_models(&base_url, api_key.as_ref()).await;
     if api_key.is_none()
         && models
@@ -406,7 +392,9 @@ async fn configure_gateway_tui(
             .map_err(dialog_error)?
             .unwrap_or(false);
         if save_key {
-            api_key = Some(store_provider_key_tui(paths, &provider_id, theme)?);
+            let secret = store_provider_key_tui(paths, &provider_id, theme)?;
+            api_key = Some(secret.clone());
+            stored_key = Some(secret);
             models = provider_models(&base_url, api_key.as_ref()).await;
         }
     }
@@ -432,25 +420,17 @@ async fn configure_gateway_tui(
         .interact_opt()
         .map_err(dialog_error)?
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let model = selected.checked_sub(1).map(|index| models[index].clone());
-    if let Some(saved) = config
-        .inference
-        .saved_providers
-        .iter_mut()
-        .find(|saved| saved.base_url == base_url)
-    {
-        saved.api_key = api_key.clone();
+    // The shared selection: the endpoint takes only its own key, and the
+    // active profile follows after the save.
+    let (_, outcome) = saved_providers::select(config, &provider_id, model.as_deref())
+        .map_err(|error| error.to_string())?;
+    if let Some(secret) = stored_key {
+        lightagent_core::provider_keys::use_key(config, Some(secret));
     }
-    config.inference.base_url = base_url;
-    config.inference.api_key = api_key;
-    config.inference.model = model.clone();
-    update_active_profile(paths, |profile| {
-        profile.routing.base_url = None;
-        profile.routing.model = model.unwrap_or_else(|| "default".to_owned());
-    })?;
-    Ok(true)
+    Ok(Some(outcome))
 }
 
 async fn provider_models(
@@ -483,10 +463,6 @@ fn store_provider_key_tui(
         .map_err(dialog_error)?;
     // The one shared store, as the HTTP API and the desktop write it.
     lightagent_core::provider_keys::store_key(paths, provider_id, &key)
-}
-
-fn provider_key_id(name: &str) -> String {
-    lightagent_core::provider_keys::key_id(name)
 }
 
 fn configure_tools_tui(config: &mut Config, theme: &ColorfulTheme) -> Result<bool, String> {

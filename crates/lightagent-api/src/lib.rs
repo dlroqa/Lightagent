@@ -36,6 +36,7 @@ use lightagent_core::identity::{
     AuditAction, Caller, Capability, PrincipalId, PrincipalSource, Role, RunTrust,
     authorize_capability, revoked_message,
 };
+use lightagent_core::saved_providers;
 use lightagent_core::{
     AgentEvent, ApprovalPolicy, ConfigError, ConfigRevision, ConfigStore, LightagentPaths,
     PlatformEndpointConfig, ProfileId, ProfileStore, SecretRef, SkillStore, UpdateError,
@@ -95,6 +96,28 @@ pub fn router(state: AppState) -> Router {
             get(get_provider_credential)
                 .put(put_provider_credential)
                 .delete(delete_provider_credential),
+        )
+        .route(
+            "/api/lightagent/v1/provider/active",
+            axum::routing::put(select_provider),
+        )
+        .route(
+            "/api/lightagent/v1/provider/model",
+            axum::routing::put(select_provider_model),
+        )
+        .route(
+            "/api/lightagent/v1/providers",
+            get(list_providers).post(create_provider),
+        )
+        .route(
+            "/api/lightagent/v1/providers/{id}",
+            get(show_provider)
+                .patch(update_provider)
+                .delete(remove_provider),
+        )
+        .route(
+            "/api/lightagent/v1/providers/{id}/check",
+            post(check_saved_provider),
         )
         .route(
             "/api/lightagent/v1/jev/routing-report",
@@ -1436,6 +1459,294 @@ async fn delete_provider_credential(
             }
         }
         Err(error) => config_error(error.into_store()),
+    }
+}
+
+/// A new saved provider, as `lightagent setup provider` creates one.
+#[derive(Deserialize)]
+struct NewProvider {
+    name: String,
+    base_url: String,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// An edit of a saved provider; an absent field stays as it is.
+#[derive(Deserialize)]
+struct ProviderEditBody {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    /// Keep the key when the endpoint changes; otherwise it is released.
+    #[serde(default)]
+    keep_key: bool,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// The provider to make active, and its model (`null`: automatic).
+#[derive(Deserialize)]
+struct SelectProvider {
+    id: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// The model to use on the active endpoint (`null`: automatic).
+#[derive(Deserialize)]
+struct SelectModel {
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RevisionQuery {
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// Every provider the picker offers, the active one and its model, the
+/// revision a change must name, and when a change applies. Never a key.
+fn providers_view(
+    config: &lightagent_core::Config,
+    revision: &ConfigRevision,
+) -> serde_json::Value {
+    let providers = saved_providers::list(config);
+    let active = providers
+        .iter()
+        .find(|provider| provider.active)
+        .map(|provider| provider.id.clone());
+    json!({
+        "providers": providers,
+        "active": active,
+        "model": config.inference.model,
+        "revision": revision.as_str(),
+        "effect": saved_providers::EFFECT,
+    })
+}
+
+/// A refused provider change: invalid input (400), no such provider (404),
+/// a name or endpoint another saved provider has (409, reason
+/// `duplicate`), or a key file that could not be moved (500).
+fn provider_error(error: saved_providers::ProviderError) -> Response {
+    use saved_providers::ProviderError;
+    match &error {
+        ProviderError::Invalid(message) => bad_request(message),
+        ProviderError::NotFound(_) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+        ProviderError::Duplicate(message) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": message, "reason": "duplicate" })),
+        )
+            .into_response(),
+        ProviderError::Store(message) => internal(message),
+    }
+}
+
+/// Apply a provider change in one config update, finish what waits for the
+/// save (a released key file, the active profile), and answer with the
+/// providers at the new revision. A stale `expected_revision` gets 409 and
+/// changes nothing.
+fn change_providers(
+    state: &AppState,
+    expected: Option<&str>,
+    status: StatusCode,
+    change: impl FnOnce(
+        &mut lightagent_core::Config,
+        &LightagentPaths,
+    ) -> Result<saved_providers::Outcome, saved_providers::ProviderError>,
+) -> Response {
+    let (Some(store), Some(root)) = (&state.config_store, home(state)) else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let paths = LightagentPaths::rooted_at(root);
+    let expected = expected.map(ConfigRevision::parse);
+    match store.update(expected.as_ref(), |config| change(config, &paths)) {
+        Ok((outcome, revision)) => {
+            if let Err(message) = saved_providers::finish(&paths, &outcome) {
+                return internal(&message);
+            }
+            match store.load() {
+                Ok(config) => (status, Json(providers_view(&config, &revision))).into_response(),
+                Err(error) => config_error(error),
+            }
+        }
+        Err(UpdateError::Change(error)) => provider_error(error),
+        Err(UpdateError::Store(error)) => config_error(error),
+    }
+}
+
+/// The providers `lightagent setup provider` offers.
+async fn list_providers(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => Json(providers_view(&config, &revision)).into_response(),
+        Err(error) => config_error(error),
+    }
+}
+
+async fn show_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => match saved_providers::get(&config, &id) {
+            Ok(provider) => Json(json!({
+                "provider": provider,
+                "revision": revision.as_str(),
+                "effect": saved_providers::EFFECT,
+            }))
+            .into_response(),
+            Err(error) => provider_error(error),
+        },
+        Err(error) => config_error(error),
+    }
+}
+
+async fn create_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<NewProvider>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    change_providers(
+        &state,
+        body.expected_revision.as_deref(),
+        StatusCode::CREATED,
+        |config, _| {
+            saved_providers::create(config, &body.name, &body.base_url)
+                .map(|_| saved_providers::Outcome::default())
+        },
+    )
+}
+
+async fn update_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<ProviderEditBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let edit = saved_providers::ProviderEdit {
+        name: body.name,
+        base_url: body.base_url,
+        keep_key: body.keep_key,
+    };
+    change_providers(
+        &state,
+        body.expected_revision.as_deref(),
+        StatusCode::OK,
+        |config, paths| {
+            saved_providers::update(config, paths, &id, &edit).map(|(_, outcome)| outcome)
+        },
+    )
+}
+
+async fn remove_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<RevisionQuery>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    change_providers(
+        &state,
+        query.expected_revision.as_deref(),
+        StatusCode::OK,
+        |config, paths| saved_providers::remove(config, paths, &id),
+    )
+}
+
+async fn select_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<SelectProvider>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    change_providers(
+        &state,
+        body.expected_revision.as_deref(),
+        StatusCode::OK,
+        |config, _| {
+            saved_providers::select(config, &body.id, body.model.as_deref())
+                .map(|(_, outcome)| outcome)
+        },
+    )
+}
+
+async fn select_provider_model(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<SelectModel>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    change_providers(
+        &state,
+        body.expected_revision.as_deref(),
+        StatusCode::OK,
+        |config, _| saved_providers::select_model(config, body.model.as_deref()),
+    )
+}
+
+/// An explicit check of one provider's endpoint, with that endpoint's own
+/// key only, ending within `timeout_secs` (1-30, default 10).
+async fn check_saved_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<CheckBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let base_url = match store.load() {
+        Ok(config) => match saved_providers::get(&config, &id) {
+            Ok(provider) => provider.base_url,
+            Err(error) => return provider_error(error),
+        },
+        Err(error) => return config_error(error),
+    };
+    let seconds = body.timeout_secs.unwrap_or(10).clamp(1, 30);
+    match state
+        .manager
+        .check_endpoint(base_url, std::time::Duration::from_secs(seconds))
+        .await
+    {
+        Ok(check) => Json(check).into_response(),
+        Err(error) => unavailable(&error),
     }
 }
 

@@ -27,7 +27,18 @@ pub(crate) struct EndpointCheck {
 /// closed: nothing is sent. A redirect is not followed, so the key reaches
 /// this endpoint only, and the whole check ends within `timeout`.
 pub(crate) async fn check_active(config: &Config, timeout: Duration) -> EndpointCheck {
-    let base_url = config.inference.base_url.clone();
+    check_endpoint(config, &config.inference.base_url, timeout).await
+}
+
+/// Check the endpoint at `base_url` (the active one, or a saved
+/// provider's) the same way, with the key bound to that endpoint and no
+/// other.
+pub(crate) async fn check_endpoint(
+    config: &Config,
+    base_url: &str,
+    timeout: Duration,
+) -> EndpointCheck {
+    let base_url = base_url.to_owned();
     let started = Instant::now();
     let finish = |models: Vec<String>, error: Option<String>, key_sent: bool| EndpointCheck {
         base_url: base_url.clone(),
