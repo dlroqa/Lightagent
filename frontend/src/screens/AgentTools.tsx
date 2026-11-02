@@ -7,6 +7,7 @@ import { Card } from "../components/Card";
 import { Empty, Pill } from "../components/Bits";
 import { ExtensionsCard } from "../components/Extensions";
 import { McpCard } from "../components/Mcp";
+import { SkillImportForm } from "../components/SkillImport";
 import { JevToolCard } from "../components/Jev";
 import { TopBar } from "../components/Shell";
 
@@ -100,6 +101,7 @@ export function AgentTools() {
   const [attempt, setAttempt] = useState(0);
   const [includeMcp, setIncludeMcp] = useState(false);
   const [mcpState, setMcpState] = useState<string | null>(null);
+  const [extensionsVersion, setExtensionsVersion] = useState(0);
 
   useEffect(() => {
     let live = true;
@@ -192,7 +194,7 @@ export function AgentTools() {
             </div>
           )}
         </Card>
-        <ExtensionsCard />
+        <ExtensionsCard key={extensionsVersion} />
         <McpCard />
         <Card title="Specialists">
           <p className="card__note">The roles a task can be delegated to, and whether each can do its work now. Every run rechecks.</p>
@@ -200,6 +202,12 @@ export function AgentTools() {
         </Card>
         <Card title="Installed skills">
           <p className="card__note">Instructions available to the harness on demand. Full skill bodies remain server-side.</p>
+          <SkillImportForm
+            onImported={() => {
+              setAttempt((value) => value + 1);
+              setExtensionsVersion((value) => value + 1);
+            }}
+          />
           {!skills ? <span className="muted">Loading skills…</span> : skills.length === 0 ? (
             <Empty title="No skills installed" hint="Add a SKILL.md under the global or active profile skills directory." />
           ) : (

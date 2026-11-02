@@ -5,11 +5,12 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 ## Coverage
 
 - Denominator: 227
-- Implemented: 53 of 227
+- Implemented: 64 of 227
 - Pending D1 decision rows: 0
 - D5a note (2026-11-02, rows 21-24): `slash.approve`, `slash.reject`, `slash.stop`, `slash.continue` and `key.steer` are implemented at `e164dde`: browser UI e2e (e2e/runs.mjs), host-level (desktop/e2e/runs.py, switch.py) and backend (desktop_continue.rs) evidence; native WebView interaction is D8 and not claimed. #98's regenerate (`api.post.sessions.id.regenerate`) has host-level R1 evidence and stays not counted until its browser and native checks (R1 is met at host level; R2-R5 are D8)
 - D6 note (2026-11-02, rows 26-27): the 13 `cli.extensions.*` rows, the 5 `extension.manifest.*` rows and `extension.roots` are implemented at `c89c989` through `lightagent_extensions::manage`: backend (crates/lightagent/tests/desktop_extensions.rs, CLI and API alike), host-level (desktop/e2e/runs.py `extensions`) and browser UI (e2e/extensions.mjs) evidence; native WebView interaction is D8 and not claimed. `config.extensions` waits for a master-switch control (row 28); the five `api.*.extensions*` rows are backend rows and not counted
-- Total rows: 345
+- D6 note (2026-11-02, rows 28-31): `mcp.server.stdio` (+`command`, `args`, `env`), `mcp.server.http` (+`url`, `headers`), `config.mcp`, `cli.tools.list`, `slash.skills` and `skills.roots` are implemented at `62e87e6` with backend, host and browser evidence; native WebView is D8. `mcp.server.http.auth`, `mcp.server.http.untrusted_profiles` and `mcp.server.http.credential_profiles` are supported by the shared operation and the MCP card's form but not yet exercised by a browser check, so they are not counted. Difference recorded: `lightagent extensions install` turns MCP on for a bundle with MCP servers (and says so); the API and desktop do only when asked, and the desktop's MCP switch asks for confirmation. Skill import (`api.post.skills.imports`) is new scope beyond the CLI and never counted
+- Total rows: 346
 
 | Kind | Rows |
 |---|---|
@@ -106,7 +107,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.config.jev-routing-report` | `lightagent config jev-routing-report` | applicable | yes | Settings/Diagnostics: Jev routing report | shared: lightagent_core::config_keys::jev_routing_report; api: GET /jev/routing-report | implemented | `crates/lightagent/src/lib.rs:203` |
 | `cli.models` | `lightagent models` | applicable | yes | Providers/Models | shared: providers::check_active; api: POST /provider/check | implemented | `crates/lightagent/src/lib.rs:99` |
 | `cli.tools` | `lightagent tools` | applicable | dup→`cli.tools.list` | Tools/MCP/Extensions | api: GET /tools | not-started | `crates/lightagent/src/lib.rs:101` |
-| `cli.tools.list` | `lightagent tools list` | applicable | yes | Tools/MCP/Extensions: tool catalog | api: GET /tools | not-started | `crates/lightagent/src/lib.rs:211` |
+| `cli.tools.list` | `lightagent tools list` | applicable | yes | Tools/MCP/Extensions: tool catalog | api: GET /tools | implemented | `crates/lightagent/src/lib.rs:211` |
 | `cli.profile` | `lightagent profile` | applicable | dup→`cli.profile.list` | Profiles/Workspaces | extract: lib.rs profiles_cmd() | not-started | `crates/lightagent/src/lib.rs:106` |
 | `cli.profile.list` | `lightagent profile list` | applicable | yes | Profiles/Workspaces | ops::Profiles::list; api: GET /profiles | implemented | `crates/lightagent/src/lib.rs:248` |
 | `cli.profile.show` | `lightagent profile show` | applicable | yes | Profiles/Workspaces: detail | ops::Profiles::show; api: GET /profiles/{id} | implemented | `crates/lightagent/src/lib.rs:250` |
@@ -335,7 +336,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 |---|---|---|---|---|---|---|---|
 | `slash.help` | `/help` | applicable | yes | Command palette: help | static | not-started | `crates/lightagent/src/slash.rs:56` |
 | `slash.tools` | `/tools` | applicable | dup→`cli.tools.list` |  |  | not-started | `crates/lightagent/src/slash.rs:57` |
-| `slash.skills` | `/skills` | applicable | yes | Skills | api: GET /skills | not-started | `crates/lightagent/src/slash.rs:58` |
+| `slash.skills` | `/skills` | applicable | yes | Skills | api: GET /skills | implemented | `crates/lightagent/src/slash.rs:58` |
 | `slash.reload` | `/reload` | applicable | yes | Tools/MCP/Extensions: reload | extract: chat.rs reload path | not-started | `crates/lightagent/src/slash.rs:59` |
 | `slash.extensions` | `/extensions` | applicable | dup→`cli.extensions.list` |  |  | not-started | `crates/lightagent/src/slash.rs:60` |
 | `slash.extensions-install` | `/extensions install` | applicable | dup→`cli.extensions.install` |  |  | not-started | `crates/lightagent/src/slash.rs:63` |
@@ -378,13 +379,13 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 
 | ID | Surface | Applicability | Counts | UI path | Backend | Status | Source |
 |---|---|---|---|---|---|---|---|
-| `mcp.server.stdio` | `[mcp].servers transport=stdio` | applicable | yes | Tools/MCP/Extensions: MCP servers (shows command; external executable must exist) | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | not-started | `crates/lightagent-core/src/config.rs:416` |
-| `mcp.server.stdio.command` | `[mcp].servers transport=stdio.command` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | not-started | `crates/lightagent-core/src/config.rs:418` |
-| `mcp.server.stdio.args` | `[mcp].servers transport=stdio.args` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | not-started | `crates/lightagent-core/src/config.rs:420` |
-| `mcp.server.stdio.env` | `[mcp].servers transport=stdio.env` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | not-started | `crates/lightagent-core/src/config.rs:422` |
-| `mcp.server.http` | `[mcp].servers transport=http` | applicable | yes | Tools/MCP/Extensions: MCP servers | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | not-started | `crates/lightagent-core/src/config.rs:424` |
-| `mcp.server.http.url` | `[mcp].servers transport=http.url` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | not-started | `crates/lightagent-core/src/config.rs:426` |
-| `mcp.server.http.headers` | `[mcp].servers transport=http.headers` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | not-started | `crates/lightagent-core/src/config.rs:428` |
+| `mcp.server.stdio` | `[mcp].servers transport=stdio` | applicable | yes | Tools/MCP/Extensions: MCP servers (shows command; external executable must exist) | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | implemented | `crates/lightagent-core/src/config.rs:416` |
+| `mcp.server.stdio.command` | `[mcp].servers transport=stdio.command` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | implemented | `crates/lightagent-core/src/config.rs:418` |
+| `mcp.server.stdio.args` | `[mcp].servers transport=stdio.args` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | implemented | `crates/lightagent-core/src/config.rs:420` |
+| `mcp.server.stdio.env` | `[mcp].servers transport=stdio.env` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | implemented | `crates/lightagent-core/src/config.rs:422` |
+| `mcp.server.http` | `[mcp].servers transport=http` | applicable | yes | Tools/MCP/Extensions: MCP servers | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | implemented | `crates/lightagent-core/src/config.rs:424` |
+| `mcp.server.http.url` | `[mcp].servers transport=http.url` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | implemented | `crates/lightagent-core/src/config.rs:426` |
+| `mcp.server.http.headers` | `[mcp].servers transport=http.headers` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | implemented | `crates/lightagent-core/src/config.rs:428` |
 | `mcp.server.http.auth` | `[mcp].servers transport=http.auth` | applicable | yes | Tools/MCP/Extensions: auth status (redacted) | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | not-started | `crates/lightagent-core/src/config.rs:430` |
 | `mcp.server.http.untrusted_profiles` | `[mcp].servers transport=http.untrusted_profiles` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | not-started | `crates/lightagent-core/src/config.rs:434` |
 | `mcp.server.http.credential_profiles` | `[mcp].servers transport=http.credential_profiles` | applicable | yes | Tools/MCP/Extensions: MCP server form field | config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6) | not-started | `crates/lightagent-core/src/config.rs:438` |
@@ -404,7 +405,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 
 | ID | Surface | Applicability | Counts | UI path | Backend | Status | Source |
 |---|---|---|---|---|---|---|---|
-| `skills.roots` | `<home>/skills and <profile>/skills (SKILL.md)` | applicable | yes | Skills: list with scope and source | api: GET /skills | not-started | `crates/lightagent-core/src/skills.rs:204` |
+| `skills.roots` | `<home>/skills and <profile>/skills (SKILL.md)` | applicable | yes | Skills: list with scope and source | api: GET /skills | implemented | `crates/lightagent-core/src/skills.rs:204` |
 
 ## config
 
@@ -415,7 +416,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `config.security` | `config.toml [security]` | applicable | yes | Settings | api: GET/PUT /settings (subset); extract: typed config read/write | not-started | `crates/lightagent-core/src/config.rs:Config.security` |
 | `config.web` | `config.toml [web]` | applicable | yes | Settings | api: GET/PUT /settings (subset); extract: typed config read/write | not-started | `crates/lightagent-core/src/config.rs:Config.web` |
 | `config.tools` | `config.toml [tools]` | applicable | yes | Settings | api: GET/PUT /settings (subset); extract: typed config read/write | not-started | `crates/lightagent-core/src/config.rs:Config.tools` |
-| `config.mcp` | `config.toml [mcp]` | applicable | yes | Tools/MCP/Extensions | api: GET/PUT /settings (subset); extract: typed config read/write | not-started | `crates/lightagent-core/src/config.rs:Config.mcp` |
+| `config.mcp` | `config.toml [mcp]` | applicable | yes | Tools/MCP/Extensions | api: GET/PUT /settings (subset); extract: typed config read/write | implemented | `crates/lightagent-core/src/config.rs:Config.mcp` |
 | `config.rag` | `config.toml [rag]` | applicable | yes | Memory/Knowledge | api: GET/PUT /settings (subset); extract: typed config read/write | not-started | `crates/lightagent-core/src/config.rs:Config.rag` |
 | `config.memory` | `config.toml [memory]` | applicable | yes | Memory/Knowledge | api: GET/PUT /settings (subset); extract: typed config read/write | not-started | `crates/lightagent-core/src/config.rs:Config.memory` |
 | `config.extensions` | `config.toml [extensions]` | applicable | yes | Settings | api: GET/PUT /settings (subset); extract: typed config read/write | not-started | `crates/lightagent-core/src/config.rs:Config.extensions` |
@@ -472,6 +473,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `api.put.mcp.servers.name` | `PUT /api/lightagent/v1/mcp/servers/{name}` | applicable | no | (backend reuse) | shared: lightagent_core::mcp_servers::update | not-started | `crates/lightagent-api/src/lib.rs:144` |
 | `api.delete.mcp.servers.name` | `DELETE /api/lightagent/v1/mcp/servers/{name}` | applicable | no | (backend reuse) | shared: lightagent_core::mcp_servers::remove | not-started | `crates/lightagent-api/src/lib.rs:144` |
 | `api.post.mcp.servers.name.check` | `POST /api/lightagent/v1/mcp/servers/{name}/check` | applicable | no | (backend reuse) | shared: chat::check_mcp_server via RunFactory::check_mcp | not-started | `crates/lightagent-api/src/lib.rs:150` |
+| `api.post.skills.imports` | `POST /api/lightagent/v1/skills/imports` | applicable | no | Tools: Installed skills, Import | shared: lightagent_extensions::skill_import::import (new scope) | not-started | `crates/lightagent-api/src/lib.rs:132` |
 | `api.get.sessions` | `GET /api/lightagent/v1/sessions` | applicable | no | (backend reuse) | api: GET /sessions | not-started | `crates/lightagent-api/src/lib.rs:94` |
 | `api.post.sessions` | `POST /api/lightagent/v1/sessions` | applicable | no | (backend reuse) | api: POST /sessions | not-started | `crates/lightagent-api/src/lib.rs:94` |
 | `api.get.runs` | `GET /api/lightagent/v1/runs` | applicable | no | (backend reuse) | api: GET /runs | not-started | `crates/lightagent-api/src/lib.rs:90` |

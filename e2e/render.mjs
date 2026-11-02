@@ -14,6 +14,7 @@ import { checkSettingsStates } from "./settings.mjs";
 import { checkExtensions } from "./extensions.mjs";
 import { checkMcp } from "./mcp.mjs";
 import { checkToolCatalog } from "./tools.mjs";
+import { checkSkillImport } from "./skills.mjs";
 
 const BASE = (process.env.PANEL_BASE ?? "http://127.0.0.1:8735").replace(/\/+$/, "");
 const OUT_DIR = process.env.OUT_DIR ?? "screens";
@@ -385,6 +386,12 @@ async function main() {
     failures.push(...(await checkExtensions(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`extensions: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Imports and removes a skills pack: after the routes above have rendered.
+  try {
+    failures.push(...(await checkSkillImport(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`skills: ${err instanceof Error ? err.message : String(err)}`);
   }
   // Installs and removes an extension with a skill: after the routes above.
   try {

@@ -129,6 +129,7 @@ pub fn router(state: AppState) -> Router {
             get(get_jev_routing_report),
         )
         .route("/api/lightagent/v1/skills", get(list_skills))
+        .route("/api/lightagent/v1/skills/imports", post(import_skills))
         .route(
             "/api/lightagent/v1/extensions",
             get(list_extensions).post(install_extension),
@@ -2057,6 +2058,59 @@ async fn check_mcp_server(
         )
             .into_response(),
         Err(error) => internal(&error),
+    }
+}
+
+/// An import of skills from a repository or folder (new scope).
+#[derive(Deserialize)]
+struct ImportSkillsBody {
+    source: String,
+    #[serde(default)]
+    revision: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    scope: Option<extension_ops::Scope>,
+    #[serde(default)]
+    replace: bool,
+    #[serde(default)]
+    activate: bool,
+}
+
+/// Import skills (see `lightagent_extensions::skill_import`): installed
+/// inactive unless `activate`, never with a tool permission.
+async fn import_skills(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ImportSkillsBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let paths = match extension_paths(&state) {
+        Ok(paths) => paths,
+        Err(response) => return *response,
+    };
+    let remote = body.source.starts_with("https://") || body.source.starts_with("git+https://");
+    if !remote && !std::path::Path::new(&body.source).is_absolute() {
+        return bad_request("the source must be an absolute folder path or an https:// Git URL");
+    }
+    let options = lightagent_extensions::skill_import::ImportOptions {
+        scope: body.scope.unwrap_or(extension_ops::Scope::Global),
+        name: body.name,
+        revision: body.revision,
+        replace: body.replace,
+        activate: body.activate,
+    };
+    let source = PathBuf::from(body.source);
+    match tokio::task::spawn_blocking(move || {
+        lightagent_extensions::skill_import::import(&paths, &source, options)
+    })
+    .await
+    {
+        Ok(Ok(imported)) => (StatusCode::CREATED, Json(imported)).into_response(),
+        Ok(Err(error)) => extension_error(error),
+        Err(error) => internal(&error.to_string()),
     }
 }
 

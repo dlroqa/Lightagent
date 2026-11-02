@@ -44,6 +44,7 @@ use lightagent_core::{ExtensionsConfig, McpServerEntry};
 use serde::Deserialize;
 
 pub mod manage;
+pub mod skill_import;
 
 /// One installed extension, as discovered on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
