@@ -1,0 +1,344 @@
+=== base 8dc7d5b9b1eb75acb4368b0d6d6016dafe316c3f
+=== message
+D5 close-out: a paused run is found from its session
+
+A run paused on its time budget keeps its session's run lease until it is
+continued or stopped. Until now, once the page that started it was closed
+or reloaded, nothing tied the session to that run: GET /runs is
+operator-only and names no session, and a new turn on the session got a
+bare 409. The run held the session until the runtime stopped.
+
+- SessionStore::journaled_run reads the run id from the session's
+  interruption journal (written at admission, removed once recorded).
+- GET /sessions/{id} adds `active_run` {id, status} while this process
+  runs one of the session's turns that the caller may see (the same
+  authorized_run check as GET /runs/{id}); otherwise the response is
+  unchanged. The in-process 409 on a busy session names it the same way.
+- The Agent screen follows such a run when it loads the session, and after
+  a busy 409, so the Continue / Answer now / Stop controls come back.
+- Tests: the run is found from the session and from the 409; an undefined
+  continue mode is refused and the run stays paused; two simultaneous
+  continues resume the run exactly once; browser: a reload while paused
+  brings the card back and Answer now sends mode answer.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-store/src/session.rs
+--- find
+    /// Session `id`'s turn was recorded: forget its journal.
+    pub fn clear_run_journal(&self, id: &SessionId) {
+        let _ = std::fs::remove_file(self.journal_path(id));
+    }
+--- with
+    /// Session `id`'s turn was recorded: forget its journal.
+    pub fn clear_run_journal(&self, id: &SessionId) {
+        let _ = std::fs::remove_file(self.journal_path(id));
+    }
+
+    /// The run id of session `id`'s journaled turn, if one is journaled. The
+    /// turn may be live in this process or another, or its process may be
+    /// gone: the caller decides which.
+    pub fn journaled_run(&self, id: &SessionId) -> Option<String> {
+        let bytes = std::fs::read(self.journal_path(id)).ok()?;
+        serde_json::from_slice::<RunJournal>(&bytes)
+            .ok()
+            .map(|journal| journal.run_id)
+    }
+=== replace crates/lightagent-store/src/session.rs
+--- find
+    #[test]
+    fn a_recorded_turn_leaves_no_journal() {
+--- with
+    #[test]
+    fn a_journaled_turn_names_its_run_until_it_is_recorded() {
+        let store = SessionStore::new(scratch_dir());
+        let session = Session::new("profile", "title");
+        let id = session.id.clone();
+        store.save(&session).expect("save");
+        assert_eq!(store.journaled_run(&id), None);
+        let lease = store.lease_run(&id).expect("lease");
+        store.journal_run(&id, "run-4", false).expect("journal");
+        assert_eq!(store.journaled_run(&id).as_deref(), Some("run-4"));
+        store.clear_run_journal(&id);
+        assert_eq!(store.journaled_run(&id), None);
+        drop(lease);
+    }
+
+    #[test]
+    fn a_recorded_turn_leaves_no_journal() {
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+        let mut busy = state.busy_sessions.lock().await;
+        if !busy.insert(id.clone()) {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "session already has an active run"})),
+            )
+                .into_response();
+        }
+--- with
+        let mut busy = state.busy_sessions.lock().await;
+        if !busy.insert(id.clone()) {
+            drop(busy);
+            // Named when this process runs it and the caller may see it (a
+            // paused run a closed page left), so it can be continued or
+            // stopped.
+            let mut refusal = json!({"error": "session already has an active run"});
+            if let Some(active) = session_active_run(&state, &headers, &session_store, &id).await {
+                refusal["active_run"] = active;
+            }
+            return (StatusCode::CONFLICT, Json(refusal)).into_response();
+        }
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+/// Continue a run paused on its time budget. The same execution carries on
+--- with
+/// The turn of session `id` this process is running, as `{id, status}`, if
+/// the caller may see that run: a run paused on its time budget or waiting
+/// on an approval stays reachable from its session after the page that
+/// started it is gone. A journal another process wrote names no run here.
+async fn session_active_run(
+    state: &AppState,
+    headers: &HeaderMap,
+    sessions: &SessionStore,
+    id: &SessionId,
+) -> Option<serde_json::Value> {
+    let run_id = sessions.journaled_run(id)?;
+    let (run, _) = authorized_run(state, headers, &run_id, Scope::RunsRead)
+        .await
+        .ok()?;
+    let status = run.status().await;
+    if status.is_terminal() {
+        return None;
+    }
+    Some(json!({ "id": run.id(), "status": status }))
+}
+
+/// Continue a run paused on its time budget. The same execution carries on
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+    if let Some(user) = user {
+        return match user.sessions(&state).load(&id) {
+            Ok(session) if user.owns(&session) => Json(session).into_response(),
+            _ => no_session(),
+        };
+    }
+    match state.sessions.load(&id) {
+        Ok(session) => Json(session).into_response(),
+--- with
+    if let Some(user) = user {
+        let sessions = user.sessions(&state);
+        return match sessions.load(&id) {
+            Ok(session) if user.owns(&session) => {
+                session_view(&state, &headers, &sessions, &id, session).await
+            }
+            _ => no_session(),
+        };
+    }
+    match state.sessions.load(&id) {
+        Ok(session) => session_view(&state, &headers, &state.sessions, &id, session).await,
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+/// Fields that can be changed from the session sidebar. `project: null` clears
+--- with
+/// A saved session as `GET /sessions/{id}` shows it: with `active_run` while
+/// this process runs one of its turns that the caller may see.
+async fn session_view(
+    state: &AppState,
+    headers: &HeaderMap,
+    sessions: &SessionStore,
+    id: &SessionId,
+    session: Session,
+) -> Response {
+    let Some(active) = session_active_run(state, headers, sessions, id).await else {
+        return Json(session).into_response();
+    };
+    match serde_json::to_value(&session) {
+        Ok(mut view) => {
+            if let Some(fields) = view.as_object_mut() {
+                fields.insert("active_run".to_owned(), active);
+            }
+            Json(view).into_response()
+        }
+        Err(error) => internal(&error.to_string()),
+    }
+}
+
+/// Fields that can be changed from the session sidebar. `project: null` clears
+=== replace crates/lightagent/tests/desktop_continue.rs
+--- find
+#[test]
+fn a_paused_run_can_be_cancelled_and_runs_that_did_not_ask_wrap_up() {
+--- with
+#[test]
+fn a_paused_run_is_found_from_its_session_and_resumes_once() {
+    let (runtime, bodies) = setup("found");
+    let session = new_session(&runtime);
+    let run = start_run(&runtime, &session, true);
+    wait_until("the run to pause", || {
+        run_info(&runtime, &run)["status"] == "awaiting_continue"
+    });
+    let session_path = format!("/api/lightagent/v1/sessions/{session}");
+
+    // A client that lost the page finds the paused run from its session: on
+    // the session itself, and on the refusal of a new turn.
+    let (status, raw) = call(&runtime, "GET", &session_path, None);
+    assert_eq!(status, 200, "{raw}");
+    let saved: Value = serde_json::from_str(&raw).expect("session JSON");
+    assert_eq!(saved["active_run"]["id"], run.as_str(), "{saved}");
+    assert_eq!(saved["active_run"]["status"], "awaiting_continue", "{saved}");
+    let body = json!({ "message": "Something else.", "session_id": session }).to_string();
+    let (status, raw) = call(&runtime, "POST", "/api/lightagent/v1/runs", Some(&body));
+    assert_eq!(status, 409, "{raw}");
+    let refused: Value = serde_json::from_str(&raw).expect("refusal JSON");
+    assert_eq!(refused["active_run"]["id"], run.as_str(), "{refused}");
+
+    // A mode the API does not define is refused; the run stays paused.
+    let (status, raw) = continue_run(&runtime, &run, "forever");
+    assert!(
+        (400..500).contains(&status) && status != 409,
+        "{status}: {raw}"
+    );
+    assert_eq!(run_info(&runtime, &run)["status"], "awaiting_continue");
+
+    // Two clients continue at once: exactly one resumes the run.
+    let mut both: Vec<u16> = std::thread::scope(|scope| {
+        let first = scope.spawn(|| continue_run(&runtime, &run, "extend").0);
+        let second = scope.spawn(|| continue_run(&runtime, &run, "extend").0);
+        vec![
+            first.join().expect("first continue"),
+            second.join().expect("second continue"),
+        ]
+    });
+    both.sort_unstable();
+    assert_eq!(both, vec![200, 409]);
+    wait_until("the run to finish", || {
+        run_info(&runtime, &run)["status"] == "completed"
+    });
+    assert_eq!(
+        bodies.lock().expect("bodies").len(),
+        2,
+        "the paused run was resumed exactly once"
+    );
+
+    // Finished, it is no longer named on its session.
+    let (status, raw) = call(&runtime, "GET", &session_path, None);
+    assert_eq!(status, 200, "{raw}");
+    let saved: Value = serde_json::from_str(&raw).expect("session JSON");
+    assert!(saved.get("active_run").is_none(), "{saved}");
+}
+
+#[test]
+fn a_paused_run_can_be_cancelled_and_runs_that_did_not_ask_wrap_up() {
+=== replace frontend/src/api/agent.ts
+--- find
+  approvals_unrestricted: boolean;
+  runs: SessionRun[];
+}
+--- with
+  approvals_unrestricted: boolean;
+  runs: SessionRun[];
+  /** A turn the server is running (or holding paused) that the caller may see. */
+  active_run?: { id: string; status: string };
+}
+=== replace frontend/src/screens/Agent.tsx
+--- find
+      const loaded = await agentApi.session(id);
+      if (selected.current === id && generation === loadGeneration.current) {
+        setSession(loaded);
+        setError(null);
+      }
+--- with
+      const loaded = await agentApi.session(id);
+      if (selected.current === id && generation === loadGeneration.current) {
+        setSession(loaded);
+        setError(null);
+        // A turn this page is not following (paused, or waiting on an
+        // approval, when an earlier page closed): follow it, so its card
+        // comes back with its controls.
+        const active = loaded.active_run;
+        if (active) {
+          backgroundRuns.current.set(id, active.id);
+          setRunId(active.id);
+        }
+      }
+=== replace frontend/src/screens/Agent.tsx
+--- find
+      setDraft(message);
+      setError(cause instanceof Error ? cause.message : String(cause));
+--- with
+      setDraft(message);
+      const text = cause instanceof Error ? cause.message : String(cause);
+      setError(text);
+      // The session already has a turn this page is not following (a paused
+      // run a closed page left): follow it, so it can be continued or stopped.
+      if (activeId && text.startsWith("409: session already has an active run")) {
+        const active = await agentApi.session(activeId).then((loaded) => loaded.active_run).catch(() => undefined);
+        if (active && selected.current === activeId) {
+          backgroundRuns.current.set(activeId, active.id);
+          setRunId(active.id);
+          setError("This conversation already has a run in progress. Continue, answer or stop it, then send again.");
+        }
+      }
+=== replace e2e/runs.mjs
+--- find
+    finish(run, "Second steer done.");
+  },
+];
+--- with
+    finish(run, "Second steer done.");
+  },
+  // Paused again; the page is reloaded and must find it from its session.
+  (run) => {
+    push(run, "run.started", { run: run.id, parent: null });
+    push(run, "tool.requested", { id: "call_d", name: "datetime.now", arguments: "{}" });
+    push(run, "tool.started", { id: "call_d", name: "datetime.now" });
+    push(run, "tool.output", { id: "call_d", is_error: false, content: "12:01" });
+    push(run, "run.paused", { reason: "time_budget", elapsed_secs: 1 });
+    run.status = "awaiting_continue";
+  },
+];
+=== replace e2e/runs.mjs
+--- find
+        redirect: "manual",
+      });
+--- with
+        redirect: "manual",
+      });
+      // The session as the server shows it while one of its turns is paused:
+      // with `active_run`, which a page that lost the run follows.
+      const paused = [...runs.values()].find((candidate) => candidate.status === "awaiting_continue");
+      if (paused && request.method === "GET" && parts[0] === "sessions" && parts.length === 2 && upstream.ok) {
+        const view = await upstream.json();
+        record.found.push(paused.id);
+        return json(200, { ...view, active_run: { id: paused.id, status: paused.status } });
+      }
+=== replace e2e/runs.mjs
+--- find
+  const record = { created: [], approvals: [], cancels: [], continues: [] };
+--- with
+  const record = { created: [], approvals: [], cancels: [], continues: [], found: [] };
+=== replace e2e/runs.mjs
+--- find
+    const notPausing = record.created.filter((created) => created.on_time_budget !== "pause");
+--- with
+    await step("a paused run survives a reload", async () => {
+      if (!(await idle())) throw new Error("the steers did not finish");
+      await send("Look up the time again.");
+      if (!(await until(async () => (await pausedCard.count()) === 1))) throw new Error("no card for the second paused run");
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await composer.waitFor({ timeout: 15000 });
+      if (!(await until(async () => (await pausedCard.count()) === 1, 5000))) {
+        await page.getByText(title, { exact: true }).first().click({ timeout: 15000 });
+      }
+      if (!(await until(async () => (await pausedCard.count()) === 1))) throw new Error("the reloaded page did not find the paused run");
+      await page.screenshot({ path: `${dir}/paused-after-reload.png` });
+      if (record.created.length !== 8) throw new Error(`the reload created runs (${record.created.length} created)`);
+      await pausedCard.getByRole("button", { name: "Answer now" }).click({ timeout: 10000 });
+      if (!(await until(() => record.continues.length === 2))) throw new Error("Answer now sent nothing");
+      const sent = record.continues[1];
+      if (sent.mode !== "answer" || sent.run !== proxy.run(7)?.id) throw new Error(`Answer now sent ${JSON.stringify(sent)}`);
+      if (!(await idle())) throw new Error("the answered run did not finish");
+    });
+
+    const notPausing = record.created.filter((created) => created.on_time_budget !== "pause");
+=== end
