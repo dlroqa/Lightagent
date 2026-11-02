@@ -266,6 +266,19 @@ impl RunFactory for LightweightRunFactory {
         serde_json::to_value(check).map_err(|error| error.to_string())
     }
 
+    async fn check_endpoint(
+        &self,
+        base_url: String,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let config = ConfigStore::at(&paths)
+            .load()
+            .map_err(|error| error.to_string())?;
+        let check = crate::providers::check_endpoint(&config, &base_url, timeout).await;
+        serde_json::to_value(check).map_err(|error| error.to_string())
+    }
+
     async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
         let paths = LightagentPaths::rooted_at(&self.root);
         let config = ConfigStore::at(&paths)

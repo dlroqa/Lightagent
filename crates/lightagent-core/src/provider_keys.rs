@@ -10,7 +10,8 @@ use crate::paths::{self, LightagentPaths};
 /// The local Lightweight endpoint's provider id.
 pub const LOCAL_PROVIDER_ID: &str = "lightweight-local";
 
-const LOCAL_URL: &str = "http://127.0.0.1:11434";
+/// The local Lightweight endpoint's URL.
+pub const LOCAL_URL: &str = "http://127.0.0.1:11434";
 
 /// A filename-safe provider id from a provider's name: lowercase ASCII
 /// letters and digits, with anything else as `-`.
@@ -33,7 +34,8 @@ pub fn key_id(name: &str) -> String {
     }
 }
 
-fn same_url(left: &str, right: &str) -> bool {
+/// Whether two URLs name the same endpoint (a trailing `/` aside).
+pub(crate) fn same_url(left: &str, right: &str) -> bool {
     left.trim_end_matches('/') == right.trim_end_matches('/')
 }
 

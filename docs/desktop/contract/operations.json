@@ -59,6 +59,46 @@
    "path": "/api/lightagent/v1/provider/credential"
   },
   {
+   "id": "provider.active.set",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/provider/active"
+  },
+  {
+   "id": "provider.model.set",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/provider/model"
+  },
+  {
+   "id": "providers.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/providers"
+  },
+  {
+   "id": "providers.create",
+   "method": "POST",
+   "path": "/api/lightagent/v1/providers"
+  },
+  {
+   "id": "providers.get",
+   "method": "GET",
+   "path": "/api/lightagent/v1/providers/{id}"
+  },
+  {
+   "id": "providers.update",
+   "method": "PATCH",
+   "path": "/api/lightagent/v1/providers/{id}"
+  },
+  {
+   "id": "providers.remove",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/providers/{id}"
+  },
+  {
+   "id": "providers.check",
+   "method": "POST",
+   "path": "/api/lightagent/v1/providers/{id}/check"
+  },
+  {
    "id": "skills.list",
    "method": "GET",
    "path": "/api/lightagent/v1/skills"

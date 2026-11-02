@@ -35,6 +35,7 @@ pub mod profile;
 pub mod provider;
 pub mod provider_keys;
 pub mod provisioning;
+pub mod saved_providers;
 pub mod skills;
 pub mod tool_stream;
 pub mod workers;
