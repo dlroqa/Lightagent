@@ -317,6 +317,13 @@ const LOCK_FILE: &str = ".lock";
 /// `.json` file, so a listing or a search never reads it as a session.
 const RUNS_DIR: &str = ".runs";
 
+/// How long taking a run lease retries before the session is busy. On Linux
+/// a released lease can read as held for an instant, while a child another
+/// thread is starting still has a copy of the lock file open (until its
+/// exec closes it). A turn that holds the lease is never waited for beyond
+/// this.
+const RUN_LEASE_GRACE: Duration = Duration::from_millis(500);
+
 /// The right to run one turn on a session, held across processes: an
 /// exclusive OS lock on the session's lease file. Dropping it, or the end of
 /// the holder's process (a crash included), releases it. It is separate from
@@ -522,10 +529,11 @@ impl SessionStore {
         })
     }
 
-    /// Take session `id`'s run lease without waiting. A turn running on it in
-    /// any process that shares this store (the desktop runtime, another
-    /// server, a terminal chat, an editor over ACP) refuses this one with
-    /// [`StoreError::Busy`]; it never queues behind it.
+    /// Take session `id`'s run lease. A turn running on it in any process
+    /// that shares this store (the desktop runtime, another server, a
+    /// terminal chat, an editor over ACP) refuses this one with
+    /// [`StoreError::Busy`] after at most [`RUN_LEASE_GRACE`]; it never
+    /// queues behind that turn.
     pub fn lease_run(&self, id: &SessionId) -> Result<RunLease, StoreError> {
         let directory = self.directory.join(RUNS_DIR);
         paths::create_private_dir(&directory).map_err(|err| StoreError::Directory {
@@ -533,7 +541,7 @@ impl SessionStore {
             reason: err.to_string(),
         })?;
         let path = directory.join(format!("{}.lock", id.as_str()));
-        match paths::lock_exclusive(&path, Duration::ZERO) {
+        match paths::lock_exclusive(&path, RUN_LEASE_GRACE) {
             Ok(file) => Ok(RunLease { _file: file }),
             Err(paths::LockError::Busy) => Err(StoreError::Busy { path: directory }),
             Err(paths::LockError::Io(err)) => Err(StoreError::Directory {
