@@ -1,0 +1,16 @@
+=== base d7a4491cce6ce62bc454e4a3506e4d052ccb1f56
+=== message
+D6-5: the tools-recovery render check matches the catalog with its query
+
+The Tools screen now asks for `/tools?mcp=skip`; the check's glob matched
+only the bare path, so its simulated failure never applied (check run
+41498996321). A regular expression matches the path with or without a
+query.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace e2e/render.mjs
+--- find
+      const endpoint = "**/api/lightagent/v1/tools";
+--- with
+      const endpoint = /\/api\/lightagent\/v1\/tools(\?.*)?$/;
+=== end
