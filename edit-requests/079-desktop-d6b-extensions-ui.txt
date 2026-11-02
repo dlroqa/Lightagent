@@ -1,0 +1,686 @@
+=== base 63f1fba2d1f19680887f6f800c8383185a58fecb
+=== message
+D6-2: the Extensions card on the Tools screen, through the shared operations
+
+The shared Web UI (and so the desktop) can now list, inspect, install,
+enable, disable and uninstall extensions, through the row 26 operations.
+
+- Each extension shows its scope (every profile or this profile), whether
+  it is active, and how many MCP servers it brings. Details shows its
+  folder, where it was installed from (folder, or repository and commit),
+  its skills, and what each MCP server would run or reach. Only the names
+  of environment variables and headers are shown, never their values.
+- Install takes an absolute folder or an https:// Git URL, for every
+  profile or this profile. "Turn MCP on" starts unchecked: an install runs
+  nothing, and the servers can be reviewed first. A refused source is
+  explained under its field.
+- Uninstall asks first (Confirm / Keep). Disable keeps the extension
+  installed.
+- Browser evidence (e2e/extensions.mjs, real harness): a relative source
+  is refused under its field; install leaves MCP off and records the
+  source; Details shows the command and the variable name and the value is
+  nowhere in the page or its storage; Disable and Enable from the keyboard;
+  Keep, then Confirm, uninstall. Host evidence (desktop/e2e/runs.py
+  `extensions`): the same operations through the host transport, with the
+  CLI seeing each change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace frontend/src/api/agent.ts
+--- find
+export interface SkillInfo {
+  name: string;
+  description: string;
+}
+--- with
+export interface SkillInfo {
+  name: string;
+  description: string;
+}
+
+/** Where an extension is installed: every profile's root, or the active profile's. */
+export type ExtensionScope = "global" | "profile";
+
+export interface ExtensionSummary {
+  name: string;
+  version: string;
+  description: string;
+  active: boolean;
+  scope: ExtensionScope;
+  skills_dir: string;
+  mcp_servers: string[];
+}
+
+export interface ExtensionListing {
+  /** The master switch, `extensions.enabled`. */
+  enabled: boolean;
+  extensions: ExtensionSummary[];
+}
+
+/** Where an install came from, as it was recorded. */
+export type ExtensionSource =
+  | { kind: "local"; path: string }
+  | { kind: "git"; url: string; subdir: string; revision: string };
+
+/** What an MCP server would run or reach. Environment and header values are never sent. */
+export type ExtensionMcpServer =
+  | { transport: "stdio"; name: string; command: string; args: string[]; env: string[] }
+  | { transport: "http"; name: string; url: string; headers: string[]; auth: boolean };
+
+export interface ExtensionDetail {
+  name: string;
+  version: string;
+  description: string;
+  active: boolean;
+  scope: ExtensionScope;
+  dir: string;
+  instructions: string;
+  mcp_servers: string[];
+  mcp: ExtensionMcpServer[];
+  skills: string[];
+  source: ExtensionSource | null;
+  mcp_enabled: boolean;
+}
+
+export interface ExtensionInstalled {
+  name: string;
+  dir: string;
+  scope: ExtensionScope;
+  mcp_servers: string[];
+  active: boolean;
+  mcp_enabled: boolean;
+  source: ExtensionSource;
+}
+=== replace frontend/src/api/agent.ts
+--- find
+  skills: () => jsonRequest<{ skills: SkillInfo[] }>("/skills"),
+--- with
+  skills: () => jsonRequest<{ skills: SkillInfo[] }>("/skills"),
+  /** `lightagent extensions list|show|install|enable|disable|uninstall`, the same operations. */
+  extensions: () => jsonRequest<ExtensionListing>("/extensions"),
+  extension: (name: string) =>
+    jsonRequest<ExtensionDetail>(`/extensions/${encodeURIComponent(name)}`),
+  installExtension: (source: string, scope: ExtensionScope, activateMcp: boolean) =>
+    jsonRequest<ExtensionInstalled>("/extensions", {
+      method: "POST",
+      body: JSON.stringify({ source, scope, activate_mcp: activateMcp }),
+    }),
+  setExtensionEnabled: (name: string, enabled: boolean) =>
+    jsonRequest<{ name: string; active: boolean; extensions_enabled: boolean }>(
+      `/extensions/${encodeURIComponent(name)}/enabled`,
+      { method: "PUT", body: JSON.stringify({ enabled }) },
+    ),
+  uninstallExtension: (name: string, scope: ExtensionScope) =>
+    jsonRequest<{ name: string; removed_from: string }>(
+      `/extensions/${encodeURIComponent(name)}?scope=${scope}`,
+      { method: "DELETE" },
+    ),
+=== write frontend/src/components/Extensions.tsx
+import { useEffect, useState } from "react";
+
+import {
+  agentApi,
+  type ExtensionDetail,
+  type ExtensionListing,
+  type ExtensionMcpServer,
+  type ExtensionScope,
+} from "../api/agent";
+import { Empty, Pill } from "./Bits";
+import { Card } from "./Card";
+
+function errorText(cause: unknown): string {
+  return (cause instanceof Error ? cause.message : String(cause)).replace(/^\d{3}:\s*/, "");
+}
+
+function statusOf(cause: unknown): number | null {
+  const match = /^(\d{3}):/.exec(cause instanceof Error ? cause.message : String(cause));
+  return match ? Number(match[1]) : null;
+}
+
+const SCOPE: Record<ExtensionScope, { label: string; tone: "info" | "accent" }> = {
+  global: { label: "Every profile", tone: "info" },
+  profile: { label: "This profile", tone: "accent" },
+};
+
+function servers(count: number): string {
+  return `${count} MCP server${count === 1 ? "" : "s"}`;
+}
+
+/** What one MCP server would run or reach; only the names of its environment and headers. */
+function McpServerLine({ server }: { server: ExtensionMcpServer }) {
+  if (server.transport === "stdio") {
+    return (
+      <li>
+        <strong>{server.name}</strong> runs{" "}
+        <code style={{ overflowWrap: "anywhere" }}>{[server.command, ...server.args].join(" ")}</code>
+        {server.env.length > 0 && (
+          <span className="muted"> · environment: {server.env.join(", ")} (values hidden)</span>
+        )}
+      </li>
+    );
+  }
+  return (
+    <li>
+      <strong>{server.name}</strong> connects to <code style={{ overflowWrap: "anywhere" }}>{server.url}</code>
+      {server.headers.length > 0 && (
+        <span className="muted"> · headers: {server.headers.join(", ")} (values hidden)</span>
+      )}
+      {server.auth && <span className="muted"> · sends a saved credential</span>}
+    </li>
+  );
+}
+
+function Details({ detail }: { detail: ExtensionDetail }) {
+  const source = detail.source;
+  const from = !source
+    ? "Not recorded (placed by hand or by an earlier version)"
+    : source.kind === "local"
+      ? `The folder ${source.path}`
+      : `${source.url}${source.subdir ? ` (folder ${source.subdir})` : ""} at commit ${source.revision.slice(0, 12)}`;
+  const row = { margin: 0, overflowWrap: "anywhere" as const };
+  return (
+    <dl style={{ margin: "8px 0 0", display: "grid", gap: 8 }}>
+      <div>
+        <dt className="field__label">Folder</dt>
+        <dd className="muted" style={row}>{detail.dir}</dd>
+      </div>
+      <div>
+        <dt className="field__label">Installed from</dt>
+        <dd className="muted" style={row}>{from}</dd>
+      </div>
+      <div>
+        <dt className="field__label">Skills</dt>
+        <dd className="muted" style={row}>{detail.skills.length ? detail.skills.join(", ") : "None"}</dd>
+      </div>
+      <div>
+        <dt className="field__label">MCP servers</dt>
+        <dd style={row}>
+          {detail.mcp.length === 0 ? (
+            <span className="muted">None</span>
+          ) : (
+            <>
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                {detail.mcp.map((server) => <McpServerLine key={server.name} server={server} />)}
+              </ul>
+              <p className="muted" style={{ margin: "4px 0 0" }}>
+                {detail.mcp_enabled
+                  ? "MCP is on: these servers can run during agent runs, and each tool call follows the approval policy."
+                  : "MCP is off, so these servers do not run."}
+              </p>
+            </>
+          )}
+        </dd>
+      </div>
+      {detail.instructions.trim() && (
+        <div>
+          <dt className="field__label">Instructions</dt>
+          <dd className="muted" style={{ ...row, whiteSpace: "pre-wrap" }}>{detail.instructions.trim()}</dd>
+        </div>
+      )}
+    </dl>
+  );
+}
+
+/**
+ * Extensions, through the operations `lightagent extensions` shares: list,
+ * details, install, enable or disable, and uninstall. Installing copies a
+ * folder and runs nothing; MCP is switched on only when asked.
+ */
+export function ExtensionsCard() {
+  const [listing, setListing] = useState<ExtensionListing | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
+  const [detail, setDetail] = useState<ExtensionDetail | null>(null);
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  const [source, setSource] = useState("");
+  const [scope, setScope] = useState<ExtensionScope>("global");
+  const [activateMcp, setActivateMcp] = useState(false);
+  const [sourceError, setSourceError] = useState<string | null>(null);
+
+  async function load() {
+    try {
+      setListing(await agentApi.extensions());
+      setLoadError(null);
+    } catch (cause) {
+      setLoadError(errorText(cause));
+    }
+  }
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  /** One change; the list is reloaded afterwards whatever happened. */
+  async function act(action: () => Promise<string>) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      setMessage(await action());
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      await load();
+      setBusy(false);
+    }
+  }
+
+  async function toggleDetails(name: string) {
+    if (open === name) {
+      setOpen(null);
+      return;
+    }
+    setOpen(name);
+    setDetail(null);
+    try {
+      setDetail(await agentApi.extension(name));
+    } catch (cause) {
+      setError(errorText(cause));
+    }
+  }
+
+  async function install() {
+    const value = source.trim();
+    if (!value || busy) return;
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    setSourceError(null);
+    try {
+      const installed = await agentApi.installExtension(value, scope, activateMcp);
+      const count = installed.mcp_servers.length;
+      const mcp = count === 0
+        ? ""
+        : installed.mcp_enabled
+          ? ` MCP is on: its ${servers(count)} can run during agent runs.`
+          : ` Its ${servers(count)} do not run while MCP is off; review them in Details.`;
+      setMessage(`Installed ${installed.name} for ${installed.scope === "profile" ? "this profile" : "every profile"}.${mcp}`);
+      setSource("");
+      setActivateMcp(false);
+    } catch (cause) {
+      const status = statusOf(cause);
+      if (status === 400 || status === 409 || status === 502) setSourceError(errorText(cause));
+      else setError(errorText(cause));
+    } finally {
+      await load();
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card title="Extensions">
+      <div data-testid="extensions-card">
+        <p className="card__note">
+          Shared with the terminal CLI (lightagent extensions). An extension adds skills, instructions and MCP
+          servers. Installing one copies its folder and runs nothing.
+        </p>
+        {loadError && (
+          <div className="notice notice--warn" role="alert">
+            Extensions are unavailable: {loadError}{" "}
+            <button type="button" className="btn" onClick={() => void load()}>Retry</button>
+          </div>
+        )}
+        {listing && !listing.enabled && (
+          <div className="notice notice--warn" role="status">
+            Extensions are off for every profile (extensions.enabled), so none of them is used.
+          </div>
+        )}
+        {error && <div className="notice notice--warn" role="alert">{error}</div>}
+        {message && <div className="notice notice--info" role="status">{message}</div>}
+        {!listing && !loadError && <span className="muted">Loading extensions…</span>}
+        {listing && listing.extensions.length === 0 && (
+          <Empty title="No extensions installed" hint="Install one below from a folder or an https:// Git repository." />
+        )}
+        {listing && listing.extensions.length > 0 && (
+          <ul style={{ listStyle: "none", padding: 0, margin: "8px 0", display: "grid", gap: 12 }}>
+            {listing.extensions.map((ext) => {
+              const scopeBadge = SCOPE[ext.scope] ?? { label: ext.scope, tone: "info" as const };
+              const detailId = `extension-detail-${ext.name}`;
+              return (
+                <li key={ext.name} data-testid={`extension-${ext.name}`} style={{ minWidth: 0 }}>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                    <strong>{ext.name}</strong>
+                    {ext.version && <span className="muted">{ext.version}</span>}
+                    <Pill tone={scopeBadge.tone}>{scopeBadge.label}</Pill>
+                    <Pill tone={ext.active ? "ok" : "neutral"}>{ext.active ? "Active" : "Inactive"}</Pill>
+                    {ext.mcp_servers.length > 0 && <Pill tone="warn">{servers(ext.mcp_servers.length)}</Pill>}
+                  </div>
+                  {ext.description && <div className="muted">{ext.description}</div>}
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                    <button type="button" className="btn" aria-expanded={open === ext.name}
+                      aria-controls={detailId} aria-label={`Details for ${ext.name}`}
+                      onClick={() => void toggleDetails(ext.name)}>
+                      {open === ext.name ? "Hide details" : "Details"}
+                    </button>
+                    {confirmRemove !== ext.name ? (
+                      <>
+                        <button type="button" className="btn" disabled={busy}
+                          aria-label={`${ext.active ? "Disable" : "Enable"} ${ext.name}`}
+                          onClick={() => void act(async () => {
+                            const result = await agentApi.setExtensionEnabled(ext.name, !ext.active);
+                            if (ext.active) return `Disabled ${ext.name}; it stays installed.`;
+                            return result.extensions_enabled
+                              ? `Enabled ${ext.name}.`
+                              : `Enabled ${ext.name}, but extensions are off for every profile.`;
+                          })}>
+                          {ext.active ? "Disable" : "Enable"}
+                        </button>
+                        <button type="button" className="btn" disabled={busy} aria-label={`Uninstall ${ext.name}`}
+                          onClick={() => setConfirmRemove(ext.name)}>
+                          Uninstall
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button type="button" className="btn btn--danger" disabled={busy} aria-busy={busy || undefined}
+                          onClick={() => void act(async () => {
+                            const removed = await agentApi.uninstallExtension(ext.name, ext.scope);
+                            setConfirmRemove(null);
+                            if (open === ext.name) setOpen(null);
+                            return `Uninstalled ${ext.name} from ${removed.removed_from}.`;
+                          })}>
+                          {`Confirm: uninstall ${ext.name}`}
+                        </button>
+                        <button type="button" className="btn" disabled={busy} onClick={() => setConfirmRemove(null)}>
+                          {`Keep ${ext.name}`}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                  {confirmRemove === ext.name && (
+                    <p className="muted" style={{ margin: "6px 0 0" }}>
+                      Deletes its installed folder. Its skills, instructions and MCP servers are gone from the next
+                      run.
+                    </p>
+                  )}
+                  {open === ext.name && (
+                    <div id={detailId} role="region" aria-label={`Details of ${ext.name}`}>
+                      {detail && detail.name === ext.name
+                        ? <Details detail={detail} />
+                        : <span className="muted">Loading details…</span>}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+
+        <fieldset style={{ border: 0, padding: 0, margin: "16px 0 0", minWidth: 0 }}>
+          <legend className="field__label">Install an extension</legend>
+          <div className="field">
+            <label className="field__label" htmlFor="extension-source">Folder or Git URL</label>
+            <input id="extension-source" className="input" value={source} spellCheck={false} disabled={busy}
+              placeholder="/path/to/extension or https://host/repo.git#folder"
+              aria-describedby="extension-source-help" aria-invalid={sourceError ? true : undefined}
+              onChange={(event) => {
+                setSource(event.target.value);
+                setSourceError(null);
+              }} />
+            <p id="extension-source-help" className="muted" style={{ margin: "4px 0 0" }}>
+              An absolute folder on this computer, or an https:// Git repository (add #folder for a folder in it).
+              The commit installed is recorded.
+            </p>
+            {sourceError && (
+              <div role="alert" style={{ fontSize: 11.5, color: "var(--danger)", marginTop: 4 }}>{sourceError}</div>
+            )}
+          </div>
+          <fieldset style={{ border: 0, padding: 0, margin: "10px 0 0", minWidth: 0 }}>
+            <legend className="field__label">Install for</legend>
+            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input type="radio" name="extension-scope" checked={scope === "global"} disabled={busy}
+                onChange={() => setScope("global")} />
+              Every profile
+            </label>
+            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input type="radio" name="extension-scope" checked={scope === "profile"} disabled={busy}
+                onChange={() => setScope("profile")} />
+              This profile only
+            </label>
+          </fieldset>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10 }}>
+            <input type="checkbox" checked={activateMcp} disabled={busy}
+              aria-describedby="extension-mcp-help" onChange={(event) => setActivateMcp(event.target.checked)} />
+            Turn MCP on if it brings MCP servers
+          </label>
+          <p id="extension-mcp-help" className="muted" style={{ margin: "4px 0 0" }}>
+            Off by default. With MCP on, every configured MCP server can run during agent runs; leave it off to
+            review the servers in Details first.
+          </p>
+          <button type="button" className="btn" style={{ marginTop: 10 }} disabled={busy || !source.trim()}
+            aria-busy={busy || undefined} onClick={() => void install()}>
+            Install
+          </button>
+        </fieldset>
+      </div>
+    </Card>
+  );
+}
+=== replace frontend/src/screens/AgentTools.tsx
+--- find
+import { JevToolCard } from "../components/Jev";
+--- with
+import { ExtensionsCard } from "../components/Extensions";
+import { JevToolCard } from "../components/Jev";
+=== replace frontend/src/screens/AgentTools.tsx
+--- find
+        <Card title="Specialists">
+--- with
+        <ExtensionsCard />
+        <Card title="Specialists">
+=== write e2e/extensions.mjs
+// The Extensions card on the Tools screen against the real harness (D6-2):
+// an unusable source is refused under its field; a folder installs with MCP
+// left off and its source recorded; Details shows what its MCP server would
+// run and never an environment value; Disable and Enable work from the
+// keyboard; Uninstall asks first. crates/lightagent/tests/desktop_extensions.rs
+// proves the API's changes are the CLI's.
+
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const NAME = "render-probe-extension";
+const SECRET = "render-extension-env-4f1c9a-not-a-real-value";
+
+async function api(base, path) {
+  const response = await fetch(`${base}/api/lightagent/v1${path}`);
+  return { status: response.status, body: await response.json() };
+}
+
+async function installed(base) {
+  const { body } = await api(base, "/extensions");
+  return (body.extensions ?? []).find((ext) => ext.name === NAME) ?? null;
+}
+
+async function until(probe, timeout = 15000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (await probe()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  return Boolean(await probe());
+}
+
+export async function checkExtensions(browser, base, outDir) {
+  const failures = [];
+  const dir = await mkdtemp(join(tmpdir(), "lightagent-render-extension-"));
+  const bundle = join(dir, NAME);
+  await mkdir(join(bundle, "skills", "greet"), { recursive: true });
+  await writeFile(join(bundle, "extension.json"), JSON.stringify({
+    name: NAME,
+    version: "1.0.0",
+    description: "Render probe",
+    mcp_servers: [{ transport: "stdio", name: "probe", command: "probe-server", args: ["--quiet"], env: { TOKEN: SECRET } }],
+  }));
+  await writeFile(join(bundle, "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hello\n---\nSay hello.\n");
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1100 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const card = page.getByTestId("extensions-card");
+  const source = page.locator("#extension-source");
+  const install = card.getByRole("button", { name: "Install", exact: true });
+  const row = page.getByTestId(`extension-${NAME}`);
+  const step = async (name, body) => {
+    try {
+      await body();
+    } catch (err) {
+      failures.push(`extensions: ${name}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+      await page.screenshot({ path: `${outDir}/extensions-failed-${name.replace(/\W+/g, "-")}.png` }).catch(() => {});
+    }
+  };
+  try {
+    await page.goto(`${base}/#/tools`);
+    await card.waitFor({ timeout: 15000 });
+    if (await installed(base)) throw new Error(`${NAME} is installed before the check`);
+
+    await step("a relative source is refused under its field", async () => {
+      await source.fill("relative/folder");
+      await install.click();
+      await card.getByRole("alert").filter({ hasText: "absolute folder path" }).first().waitFor({ timeout: 10000 });
+      if (await installed(base)) throw new Error("something was installed");
+    });
+
+    await step("install leaves MCP off", async () => {
+      await source.fill(bundle);
+      if (await card.getByRole("checkbox", { name: /Turn MCP on/ }).isChecked()) {
+        throw new Error("the MCP opt-in starts checked");
+      }
+      await install.click();
+      await card.getByRole("status").filter({ hasText: `Installed ${NAME}` }).first().waitFor({ timeout: 20000 });
+      await row.waitFor({ timeout: 10000 });
+      const { body: detail } = await api(base, `/extensions/${NAME}`);
+      if (detail.active !== true) throw new Error(`not active after the install: ${JSON.stringify(detail)}`);
+      if (detail.mcp_enabled !== false) throw new Error("the install switched MCP on");
+      if (detail.source?.kind !== "local") throw new Error(`the source was not recorded: ${JSON.stringify(detail.source)}`);
+      await page.screenshot({ path: `${outDir}/extensions-installed.png` });
+    });
+
+    await step("details show the server, never its environment value", async () => {
+      await row.getByRole("button", { name: `Details for ${NAME}` }).click();
+      const region = page.getByRole("region", { name: `Details of ${NAME}` });
+      await region.getByText("probe-server --quiet").waitFor({ timeout: 10000 });
+      if (!(await region.innerText()).includes("TOKEN")) throw new Error("the environment variable's name is not shown");
+      const everything = await page.evaluate(() =>
+        document.documentElement.outerHTML + JSON.stringify(localStorage) + JSON.stringify(sessionStorage));
+      if (everything.includes(SECRET)) throw new Error("the environment value reached the page");
+      await page.screenshot({ path: `${outDir}/extensions-details.png` });
+    });
+
+    await step("disable and enable from the keyboard", async () => {
+      await row.getByRole("button", { name: `Disable ${NAME}` }).focus();
+      await page.keyboard.press("Enter");
+      if (!(await until(async () => (await installed(base))?.active === false))) throw new Error("Disable did not reach the server");
+      await row.getByText("Inactive", { exact: true }).waitFor({ timeout: 10000 });
+      await row.getByRole("button", { name: `Enable ${NAME}` }).focus();
+      await page.keyboard.press("Enter");
+      if (!(await until(async () => (await installed(base))?.active === true))) throw new Error("Enable did not reach the server");
+    });
+
+    await step("uninstall asks first", async () => {
+      await row.getByRole("button", { name: `Uninstall ${NAME}` }).click();
+      await row.getByRole("button", { name: `Keep ${NAME}` }).click();
+      if (!(await installed(base))) throw new Error("Keep removed it");
+      await row.getByRole("button", { name: `Uninstall ${NAME}` }).click();
+      await page.screenshot({ path: `${outDir}/extensions-confirm.png` });
+      await row.getByRole("button", { name: `Confirm: uninstall ${NAME}` }).click();
+      if (!(await until(async () => (await installed(base)) === null))) throw new Error("Confirm did not uninstall it");
+      await row.waitFor({ state: "detached", timeout: 10000 });
+    });
+
+    if (errors.length) failures.push(`extensions: page errors: ${errors.join("; ")}`);
+  } finally {
+    await page.close();
+    // Leave the harness as it was, even after a failed step.
+    if (await installed(base).catch(() => null)) {
+      await fetch(`${base}/api/lightagent/v1/extensions/${NAME}`, { method: "DELETE" }).catch(() => {});
+    }
+    await rm(dir, { recursive: true, force: true });
+  }
+  return failures;
+}
+=== replace e2e/render.mjs
+--- find
+import { checkSettingsStates } from "./settings.mjs";
+--- with
+import { checkSettingsStates } from "./settings.mjs";
+import { checkExtensions } from "./extensions.mjs";
+=== replace e2e/render.mjs
+--- find
+  // Changes the profile store: after the routes above have rendered.
+--- with
+  // Installs and removes an extension: after the routes above have rendered.
+  try {
+    failures.push(...(await checkExtensions(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`extensions: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Changes the profile store: after the routes above have rendered.
+=== replace desktop/e2e/runs.py
+--- find
+            ("steering", lambda: scenario_steering(host, provider, workspace)),
+--- with
+            ("steering", lambda: scenario_steering(host, provider, workspace)),
+            ("extensions", lambda: scenario_extensions(host, cli)),
+=== replace desktop/e2e/runs.py
+--- find
+def main():
+--- with
+def scenario_extensions(host, cli):
+    """D6 through the host transport: install, list, show, disable, refuse and
+    uninstall an extension; the CLI sees each change; an environment value
+    of its MCP server never crosses the host; MCP stays off unasked."""
+    import shutil
+    import tempfile
+
+    check = Checks("extensions")
+    source = tempfile.mkdtemp(prefix="lightagent-e2e-extension-")
+    bundle = os.path.join(source, "host-probe")
+    secret = "e2e-extension-env-value"
+
+    def cli_list():
+        return json.loads(harness.run_cli(cli, "--json", "extensions", "list"))
+
+    try:
+        os.makedirs(os.path.join(bundle, "skills", "greet"))
+        with open(os.path.join(bundle, "extension.json"), "w", encoding="utf-8") as handle:
+            json.dump({
+                "name": "host-probe", "version": "1.0.0", "description": "Host probe",
+                "mcp_servers": [{"transport": "stdio", "name": "probe", "command": "probe-server",
+                                 "env": {"TOKEN": secret}}],
+            }, handle)
+        with open(os.path.join(bundle, "skills", "greet", "SKILL.md"), "w", encoding="utf-8") as handle:
+            handle.write("---\nname: greet\ndescription: Say hello\n---\nSay hello.\n")
+        status, installed = host.fetch("POST", f"{API}/extensions", {"source": bundle})
+        installed = installed or {}
+        check.expect("installed through the host, MCP left off",
+                     status == 201 and installed.get("name") == "host-probe" and installed.get("mcp_enabled") is False,
+                     (status, installed))
+        status, listed = host.fetch("GET", f"{API}/extensions")
+        check.expect("the host and the CLI list the same", status == 200 and listed == cli_list(), (status, listed))
+        status, shown = host.fetch("GET", f"{API}/extensions/host-probe")
+        commands = [server.get("command") for server in (shown or {}).get("mcp", [])]
+        check.expect("shown with its server's command, never an environment value",
+                     status == 200 and commands == ["probe-server"] and secret not in json.dumps(shown),
+                     (status, shown))
+        status, toggled = host.fetch("PUT", f"{API}/extensions/host-probe/enabled", {"enabled": False})
+        by_cli = [ext.get("active") for ext in cli_list().get("extensions", [])]
+        check.expect("disabled through the host, inactive for the CLI",
+                     status == 200 and (toggled or {}).get("active") is False and by_cli == [False],
+                     (status, toggled, by_cli))
+        status, refused = host.fetch("POST", f"{API}/extensions", {"source": "relative/folder"})
+        check.expect("a relative source is refused", status == 400, (status, refused))
+        status, removed = host.fetch("DELETE", f"{API}/extensions/host-probe")
+        left = cli_list().get("extensions")
+        check.expect("uninstalled through the host, gone for the CLI", status == 200 and left == [],
+                     (status, removed, left))
+    finally:
+        shutil.rmtree(source, ignore_errors=True)
+    return check
+
+
+def main():
+=== end
