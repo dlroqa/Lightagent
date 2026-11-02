@@ -1,0 +1,30 @@
+=== base 88aafcb2e0a84185be5b251304c27f23c76ee49f
+=== message
+D5b: the ACP session's lease is a held guard, never read
+
+The field only holds the lease until the prompt completes; it is named
+`_lease`, as a guard kept for its drop, so it is not reported as a field
+that is never read.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-acp/src/server.rs
+--- find
+    lease: Option<lightagent_store::RunLease>,
+--- with
+    _lease: Option<lightagent_store::RunLease>,
+=== replace crates/lightagent-acp/src/server.rs count=2
+--- find
+lease: None,
+--- with
+_lease: None,
+=== replace crates/lightagent-acp/src/server.rs
+--- find
+                        session.lease = lease;
+--- with
+                        session._lease = lease;
+=== replace crates/lightagent-acp/src/server.rs
+--- find
+            session.lease = None;
+--- with
+            session._lease = None;
+=== end
