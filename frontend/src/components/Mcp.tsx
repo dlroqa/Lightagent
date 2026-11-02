@@ -44,7 +44,8 @@ function Target({ server }: { server: McpServerView }) {
   );
 }
 
-function CheckResult({ check }: { check: McpCheck }) {
+function CheckResult({ check }: { check: McpCheck | undefined }) {
+  if (!check) return null;
   const runs = check.mcp_enabled ? "" : " Agent runs do not use it while MCP is off.";
   if (check.ok) {
     const names = check.tools.length ? check.tools.join(", ") : "no tools";
@@ -298,7 +299,7 @@ export function McpCard() {
                         lists its tools and stops it. It changes no setting.
                       </p>
                     )}
-                    {checks[server.name] && <CheckResult check={checks[server.name]} />}
+                    <CheckResult check={checks[server.name]} />
                   </li>
                 ))}
               </ul>
