@@ -46,7 +46,7 @@ struct Session {
     busy: bool,
     /// The session's run lease while a prompt runs: no other process runs a
     /// turn on this session meanwhile.
-    lease: Option<lightagent_store::RunLease>,
+    _lease: Option<lightagent_store::RunLease>,
     stored: StoredSession,
     store: Option<SessionStore>,
 }
@@ -262,7 +262,7 @@ impl AcpServer {
                             cwd,
                             active: None,
                             busy: false,
-                            lease: None,
+                            _lease: None,
                             stored,
                             store,
                         },
@@ -318,7 +318,7 @@ impl AcpServer {
                         cwd,
                         active: None,
                         busy: false,
-                        lease: None,
+                        _lease: None,
                         stored: stored.clone(),
                         store: Some(store),
                     },
@@ -428,7 +428,7 @@ impl AcpServer {
                         };
                         session.stored = updated;
                         session.busy = true;
-                        session.lease = lease;
+                        session._lease = lease;
                         (session.profile.clone(), session.cwd.clone(), history)
                     }
                     None => {
@@ -568,7 +568,7 @@ impl PromptTask {
             }
             session.active = None;
             session.busy = false;
-            session.lease = None;
+            session._lease = None;
         }
         if let Some(error) = save_error {
             let _ = self.outbound.send(protocol::error(
