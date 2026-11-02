@@ -117,7 +117,7 @@
    "not-applicable": 29
   },
   "parity_denominator": 227,
-  "parity_implemented": 34,
+  "parity_implemented": 53,
   "pending_decision_rows": 0,
   "not_counted_duplicates": 26
  },
@@ -1173,10 +1173,10 @@
    "backend": "extract: extensions::list()",
    "permission": "local-operator",
    "data_scope": "home|profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py extensions; browser: e2e/extensions.mjs (real harness); native WebView: D8",
+   "tested_sha": "c89c9898c3bbbedeb1c05dfec422a0e2ed2a0914",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996, https://github.com/dlroqa/Lightagent/actions/runs/41459281969"
   },
   {
    "id": "cli.extensions.show",
@@ -1195,10 +1195,10 @@
    "backend": "extract: extensions::show()",
    "permission": "local-operator",
    "data_scope": "home|profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py extensions; browser: e2e/extensions.mjs (real harness); native WebView: D8",
+   "tested_sha": "c89c9898c3bbbedeb1c05dfec422a0e2ed2a0914",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996, https://github.com/dlroqa/Lightagent/actions/runs/41459281969"
   },
   {
    "id": "cli.extensions.show.arg.name",
@@ -1217,10 +1217,10 @@
    "backend": "extract: extensions::show()",
    "permission": "local-operator",
    "data_scope": "home|profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py extensions; browser: e2e/extensions.mjs (real harness); native WebView: D8",
+   "tested_sha": "c89c9898c3bbbedeb1c05dfec422a0e2ed2a0914",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996, https://github.com/dlroqa/Lightagent/actions/runs/41459281969"
   },
   {
    "id": "cli.extensions.enable",
@@ -1239,10 +1239,10 @@
    "backend": "extract: extensions::enable()",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py extensions; browser: e2e/extensions.mjs (real harness); native WebView: D8",
+   "tested_sha": "c89c9898c3bbbedeb1c05dfec422a0e2ed2a0914",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996, https://github.com/dlroqa/Lightagent/actions/runs/41459281969"
   },
   {
    "id": "cli.extensions.enable.arg.name",
@@ -1261,10 +1261,10 @@
    "backend": "extract: extensions::enable()",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py extensions; browser: e2e/extensions.mjs (real harness); native WebView: D8",
+   "tested_sha": "c89c9898c3bbbedeb1c05dfec422a0e2ed2a0914",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996, https://github.com/dlroqa/Lightagent/actions/runs/41459281969"
   },
   {
    "id": "cli.extensions.disable",
@@ -1283,10 +1283,10 @@
    "backend": "extract: extensions::disable()",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py extensions; browser: e2e/extensions.mjs (real harness); native WebView: D8",
+   "tested_sha": "c89c9898c3bbbedeb1c05dfec422a0e2ed2a0914",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996, https://github.com/dlroqa/Lightagent/actions/runs/41459281969"
   },
   {
    "id": "cli.extensions.disable.arg.name",
@@ -1305,10 +1305,10 @@
    "backend": "extract: extensions::disable()",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py extensions; browser: e2e/extensions.mjs (real harness); native WebView: D8",
+   "tested_sha": "c89c9898c3bbbedeb1c05dfec422a0e2ed2a0914",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996, https://github.com/dlroqa/Lightagent/actions/runs/41459281969"
   },
   {
    "id": "cli.extensions.install",
@@ -1327,10 +1327,10 @@
    "backend": "extract: extensions::install()",
    "permission": "local-operator",
    "data_scope": "home|profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py extensions; browser: e2e/extensions.mjs (real harness); native WebView: D8",
+   "tested_sha": "c89c9898c3bbbedeb1c05dfec422a0e2ed2a0914",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996, https://github.com/dlroqa/Lightagent/actions/runs/41459281969"
   },
   {
    "id": "cli.extensions.install.arg.source",
@@ -1349,10 +1349,10 @@
    "backend": "extract: extensions::install()",
    "permission": "local-operator",
    "data_scope": "home|profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py extensions; browser: e2e/extensions.mjs (real harness); native WebView: D8",
+   "tested_sha": "c89c9898c3bbbedeb1c05dfec422a0e2ed2a0914",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996, https://github.com/dlroqa/Lightagent/actions/runs/41459281969"
   },
   {
    "id": "cli.extensions.install.opt.profile",
@@ -1371,10 +1371,10 @@
    "backend": "extract: extensions::install()",
    "permission": "local-operator",
    "data_scope": "home|profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py extensions; browser: e2e/extensions.mjs (real harness); native WebView: D8",
+   "tested_sha": "c89c9898c3bbbedeb1c05dfec422a0e2ed2a0914",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996, https://github.com/dlroqa/Lightagent/actions/runs/41459281969"
   },
   {
    "id": "cli.extensions.uninstall",
@@ -1393,10 +1393,10 @@
    "backend": "extract: extensions::uninstall()",
    "permission": "local-operator",
    "data_scope": "home|profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py extensions; browser: e2e/extensions.mjs (real harness); native WebView: D8",
+   "tested_sha": "c89c9898c3bbbedeb1c05dfec422a0e2ed2a0914",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996, https://github.com/dlroqa/Lightagent/actions/runs/41459281969"
   },
   {
    "id": "cli.extensions.uninstall.arg.name",
@@ -1415,10 +1415,10 @@
    "backend": "extract: extensions::uninstall()",
    "permission": "local-operator",
    "data_scope": "home|profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py extensions; browser: e2e/extensions.mjs (real harness); native WebView: D8",
+   "tested_sha": "c89c9898c3bbbedeb1c05dfec422a0e2ed2a0914",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996, https://github.com/dlroqa/Lightagent/actions/runs/41459281969"
   },
   {
    "id": "cli.extensions.uninstall.opt.profile",
@@ -1437,10 +1437,10 @@
    "backend": "extract: extensions::uninstall()",
    "permission": "local-operator",
    "data_scope": "home|profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py extensions; browser: e2e/extensions.mjs (real harness); native WebView: D8",
+   "tested_sha": "c89c9898c3bbbedeb1c05dfec422a0e2ed2a0914",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996, https://github.com/dlroqa/Lightagent/actions/runs/41459281969"
   },
   {
    "id": "cli.sessions",
@@ -5711,10 +5711,10 @@
    "backend": "extract: extensions::show()",
    "permission": "local-operator",
    "data_scope": "home|profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py extensions; browser: e2e/extensions.mjs (real harness); native WebView: D8",
+   "tested_sha": "c89c9898c3bbbedeb1c05dfec422a0e2ed2a0914",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996, https://github.com/dlroqa/Lightagent/actions/runs/41459281969"
   },
   {
    "id": "extension.manifest.version",
@@ -5735,10 +5735,10 @@
    "backend": "extract: extensions::show()",
    "permission": "local-operator",
    "data_scope": "home|profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py extensions; browser: e2e/extensions.mjs (real harness); native WebView: D8",
+   "tested_sha": "c89c9898c3bbbedeb1c05dfec422a0e2ed2a0914",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996, https://github.com/dlroqa/Lightagent/actions/runs/41459281969"
   },
   {
    "id": "extension.manifest.description",
@@ -5759,10 +5759,10 @@
    "backend": "extract: extensions::show()",
    "permission": "local-operator",
    "data_scope": "home|profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py extensions; browser: e2e/extensions.mjs (real harness); native WebView: D8",
+   "tested_sha": "c89c9898c3bbbedeb1c05dfec422a0e2ed2a0914",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996, https://github.com/dlroqa/Lightagent/actions/runs/41459281969"
   },
   {
    "id": "extension.manifest.instructions",
@@ -5783,10 +5783,10 @@
    "backend": "extract: extensions::show()",
    "permission": "local-operator",
    "data_scope": "home|profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py extensions; browser: e2e/extensions.mjs (real harness); native WebView: D8",
+   "tested_sha": "c89c9898c3bbbedeb1c05dfec422a0e2ed2a0914",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996, https://github.com/dlroqa/Lightagent/actions/runs/41459281969"
   },
   {
    "id": "extension.manifest.mcp_servers",
@@ -5807,10 +5807,10 @@
    "backend": "extract: extensions::show()",
    "permission": "local-operator",
    "data_scope": "home|profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py extensions; browser: e2e/extensions.mjs (real harness); native WebView: D8",
+   "tested_sha": "c89c9898c3bbbedeb1c05dfec422a0e2ed2a0914",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996, https://github.com/dlroqa/Lightagent/actions/runs/41459281969"
   },
   {
    "id": "extension.roots",
@@ -5829,10 +5829,10 @@
    "backend": "extract: extensions::list()",
    "permission": "local-operator",
    "data_scope": "home|profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py extensions; browser: e2e/extensions.mjs (real harness); native WebView: D8",
+   "tested_sha": "c89c9898c3bbbedeb1c05dfec422a0e2ed2a0914",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41459314993, https://github.com/dlroqa/Lightagent/actions/runs/41459314996, https://github.com/dlroqa/Lightagent/actions/runs/41459281969"
   },
   {
    "id": "skills.roots",
