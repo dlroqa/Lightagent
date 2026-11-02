@@ -122,6 +122,71 @@ export async function checkSettingsStates(browser, base, outDir) {
     if (!/^(Reachable in|Not reachable:)/.test(checkText)) failures.push(`settings: the endpoint check showed "${checkText}"`);
     if (checkText.includes(PROVIDER_KEY) || checkText.includes(PROVIDER_KEY_2)) failures.push("settings: the endpoint check shows a key");
 
+    // Providers and models: the shared operations. The card loaded before
+    // the writes above, so its first save is refused and the entry stays;
+    // on the current revision it is saved, renamed, used and given a model,
+    // and a stale removal is refused before it is made.
+    const providersNow = async () => (await fetch(`${base}/api/lightagent/v1/providers`)).json();
+    const startedWith = await providersNow();
+    const originalUrl = startedWith.providers.find((provider) => provider.active)?.base_url;
+    const originalModel = startedWith.model;
+    const labUrl = "http://127.0.0.1:9/e2e-lab";
+    const card = page.getByTestId("providers-card");
+    const newName = page.locator("#provider-new-name");
+    await newName.fill("E2E Lab");
+    await page.locator("#provider-new-url").fill(labUrl);
+    const saveProvider = page.getByRole("button", { name: "Save provider", exact: true });
+    await saveProvider.click();
+    await card.getByText("Nothing was saved", { exact: false }).waitFor({ timeout: 5000 });
+    if (await newName.inputValue() !== "E2E Lab") failures.push("providers: a refused save lost the entry");
+    if ((await providersNow()).providers.some((provider) => provider.id === "e2e-lab")) {
+      failures.push("providers: a refused save stored the provider");
+    }
+    await saveProvider.click();
+    await page.getByTestId("provider-e2e-lab").waitFor({ timeout: 5000 });
+    if (await newName.inputValue()) failures.push("providers: the saved entry stays in the field");
+
+    await page.getByRole("button", { name: "Edit E2E Lab", exact: true }).click();
+    await page.locator("#provider-name-e2e-lab").fill("E2E Lab Two");
+    await page.getByRole("button", { name: "Save changes", exact: true }).click();
+    await page.getByTestId("provider-e2e-lab-two").waitFor({ timeout: 5000 });
+
+    await page.getByRole("button", { name: "Use E2E Lab Two", exact: true }).click();
+    await card.getByText("E2E Lab Two is the active provider", { exact: false }).waitFor({ timeout: 5000 });
+    if ((await providersNow()).active !== "e2e-lab-two") failures.push("providers: Use did not select the provider");
+    if (!(await card.innerText()).includes("Applies to the next run")) {
+      failures.push("providers: the card does not say when a change applies");
+    }
+    if ((await credentialNow()).base_url !== labUrl) failures.push("providers: the key status is not the new provider's");
+    await page.getByText(`(${labUrl})`, { exact: false }).first().waitFor({ timeout: 5000 });
+
+    await page.locator("#provider-model").fill("e2e-model");
+    await page.getByRole("button", { name: "Use this model", exact: true }).click();
+    await card.getByText("Model set to e2e-model.", { exact: false }).waitFor({ timeout: 5000 });
+    if ((await providersNow()).model !== "e2e-model") failures.push("providers: the model was not saved");
+    await page.screenshot({ path: `${outDir}/settings-providers.png` });
+
+    // Back to the harness's endpoint and model, as another writer.
+    if (originalUrl) await writeElsewhere(base, "inference.base_url", originalUrl);
+    if (originalModel) await writeElsewhere(base, "inference.model", originalModel);
+    else await put(base, "/provider/model", { model: null });
+    await page.getByRole("button", { name: "Remove E2E Lab Two", exact: true }).click();
+    const confirmRemove = page.getByRole("button", { name: "Confirm: remove E2E Lab Two", exact: true });
+    await confirmRemove.click();
+    await card.getByText("Nothing was saved", { exact: false }).waitFor({ timeout: 5000 });
+    if (!(await providersNow()).providers.some((provider) => provider.id === "e2e-lab-two")) {
+      failures.push("providers: a refused removal removed the provider");
+    }
+    await confirmRemove.click();
+    await card.getByText("Removed E2E Lab Two.", { exact: false }).waitFor({ timeout: 5000 });
+    const finished = await providersNow();
+    if (finished.providers.some((provider) => provider.id === "e2e-lab-two")) {
+      failures.push("providers: the removal did not remove the provider");
+    }
+    if (originalUrl && finished.providers.find((provider) => provider.active)?.base_url !== originalUrl) {
+      failures.push("providers: the harness endpoint was not restored");
+    }
+
     // A saved secret is in none of the renderer's state.
     const current = await settingsNow(base);
     const saved = await put(base, "/settings", { ...current, jev: { ...current.jev, api_key: SECRET } });

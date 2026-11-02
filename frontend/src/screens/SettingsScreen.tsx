@@ -17,6 +17,7 @@ import { JevClassificationSection } from "../components/Jev";
 import { Card } from "../components/Card";
 import { ConfigEditorCard } from "../components/ConfigEditor";
 import { ProviderCredentialCard } from "../components/ProviderCredential";
+import { ProvidersCard } from "../components/Providers";
 import { TopBar } from "../components/Shell";
 import { usePoll } from "../hooks/usePoll";
 import { usePreferences } from "../state/preferences";
@@ -31,6 +32,9 @@ export function SettingsScreen() {
   const [current, setCurrent] = useState<LightagentSettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  // Bumped by a provider change, so the API key card reloads for the new
+  // active provider and never saves a key typed for another one.
+  const [providerVersion, setProviderVersion] = useState(0);
   // A change refused because the settings changed elsewhere: kept, with the
   // values saved now, until it is applied to them or discarded.
   const [conflict, setConflict] = useState<{
@@ -142,7 +146,8 @@ export function SettingsScreen() {
         )}
 
         <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))" }}>
-          <ProviderCredentialCard />
+          <ProvidersCard onChanged={() => setProviderVersion((version) => version + 1)} />
+          <ProviderCredentialCard key={providerVersion} />
           <Card title="Agent runtime">
             <p className="card__note">
               These controls are shared with the terminal CLI and apply to the next run.
