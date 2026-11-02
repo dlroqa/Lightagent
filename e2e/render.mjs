@@ -5,6 +5,7 @@
 import { mkdir } from "node:fs/promises";
 import { chromium } from "playwright";
 import { checkResponseActions } from "./actions.mjs";
+import { checkRunControls } from "./runs.mjs";
 import { checkDeliveryStates } from "./delivery.mjs";
 import { checkJevStates } from "./jev.mjs";
 import { checkProfileStates } from "./profiles.mjs";
@@ -361,6 +362,13 @@ async function main() {
     failures.push(...(await checkResponseActions(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`response actions: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // The run controls: approval card, Stop, Continue, and the steering queue.
+  try {
+    failures.push(...(await checkRunControls(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`run controls: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // Last: these states change the server's Jev settings.

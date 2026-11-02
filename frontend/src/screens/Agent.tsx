@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, CornerDownLeft, Cpu, FilePenLine, FileText, Folder, Globe, MessageCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, SquarePen, Terminal, Trash2, Wrench, X } from "lucide-react";
+import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, Clock, CornerDownLeft, Cpu, FilePenLine, FileText, Folder, Globe, MessageCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, SquarePen, Terminal, Trash2, Wrench, X } from "lucide-react";
 
 import {
   agentApi,
@@ -418,6 +418,7 @@ export function Agent() {
   // answer it would replace.
   const [replacing, setReplacing] = useState<{ sessionId: string; runId: string; savedRunId: string } | null>(null);
   const [deciding, setDeciding] = useState(false);
+  const [continuing, setContinuing] = useState(false);
   const [savingPolicy, setSavingPolicy] = useState(false);
   const [followTranscript, setFollowTranscript] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -543,6 +544,21 @@ export function Agent() {
   useEffect(() => {
     if (!pending) setDeciding(false);
   }, [pending]);
+
+  // A run paused on its time budget, until anything shows it going on again.
+  const paused = useMemo(() => {
+    if (done) return null;
+    let at: { elapsed: number } | null = null;
+    for (const event of events) {
+      if (event.type === "run.paused") at = { elapsed: Number(event.data.elapsed_secs) || 0 };
+      else if (at && ["model.delta", "tool.requested", "tool.started", "turn.completed"].includes(event.type)) at = null;
+    }
+    return at;
+  }, [done, events]);
+
+  useEffect(() => {
+    if (!paused) setContinuing(false);
+  }, [paused]);
 
   useEffect(() => {
     resizeComposer(composerTextarea.current);
@@ -932,6 +948,21 @@ export function Agent() {
     }
   }
 
+  async function continueRun(mode: "extend" | "answer") {
+    if (!runId || continuing) return;
+    setContinuing(true);
+    try {
+      const result = await agentApi.continueRun(runId, mode);
+      if (!result.continued) {
+        setContinuing(false);
+        setError("The run was no longer paused. Please wait for it to update.");
+      }
+    } catch (cause) {
+      setContinuing(false);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
   async function setApprovalPolicy(policy: LightagentSettings["approval_policy"]) {
     const settings = agentSettings.data;
     if (!settings || savingPolicy) return;
@@ -952,7 +983,9 @@ export function Agent() {
   const activeTool = tools.find((tool) => tool.status === "running" || tool.status === "requested");
   const activity = pending
     ? { tone: "warn" as const, label: "approval needed", detail: `${pending.tool} is paused until you decide.` }
-    : queuePaused
+    : paused
+      ? { tone: "warn" as const, label: "paused", detail: "The run reached its time budget and waits for you to continue it." }
+      : queuePaused
       ? { tone: "warn" as const, label: "queue paused", detail: "A queued steer is paused; retry or clear it." }
       : serviceUnavailable
         ? { tone: "danger" as const, label: "offline", detail: "The Lightagent service cannot be reached." }
@@ -1267,6 +1300,23 @@ export function Agent() {
                     <button type="button" className="btn" disabled={deciding} onClick={() => void decide(false)}>Deny</button>
                     <button type="button" className="btn btn--primary" disabled={deciding} onClick={() => void decide(true)}>
                       {deciding ? "Deciding…" : "Allow once"}
+                    </button>
+                  </div>
+                </div>
+              )}
+              {paused && (
+                <div className="approval" role="alertdialog" aria-label="Run paused on its time budget">
+                  <Clock size={18} style={{ flex: "none", marginTop: 1 }} aria-hidden="true" />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <strong style={{ fontSize: 13.5 }}>Paused on its time budget</strong>
+                    <span className="muted" style={{ fontSize: 12, display: "block" }}>
+                      Its tools returned results the model has not read yet. Continue for another time budget, or have it answer now from what it has.
+                    </span>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flex: "none", flexWrap: "wrap" }}>
+                    <button type="button" className="btn" disabled={continuing} onClick={() => void continueRun("answer")}>Answer now</button>
+                    <button type="button" className="btn btn--primary" disabled={continuing} onClick={() => void continueRun("extend")}>
+                      {continuing ? "Continuing…" : "Continue"}
                     </button>
                   </div>
                 </div>

@@ -540,7 +540,15 @@ export const agentApi = {
   createRun: (message: string, profile?: string, sessionId?: string, model?: string) =>
     jsonRequest<{ id: string; status: string; session_id: string | null }>("/runs", {
       method: "POST",
-      body: JSON.stringify({ message, profile, session_id: sessionId, model }),
+      // Interactive, like the terminal: a run that reaches its time budget
+      // with unread tool results pauses until the person continues it.
+      body: JSON.stringify({ message, profile, session_id: sessionId, model, on_time_budget: "pause" }),
+    }),
+  /** Continue a run paused on its time budget: renew it (`extend`) or answer now (`answer`). */
+  continueRun: (runId: string, mode: "extend" | "answer") =>
+    jsonRequest<{ id: string; continued: boolean }>(`/runs/${encodeURIComponent(runId)}/continue`, {
+      method: "POST",
+      body: JSON.stringify({ mode }),
     }),
   /** Replace the session's latest answer, written by `runId`, with a new run of its prompt. */
   regenerate: (sessionId: string, runId: string, model?: string) =>
