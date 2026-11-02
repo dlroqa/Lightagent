@@ -1,0 +1,65 @@
+=== base cee337904da890d688fb63bab4db1f63632425fe
+=== message
+D5b: release the run lease before the busy entry
+
+The lease was released when the recorder returned, just after it removed
+the session's busy entry. A caller that saw the busy entry go and started
+the next turn at once could still find the lease held for a moment and get
+409: the existing regenerate test did exactly that on two platforms (check
+run 41402975656). Every path now releases the lease first, so a session
+free in this process is free in every process: the recorder after saving
+the run, a refused admission, an admission that could not be read, and a
+supervised start that was denied.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+            Ok(Err(refused)) => {
+                busy.remove(&id);
+                return refused.into_response();
+            }
+            Err(error) => {
+                busy.remove(&id);
+                return internal(&error.to_string());
+            }
+--- with
+            // The lease goes before the busy entry, so a session free here
+            // is free in every process.
+            Ok(Err(refused)) => {
+                drop(lease);
+                busy.remove(&id);
+                return refused.into_response();
+            }
+            Err(error) => {
+                drop(lease);
+                busy.remove(&id);
+                return internal(&error.to_string());
+            }
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+                        Err(denial) => {
+                            if let Some(id) = &session_id {
+                                state.busy_sessions.lock().await.remove(id);
+--- with
+                        Err(denial) => {
+                            drop(run_lease.take());
+                            if let Some(id) = &session_id {
+                                state.busy_sessions.lock().await.remove(id);
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+            busy.lock().await.remove(&id);
+            break;
+--- with
+            // The lease goes first: once the busy entry is gone, the session
+            // is free in every process.
+            drop(lease.take());
+            busy.lock().await.remove(&id);
+            break;
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+    // Released when this returns, after the busy entry.
+    _lease: Option<lightagent_store::RunLease>,
+--- with
+    // Released just before the busy entry, once the run is recorded.
+    mut lease: Option<lightagent_store::RunLease>,
+=== end
