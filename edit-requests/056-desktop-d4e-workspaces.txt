@@ -1,0 +1,898 @@
+=== base bf5e56d9a6b09131832b0f0206eb4d1c5b458e90
+=== message
+D4e: the tools workspace through one shared, validated operation
+
+The workspace (the folder file and terminal tools are confined to) was a
+free string: setup stored whatever was typed, a relative path meant a
+different folder in each process (the terminal's working directory, the
+desktop runtime's), and a run created whatever directory it named.
+
+`lightagent_core::workspaces` is now the one way to read and set it,
+shared by `lightagent setup tools` and the HTTP API (and so the desktop):
+
+- validate / set: an absolute path without control characters that is an
+  existing folder, or a new folder whose parent folder exists (the next
+  run creates it); blank clears it, so runs use the active profile's own
+  `workspace/`. A file, a relative path or a missing parent is refused.
+- view: the configured folder, the effective folder for the next run of
+  the active profile (it follows a profile switch when none is set),
+  whether it exists, and whether file and terminal tools are on.
+- Every answer says the change applies to the next run; a run in progress
+  keeps its folder, and an editor's ACP session keeps using the editor's
+  folder.
+
+Setup: the full-screen prompt validates as it is typed; line-mode setup
+refuses an invalid new folder, and leaves an unchanged existing value as
+it is. The line-mode test now uses an absolute temporary folder, which is
+also correct on Windows.
+
+API (admin): GET|PUT /workspace, revision-checked: a stale revision gets
+409 and writes nothing; an invalid folder gets 400. Contract operations
+workspace.get / workspace.set, backend inventory rows (333 rows).
+
+Settings: a Workspace card shows the effective folder and where it comes
+from, takes an absolute folder, offers "Use the profile's own folder",
+keeps the entry after a refusal and says when a change applies.
+
+Hosted tests: workspaces unit tests, setup line-mode tests (absolute
+folder kept, relative refused), crates/lightagent/tests/desktop_workspace.rs
+(effective folder follows the active profile; relative, file and
+missing-parent refusals with config.json unchanged; a stale revision
+refused after a CLI write; set and clear), and the render e2e (stale save
+refused with the entry kept, relative refused, saved, cleared). Browser
+evidence only; native WebView verification remains D8.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-core/src/lib.rs
+--- find
+pub mod tool_stream;
+--- with
+pub mod tool_stream;
+pub mod workspaces;
+=== write crates/lightagent-core/src/workspaces.rs
+//! The tools workspace: the folder the file and terminal tools are confined
+//! to. `lightagent setup tools`, the HTTP API and the desktop's Settings
+//! read and set it through these functions, inside one config update, so
+//! every surface means the same folder.
+
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+
+use crate::ProfileStore;
+use crate::config::Config;
+use crate::paths::LightagentPaths;
+
+/// When a workspace change takes effect.
+pub const EFFECT: &str = "Applies to the next run. A run in progress keeps its folder; an editor's ACP session keeps using the editor's folder.";
+
+/// The workspace as the next run of the active profile uses it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WorkspaceView {
+    /// The configured folder, when one is set.
+    pub configured: Option<String>,
+    /// The folder the next run of the active profile uses: the configured
+    /// one, or that profile's own `workspace/`.
+    pub effective: Option<String>,
+    /// `config` or `profile`.
+    pub source: &'static str,
+    /// The active profile.
+    pub profile: Option<String>,
+    /// Whether the effective folder exists now; a run creates a missing one.
+    pub exists: bool,
+    pub tools_enabled: bool,
+    pub terminal_enabled: bool,
+}
+
+/// The workspace for the next run of the active profile.
+pub fn view(config: &Config, paths: &LightagentPaths) -> WorkspaceView {
+    let profiles = ProfileStore::new(paths.root());
+    let profile = profiles.active().ok().flatten();
+    let effective: Option<PathBuf> = match &config.tools.workspace {
+        Some(folder) => Some(PathBuf::from(folder)),
+        None => profile
+            .as_ref()
+            .map(|id| profiles.handle(id).workspace_dir()),
+    };
+    WorkspaceView {
+        configured: config.tools.workspace.clone(),
+        exists: effective.as_ref().is_some_and(|folder| folder.is_dir()),
+        effective: effective.map(|folder| folder.display().to_string()),
+        source: if config.tools.workspace.is_some() {
+            "config"
+        } else {
+            "profile"
+        },
+        profile: profile.map(|id| id.as_str().to_owned()),
+        tools_enabled: config.tools.enabled,
+        terminal_enabled: config.tools.enabled && config.tools.allow_terminal,
+    }
+}
+
+/// A folder typed by a person, trimmed: absolute, so the terminal and the
+/// desktop runtime mean the same folder, and either an existing folder or a
+/// new one whose parent folder exists (the next run creates it).
+pub fn validate(folder: &str) -> Result<String, String> {
+    let folder = folder.trim();
+    if folder.chars().any(char::is_control) {
+        return Err("the workspace folder contains a control character".to_owned());
+    }
+    let path = Path::new(folder);
+    if !path.is_absolute() {
+        return Err(
+            "enter an absolute folder path: a relative one would mean a different folder for each process"
+                .to_owned(),
+        );
+    }
+    match std::fs::metadata(path) {
+        Ok(found) if found.is_dir() => Ok(folder.to_owned()),
+        Ok(_) => Err("that path is a file, not a folder".to_owned()),
+        Err(_) => match path.parent().map(std::fs::metadata) {
+            Some(Ok(parent)) if parent.is_dir() => Ok(folder.to_owned()),
+            _ => Err("the folder does not exist, and neither does the folder it would be created in".to_owned()),
+        },
+    }
+}
+
+/// Set the workspace folder; `None` or blank clears it, so runs use the
+/// active profile's own `workspace/`. An invalid folder changes nothing.
+pub fn set(config: &mut Config, folder: Option<&str>) -> Result<(), String> {
+    config.tools.workspace = match folder.map(str::trim).filter(|folder| !folder.is_empty()) {
+        Some(folder) => Some(validate(folder)?),
+        None => None,
+    };
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_folder_is_absolute_and_a_folder_or_inside_one() {
+        let root = std::env::temp_dir().join(format!(
+            "lightagent-workspaces-{}",
+            crate::ids::RunId::new().as_str()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("file.txt");
+        std::fs::write(&file, "x").unwrap();
+        let existing = root.display().to_string();
+        let new = root.join("new").display().to_string();
+        assert_eq!(validate(&existing), Ok(existing.clone()));
+        assert_eq!(validate(&format!("  {new}  ")), Ok(new.clone()));
+        assert!(validate("relative/folder").unwrap_err().contains("absolute"));
+        assert!(validate(&file.display().to_string()).unwrap_err().contains("file"));
+        assert!(validate(&root.join("a").join("b").display().to_string()).is_err());
+        assert!(validate(&format!("{existing}\u{7}")).is_err());
+
+        let mut config = Config::default();
+        set(&mut config, Some(&new)).unwrap();
+        assert_eq!(config.tools.workspace.as_deref(), Some(new.as_str()));
+        assert!(set(&mut config, Some("relative")).is_err());
+        assert_eq!(config.tools.workspace.as_deref(), Some(new.as_str()));
+        set(&mut config, Some("  ")).unwrap();
+        assert_eq!(config.tools.workspace, None);
+        set(&mut config, Some(&new)).unwrap();
+        set(&mut config, None).unwrap();
+        assert_eq!(config.tools.workspace, None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_view_names_the_configured_folder() {
+        let paths = LightagentPaths::rooted_at(std::env::temp_dir().join(format!(
+            "lightagent-workspaces-view-{}",
+            crate::ids::RunId::new().as_str()
+        )));
+        let mut config = Config::default();
+        let view_now = view(&config, &paths);
+        assert_eq!((view_now.source, view_now.configured), ("profile", None));
+        config.tools.workspace = Some("/projects/lab".to_owned());
+        let view_now = view(&config, &paths);
+        assert_eq!(view_now.source, "config");
+        assert_eq!(view_now.effective.as_deref(), Some("/projects/lab"));
+    }
+}
+=== replace crates/lightagent/src/setup.rs
+--- find
+    if config.tools.enabled && config.tools.workspace.is_none() {
+        let workspace = Input::<String>::with_theme(theme)
+            .with_prompt("Workspace folder (blank uses profile workspace)")
+            .allow_empty(true)
+            .interact_text()
+            .map_err(dialog_error)?;
+        config.tools.workspace = nonempty(workspace);
+    }
+--- with
+    if config.tools.enabled && config.tools.workspace.is_none() {
+        // The shared rule, checked as it is typed: an absolute folder that
+        // exists, or a new one inside an existing folder.
+        let workspace = Input::<String>::with_theme(theme)
+            .with_prompt("Workspace folder (blank uses profile workspace)")
+            .allow_empty(true)
+            .validate_with(|value: &String| -> Result<(), String> {
+                if value.trim().is_empty() {
+                    Ok(())
+                } else {
+                    lightagent_core::workspaces::validate(value).map(|_| ())
+                }
+            })
+            .interact_text()
+            .map_err(dialog_error)?;
+        lightagent_core::workspaces::set(config, Some(&workspace))?;
+    }
+=== replace crates/lightagent/src/setup.rs
+--- find
+        let workspace = prompt.input(
+            "Workspace folder (blank uses the active profile workspace)",
+            current,
+        )?;
+        config.tools.workspace = nonempty(workspace);
+--- with
+        let workspace = prompt.input(
+            "Workspace folder (blank uses the active profile workspace)",
+            current,
+        )?;
+        // A new folder takes the shared rule; an unchanged one stays as it is.
+        if workspace != current {
+            lightagent_core::workspaces::set(config, Some(&workspace))?;
+        }
+=== replace crates/lightagent/src/setup.rs
+--- find
+            reader: Cursor::new("3\n/tmp/project\n"),
+            writer: &mut output,
+        };
+        configure_tools(&mut config, &mut prompt).unwrap();
+        assert!(config.tools.enabled);
+        assert!(config.tools.allow_terminal);
+        assert_eq!(config.tools.workspace.as_deref(), Some("/tmp/project"));
+    }
+--- with
+            reader: Cursor::new(format!("3\n{project}\n")),
+            writer: &mut output,
+        };
+        configure_tools(&mut config, &mut prompt).unwrap();
+        assert!(config.tools.enabled);
+        assert!(config.tools.allow_terminal);
+        assert_eq!(config.tools.workspace.as_deref(), Some(project.as_str()));
+    }
+
+    #[test]
+    fn a_relative_workspace_folder_is_refused() {
+        let mut config = Config::default();
+        let mut output = Vec::new();
+        let mut prompt = Prompt {
+            reader: Cursor::new("3\nrelative/project\n"),
+            writer: &mut output,
+        };
+        let error = configure_tools(&mut config, &mut prompt).unwrap_err();
+        assert!(error.contains("absolute"), "{error}");
+        assert_eq!(config.tools.workspace, None);
+    }
+=== replace crates/lightagent/src/setup.rs
+--- find
+    fn tools_are_selected_without_config_keys() {
+        let mut config = Config::default();
+--- with
+    fn tools_are_selected_without_config_keys() {
+        let project = std::env::temp_dir()
+            .join("lightagent-setup-project")
+            .display()
+            .to_string();
+        let mut config = Config::default();
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+            "/api/lightagent/v1/providers/{id}/check",
+            post(check_saved_provider),
+        )
+--- with
+            "/api/lightagent/v1/providers/{id}/check",
+            post(check_saved_provider),
+        )
+        .route(
+            "/api/lightagent/v1/workspace",
+            get(get_workspace).put(put_workspace),
+        )
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+/// `lightagent config jev-routing-report`: the same dry run, from the same
+--- with
+/// A workspace choice: an absolute folder, or `null` for the active
+/// profile's own `workspace/`.
+#[derive(Deserialize)]
+struct WorkspaceBody {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// The workspace for the next run of the active profile, the revision a
+/// change must name, and when a change applies.
+fn workspace_view(
+    config: &lightagent_core::Config,
+    revision: &ConfigRevision,
+    root: &std::path::Path,
+) -> serde_json::Value {
+    json!({
+        "workspace": lightagent_core::workspaces::view(config, &LightagentPaths::rooted_at(root)),
+        "revision": revision.as_str(),
+        "effect": lightagent_core::workspaces::EFFECT,
+    })
+}
+
+/// The workspace folder `lightagent setup tools` sets.
+async fn get_workspace(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (Some(store), Some(root)) = (&state.config_store, home(&state)) else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => Json(workspace_view(&config, &revision, &root)).into_response(),
+        Err(error) => config_error(error),
+    }
+}
+
+/// Set or clear the workspace folder as setup does, on the revision the
+/// caller read: a stale one gets 409 and writes nothing; a folder that is
+/// not absolute, is a file or has no parent folder gets 400.
+async fn put_workspace(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<WorkspaceBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (Some(store), Some(root)) = (&state.config_store, home(&state)) else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let expected = body.expected_revision.as_deref().map(ConfigRevision::parse);
+    match store.update(expected.as_ref(), |config| {
+        lightagent_core::workspaces::set(config, body.path.as_deref())
+    }) {
+        Ok(((), revision)) => match store.load() {
+            Ok(config) => Json(workspace_view(&config, &revision, &root)).into_response(),
+            Err(error) => config_error(error),
+        },
+        Err(UpdateError::Change(message)) => bad_request(&message),
+        Err(UpdateError::Store(error)) => config_error(error),
+    }
+}
+
+/// `lightagent config jev-routing-report`: the same dry run, from the same
+=== write crates/lightagent/tests/desktop_workspace.rs
+//! The tools workspace is one validated, shared setting (D4e): the desktop
+//! runtime's GET|PUT /workspace and `lightagent setup tools` take the same
+//! rule (an absolute folder, existing or inside an existing folder), under
+//! the config's revision check, and the effective folder follows the active
+//! profile when none is set. The runtime and the CLI run as separate
+//! processes.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+
+const KEY: &str = "8192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70";
+const WORKSPACE: &str = "/api/lightagent/v1/workspace";
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-workspace-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+/// One authenticated request: the status, the raw body and its JSON.
+fn call(runtime: &Runtime, method: &str, path: &str, body: Option<&str>) -> (u16, String, Value) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    let json = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    (status, raw, json)
+}
+
+fn put(runtime: &Runtime, body: Value) -> (u16, String, Value) {
+    call(runtime, "PUT", WORKSPACE, Some(&body.to_string()))
+}
+
+fn cli(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent")
+}
+
+fn cli_ok(home: &Path, args: &[&str]) -> String {
+    let output = cli(home, args);
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn configured(home: &Path) -> Value {
+    let config: Value =
+        serde_json::from_slice(&std::fs::read(home.join("config.json")).expect("read"))
+            .expect("config JSON");
+    config["tools"]["workspace"].clone()
+}
+
+fn profile_workspace(home: &Path, id: &str) -> String {
+    home.join("profiles")
+        .join(id)
+        .join("workspace")
+        .display()
+        .to_string()
+}
+
+#[test]
+fn the_workspace_is_one_validated_shared_setting() {
+    let home = scratch_home("set");
+    cli_ok(&home, &["config", "set", "inference.model", "m1"]);
+    cli_ok(&home, &["profile", "create", "work"]);
+    cli_ok(&home, &["profile", "create", "other"]);
+    cli_ok(&home, &["profile", "use", "work"]);
+    let runtime = start(&home);
+
+    // None set: the active profile's own folder, and it follows a switch.
+    let (status, raw, view) = call(&runtime, "GET", WORKSPACE, None);
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(view["workspace"]["source"], "profile", "{view}");
+    assert_eq!(view["workspace"]["effective"], profile_workspace(&home, "work"));
+    assert!(
+        view["effect"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("next run"),
+        "{view}"
+    );
+    cli_ok(&home, &["profile", "use", "other"]);
+    let (_, _, view) = call(&runtime, "GET", WORKSPACE, None);
+    assert_eq!(view["workspace"]["effective"], profile_workspace(&home, "other"));
+    assert_eq!(view["workspace"]["profile"], "other");
+
+    // Refused folders write nothing.
+    let file = home.join("a-file.txt");
+    std::fs::write(&file, "x").expect("file");
+    let before = std::fs::read(home.join("config.json")).expect("config");
+    for folder in [
+        "relative/folder".to_owned(),
+        file.display().to_string(),
+        home.join("missing").join("deeper").display().to_string(),
+    ] {
+        let (status, raw, _) = put(&runtime, json!({ "path": folder }));
+        assert_eq!(status, 400, "{folder}: {raw}");
+    }
+    assert_eq!(
+        std::fs::read(home.join("config.json")).expect("config"),
+        before,
+        "a refused folder wrote the config"
+    );
+
+    // A change on a revision read before a CLI write is refused.
+    let folder = home.join("project").display().to_string();
+    let read_at = view["revision"].clone();
+    cli_ok(&home, &["config", "set", "inference.model", "m2"]);
+    let (status, raw, _) = put(
+        &runtime,
+        json!({ "path": folder, "expected_revision": read_at }),
+    );
+    assert_eq!(status, 409, "{raw}");
+    assert!(configured(&home).is_null());
+
+    // On the current revision it is saved: a new folder inside an
+    // existing one, created by the next run.
+    let (_, _, view) = call(&runtime, "GET", WORKSPACE, None);
+    let (status, raw, view) = put(
+        &runtime,
+        json!({ "path": folder, "expected_revision": view["revision"] }),
+    );
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(view["workspace"]["source"], "config");
+    assert_eq!(view["workspace"]["configured"], folder);
+    assert_eq!(view["workspace"]["exists"], false);
+    assert_eq!(configured(&home), folder);
+
+    // Cleared: back to the active profile's own folder.
+    let (status, raw, view) = put(&runtime, json!({ "path": null }));
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(view["workspace"]["source"], "profile");
+    assert!(configured(&home).is_null());
+}
+=== replace frontend/src/api/agent.ts
+--- find
+/** A provider as the picker shows it: its key's state only, never the key. */
+--- with
+/** The tools workspace (`lightagent setup tools`) for the next run of the active profile. */
+export interface WorkspaceState {
+  workspace: {
+    configured: string | null;
+    effective: string | null;
+    source: "config" | "profile";
+    profile: string | null;
+    exists: boolean;
+    tools_enabled: boolean;
+    terminal_enabled: boolean;
+  };
+  revision: string;
+  effect: string;
+}
+
+/** A provider as the picker shows it: its key's state only, never the key. */
+=== replace frontend/src/api/agent.ts
+--- find
+  providers: () => jsonRequest<ProviderList>("/providers"),
+--- with
+  workspace: () => jsonRequest<WorkspaceState>("/workspace"),
+  /** An absolute folder, or `null` for the active profile's own folder; 409 when the revision is stale. */
+  setWorkspace: (path: string | null, expectedRevision: string) =>
+    jsonRequest<WorkspaceState>("/workspace", {
+      method: "PUT",
+      body: JSON.stringify({ path, expected_revision: expectedRevision }),
+    }),
+  providers: () => jsonRequest<ProviderList>("/providers"),
+=== write frontend/src/components/Workspace.tsx
+import { useEffect, useState } from "react";
+
+import { agentApi, type WorkspaceState } from "../api/agent";
+import { Pill } from "./Bits";
+import { Card } from "./Card";
+
+function errorText(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
+}
+
+/**
+ * The folder file and terminal tools are confined to, set through the
+ * operation `lightagent setup tools` shares: an absolute folder, or the
+ * active profile's own folder.
+ */
+export function WorkspaceCard() {
+  const [state, setState] = useState<WorkspaceState | null>(null);
+  const [folder, setFolder] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function load(): Promise<WorkspaceState | null> {
+    try {
+      const next = await agentApi.workspace();
+      setState(next);
+      return next;
+    } catch (cause) {
+      setError(errorText(cause));
+      return null;
+    }
+  }
+
+  useEffect(() => {
+    void load().then((next) => {
+      if (next) setFolder(next.workspace.configured ?? "");
+    });
+  }, []);
+
+  async function save(path: string | null) {
+    if (!state || busy) return;
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const next = await agentApi.setWorkspace(path, state.revision);
+      setState(next);
+      setFolder(next.workspace.configured ?? "");
+      setMessage(
+        `${path === null ? "Runs use the profile's own workspace folder." : "Workspace folder saved."} ${next.effect}`,
+      );
+    } catch (cause) {
+      const text = errorText(cause);
+      if (text.startsWith("409:")) {
+        // Nothing was saved; the entry stays in the field for another try.
+        await load();
+        setError(
+          "The configuration changed elsewhere after this card loaded, so the folder was not saved. Your entry is kept and the current folder is shown; review it, then save again.",
+        );
+      } else {
+        setError(text.replace(/^\d{3}:\s*/, ""));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const view = state?.workspace ?? null;
+  return (
+    <Card title="Workspace">
+      <div data-testid="workspace-card">
+        <p className="card__note">
+          The folder file and terminal tools are confined to. Shared with the terminal CLI (lightagent setup
+          tools).{state ? ` ${state.effect}` : ""}
+        </p>
+        {error && <div className="notice notice--warn" role="alert">{error}</div>}
+        {message && <div className="notice notice--info" role="status">{message}</div>}
+        {view && (
+          <p data-testid="workspace-effective" style={{ margin: "8px 0", overflowWrap: "anywhere" }}>
+            <Pill tone={view.source === "config" ? "accent" : "neutral"}>
+              {view.source === "config" ? "Chosen folder" : view.profile ? `Profile ${view.profile}` : "Profile folder"}
+            </Pill>{" "}
+            {view.effective ?? "the active profile's own workspace folder"}
+            {view.effective && !view.exists ? <span className="muted"> (the next run creates it)</span> : null}
+          </p>
+        )}
+        {view && !view.tools_enabled && (
+          <p className="muted">File and terminal tools are off, so no run uses this folder until they are turned on.</p>
+        )}
+        <div className="field">
+          <label className="field__label" htmlFor="workspace-folder">Workspace folder (absolute path)</label>
+          <input id="workspace-folder" className="input" spellCheck={false} autoComplete="off" value={folder}
+            disabled={!state || busy} onChange={(event) => setFolder(event.target.value)} />
+          <p className="muted" style={{ margin: "4px 0 0" }}>
+            An existing folder, or a new one inside an existing folder.
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+          <button type="button" className="btn" disabled={!state || busy || !folder.trim()}
+            aria-busy={busy || undefined} onClick={() => void save(folder)}>
+            Save folder
+          </button>
+          {view?.configured && (
+            <button type="button" className="btn" disabled={busy} onClick={() => void save(null)}>
+              Use the profile's own folder
+            </button>
+          )}
+        </div>
+      </div>
+    </Card>
+  );
+}
+=== replace frontend/src/screens/SettingsScreen.tsx
+--- find
+import { ProvidersCard } from "../components/Providers";
+--- with
+import { ProvidersCard } from "../components/Providers";
+import { WorkspaceCard } from "../components/Workspace";
+=== replace frontend/src/screens/SettingsScreen.tsx
+--- find
+          <ProviderCredentialCard key={providerVersion} />
+--- with
+          <ProviderCredentialCard key={providerVersion} />
+          <WorkspaceCard />
+=== replace e2e/settings.mjs
+--- find
+    // A saved secret is in none of the renderer's state.
+--- with
+    // The workspace folder: one validated, revision-checked setting shared
+    // with setup. The card loaded before the writes above, so its first save
+    // is refused and the entry stays; a relative folder is refused; an
+    // absolute one is saved, then cleared.
+    const workspaceNow = async () => (await fetch(`${base}/api/lightagent/v1/workspace`)).json();
+    const startedWorkspace = await workspaceNow();
+    const workspaceCard = page.getByTestId("workspace-card");
+    const folderField = page.locator("#workspace-folder");
+    const saveFolder = page.getByRole("button", { name: "Save folder", exact: true });
+    await folderField.fill("relative/folder");
+    await saveFolder.click();
+    await workspaceCard.getByText("so the folder was not saved", { exact: false }).waitFor({ timeout: 5000 });
+    if (await folderField.inputValue() !== "relative/folder") failures.push("workspace: a refused save lost the entry");
+    await saveFolder.click();
+    await workspaceCard.getByRole("alert").filter({ hasText: "absolute folder path" }).waitFor({ timeout: 5000 });
+    if ((await workspaceNow()).workspace.configured !== startedWorkspace.workspace.configured) {
+      failures.push("workspace: a relative folder was saved");
+    }
+    const effective = startedWorkspace.workspace.effective;
+    if (!effective) {
+      failures.push("workspace: the active profile has no effective folder");
+    } else {
+      const chosen = `${effective.replace(/[\\/]workspace$/, "")}/e2e-workspace`;
+      await folderField.fill(chosen);
+      await saveFolder.click();
+      await workspaceCard.getByText("Workspace folder saved.", { exact: false }).waitFor({ timeout: 5000 });
+      const saved = await workspaceNow();
+      if (saved.workspace.configured !== chosen || saved.workspace.source !== "config") {
+        failures.push(`workspace: after saving, the folder is ${JSON.stringify(saved.workspace)}`);
+      }
+      if (!(await workspaceCard.innerText()).includes("Applies to the next run")) {
+        failures.push("workspace: the card does not say when a change applies");
+      }
+      await page.getByRole("button", { name: "Use the profile's own folder", exact: true }).click();
+      await workspaceCard.getByText("Runs use the profile's own workspace folder.", { exact: false }).waitFor({ timeout: 5000 });
+      if ((await workspaceNow()).workspace.configured !== null) failures.push("workspace: clearing kept a folder");
+    }
+    if (startedWorkspace.workspace.configured) {
+      await put(base, "/workspace", { path: startedWorkspace.workspace.configured });
+    }
+
+    // A saved secret is in none of the renderer's state.
+=== replace docs/desktop/contract/operations.json
+--- find
+   "id": "providers.check",
+   "method": "POST",
+   "path": "/api/lightagent/v1/providers/{id}/check"
+  },
+--- with
+   "id": "providers.check",
+   "method": "POST",
+   "path": "/api/lightagent/v1/providers/{id}/check"
+  },
+  {
+   "id": "workspace.get",
+   "method": "GET",
+   "path": "/api/lightagent/v1/workspace"
+  },
+  {
+   "id": "workspace.set",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/workspace"
+  },
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "total_rows": 331,
+--- with
+  "total_rows": 333,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "api": 49,
+--- with
+   "api": 51,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "applicable": 295,
+--- with
+   "applicable": 297,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  {
+   "id": "api.put.config.key",
+--- with
+  {
+   "id": "api.get.workspace",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/workspace",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "The tools workspace for the next run of the active profile: the configured folder or the profile's own, whether it exists, and whether file and terminal tools are on",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/workspace"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: GET /workspace",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.put.workspace",
+   "kind": "api",
+   "surface": "PUT /api/lightagent/v1/workspace",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "Set or clear the tools workspace (an absolute folder, existing or inside an existing folder), revision-checked; applies to the next run",
+   "tree_key": null,
+   "tokens": [
+    "PUT /api/lightagent/v1/workspace"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI/slash capability it serves",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "api: PUT /workspace",
+   "permission": "local-operator",
+   "data_scope": "installation",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.put.config.key",
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Total rows: 331
+--- with
+- Total rows: 333
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| api | 49 |
+--- with
+| api | 51 |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| applicable | 295 |
+--- with
+| applicable | 297 |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.put.config.key` | `PUT /api/lightagent/v1/config/{key}` | applicable | no | (backend reuse) | api: PUT /config/{key} | not-started | `crates/lightagent-api/src/lib.rs` |
+--- with
+| `api.get.workspace` | `GET /api/lightagent/v1/workspace` | applicable | no | (backend reuse) | api: GET /workspace | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.put.workspace` | `PUT /api/lightagent/v1/workspace` | applicable | no | (backend reuse) | api: PUT /workspace | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.put.config.key` | `PUT /api/lightagent/v1/config/{key}` | applicable | no | (backend reuse) | api: PUT /config/{key} | not-started | `crates/lightagent-api/src/lib.rs` |
+=== end
