@@ -573,3 +573,247 @@ Development branches, draft PRs, remote source editing and necessary GitHub-host
 Do NOT merge, tag, publish releases, deploy, activate production or update installed applications without my separate explicit approval.
 
 Begin with a concise verified status report, then continue the authorized work. Do not stop at routine progress checkpoints unless a genuine blocker or authorization boundary requires my input.
+
+## 6. Continuation: D5a and the D5b review follow-through (2026-11-02, fourth continuation)
+
+Continue the existing Lightagent Desktop project:
+https://github.com/dlroqa/Lightagent
+
+This is a new-session handoff. Verify current GitHub state, read the committed instructions, and continue the next unfinished work. Do not restart or duplicate completed slices.
+
+GOAL
+
+Build an installable Lightagent Desktop application with full CLI capability coverage, reusing the shared backend and React WebUI.
+
+Keep desktop-specific implementation in desktop/. Preserve providers, models, credentials, profiles, workspaces, sessions, tools, skills, MCP and response-action integration.
+
+READ FIRST
+
+Read the governing documents on the latest relevant development branch, not only master:
+- docs/desktop/DESKTOP_BUILD_PLAN.md
+- docs/desktop/DESKTOP_CLAUDE_PROMPT.md
+- docs/desktop/DESKTOP_PROGRESS.md
+- docs/desktop/DESKTOP_CLI_PARITY.md
+- docs/desktop/desktop-capabilities.json
+- docs/desktop/DESKTOP_ARCHITECTURE.md
+- docs/desktop/DESKTOP_ACCEPTANCE.md
+- docs/desktop/DESKTOP_MERGE_ORDER.md
+- docs/response-action-bar-progress.md
+
+Discover any additional governing files and repository rules. Report missing files accurately.
+
+SESSION OWNERSHIP
+
+Verify whether another session is actively writing to this stack before editing.
+- Maintain one implementation owner.
+- Preserve all existing work, local drafts and staging folders.
+- Do not reset, clean, delete, overwrite or force-update branches.
+- If ownership conflicts, continue read-only investigation while resolving ownership.
+
+LATEST VERIFIED CHECKPOINT — RECHECK
+
+PR #113:
+- Branch: desktop/d5b-run-admission
+- Head: db44a465eeb6f0c592091c615c62dbb7da2308e2
+- Draft, open and unmerged.
+- desktop 41408566607: passed.
+- check 41408566354: passed.
+- Jev evaluation 41408566389: passed.
+- subagents 41408566450: passed.
+
+Reported coverage: 29/227 applicable capabilities.
+This measures feature parity, not overall project completion.
+
+Completed draft slices reported before this checkpoint:
+- #108: endpoint-bound provider credentials, validated code head 8e3919b.
+- #109: shared saved-provider/model operations, 108dac6.
+- #110: Providers and models Settings card, bb76e74.
+- #111: remaining live remote credential paths fail closed, c15e249.
+- #112: shared absolute workspace setting and Settings card, ec1fc4e.
+- #113: cross-process per-session run admission, 1e657e5, followed by the validated documentation head db44a46.
+
+Earlier work includes configuration locking/revisions, session-write locking, profile lifecycle, response-action transport adoption, credential management and endpoint checks.
+
+These are historical checkpoints. Verify current heads, trees, bases, Actions results, newer PRs and progress records before choosing the next change.
+
+NEXT STAGE: D5a
+
+Unless newer verified work has completed it, implement D5a on the latest validated prerequisite.
+
+Use the real desktop host and real Lightagent runtime with a deterministic fake provider. Extend the existing harness:
+- desktop/e2e/run.py
+- desktop/e2e/switch.py
+
+Cover:
+1. Streaming and tool execution.
+2. Approval granted and denied.
+3. Cancellation.
+4. Continue after a time-budget pause.
+5. Steering.
+6. Relay reconnect without missing or duplicate delivered events.
+7. Pending approval during profile switching:
+   - switching remains blocked unless the user explicitly cancels affected runs;
+   - approvals cannot cross into another profile.
+8. Sidecar crash mid-run:
+   - report the interrupted run accurately;
+   - automatic runtime recovery must never replay the task or tool side effects.
+9. Regenerate through the desktop host:
+   - successful replacement;
+   - preserve the previous saved answer after refusal, provider failure, cancellation or empty output;
+   - enforce permissions, ownership and profile-switch gates.
+
+Use explicit synchronization rather than timing sleeps wherever practical. Test product behavior, not just the harness’s internal assumptions.
+
+Clearly distinguish:
+- backend/API evidence;
+- host-level integration evidence;
+- browser UI evidence;
+- native Desktop WebView interaction.
+
+Keep D8 native verification gaps explicit.
+
+D5b REVIEW FOLLOW-THROUGH
+
+#113 introduced a bounded 500 ms grace when acquiring the per-session run lease.
+
+Review and verify:
+- An active holder prevents a second provider request.
+- A competing turn is refused within the documented bound.
+- Normal completion, cancellation and crashes release the lease.
+- Different sessions can run concurrently.
+- All supported entry points use the same lease: Desktop runtime, additional serve processes, CLI chat, ACP and regeneration.
+- Child processes do not unintentionally inherit lease handles and prolong ownership.
+- The long-lived run lease remains separate from short session-file write locks.
+
+If handle inheritance causes delayed release, fix it where feasible rather than relying solely on the grace period. Record platform-specific evidence and remaining limitations.
+
+RECORDED FINDINGS — PRESERVE
+
+- Provider credentials must stay bound to the endpoint they were saved for.
+- Endpoint changes must not implicitly carry the old endpoint’s key.
+- Provider names that collide in credential-file naming must be rejected safely.
+- Workspaces are absolute to avoid process-dependent interpretation.
+- The earlier runtime.rs control-plane concern was reported as dead, uncompiled code; verify before proposing work on it.
+- Browser secret checks do not establish native Desktop verification.
+- Diagnostics-bundle secret checks remain assigned to D7.
+
+CI FAILURES AND RELIABILITY
+
+Earlier reports include:
+- GitHub broker dispatched_unlocated failures.
+- macOS hdiutil disk-image eject failures.
+- Real D5b lease-release and timing defects that were fixed.
+
+Preserve failing run references and logs.
+Do not label broker failures definitively GitHub-side without evidence.
+Investigate unresolved failures that affect acceptance.
+
+Any packaging retry change must:
+- match a specific established transient failure;
+- remain bounded;
+- retain every attempt’s logs;
+- fail immediately on unrelated errors.
+
+Do not retry failures merely to obtain a green result.
+
+RESPONSE-ACTION REQUIREMENTS
+
+Keep the feature in Desktop scope:
+- Copy, read aloud, share, regenerate and More.
+- Native clipboard, speech and sharing capability checks per platform.
+- Clear unavailable states where unsupported.
+- Keyboard navigation, tooltips, accessibility, streaming visibility and narrow-window layout.
+- Ratings remain temporary until persistence exists.
+- Branching remains disabled until its backend exists.
+- Previous-answer navigation remains unavailable until implemented.
+
+Do not count unfinished features as completed parity.
+
+DEPENDENCY AND MERGE PLAN
+
+Previously established sequence:
+#90 → #92 → #93 → #94 → #95 → #96 → #97
+→ #101 → #102 → #103 → #104 → #106 → #107
+→ #108 → #109 → #110 → #111 → #112 → #113
+→ D5a and subsequent dependency-ordered slices.
+
+Verify and update this against current GitHub state.
+Document why D5b was implemented before D5a and reflect actual dependencies.
+
+- #91: framework-spike evidence only.
+- #99: transport evidence only.
+- #98: incorporated through #102; do not merge separately under this plan.
+
+Existing evidence validates PR heads, not the complete merge sequence.
+Before requesting eventual merge approval:
+- simulate the exact proposed sequence;
+- record resulting commits and trees;
+- validate candidate trees through hosted Actions;
+- establish that intermediate master states remain valid.
+
+Do not infer merge-tree equivalence from stacked bases alone.
+
+EXECUTION POLICY — MANDATORY
+
+Implementation source and workflow edits:
+- GitHub-native APIs or the existing GitHub-hosted source-edit workflow only.
+- Verify the fixed base, generated commit/tree and provenance.
+- Attach commits to the correct branches and draft PRs.
+- No local source/workflow editing, including temporary staging directories.
+
+All dependency installation for builds/validation, formatting, linting, building, rendering, testing, benchmarking, packaging, installer verification and release dry-runs:
+- GitHub Actions only.
+- GitHub-hosted runners only.
+- No self-hosted runners.
+- No local application execution or validation.
+
+Respect repository dependency rules.
+Never expose credentials in edit requests, logs, screenshots, artifacts or commits.
+Preserve the recorded earlier #98 local-edit policy departure without rewriting history.
+
+LOCAL BACKUP AND PROGRESS — REQUIRED
+
+Verify the existing backup:
+~/Repositories/LAcode/Lightagent
+
+Previous state:
+- master 12582a0 checked out, working tree clean.
+- Desktop branches retained as fetched remote refs.
+- Progress copies in:
+  ~/Repositories/LAcode/desktop-progress/
+
+Local use is limited to:
+- repository copying and safe synchronization;
+- safekeeping;
+- static source reading;
+- progress documentation.
+
+After each completed stage:
+- safely fetch relevant branches;
+- preserve local work and older snapshots;
+- distinguish fetched refs from checked-out files;
+- refresh progress copies from authoritative GitHub documents;
+- record actual synchronization time and backed-up SHA.
+
+REPORTING
+
+For each completed stage, provide:
+- Repository, branch and draft PR URL.
+- Exact source head SHA/tree.
+- Exact tested SHA/tree and head-versus-merge-candidate distinction.
+- Actions URLs and actual results.
+- Failures, reruns, fixes and remaining gaps.
+- Capability coverage and reconciled denominator.
+- Artifact links and retention.
+- Local backup state and progress-document paths.
+- Next dependency-ordered stage.
+
+Keep generated installers, screenshots and reports as Actions artifacts. Preserve durable conclusions and evidence references in Git. Do not commit generated binaries.
+
+AUTHORIZATION
+
+Development branches, draft PRs, remote source editing and necessary GitHub-hosted Actions runs are authorized.
+
+Do NOT merge, tag, publish releases, deploy, activate production or update installed applications without separate explicit approval.
+
+Start with a concise verified status report, then execute the next unfinished stage. Continue through the established D5–D10 plan after prerequisite gates pass. Do not stop at routine reports or stage boundaries unless genuinely blocked or at an authorization boundary.

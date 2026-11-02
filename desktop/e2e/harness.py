@@ -279,6 +279,10 @@ class Host:
 
     def ready(self, timeout=WAIT):
         self.wait_event("driver_ready", timeout)
+        return self.wait_ready(timeout)
+
+    def wait_ready(self, timeout=WAIT):
+        """Wait until the host serves a ready runtime (after a start or a restart)."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             status = self.call("status")
@@ -458,3 +462,13 @@ def wait_until(probe, timeout=WAIT, every=0.2):
         if value or time.time() >= deadline:
             return value
         time.sleep(every)
+
+
+def runtimes(pid):
+    """The runtimes running under the host process `pid`."""
+    import psutil
+
+    try:
+        return [p for p in psutil.Process(pid).children(recursive=True) if "sidecar" in p.name() and p.is_running()]
+    except psutil.Error:
+        return []

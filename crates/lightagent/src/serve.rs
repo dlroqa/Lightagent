@@ -799,6 +799,15 @@ pub async fn run_desktop(host: String, port: u16, profile: Option<String>) -> Re
             .ok_or_else(|| "no active profile".to_string())?,
     };
     let sessions = SessionStore::at_profile(&store.handle(&active));
+    // Turns a runtime ended before recording are recorded as interrupted;
+    // none is run again.
+    let interrupted = sessions.recover_all_interrupted();
+    if !interrupted.is_empty() {
+        eprintln!(
+            "recorded {} interrupted run(s); none is run again",
+            interrupted.len()
+        );
+    }
     let context_limit = config.runtime.n_ctx.unwrap_or(4_096) as usize;
     let factory = Arc::new(LightweightRunFactory {
         root: paths.root().to_path_buf(),
@@ -898,6 +907,15 @@ pub async fn run(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "no active profile — run `lightagent init` first".to_string())?;
     let sessions = SessionStore::at_profile(&store.handle(&active));
+    // Turns a runtime ended before recording are recorded as interrupted;
+    // none is run again.
+    let interrupted = sessions.recover_all_interrupted();
+    if !interrupted.is_empty() {
+        eprintln!(
+            "recorded {} interrupted run(s); none is run again",
+            interrupted.len()
+        );
+    }
 
     let is_loopback = matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1");
     let auth = match key_env.and_then(|var| std::env::var(&var).ok()) {

@@ -31,10 +31,18 @@ tree are recorded here.
 | 17 | D4d-3 every configured remote credential fails closed | https://github.com/dlroqa/Lightagent/pull/111 | `desktop/d4d3-fail-closed` | `desktop/d4d2b3-providers-ui` | `c15e249` | `c15e249` |
 | 18 | D4e the tools workspace through one shared, validated operation | https://github.com/dlroqa/Lightagent/pull/112 | `desktop/d4e-workspaces` | `desktop/d4d3-fail-closed` (`bf5e56d`) | `ec1fc4e` | `ec1fc4e` |
 | 19 | D5b one turn at a time per session across every process (https://github.com/dlroqa/Lightagent/issues/105) | https://github.com/dlroqa/Lightagent/pull/113 | `desktop/d5b-run-admission` | `desktop/d4e-workspaces` | `1e657e5` | `1e657e5` |
-| 20+ | D5a (deterministic run, relay reconnect, approvals across a profile switch, sidecar crash, R1), then D6 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+| 20 | D5b follow-through: a dropped run lease is free at once | https://github.com/dlroqa/Lightagent/pull/114 | `desktop/d5b2-lease-release` | `desktop/d5b-run-admission` (`db44a46`) | `e5363fc` | `e5363fc` |
+| 21 | D5a-1 the host relay resumes a broken stream; runs through the host (R1) | https://github.com/dlroqa/Lightagent/pull/115 | `desktop/d5a1-host-runs` | `desktop/d5b2-lease-release` | `64d632f` | `64d632f` |
+| 22 | D5a-2 a turn its runtime did not live to record is Interrupted, never rerun | https://github.com/dlroqa/Lightagent/pull/116 | `desktop/d5a2-interrupted` | `desktop/d5a1-host-runs` | `c6fd6ac` | `c6fd6ac` |
+| 23+ | D5a-3 (time-budget continue, steering), then D6 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
 
-D5b is row 19, before D5a: it uses no D5a operation, and the owner ordered
-it next (DESKTOP_CLAUDE_PROMPT.md §5).
+D5b (rows 19-20) comes before D5a (rows 21-23) because D5a depends on it,
+not the reverse. D5b uses no D5a operation, and the owner ordered it next
+(DESKTOP_CLAUDE_PROMPT.md §5). D5a's scenarios rely on D5b: a cancelled run
+or a crashed runtime must release the session for the next run (rows 21 and
+22 check that it does), and row 22's recovery runs under the run lease.
+Rows 21 and 22 are separate PRs because row 22 changes the shared store and
+API, while row 21 changes only the desktop host and its tests.
 
 Heads change as slices receive fixes. DESKTOP_PROGRESS.md records every
 head with its runs; the D10 review package fixes the final heads and the
