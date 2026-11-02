@@ -1,0 +1,456 @@
+=== base c6fd6aca300ca93bd276c8f4e879586c9747dd58
+=== message
+Desktop docs: rows 20-22 (D5b follow-through, D5a-1, D5a-2) and their evidence
+
+Records the lease-release fix (#114), the host relay resume and hosted run
+scenarios (#115) and interrupted runs (#116) with their tested heads,
+trees and Actions runs; updates the merge order (rows 20-22, 23+) and why
+D5b came before D5a; notes that the D5a operations have host-level
+evidence but count toward parity only with UI evidence (29 of 227
+unchanged); and commits the owner's fourth continuation prompt as
+DESKTOP_CLAUDE_PROMPT.md section 6.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+| D5a, D6–D10 | not started | — | — | — | — |
+--- with
+| Row 20: D5b follow-through, a dropped run lease is free at once | **CI-validated** at `e5363fc` (check, desktop, jev evaluation, subagents; first run) | `desktop/d5b2-lease-release` (stacked on row 19 `db44a46`) | https://github.com/dlroqa/Lightagent/pull/114 | `e5363fc9c875c6b83c1606b24542d247e25f0e3f` | `e5363fc` / tree `ce2f291600512e2105ccb47ced1895342ba44f0c` |
+| Row 21: D5a-1 the host relay resumes a broken stream; runs through the host | **CI-validated** at `64d632f` (check, desktop, jev evaluation, subagents; one macOS arm64 bundling job was never given a runner and was re-run once, passing) | `desktop/d5a1-host-runs` (stacked on row 20) | https://github.com/dlroqa/Lightagent/pull/115 | `64d632ff37f4033343baf3ce2ec663b0dae4b999` | `64d632f` / tree `169f76fb18559562563b792876203128e4f1b7e0` |
+| Row 22: D5a-2 a turn its runtime did not live to record is Interrupted, never rerun | **CI-validated** at `c6fd6ac` (check, desktop, jev evaluation, subagents; first run) | `desktop/d5a2-interrupted` (stacked on row 21) | https://github.com/dlroqa/Lightagent/pull/116 | `c6fd6aca300ca93bd276c8f4e879586c9747dd58`, plus this documentation commit | `c6fd6ac` / tree `c98ac0acbcd1f716f2a3610b111337158eddf3bd` |
+| D5a-3 (time-budget continue and steering), D6–D10 | not started | — | — | — | — |
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+could widen that window.
+
+## Artifacts and retention
+--- with
+could widen that window.
+
+## Row 20 — D5b follow-through: a dropped run lease is free at once
+
+Review of #113's 500 ms grace. The cause was found and fixed rather than
+left to the grace:
+
+- An OS file lock (`flock`, and `LockFileEx` on Windows) belongs to the
+  open file, not to one handle. On Unix, a child that another thread is
+  starting (fork, then exec) shares every open file of its parent until
+  its exec closes the copies, so a lease closed in that instant stayed held
+  until the child's exec.
+- `RunLease` now **unlocks before it closes**, which releases the lock for
+  every copy at once. The grace stays, as the documented bound for refusing
+  a held lease.
+
+| Requirement | Evidence (`e5363fc`, all four `check` platforms unless noted) |
+|---|---|
+| An active holder prevents a second turn | store lease test; `desktop_run_admission.rs` (#113): API run, regenerate, CLI chat, ACP refused while another process holds it |
+| A competing turn is refused within the bound | `run_lease.rs`: refused in under 2 s (500 ms grace plus slack) |
+| Completion, cancellation and crashes release it | `desktop_run_admission.rs` (killed chat releases); runs.py `cancel` (row 21: the next run is admitted after a cancel); row 22 crash tests |
+| Different sessions run concurrently | `run_lease.rs`; `desktop_run_admission.rs` |
+| One lease for every entry point | `SessionStore::lease_run` is the only lease, taken by the API (runs, regenerate; the desktop runtime and any `serve`), CLI chat and ACP (#113) |
+| Child processes do not keep it | `run_lease.rs`: a child started while it is held does not keep it (all platforms); Unix: a lease dropped while a child is between fork and exec is free at once, and on Linux a control lock closed without unlocking stays held by that child, proving the window is real |
+| Separate from the short write lock | store lease test (a save goes through while a turn runs) |
+
+Remaining limitation: the short write locks (`sessions/.lock`,
+`config.json.lock`) still close without an explicit unlock. Their waiters
+wait up to 5 s, so the same instant can only delay them, never refuse them.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Edit request `062`; branch `desktop/d5b2-lease-release`; draft PR #114 | `e5363fc` / `ce2f291` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41429457355 |
+| 2026-11-02 | `check`, `desktop`, `jev evaluation`, `subagents`: **success**, first run | `e5363fc` | https://github.com/dlroqa/Lightagent/actions/runs/41429597466, https://github.com/dlroqa/Lightagent/actions/runs/41429597459, https://github.com/dlroqa/Lightagent/actions/runs/41429597338, https://github.com/dlroqa/Lightagent/actions/runs/41429597555 |
+
+## Row 21 — D5a-1: the host relay resumes a broken stream; runs through the host
+
+**Product change (desktop host).** The relay of a run's event stream now
+resumes a broken stream itself:
+- It reconnects from the last event it forwarded, sending `Last-Event-ID`.
+  Nothing is skipped, and nothing at or before that id is forwarded twice.
+- Five resumes in a row that forward nothing report the break.
+- A runtime that no longer has the run ends the relay at once, with that
+  reason.
+- An ended stream counts as finished only when the runtime says the run is.
+
+The UI's own `?after=` resume remains as a second layer. The IPC command
+bodies moved into plain functions; their behavior is unchanged.
+
+**Hosted scenarios** use the real host and the real `serve --desktop`
+runtime, with a deterministic fake provider (`desktop/e2e/harness.py`):
+scripted turns, named gates, and every request recorded. A test-only stdin
+driver (`e2e_driver.rs`, `--features e2e-hooks`, never bundled) calls the
+same functions as the UI's IPC commands. Synchronization is on what the host
+relayed or the provider received.
+
+| D5 gate / R1 item | Scenario | Result at `64d632f` |
+|---|---|---|
+| Streaming and a tool call | runs.py `stream` | passed: three or more deltas, `datetime.now` ran without approval, answer saved, two provider turns |
+| Approval granted | runs.py `approve` | passed: listed as pending, nothing written before the decision, written exactly once |
+| Approval denied | runs.py `deny` | passed: never written, the model was told it was denied |
+| Cancel | runs.py `cancel` | passed: cancelled mid-stream, saved as `Cancelled`, next run admitted, the turn not resent |
+| Relay reconnect, no missing or duplicate events | runs.py `relay` | passed: two drops mid-run; delivered ids exactly `0..10` (the runtime's count); host report `resumes=2 skipped=0 error=false` |
+| Pending approval during a switch | switch.py `pending` | passed: while the switch held its gate, `runs.create`, `sessions.regenerate` and `approvals.respond` were refused; without stopping runs it was `blocked` and the approval stayed pending; stopping runs rejected it explicitly (default's saved session: `the approval for 'fs.write' was denied; the tool did not run`, `Cancelled`); in `work`, the approvals list was empty and the old run and its approval answered 404; the file was never written |
+| R1 regenerate through the host | runs.py `regenerate` | passed: a finished answer replaced the saved one (one run record, the new one); a provider failure (500), a refusal, an empty answer and a cancel kept it; a stale answer id and a busy session were refused |
+| Continue after a time-budget pause; steering | — | not covered: the API has no continue operation, and steering is held by the renderer (row 23) |
+
+Evidence classes: this is **host-level** evidence (the host transport and
+relay, plus the real runtime). It is not browser UI evidence, and not native
+WebView interaction (D8). Permission and ownership enforcement for
+regenerate is **backend/API** evidence (#98's tests: `SessionsWrite`
+required, another user's session answered as missing). The desktop host
+always calls as the operator.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Edit request `063` (prepared `52d4272`); the final commit attaches the `desktop.yml` blob `86e1720`; branch `desktop/d5a1-host-runs`; draft PR #115 | `64d632f` / `169f76f` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41431358008 |
+| 2026-11-02 | `check`, `jev evaluation`, `subagents`: **success**. `desktop`: every job passed, including `desktop profile switch and runs` (both scenario sets reported no failures), except `desktop shell (macos-arm64)`: cancelled after 15 min, "The job was not acquired by Runner of type hosted even after multiple attempts" (GitHub's macOS arm64 capacity notice). That job never ran, so it was re-run once to obtain evidence, and passed | `64d632f` | https://github.com/dlroqa/Lightagent/actions/runs/41431492275, https://github.com/dlroqa/Lightagent/actions/runs/41431492257, https://github.com/dlroqa/Lightagent/actions/runs/41431492204, https://github.com/dlroqa/Lightagent/actions/runs/41431492291 |
+
+## Row 22 — D5a-2: a turn its runtime did not live to record is Interrupted, never rerun
+
+A session turn saves its prompt when admitted and is recorded when it ends.
+A runtime that died in between left the prompt with no record.
+
+- **Run journal.** `sessions/.runs/<id>.run` is written when an API turn
+  starts and removed once the turn is recorded. One that outlives the
+  process holding the session's lease marks an interrupted turn.
+- **Recovery.** An appended turn gets a run record with stop reason
+  `Interrupted` and no answer. An interrupted regeneration leaves the saved
+  answer and its record exactly as they were. Nothing is run again.
+- **When recovery runs:** as `lightagent serve` starts (the desktop runtime
+  included), for sessions no live process holds; and under the lease,
+  before a session's next turn is admitted.
+- **Web UI:** the stop reason reads "interrupted, not run again".
+
+| D5 gate item | Evidence at `c6fd6ac` |
+|---|---|
+| A sidecar crash mid-run is reported accurately | runs.py `crash` (host-level): with an approved write done and the model's next turn in flight, the runtime is killed; the host reports the lost stream and restarts its runtime once; the session records `Interrupted` with no answer; the restarted runtime answers 404 for the old run |
+| Recovery never replays the task or its tool side effects | runs.py `crash`: two provider turns before the crash and none after; the file holds `once` only; the next run is admitted. `desktop_interrupted.rs` (separate processes, all four platforms): the next runtime records the turn as Interrupted, the provider gets no second request, and an interrupted regeneration keeps the saved answer |
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-02 | Edit request `064`; branch `desktop/d5a2-interrupted`; draft PR #116 | `c6fd6ac` / `c98ac0a` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41433988154 |
+| 2026-11-02 | `check`, `desktop`, `jev evaluation`, `subagents`: **success**, first run | `c6fd6ac` | https://github.com/dlroqa/Lightagent/actions/runs/41434134050, https://github.com/dlroqa/Lightagent/actions/runs/41434134035, https://github.com/dlroqa/Lightagent/actions/runs/41434134009, https://github.com/dlroqa/Lightagent/actions/runs/41434134043 |
+
+**Parity.** The D5a scenarios exercise the operations behind `slash.approve`,
+`slash.reject` and `slash.stop`, and #98's regenerate, through the host.
+These rows still count only once a UI path is verified: browser UI e2e at
+least, and native WebView interaction in D8. No browser test covers the
+approval card or Stop yet, so coverage stays **29 of 227**.
+
+**What remains of the D5 gate (row 23):** continue after a time-budget
+pause, which needs a new API operation, since API runs use the wrap-up time
+policy and never pause; and steering. Steering in the Web UI and the terminal
+is a client-held FIFO queue that starts the next turn when the session is
+free. Whether it needs a backend operation (the inventory's current note) is
+decided in row 23.
+
+## Artifacts and retention
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+| `desktop-cargo-lock` | 40999470324 | 30 days |
+--- with
+| `desktop-cargo-lock` | 40999470324 | 30 days |
+| `desktop-switch-e2e`: `switch-e2e/` (switch.json, reports, `driver-switch-pending.log`) and `runs-e2e/` (runs.json with the provider log, `report-runs.txt`, `driver-runs.log`) | 41431492257 (row 21), 41434134035 (row 22) | 30 days |
+| `prepared-062…`, `prepared-063…`, `prepared-064…` (commit, tree, diff) | 41429457355, 41431358008, 41433988154 | 30 days |
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+  A documentation commit cannot record itself. Each row names the heads
+--- with
+  | 2026-11-02T11:24:27Z | `d5b-run-admission` `db44a46`, `d5b2-lease-release` `e5363fc`, `d5a1-host-runs` `64d632f`, `d5a2-interrupted` `c6fd6ac`, `tools/source-edit` `aef2d2e` (lower slices unchanged) | rows 20-22 validated; fetch only (remote-tracking refs), working tree `master` `12582a0` clean |
+
+  A documentation commit cannot record itself. Each row names the heads
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+## Next
+
+The owner's order of 2026-11-02 (third continuation, DESKTOP_CLAUDE_PROMPT.md §5):
+--- with
+## Next
+
+The owner's order of 2026-11-02 (fourth continuation, DESKTOP_CLAUDE_PROMPT.md §6):
+
+1. The D5b review follow-through is done (row 20).
+2. D5a is split by dependency: row 21 (host relay resume plus run
+   scenarios, R1) and row 22 (sidecar crash: interrupted, never rerun) are
+   done.
+3. **Row 23 (next), D5a-3:** continue after a time-budget pause (a new API
+   operation and run state, with host scenarios), and the steering decision
+   and evidence. Then the D5 gate is reviewed as a whole.
+4. D6-D10 in dependency order. D8 keeps the native WebView checks (Settings,
+   profile switching, close with active runs, response actions R2-R5).
+
+Previous order (DESKTOP_CLAUDE_PROMPT.md §5), kept for reference:
+=== replace docs/desktop/DESKTOP_MERGE_ORDER.md
+--- find
+| 20+ | D5a (deterministic run, relay reconnect, approvals across a profile switch, sidecar crash, R1), then D6 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+
+D5b is row 19, before D5a: it uses no D5a operation, and the owner ordered
+it next (DESKTOP_CLAUDE_PROMPT.md §5).
+--- with
+| 20 | D5b follow-through: a dropped run lease is free at once | https://github.com/dlroqa/Lightagent/pull/114 | `desktop/d5b2-lease-release` | `desktop/d5b-run-admission` (`db44a46`) | `e5363fc` | `e5363fc` |
+| 21 | D5a-1 the host relay resumes a broken stream; runs through the host (R1) | https://github.com/dlroqa/Lightagent/pull/115 | `desktop/d5a1-host-runs` | `desktop/d5b2-lease-release` | `64d632f` | `64d632f` |
+| 22 | D5a-2 a turn its runtime did not live to record is Interrupted, never rerun | https://github.com/dlroqa/Lightagent/pull/116 | `desktop/d5a2-interrupted` | `desktop/d5a1-host-runs` | `c6fd6ac` | `c6fd6ac` |
+| 23+ | D5a-3 (time-budget continue, steering), then D6 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+
+D5b (rows 19-20) comes before D5a (rows 21-23) because D5a depends on it,
+not the reverse. D5b uses no D5a operation, and the owner ordered it next
+(DESKTOP_CLAUDE_PROMPT.md §5). D5a's scenarios rely on D5b: a cancelled run
+or a crashed runtime must release the session for the next run (rows 21 and
+22 check that it does), and row 22's recovery runs under the run lease.
+Rows 21 and 22 are separate PRs because row 22 changes the shared store and
+API, while row 21 changes only the desktop host and its tests.
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Pending D1 decision rows: 0
+--- with
+- Pending D1 decision rows: 0
+- D5a note (2026-11-02, rows 21-22): the operations behind `slash.approve`, `slash.reject` and `slash.stop` (and #98's regenerate) now have host-level end-to-end evidence through the desktop host (desktop/e2e/runs.py, switch.py). They are not counted until a UI path is verified (browser UI e2e at least; native WebView in D8). `slash.continue` and `key.steer` remain not started (row 23)
+=== replace docs/desktop/DESKTOP_CLAUDE_PROMPT.md
+--- find
+Begin with a concise verified status report, then continue the authorized work. Do not stop at routine progress checkpoints unless a genuine blocker or authorization boundary requires my input.
+--- with
+Begin with a concise verified status report, then continue the authorized work. Do not stop at routine progress checkpoints unless a genuine blocker or authorization boundary requires my input.
+
+## 6. Continuation: D5a and the D5b review follow-through (2026-11-02, fourth continuation)
+
+Continue the existing Lightagent Desktop project:
+https://github.com/dlroqa/Lightagent
+
+This is a new-session handoff. Verify current GitHub state, read the committed instructions, and continue the next unfinished work. Do not restart or duplicate completed slices.
+
+GOAL
+
+Build an installable Lightagent Desktop application with full CLI capability coverage, reusing the shared backend and React WebUI.
+
+Keep desktop-specific implementation in desktop/. Preserve providers, models, credentials, profiles, workspaces, sessions, tools, skills, MCP and response-action integration.
+
+READ FIRST
+
+Read the governing documents on the latest relevant development branch, not only master:
+- docs/desktop/DESKTOP_BUILD_PLAN.md
+- docs/desktop/DESKTOP_CLAUDE_PROMPT.md
+- docs/desktop/DESKTOP_PROGRESS.md
+- docs/desktop/DESKTOP_CLI_PARITY.md
+- docs/desktop/desktop-capabilities.json
+- docs/desktop/DESKTOP_ARCHITECTURE.md
+- docs/desktop/DESKTOP_ACCEPTANCE.md
+- docs/desktop/DESKTOP_MERGE_ORDER.md
+- docs/response-action-bar-progress.md
+
+Discover any additional governing files and repository rules. Report missing files accurately.
+
+SESSION OWNERSHIP
+
+Verify whether another session is actively writing to this stack before editing.
+- Maintain one implementation owner.
+- Preserve all existing work, local drafts and staging folders.
+- Do not reset, clean, delete, overwrite or force-update branches.
+- If ownership conflicts, continue read-only investigation while resolving ownership.
+
+LATEST VERIFIED CHECKPOINT — RECHECK
+
+PR #113:
+- Branch: desktop/d5b-run-admission
+- Head: db44a465eeb6f0c592091c615c62dbb7da2308e2
+- Draft, open and unmerged.
+- desktop 41408566607: passed.
+- check 41408566354: passed.
+- Jev evaluation 41408566389: passed.
+- subagents 41408566450: passed.
+
+Reported coverage: 29/227 applicable capabilities.
+This measures feature parity, not overall project completion.
+
+Completed draft slices reported before this checkpoint:
+- #108: endpoint-bound provider credentials, validated code head 8e3919b.
+- #109: shared saved-provider/model operations, 108dac6.
+- #110: Providers and models Settings card, bb76e74.
+- #111: remaining live remote credential paths fail closed, c15e249.
+- #112: shared absolute workspace setting and Settings card, ec1fc4e.
+- #113: cross-process per-session run admission, 1e657e5, followed by the validated documentation head db44a46.
+
+Earlier work includes configuration locking/revisions, session-write locking, profile lifecycle, response-action transport adoption, credential management and endpoint checks.
+
+These are historical checkpoints. Verify current heads, trees, bases, Actions results, newer PRs and progress records before choosing the next change.
+
+NEXT STAGE: D5a
+
+Unless newer verified work has completed it, implement D5a on the latest validated prerequisite.
+
+Use the real desktop host and real Lightagent runtime with a deterministic fake provider. Extend the existing harness:
+- desktop/e2e/run.py
+- desktop/e2e/switch.py
+
+Cover:
+1. Streaming and tool execution.
+2. Approval granted and denied.
+3. Cancellation.
+4. Continue after a time-budget pause.
+5. Steering.
+6. Relay reconnect without missing or duplicate delivered events.
+7. Pending approval during profile switching:
+   - switching remains blocked unless the user explicitly cancels affected runs;
+   - approvals cannot cross into another profile.
+8. Sidecar crash mid-run:
+   - report the interrupted run accurately;
+   - automatic runtime recovery must never replay the task or tool side effects.
+9. Regenerate through the desktop host:
+   - successful replacement;
+   - preserve the previous saved answer after refusal, provider failure, cancellation or empty output;
+   - enforce permissions, ownership and profile-switch gates.
+
+Use explicit synchronization rather than timing sleeps wherever practical. Test product behavior, not just the harness’s internal assumptions.
+
+Clearly distinguish:
+- backend/API evidence;
+- host-level integration evidence;
+- browser UI evidence;
+- native Desktop WebView interaction.
+
+Keep D8 native verification gaps explicit.
+
+D5b REVIEW FOLLOW-THROUGH
+
+#113 introduced a bounded 500 ms grace when acquiring the per-session run lease.
+
+Review and verify:
+- An active holder prevents a second provider request.
+- A competing turn is refused within the documented bound.
+- Normal completion, cancellation and crashes release the lease.
+- Different sessions can run concurrently.
+- All supported entry points use the same lease: Desktop runtime, additional serve processes, CLI chat, ACP and regeneration.
+- Child processes do not unintentionally inherit lease handles and prolong ownership.
+- The long-lived run lease remains separate from short session-file write locks.
+
+If handle inheritance causes delayed release, fix it where feasible rather than relying solely on the grace period. Record platform-specific evidence and remaining limitations.
+
+RECORDED FINDINGS — PRESERVE
+
+- Provider credentials must stay bound to the endpoint they were saved for.
+- Endpoint changes must not implicitly carry the old endpoint’s key.
+- Provider names that collide in credential-file naming must be rejected safely.
+- Workspaces are absolute to avoid process-dependent interpretation.
+- The earlier runtime.rs control-plane concern was reported as dead, uncompiled code; verify before proposing work on it.
+- Browser secret checks do not establish native Desktop verification.
+- Diagnostics-bundle secret checks remain assigned to D7.
+
+CI FAILURES AND RELIABILITY
+
+Earlier reports include:
+- GitHub broker dispatched_unlocated failures.
+- macOS hdiutil disk-image eject failures.
+- Real D5b lease-release and timing defects that were fixed.
+
+Preserve failing run references and logs.
+Do not label broker failures definitively GitHub-side without evidence.
+Investigate unresolved failures that affect acceptance.
+
+Any packaging retry change must:
+- match a specific established transient failure;
+- remain bounded;
+- retain every attempt’s logs;
+- fail immediately on unrelated errors.
+
+Do not retry failures merely to obtain a green result.
+
+RESPONSE-ACTION REQUIREMENTS
+
+Keep the feature in Desktop scope:
+- Copy, read aloud, share, regenerate and More.
+- Native clipboard, speech and sharing capability checks per platform.
+- Clear unavailable states where unsupported.
+- Keyboard navigation, tooltips, accessibility, streaming visibility and narrow-window layout.
+- Ratings remain temporary until persistence exists.
+- Branching remains disabled until its backend exists.
+- Previous-answer navigation remains unavailable until implemented.
+
+Do not count unfinished features as completed parity.
+
+DEPENDENCY AND MERGE PLAN
+
+Previously established sequence:
+#90 → #92 → #93 → #94 → #95 → #96 → #97
+→ #101 → #102 → #103 → #104 → #106 → #107
+→ #108 → #109 → #110 → #111 → #112 → #113
+→ D5a and subsequent dependency-ordered slices.
+
+Verify and update this against current GitHub state.
+Document why D5b was implemented before D5a and reflect actual dependencies.
+
+- #91: framework-spike evidence only.
+- #99: transport evidence only.
+- #98: incorporated through #102; do not merge separately under this plan.
+
+Existing evidence validates PR heads, not the complete merge sequence.
+Before requesting eventual merge approval:
+- simulate the exact proposed sequence;
+- record resulting commits and trees;
+- validate candidate trees through hosted Actions;
+- establish that intermediate master states remain valid.
+
+Do not infer merge-tree equivalence from stacked bases alone.
+
+EXECUTION POLICY — MANDATORY
+
+Implementation source and workflow edits:
+- GitHub-native APIs or the existing GitHub-hosted source-edit workflow only.
+- Verify the fixed base, generated commit/tree and provenance.
+- Attach commits to the correct branches and draft PRs.
+- No local source/workflow editing, including temporary staging directories.
+
+All dependency installation for builds/validation, formatting, linting, building, rendering, testing, benchmarking, packaging, installer verification and release dry-runs:
+- GitHub Actions only.
+- GitHub-hosted runners only.
+- No self-hosted runners.
+- No local application execution or validation.
+
+Respect repository dependency rules.
+Never expose credentials in edit requests, logs, screenshots, artifacts or commits.
+Preserve the recorded earlier #98 local-edit policy departure without rewriting history.
+
+LOCAL BACKUP AND PROGRESS — REQUIRED
+
+Verify the existing backup:
+~/Repositories/LAcode/Lightagent
+
+Previous state:
+- master 12582a0 checked out, working tree clean.
+- Desktop branches retained as fetched remote refs.
+- Progress copies in:
+  ~/Repositories/LAcode/desktop-progress/
+
+Local use is limited to:
+- repository copying and safe synchronization;
+- safekeeping;
+- static source reading;
+- progress documentation.
+
+After each completed stage:
+- safely fetch relevant branches;
+- preserve local work and older snapshots;
+- distinguish fetched refs from checked-out files;
+- refresh progress copies from authoritative GitHub documents;
+- record actual synchronization time and backed-up SHA.
+
+REPORTING
+
+For each completed stage, provide:
+- Repository, branch and draft PR URL.
+- Exact source head SHA/tree.
+- Exact tested SHA/tree and head-versus-merge-candidate distinction.
+- Actions URLs and actual results.
+- Failures, reruns, fixes and remaining gaps.
+- Capability coverage and reconciled denominator.
+- Artifact links and retention.
+- Local backup state and progress-document paths.
+- Next dependency-ordered stage.
+
+Keep generated installers, screenshots and reports as Actions artifacts. Preserve durable conclusions and evidence references in Git. Do not commit generated binaries.
+
+AUTHORIZATION
+
+Development branches, draft PRs, remote source editing and necessary GitHub-hosted Actions runs are authorized.
+
+Do NOT merge, tag, publish releases, deploy, activate production or update installed applications without separate explicit approval.
+
+Start with a concise verified status report, then execute the next unfinished stage. Continue through the established D5–D10 plan after prerequisite gates pass. Do not stop at routine reports or stage boundaries unless genuinely blocked or at an authorization boundary.
+=== end
