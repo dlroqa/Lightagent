@@ -1,0 +1,78 @@
+=== base 903528fbd8277502f2186b2feb7d6aa5129bf118
+=== message
+Wait for a session's release, not only its record, before the next prompt
+
+Two older API tests posted a follow-up prompt as soon as the session file
+showed the previous run's record. The recorder frees the session for its
+next run just after that write, so in the gap between the two the
+follow-up was refused (409 "session already has an active run"). On a
+single-threaded test runtime the write and the release used to run back
+to back, which hid the gap. With the record written on the blocking pool,
+the test can see the file first (check 41367939822, linux-x64:
+`session_history_is_packed_against_the_resolved_window`).
+
+The API never promised that a visible record means a free session:
+#98's `settled` helper and the profile-scoped regenerate test already wait
+for the release, or retry on 409. These two tests now wait for the release
+too. Nothing they assert changes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-api/tests/api.rs
+--- find
+async fn a_saved_session_is_reused_by_follow_up_runs_and_new_sessions_are_empty() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut state = app_state(AuthConfig::open());
+        let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        state.manager = RunManager::new(Arc::new(HistoryFactory {
+            requests: Arc::clone(&requests),
+        }));
+        let store = state.sessions.clone();
+--- with
+async fn a_saved_session_is_reused_by_follow_up_runs_and_new_sessions_are_empty() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut state = app_state(AuthConfig::open());
+        let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        state.manager = RunManager::new(Arc::new(HistoryFactory {
+            requests: Arc::clone(&requests),
+        }));
+        let store = state.sessions.clone();
+        let busy = Arc::clone(&state.busy_sessions);
+=== replace crates/lightagent-api/tests/api.rs
+--- find
+                tokio::task::yield_now().await;
+            }
+        }
+        assert!(requests.lock().await[0].is_empty());
+--- with
+                tokio::task::yield_now().await;
+            }
+            // The next prompt is admitted once the session is released.
+            released(&busy, &id_parsed).await;
+        }
+        assert!(requests.lock().await[0].is_empty());
+=== replace crates/lightagent-api/tests/api.rs
+--- find
+    state.manager = RunManager::new(Arc::new(WindowedFactory {
+        window,
+        requests: Arc::clone(&requests),
+    }));
+    let store = state.sessions.clone();
+--- with
+    state.manager = RunManager::new(Arc::new(WindowedFactory {
+        window,
+        requests: Arc::clone(&requests),
+    }));
+    let store = state.sessions.clone();
+    let busy = Arc::clone(&state.busy_sessions);
+=== replace crates/lightagent-api/tests/api.rs
+--- find
+        while store.load(&parsed).unwrap().runs.len() <= index {
+            tokio::task::yield_now().await;
+        }
+--- with
+        while store.load(&parsed).unwrap().runs.len() <= index {
+            tokio::task::yield_now().await;
+        }
+        // The next prompt is admitted once the session is released.
+        released(&busy, &parsed).await;
+=== end
