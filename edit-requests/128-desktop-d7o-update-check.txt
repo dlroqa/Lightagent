@@ -1,0 +1,1112 @@
+=== base df7c2735f387e1a7e3a989692761f1ac324b52ef
+=== message
+Row 49: D7-12 — update --check through one shared, read-only operation
+
+`lightagent update --check` (D1-Q1: applicable as a read-only check that
+installs nothing) had no desktop path.
+
+- release-update: `check()` returns the report `update --check --json`
+  prints; the CLI's check and the API share `inspect`, factored out of
+  `run` (the install path is unchanged). A check fetches the release
+  metadata only, never an archive, and changes nothing.
+- Errors say which: HTTP status, an exhausted rate limit (HTTP 403/429
+  with x-ratelimit-remaining: 0, with its reset time), a timeout, a
+  malformed or tagless answer.
+- Test-only: LIGHTAGENT_TEST_RELEASE_API (with
+  LIGHTAGENT_TEST_RELEASE_TIMEOUT_MS) replaces GitHub's release API for
+  `--check` only and only with a loopback http:// URL; anything else is
+  refused, and installing never reads it.
+- API (operator): GET /update/check (503 with the reason when the check
+  fails); contract update.check; one backend inventory row (not counted).
+- Diagnostics screen: an Updates card (Check for updates; installs
+  nothing; the app is updated by installing a new version of it).
+- Fixture evidence: desktop_update_check.rs (newer, equal and older
+  releases; HTTP 500, rate limit, malformed, tagless, timeout; only the
+  metadata path requested, never an asset; the binary unchanged; the CLI
+  and the API alike; a non-loopback override refused), runs.py
+  `update_check` (host), e2e/update.mjs with a loopback release fixture in
+  render-panel.sh (browser).
+- Live evidence, separately: .github/workflows/update-check-live.yml runs
+  the real check against GitHub, read-only (the binary's hash is checked
+  before and after), and keeps its report as an artifact.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/release-update/src/release.rs
+--- find
+const LATEST_RELEASE_API: &str = "https://api.github.com/repos/dlroqa/Lightagent/releases/latest";
+--- with
+pub(crate) const LATEST_RELEASE_API: &str =
+    "https://api.github.com/repos/dlroqa/Lightagent/releases/latest";
+
+/// How long a request for the release metadata may take.
+pub(crate) const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Test-only: a loopback release API that replaces GitHub's for `update
+/// --check`, so hosted tests can serve controlled answers. Installing never
+/// reads it, and anything but a loopback `http://` URL is refused.
+const TEST_RELEASE_API_ENV: &str = "LIGHTAGENT_TEST_RELEASE_API";
+/// Test-only, with [`TEST_RELEASE_API_ENV`]: the check's timeout.
+const TEST_RELEASE_TIMEOUT_ENV: &str = "LIGHTAGENT_TEST_RELEASE_TIMEOUT_MS";
+
+/// The release API and timeout `update --check` uses.
+pub(crate) fn check_source() -> Result<(String, Duration), String> {
+    match std::env::var(TEST_RELEASE_API_ENV) {
+        Ok(url) if !url.is_empty() => {
+            if !(url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:")) {
+                return Err(format!(
+                    "{TEST_RELEASE_API_ENV} must be a loopback http:// URL"
+                ));
+            }
+            let timeout = std::env::var(TEST_RELEASE_TIMEOUT_ENV)
+                .ok()
+                .and_then(|ms| ms.parse().ok())
+                .map(Duration::from_millis)
+                .unwrap_or(CHECK_TIMEOUT);
+            Ok((url, timeout))
+        }
+        _ => Ok((LATEST_RELEASE_API.to_owned(), CHECK_TIMEOUT)),
+    }
+}
+=== replace crates/release-update/src/release.rs
+--- find
+pub(crate) async fn latest(client: &reqwest::Client) -> Result<Release, String> {
+    let response = client
+        .get(LATEST_RELEASE_API)
+        .header("Accept", "application/vnd.github+json")
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|error| format!("could not check for updates: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "GitHub answered HTTP {} while checking for updates",
+            response.status().as_u16()
+        ));
+    }
+    response
+        .json::<Release>()
+        .await
+        .map_err(|error| format!("could not read the latest release: {error}"))
+}
+--- with
+/// The latest release from `api`, within `timeout`. A failed, rate-limited,
+/// timed-out, malformed or tagless answer is an error that says which.
+pub(crate) async fn latest_from(
+    client: &reqwest::Client,
+    api: &str,
+    timeout: Duration,
+) -> Result<Release, String> {
+    let timed_out = || {
+        format!(
+            "checking for updates timed out after {} ms",
+            timeout.as_millis()
+        )
+    };
+    let response = client
+        .get(api)
+        .header("Accept", "application/vnd.github+json")
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(|error| {
+            if error.is_timeout() {
+                timed_out()
+            } else {
+                format!("could not check for updates: {error}")
+            }
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        if matches!(status.as_u16(), 403 | 429)
+            && header("x-ratelimit-remaining").as_deref() == Some("0")
+        {
+            return Err(match header("x-ratelimit-reset") {
+                Some(reset) => format!(
+                    "GitHub's API rate limit is used up (HTTP {}); it resets at Unix time {reset}",
+                    status.as_u16()
+                ),
+                None => format!(
+                    "GitHub's API rate limit is used up (HTTP {})",
+                    status.as_u16()
+                ),
+            });
+        }
+        return Err(format!(
+            "GitHub answered HTTP {} while checking for updates",
+            status.as_u16()
+        ));
+    }
+    let release = response.json::<Release>().await.map_err(|error| {
+        if error.is_timeout() {
+            timed_out()
+        } else {
+            format!("could not read the latest release: {error}")
+        }
+    })?;
+    if release.version().is_empty() {
+        return Err("could not read the latest release: it names no version".to_owned());
+    }
+    Ok(release)
+}
+=== replace crates/release-update/src/lib.rs
+--- find
+    let executable = std::env::current_exe()
+        .and_then(|path| path.canonicalize())
+        .map_err(|error| format!("could not locate the running executable: {error}"))?;
+    let install_dir = install::install_dir(&executable)?;
+
+    let client = release::client(&format!("{}/{current}", invoker.binary()))?;
+    let release = release::latest(&client).await?;
+    let latest = release.version().to_owned();
+
+    let mut targets = Vec::new();
+    for cli in [invoker] {
+        let path = install::binary_path(&install_dir, cli);
+        let installed = path.is_file();
+        let version = if same_file(&path, &executable) {
+            Some(current.to_owned())
+        } else if installed {
+            install::installed_version(&path, cli).await
+        } else {
+            None
+        };
+        let needs_update = request.force
+            || version.as_deref().is_none_or(|version| {
+                version::compare_versions(&latest, version) == Ordering::Greater
+            });
+        targets.push(Target {
+            cli,
+            path,
+            version,
+            installed,
+            needs_update,
+        });
+    }
+
+    let blocked = targets
+        .iter()
+        .filter(|target| target.installed)
+        .find_map(|target| install::managed_install(&target.path));
+    let method = method(&release, &latest, &targets)?;
+
+--- with
+    let (api, timeout) = if request.check {
+        release::check_source()?
+    } else {
+        (
+            release::LATEST_RELEASE_API.to_owned(),
+            release::CHECK_TIMEOUT,
+        )
+    };
+    let Inspection {
+        client,
+        release,
+        latest,
+        targets,
+        blocked,
+        method,
+        install_dir,
+    } = inspect(invoker, current, request.force, &api, timeout).await?;
+
+=== replace crates/release-update/src/lib.rs
+--- find
+/// Choose the published archive when present, otherwise build the same tag.
+--- with
+/// `update --check` as data: the report `update --check --json` prints.
+/// Read-only: only the release metadata is fetched, never an archive, and
+/// nothing is installed or changed.
+pub async fn check(invoker: Cli, current: &str) -> Result<serde_json::Value, String> {
+    let (api, timeout) = release::check_source()?;
+    let inspection = inspect(invoker, current, false, &api, timeout).await?;
+    Ok(check_report(
+        invoker,
+        &inspection.release,
+        &inspection.targets,
+        inspection.method,
+        inspection.blocked.as_deref(),
+    ))
+}
+
+/// What an update would do, found without changing anything.
+struct Inspection {
+    client: reqwest::Client,
+    release: Release,
+    latest: String,
+    targets: Vec<Target>,
+    blocked: Option<String>,
+    method: Method,
+    install_dir: PathBuf,
+}
+
+/// Read the latest release from `api` and compare it with what is installed.
+async fn inspect(
+    invoker: Cli,
+    current: &str,
+    force: bool,
+    api: &str,
+    timeout: std::time::Duration,
+) -> Result<Inspection, String> {
+    let executable = std::env::current_exe()
+        .and_then(|path| path.canonicalize())
+        .map_err(|error| format!("could not locate the running executable: {error}"))?;
+    let install_dir = install::install_dir(&executable)?;
+
+    let client = release::client(&format!("{}/{current}", invoker.binary()))?;
+    let release = release::latest_from(&client, api, timeout).await?;
+    let latest = release.version().to_owned();
+
+    let mut targets = Vec::new();
+    for cli in [invoker] {
+        let path = install::binary_path(&install_dir, cli);
+        let installed = path.is_file();
+        let version = if same_file(&path, &executable) {
+            Some(current.to_owned())
+        } else if installed {
+            install::installed_version(&path, cli).await
+        } else {
+            None
+        };
+        let needs_update = force
+            || version.as_deref().is_none_or(|version| {
+                version::compare_versions(&latest, version) == Ordering::Greater
+            });
+        targets.push(Target {
+            cli,
+            path,
+            version,
+            installed,
+            needs_update,
+        });
+    }
+
+    let blocked = targets
+        .iter()
+        .filter(|target| target.installed)
+        .find_map(|target| install::managed_install(&target.path));
+    let method = method(&release, &latest, &targets)?;
+    Ok(Inspection {
+        client,
+        release,
+        latest,
+        targets,
+        blocked,
+        method,
+        install_dir,
+    })
+}
+
+/// Choose the published archive when present, otherwise build the same tag.
+=== replace crates/release-update/src/lib.rs
+--- find
+    let update_available = targets.iter().any(|target| target.needs_update);
+    let current = targets
+        .iter()
+        .find(|target| target.cli == invoker)
+        .and_then(|target| target.version.as_deref());
+    if json {
+        let binaries: Vec<serde_json::Value> = targets
+            .iter()
+            .map(|target| {
+                serde_json::json!({
+                    "name": target.cli.binary(),
+                    "path": target.path,
+                    "installed": target.installed,
+                    "version": target.version,
+                    "update_available": target.needs_update,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "current": current,
+                "latest": latest,
+                "update_available": update_available,
+                "release": release.html_url,
+                "method": method.as_str(),
+                "binaries": binaries,
+                "blocked": blocked,
+            })
+        );
+        return;
+    }
+--- with
+    let update_available = targets.iter().any(|target| target.needs_update);
+    if json {
+        println!(
+            "{}",
+            check_report(invoker, release, targets, method, blocked)
+        );
+        return;
+    }
+=== replace crates/release-update/src/lib.rs
+--- find
+/// A human-readable installed version summary.
+--- with
+/// The `--check --json` report.
+fn check_report(
+    invoker: Cli,
+    release: &Release,
+    targets: &[Target],
+    method: Method,
+    blocked: Option<&str>,
+) -> serde_json::Value {
+    let current = targets
+        .iter()
+        .find(|target| target.cli == invoker)
+        .and_then(|target| target.version.as_deref());
+    let binaries: Vec<serde_json::Value> = targets
+        .iter()
+        .map(|target| {
+            serde_json::json!({
+                "name": target.cli.binary(),
+                "path": target.path,
+                "installed": target.installed,
+                "version": target.version,
+                "update_available": target.needs_update,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "current": current,
+        "latest": release.version(),
+        "update_available": targets.iter().any(|target| target.needs_update),
+        "release": release.html_url,
+        "method": method.as_str(),
+        "binaries": binaries,
+        "blocked": blocked,
+    })
+}
+
+/// A human-readable installed version summary.
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    /// Tools currently visible to the factory's active target.
+    async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
+--- with
+    /// `lightagent update --check`: read-only, it installs nothing. The
+    /// default refuses.
+    async fn update_check(&self) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
+    /// Tools currently visible to the factory's active target.
+    async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    /// Perform a worker-assignment change through the factory.
+--- with
+    /// Check for updates through the factory (read-only).
+    pub async fn update_check(&self) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.update_check().await
+    }
+
+    /// Perform a worker-assignment change through the factory.
+=== replace crates/lightagent/src/serve.rs
+--- find
+    async fn workers_change(
+        &self,
+        request: lightagent_api::ops::WorkerRequest,
+--- with
+    async fn update_check(&self) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        release_update::check(release_update::Cli::Lightagent, crate::VERSION)
+            .await
+            .map_err(|error| {
+                lightagent_api::ops::OpError::new(lightagent_api::ops::OpCategory::Unavailable, error)
+            })
+    }
+
+    async fn workers_change(
+        &self,
+        request: lightagent_api::ops::WorkerRequest,
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+        .route("/api/lightagent/v1/import/hermes", post(import_hermes))
+--- with
+        .route("/api/lightagent/v1/import/hermes", post(import_hermes))
+        .route("/api/lightagent/v1/update/check", get(update_check))
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+/// An import of skills from a repository or folder (new scope).
+--- with
+/// `lightagent update --check`: read-only, it installs nothing. Operator
+/// only. A failed check answers 503 with its reason.
+async fn update_check(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    match state.manager.update_check().await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+/// An import of skills from a repository or folder (new scope).
+=== replace docs/desktop/contract/operations.json
+--- find
+  {
+   "id": "setup.init",
+--- with
+  {
+   "id": "update.check",
+   "method": "GET",
+   "path": "/api/lightagent/v1/update/check"
+  },
+  {
+   "id": "setup.init",
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  {
+   "id": "api.post.setup.init",
+--- with
+  {
+   "id": "api.get.update.check",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/update/check",
+   "source": "crates/lightagent-api/src/lib.rs:177",
+   "behavior": "Check for updates, read-only: the report `update --check --json` prints (D7-12)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/update/check"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.update.opt.check)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: release_update::check via RunFactory::update_check",
+   "permission": "local-operator",
+   "data_scope": "machine",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.post.setup.init",
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.post.setup.init` | `POST /api/lightagent/v1/setup/init` | applicable | no | (backend reuse) | shared: init_report via RunFactory::setup | not-started | `crates/lightagent-api/src/lib.rs:177` |
+--- with
+| `api.get.update.check` | `GET /api/lightagent/v1/update/check` | applicable | no | (backend reuse) | shared: release_update::check via RunFactory::update_check | not-started | `crates/lightagent-api/src/lib.rs:177` |
+| `api.post.setup.init` | `POST /api/lightagent/v1/setup/init` | applicable | no | (backend reuse) | shared: init_report via RunFactory::setup | not-started | `crates/lightagent-api/src/lib.rs:177` |
+=== write crates/lightagent/tests/desktop_update_check.rs
+//! `lightagent update --check` (D7-12) against a controlled release API on
+//! loopback: the CLI and the desktop runtime's API report the same thing
+//! for newer, equal and older releases, and the same reason for an HTTP
+//! error, an exhausted rate limit, a malformed or tagless answer and a
+//! timeout. Only the release metadata is ever requested, never an asset,
+//! and the binary is unchanged. This is fixture evidence; the live check
+//! against GitHub is .github/workflows/update-check-live.yml. Every
+//! process here is separate.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+
+const KEY: &str = "f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7";
+const CHECK: &str = "/api/lightagent/v1/update/check";
+const RELEASE_PATH: &str = "/repos/dlroqa/Lightagent/releases/latest";
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// What the fixture answers the next request with.
+#[derive(Clone)]
+enum Answer {
+    Respond(String),
+    /// Accept and say nothing, for longer than any check waits.
+    Hold,
+}
+
+struct Fixture {
+    url: String,
+    requests: Arc<Mutex<Vec<String>>>,
+    answer: Arc<Mutex<Answer>>,
+}
+
+fn fixture() -> Fixture {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the fixture");
+    let url = format!(
+        "http://{}{RELEASE_PATH}",
+        listener.local_addr().expect("fixture address")
+    );
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let answer = Arc::new(Mutex::new(Answer::Hold));
+    let (seen, current) = (Arc::clone(&requests), Arc::clone(&answer));
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let (seen, current) = (Arc::clone(&seen), Arc::clone(&current));
+            std::thread::spawn(move || serve(stream, &seen, &current));
+        }
+    });
+    Fixture {
+        url,
+        requests,
+        answer,
+    }
+}
+
+fn serve(mut stream: TcpStream, seen: &Mutex<Vec<String>>, current: &Mutex<Answer>) {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        match stream.read(&mut byte) {
+            Ok(1) => head.push(byte[0]),
+            _ => return,
+        }
+    }
+    let line = String::from_utf8_lossy(&head)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    seen.lock().expect("requests").push(line);
+    let answer = current.lock().expect("answer").clone();
+    match answer {
+        Answer::Respond(raw) => {
+            let _ = stream.write_all(raw.as_bytes());
+        }
+        Answer::Hold => std::thread::sleep(Duration::from_secs(5)),
+    }
+}
+
+/// An HTTP response; each of `headers` ends with CRLF.
+fn http(status: &str, headers: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}",
+        body.len()
+    )
+}
+
+fn scratch(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!(
+        "lightagent-desktop-update-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    dir
+}
+
+fn quiet(command: &mut Command, home: &Path, env: &[(&str, &str)]) {
+    command
+        .env("LIGHTAGENT_HOME", home)
+        .env_remove("LIGHTAGENT_TEST_RELEASE_API")
+        .env_remove("LIGHTAGENT_TEST_RELEASE_TIMEOUT_MS")
+        .env_remove("LIGHTAGENT_INSTALL_ROOT");
+    for (name, value) in env {
+        command.env(name, value);
+    }
+}
+
+fn start(home: &Path, env: &[(&str, &str)]) -> Runtime {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lightagent"));
+    command
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    quiet(&mut command, home, env);
+    let mut child = command.spawn().expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        let _ = reader.read_line(&mut line);
+        let _ = tx.send(line);
+        let mut rest = String::new();
+        while reader.read_line(&mut rest).is_ok_and(|read| read > 0) {
+            rest.clear();
+        }
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+fn call(runtime: &Runtime, method: &str, path: &str) -> (u16, String) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        runtime.addr
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, raw)
+}
+
+fn cli(home: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lightagent"));
+    command.args(args).stdin(Stdio::null());
+    quiet(&mut command, home, env);
+    command.output().expect("run lightagent")
+}
+
+fn cli_json(home: &Path, env: &[(&str, &str)], args: &[&str]) -> Value {
+    let mut all = vec!["--json"];
+    all.extend_from_slice(args);
+    let output = cli(home, env, &all);
+    assert!(
+        output.status.success(),
+        "lightagent {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("JSON output")
+}
+
+/// The binary's size and modification time: unchanged if nothing replaced it.
+fn stamp() -> (u64, Option<SystemTime>) {
+    let meta = std::fs::metadata(env!("CARGO_BIN_EXE_lightagent")).expect("binary");
+    (meta.len(), meta.modified().ok())
+}
+
+#[test]
+fn the_cli_and_the_api_check_alike_against_controlled_releases() {
+    let home = scratch("check");
+    let fx = fixture();
+    let env = [
+        ("LIGHTAGENT_TEST_RELEASE_API", fx.url.as_str()),
+        ("LIGHTAGENT_TEST_RELEASE_TIMEOUT_MS", "1500"),
+    ];
+    let before = stamp();
+    let current = cli_json(&home, &[], &["doctor"])["version"]
+        .as_str()
+        .expect("version")
+        .to_owned();
+    let runtime = start(&home, &env);
+    let release = |tag: &str| {
+        let body = json!({
+            "tag_name": tag,
+            "html_url": format!("https://github.com/dlroqa/Lightagent/releases/tag/{tag}"),
+            "assets": [{
+                "name": "lightagent-never-downloaded.tar.gz",
+                "browser_download_url": format!("{}/never-downloaded", fx.url),
+                "size": 1,
+            }],
+        });
+        http("200 OK", "", &body.to_string())
+    };
+
+    let cases = [
+        ("v99.0.0".to_owned(), true),
+        (format!("v{current}"), false),
+        ("v0.0.1".to_owned(), false),
+    ];
+    for (tag, available) in cases {
+        *fx.answer.lock().expect("answer") = Answer::Respond(release(&tag));
+        let by_cli = cli_json(&home, &env, &["update", "--check"]);
+        let (status, raw) = call(&runtime, "GET", CHECK);
+        assert_eq!(status, 200, "{tag}: {raw}");
+        let by_api: Value = serde_json::from_str(&raw).expect("JSON");
+        assert_eq!(by_api, by_cli, "{tag}");
+        assert_eq!(by_cli["latest"], tag.trim_start_matches('v'), "{by_cli}");
+        assert_eq!(by_cli["update_available"], available, "{tag}: {by_cli}");
+        assert_eq!(by_cli["current"], current.as_str(), "{by_cli}");
+        assert_eq!(
+            by_cli["release"],
+            format!("https://github.com/dlroqa/Lightagent/releases/tag/{tag}"),
+            "{by_cli}"
+        );
+    }
+
+    let failures = [
+        (
+            Answer::Respond(http("500 Internal Server Error", "", "{}")),
+            "GitHub answered HTTP 500",
+        ),
+        (
+            Answer::Respond(http(
+                "403 Forbidden",
+                "x-ratelimit-remaining: 0\r\nx-ratelimit-reset: 1700000000\r\n",
+                r#"{"message":"API rate limit exceeded"}"#,
+            )),
+            "rate limit is used up (HTTP 403); it resets at Unix time 1700000000",
+        ),
+        (
+            Answer::Respond(http("200 OK", "", "{not json")),
+            "could not read the latest release",
+        ),
+        (
+            Answer::Respond(http("200 OK", "", r#"{"html_url":"https://example.org"}"#)),
+            "could not read the latest release",
+        ),
+        (Answer::Hold, "timed out after 1500 ms"),
+    ];
+    for (answer, words) in failures {
+        *fx.answer.lock().expect("answer") = answer;
+        let output = cli(&home, &env, &["--json", "update", "--check"]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{words}: the CLI succeeded");
+        assert!(stderr.contains(words), "CLI, {words}: {stderr}");
+        let (status, raw) = call(&runtime, "GET", CHECK);
+        assert_eq!(status, 503, "{words}: {raw}");
+        assert!(raw.contains(words), "API, {words}: {raw}");
+    }
+
+    // Only the metadata was asked for, never an asset; nothing was replaced.
+    let seen = fx.requests.lock().expect("requests").clone();
+    assert!(seen.len() >= 16, "{seen:?}");
+    assert!(
+        seen.iter()
+            .all(|line| line.starts_with(&format!("GET {RELEASE_PATH} "))),
+        "{seen:?}"
+    );
+    assert_eq!(stamp(), before, "the binary changed");
+}
+
+#[test]
+fn a_release_api_off_loopback_is_refused() {
+    let home = scratch("refused");
+    for url in ["https://example.com/releases/latest", "http://10.0.0.1:80/latest"] {
+        let output = cli(
+            &home,
+            &[("LIGHTAGENT_TEST_RELEASE_API", url)],
+            &["update", "--check"],
+        );
+        assert!(!output.status.success(), "{url}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("must be a loopback http:// URL"),
+            "{url}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+=== replace desktop/e2e/runs.py
+--- find
+import json
+import os
+import sys
+import time
+--- with
+import http.server
+import json
+import os
+import sys
+import threading
+import time
+=== replace desktop/e2e/runs.py
+--- find
+def main():
+--- with
+class _Releases(http.server.BaseHTTPRequestHandler):
+    """A controlled release API on loopback for `update --check`: it always
+    names v99.0.0 and records every path requested."""
+    seen = []
+
+    def do_GET(self):
+        _Releases.seen.append(self.path)
+        body = json.dumps({"tag_name": "v99.0.0",
+                           "html_url": "https://github.com/dlroqa/Lightagent/releases/tag/v99.0.0",
+                           "assets": []}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+def scenario_update_check(host, cli):
+    """D7 through the host transport, against the controlled release API:
+    the runtime's check reports the release the CLI's check reports, only
+    the release metadata is requested, and nothing is installed."""
+    check = Checks("update_check")
+    before = len(_Releases.seen)
+    by_cli = json.loads(harness.run_cli(cli, "--json", "update", "--check"))
+    status, by_host = host.fetch("GET", f"{API}/update/check")
+    fields = ("latest", "update_available", "release")
+    check.expect("the check through the host reports the CLI's release",
+                 status == 200 and all((by_host or {}).get(name) == by_cli.get(name) for name in fields)
+                 and by_cli.get("latest") == "99.0.0" and by_cli.get("update_available") is True,
+                 (status, by_host, by_cli))
+    paths = _Releases.seen[before:]
+    check.expect("only the release metadata was requested",
+                 len(paths) == 2 and all(path == "/repos/dlroqa/Lightagent/releases/latest" for path in paths),
+                 paths)
+    return check
+
+
+def main():
+=== replace desktop/e2e/runs.py
+--- find
+    harness.run_cli(cli, "remote-credential", "keygen", os.path.join(key_dir, "credential.key"))
+    os.environ["LIGHTAGENT_CREDENTIAL_KEY_FILE"] = os.path.join(key_dir, "credential.key")
+--- with
+    harness.run_cli(cli, "remote-credential", "keygen", os.path.join(key_dir, "credential.key"))
+    os.environ["LIGHTAGENT_CREDENTIAL_KEY_FILE"] = os.path.join(key_dir, "credential.key")
+    # A controlled release API for `update --check`, inherited like the key.
+    releases = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Releases)
+    threading.Thread(target=releases.serve_forever, daemon=True).start()
+    os.environ["LIGHTAGENT_TEST_RELEASE_API"] = (
+        f"http://127.0.0.1:{releases.server_address[1]}/repos/dlroqa/Lightagent/releases/latest")
+=== replace desktop/e2e/runs.py
+--- find
+            ("config_sections", lambda: scenario_config_sections(host, cli)),
+--- with
+            ("config_sections", lambda: scenario_config_sections(host, cli)),
+            ("update_check", lambda: scenario_update_check(host, cli)),
+=== replace scripts/render-panel.sh
+--- find
+agent_pid=""
+--- with
+agent_pid=""
+release_pid=""
+=== replace scripts/render-panel.sh
+--- find
+  [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null || true
+--- with
+  [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null || true
+  [ -n "$release_pid" ] && kill "$release_pid" 2>/dev/null || true
+=== replace scripts/render-panel.sh
+--- find
+export LIGHTAGENT_CREDENTIAL_KEY_FILE="$work_dir/credential.key"
+--- with
+export LIGHTAGENT_CREDENTIAL_KEY_FILE="$work_dir/credential.key"
+
+# A controlled release API for `update --check` (read-only), on loopback.
+mkdir -p "$work_dir/releases"
+printf '%s\n' '{"tag_name":"v99.0.0","html_url":"https://github.com/dlroqa/Lightagent/releases/tag/v99.0.0","assets":[]}' \
+  >"$work_dir/releases/latest"
+python3 -m http.server 8737 --bind 127.0.0.1 --directory "$work_dir/releases" >"$work_dir/releases.log" 2>&1 &
+release_pid=$!
+wait_for "http://127.0.0.1:8737/latest" "the release fixture" "$release_pid"
+export LIGHTAGENT_TEST_RELEASE_API="http://127.0.0.1:8737/latest"
+=== replace frontend/src/api/agent.ts
+--- find
+export interface ApprovalRow {
+--- with
+/** `lightagent update --check --json`: read-only; nothing is installed. */
+export interface UpdateCheck {
+  current: string | null;
+  latest: string;
+  update_available: boolean;
+  release: string;
+  method: string;
+  blocked: string | null;
+}
+
+export interface ApprovalRow {
+=== replace frontend/src/api/agent.ts
+--- find
+  diagnosticsBundle: () =>
+--- with
+  updateCheck: () => jsonRequest<UpdateCheck>("/update/check"),
+  diagnosticsBundle: () =>
+=== replace frontend/src/screens/DiagnosticsScreen.tsx
+--- find
+import { agentApi } from "../api/agent";
+--- with
+import { agentApi, type UpdateCheck } from "../api/agent";
+=== replace frontend/src/screens/DiagnosticsScreen.tsx
+--- find
+  const [saved, setSaved] = useState<string | null>(null);
+--- with
+  const [saved, setSaved] = useState<string | null>(null);
+  const [update, setUpdate] = useState<UpdateCheck | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  async function checkForUpdates() {
+    setChecking(true);
+    setUpdateError(null);
+    try {
+      setUpdate(await agentApi.updateCheck());
+    } catch (cause) {
+      setUpdate(null);
+      setUpdateError(errorText(cause));
+    } finally {
+      setChecking(false);
+    }
+  }
+=== replace frontend/src/screens/DiagnosticsScreen.tsx
+--- find
+        <Card title="Diagnostics bundle">
+--- with
+        <Card title="Updates">
+          <p className="card__note">
+            Compares this Lightagent with the latest published release. Checking installs nothing; the desktop app is
+            updated by installing a new version of it.
+          </p>
+          <button type="button" className="btn" disabled={checking} aria-busy={checking || undefined}
+            onClick={() => void checkForUpdates()}>Check for updates</button>
+          {updateError && <div role="alert" style={{ fontSize: 11.5, color: "var(--danger)", marginTop: 4 }}>{updateError}</div>}
+          {update && (
+            <div data-testid="diagnostics-update" role="status" style={{ marginTop: 10, display: "grid", gap: 4 }}>
+              <div>
+                {update.update_available
+                  ? `Lightagent ${update.latest} is available; this is ${update.current ?? "an unknown version"}.`
+                  : `Lightagent ${update.current ?? update.latest} is up to date (the latest release is ${update.latest}).`}
+              </div>
+              {update.blocked && <div className="muted">Not updated from here: {update.blocked}.</div>}
+              <div className="muted" style={{ overflowWrap: "anywhere" }}>Release: {update.release}</div>
+            </div>
+          )}
+        </Card>
+
+        <Card title="Diagnostics bundle">
+=== write e2e/update.mjs
+// The Diagnostics screen's Updates card against the real harness (D7-12):
+// render-panel.sh serves a controlled release API on loopback naming
+// v99.0.0, so Check for updates reports that release as available. It is
+// read-only: the API reports what `update --check --json` prints.
+// crates/lightagent/tests/desktop_update_check.rs is the fixture evidence
+// for every answer; .github/workflows/update-check-live.yml is the live one.
+
+export async function checkUpdate(browser, base, outDir) {
+  const failures = [];
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1400 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  try {
+    await page.goto(`${base}/#/diagnostics`);
+    const screen = page.getByTestId("diagnostics-screen");
+    await screen.waitFor({ timeout: 15000 });
+    await screen.getByText("Checking installs nothing", { exact: false }).waitFor({ timeout: 10000 });
+    await screen.getByRole("button", { name: "Check for updates" }).click();
+    await page.getByTestId("diagnostics-update").getByText("Lightagent 99.0.0 is available", { exact: false })
+      .waitFor({ timeout: 15000 });
+    const report = await (await fetch(`${base}/api/lightagent/v1/update/check`)).json();
+    if (report.latest !== "99.0.0" || report.update_available !== true) {
+      failures.push(`update: the API reports ${JSON.stringify(report)}`);
+    }
+    await page.screenshot({ path: `${outDir}/diagnostics-update.png`, fullPage: true });
+    if (errors.length) failures.push(`update: page errors: ${errors.join("; ")}`);
+  } catch (err) {
+    failures.push(`update: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+    await page.screenshot({ path: `${outDir}/update-failed.png`, fullPage: true }).catch(() => {});
+  } finally {
+    await page.close();
+  }
+  return failures;
+}
+=== replace e2e/render.mjs
+--- find
+import { checkDiagnostics } from "./diagnostics.mjs";
+--- with
+import { checkDiagnostics } from "./diagnostics.mjs";
+import { checkUpdate } from "./update.mjs";
+=== replace e2e/render.mjs
+--- find
+  // Prepares and saves the diagnostics bundle, after identity and credentials exist.
+--- with
+  // Checks for updates against the harness's release fixture (read-only).
+  try {
+    failures.push(...(await checkUpdate(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`update: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  }
+  // Prepares and saves the diagnostics bundle, after identity and credentials exist.
+=== write .github/workflows/update-check-live.yml
+name: update check (live, read-only)
+
+# The live counterpart of the fixture evidence in
+# crates/lightagent/tests/desktop_update_check.rs: `lightagent update
+# --check --json` against GitHub's real release API. Read-only: it fetches
+# release metadata only, never downloads an archive, installs or publishes
+# anything; the binary's hash is checked before and after. Its result is
+# reported on its own, apart from the deterministic tests.
+
+on:
+  pull_request:
+    paths:
+      - crates/release-update/**
+      - crates/lightagent/src/**
+      - .github/workflows/update-check-live.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-check-live-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live:
+    name: update --check against GitHub (read-only)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build lightagent
+        run: cargo build -p lightagent --bin lightagent
+      - name: Check for updates (read-only)
+        env:
+          LIGHTAGENT_TEST_RELEASE_API: ""
+        run: |
+          set -euo pipefail
+          bin=target/debug/lightagent
+          before=$(sha256sum "$bin" | cut -d' ' -f1)
+          "$bin" --json update --check > "$RUNNER_TEMP/update-check-live.json"
+          after=$(sha256sum "$bin" | cut -d' ' -f1)
+          test "$before" = "$after" || { echo "::error::the binary changed during a check"; exit 1; }
+          cat "$RUNNER_TEMP/update-check-live.json"
+          python3 - "$RUNNER_TEMP/update-check-live.json" <<'PY'
+          import json, re, sys
+          report = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert re.fullmatch(r"\d+\.\d+\.\d+\S*", report["latest"]), report
+          assert report["release"].startswith("https://github.com/dlroqa/Lightagent/releases/"), report
+          assert isinstance(report["update_available"], bool), report
+          print(f"live: latest {report['latest']}, current {report['current']}, update available {report['update_available']}")
+          PY
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: update-check-live
+          path: ${{ runner.temp }}/update-check-live.json
+          if-no-files-found: warn
+          retention-days: 30
+=== end
