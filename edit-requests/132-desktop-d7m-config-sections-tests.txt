@@ -1,0 +1,174 @@
+=== base 32e25813c0df705abae1e6f67c2c675e9a8c79da
+=== message
+Row 47: config-sections tests read unset optional keys and restore safely
+
+The host scenario read each key's original value with `config get`, which
+refuses an optional key that has no value (runtime.threads,
+generation.max_output_tokens, platform.infinity.timeout_secs): the
+scenario aborted on the first one. It now reads the original through the
+host. A 404 there must be the CLI's refusal too (unset at both levels
+alike), and the key is cleared again afterwards. Every key is checked to
+be restored exactly.
+
+The browser check restored each key with an external PUT. That changed
+the config file's revision under the Advanced configuration card, so the
+card's next Set was refused with 409 as designed, and every other key
+failed. It also read keys before they had a value. The page now reloads
+before each key, and Read must show the exact current value (or, for an
+unset optional key, the refusal). Set must show the exact confirmation,
+and Read must show the new value. The API confirms it, and restoration is
+checked.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace desktop/e2e/runs.py
+--- find
+def scenario_config_sections(host, cli):
+    """D7 through the host transport: one key of every settable
+    configuration section, written through the host, is what the CLI reads,
+    and the CLI's write is what the host reads. Every value is restored."""
+    check = Checks("config_sections")
+    for key, by_host, by_cli in CONFIG_SECTIONS:
+        original = harness.run_cli(cli, "config", "get", key).strip()
+        try:
+            status, written = host.fetch("PUT", f"{API}/config/{key}", {"value": by_host})
+            read = harness.run_cli(cli, "config", "get", key).strip()
+            harness.run_cli(cli, "config", "set", key, by_cli)
+            _, shown = host.fetch("GET", f"{API}/config/{key}")
+            check.expect(f"{key}: through the host and by the CLI alike",
+                         status == 200 and read == by_host and (shown or {}).get("value") == by_cli,
+                         (status, written, read, shown))
+        finally:
+            harness.run_cli(cli, "config", "set", key, original)
+    return check
+--- with
+def scenario_config_sections(host, cli):
+    """D7 through the host transport: one key of every settable
+    configuration section, written through the host, is what the CLI reads,
+    and the CLI's write is what the host reads. An optional key with no value
+    is unset for both alike (the host's 404, the CLI's refusal). Every value
+    is restored, and a key that had none is cleared again."""
+    check = Checks("config_sections")
+    for key, by_host, by_cli in CONFIG_SECTIONS:
+        before_status, before = host.fetch("GET", f"{API}/config/{key}")
+        if before_status == 404:
+            try:
+                harness.run_cli(cli, "config", "get", key)
+                refused = None
+            except RuntimeError as error:
+                refused = str(error)
+            check.expect(f"{key}: unset through the host and for the CLI alike",
+                         refused is not None and f"unknown or unreadable config key '{key}'" in refused,
+                         (before, refused))
+            original = ""
+        else:
+            original = (before or {}).get("value")
+            check.expect(f"{key}: readable through the host",
+                         before_status == 200 and isinstance(original, str), (before_status, before))
+            if not isinstance(original, str):
+                continue
+        try:
+            status, written = host.fetch("PUT", f"{API}/config/{key}", {"value": by_host})
+            read = harness.run_cli(cli, "config", "get", key).strip()
+            harness.run_cli(cli, "config", "set", key, by_cli)
+            _, shown = host.fetch("GET", f"{API}/config/{key}")
+            check.expect(f"{key}: through the host and by the CLI alike",
+                         status == 200 and read == by_host and (shown or {}).get("value") == by_cli,
+                         (status, written, read, shown))
+        finally:
+            harness.run_cli(cli, "config", "set", key, original)
+        after_status, after = host.fetch("GET", f"{API}/config/{key}")
+        check.expect(f"{key}: restored",
+                     after_status == before_status and (after or {}).get("value") == (before or {}).get("value"),
+                     (before_status, before, after_status, after))
+    return check
+=== write e2e/config-sections.mjs
+// One key of every configuration section the CLI can set (inventory rows
+// config.<section>, and setup → tui), with the Settings screen's Advanced
+// configuration card against the real harness. Read shows the current value
+// (or, for an optional key with no value, the same refusal as `config get`).
+// Set writes the new value, Read shows it, and the API confirms it. The
+// original is restored through the API, which changes the config revision,
+// so the page reloads before each key: the card sends the revision it
+// loaded, and a stale one is refused (409) by design.
+// crates/lightagent/tests/desktop_config_sections.rs proves API = CLI per
+// section; desktop/e2e/runs.py `config_sections` covers the host.
+
+const SECTIONS = [
+  ["inference.model", "sections-model-a"],
+  ["agent.max_turns", "17"],
+  ["web.timeout_secs", "21"],
+  ["tools.profile_policy", "report_only"],
+  ["rag.realtime_enabled", "true"],
+  ["memory.top_k", "6"],
+  ["runtime.threads", "3"],
+  ["generation.max_output_tokens", "1234"],
+  ["platform.infinity.timeout_secs", "11"],
+  ["subagents.selection_profiles", "alpha"],
+  ["tui.show_reasoning", "false"],
+];
+
+export async function checkConfigSections(browser, base, outDir) {
+  const failures = [];
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1100 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const url = (key) => `${base}/api/lightagent/v1/config/${key}`;
+  // An optional key with no value is a 404, as `config get` refuses it.
+  const current = async (key) => {
+    const response = await fetch(url(key));
+    const body = await response.json().catch(() => null);
+    return { status: response.status, value: body?.value };
+  };
+  const restore = (key, value) =>
+    fetch(url(key), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ value }) });
+  const heading = page.getByRole("heading", { name: "Advanced configuration" });
+  const shows = (text) => page.getByText(text, { exact: true }).waitFor({ timeout: 5000 });
+  try {
+    await page.goto(`${base}/#/settings`);
+    await heading.waitFor({ timeout: 15000 });
+    for (const [key, value] of SECTIONS) {
+      const before = await current(key);
+      if (before.status !== 200 && before.status !== 404) {
+        failures.push(`config sections: ${key} reads as ${before.status} through the API`);
+        continue;
+      }
+      try {
+        await page.reload();
+        await heading.waitFor({ timeout: 15000 });
+        await page.getByLabel("Key", { exact: true }).fill(key);
+        await page.getByRole("button", { name: "Read", exact: true }).click();
+        if (before.status === 404) {
+          await page.getByRole("alert").filter({ hasText: `unknown or unreadable config key '${key}'` })
+            .waitFor({ timeout: 5000 });
+        } else {
+          await shows(`${key} = ${before.value || "(empty)"}`);
+        }
+        await page.getByLabel("Value", { exact: true }).fill(value);
+        await page.getByRole("button", { name: "Set", exact: true }).click();
+        await shows(`Set ${key} = ${value}. New runs use it.`);
+        await page.getByRole("button", { name: "Read", exact: true }).click();
+        await shows(`${key} = ${value}`);
+        const now = await current(key);
+        if (now.status !== 200 || now.value !== value) {
+          failures.push(`config sections: ${key} is ${JSON.stringify(now)} after the card set ${value}`);
+        }
+      } catch (err) {
+        failures.push(`config sections: ${key}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+        await page.screenshot({ path: `${outDir}/config-sections-failed-${key.replace(/\W+/g, "-")}.png` }).catch(() => {});
+      } finally {
+        await restore(key, before.value ?? "").catch(() => {});
+      }
+      const after = await current(key);
+      if (after.status !== before.status || after.value !== before.value) {
+        failures.push(`config sections: ${key} not restored: ${JSON.stringify(before)} became ${JSON.stringify(after)}`);
+      }
+    }
+    if (errors.length) failures.push(`config sections: page errors: ${errors.join("; ")}`);
+  } catch (err) {
+    failures.push(`config sections: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  } finally {
+    await page.close();
+  }
+  return failures;
+}
+=== end
