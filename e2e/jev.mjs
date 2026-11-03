@@ -4,7 +4,8 @@
 // no credential or paid request is involved. Each state is reached through the
 // same settings API the Web UI uses; the harness then talks to the stub for
 // connection checks and run classification exactly as it would to TypeSafe.
-// The stub's path prefix selects its behaviour: /ok, /low, /auth, /slow.
+// The stub's path prefix selects its behaviour: /ok, /low, /auth, /slow,
+// and a broken service's /busy (503), /text (not JSON) and /unanswered.
 
 import { createServer } from "node:http";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -21,6 +22,14 @@ function jevStub() {
       };
       if (path.startsWith("/auth/")) return reply(401, { error: "invalid API key" });
       if (path.startsWith("/slow/")) return void setTimeout(() => reply(200, {}), 4000);
+      if (path.startsWith("/busy/")) return reply(503, { error: "unavailable" });
+      if (path.startsWith("/text/")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        return response.end("this is not JSON");
+      }
+      if (path.startsWith("/unanswered/")) {
+        return reply(200, { model: "jev-1.13.0", answers: {}, usage: { input_tokens: 12, output_tokens: 2 } });
+      }
       let body;
       try { body = JSON.parse(raw); } catch { return reply(422, { error: "invalid body" }); }
       const confidence = path.startsWith("/low/") ? 0.4 : 0.95;
@@ -308,6 +317,37 @@ export async function checkJevStates(browser, base, outDir) {
     await configure({ jev: { routing_allowed_profiles: [] } });
     if ((await api("/jev")).routing?.profile_permission !== "denied") failures.push("routing-revoked: status still permits");
     await capture("19-routing-revoked", [`Denied for ${profile}`]);
+
+    // Test connection against a service that answers badly: each failure is
+    // the check's result, shown as an alert, and the status reports it.
+    {
+      const kept = (await settingsNow()).base_url;
+      const closed = await new Promise((resolve) => {
+        const probe = createServer();
+        probe.listen(0, "127.0.0.1", () => {
+          const { port } = probe.address();
+          probe.close(() => resolve(`http://127.0.0.1:${port}`));
+        });
+      });
+      for (const [name, url, code] of [
+        ["20-malformed-text", `${stubUrl}/text`, "malformed"],
+        ["21-malformed-unanswered", `${stubUrl}/unanswered`, "malformed"],
+        ["22-unavailable", closed, "connect"],
+        ["23-service-error", `${stubUrl}/busy`, "status"],
+      ]) {
+        await configure({ jev: { base_url: url } });
+        await open("settings");
+        await page.getByRole("button", { name: "Test connection" }).click({ timeout: 15000 });
+        await page.getByRole("alert").filter({ hasText: `Connection check failed: ${code}.` }).waitFor({ timeout: 15000 });
+        const reported = (await api("/jev")).verification;
+        if (reported?.ok !== false || reported?.error !== code) {
+          failures.push(`${name}: the status reports ${JSON.stringify(reported)}`);
+        }
+        await endpointsCard().screenshot({ path: `${dir}/${name}-settings.png` });
+        console.log(`  [ok] jev ${name}: Test connection reports ${code}`);
+      }
+      await configure({ jev: { base_url: kept } });
+    }
 
     // The controls themselves: keyboard, labels and inline errors.
     await open("settings");
