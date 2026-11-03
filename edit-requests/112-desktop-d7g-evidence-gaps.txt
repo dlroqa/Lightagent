@@ -1,0 +1,245 @@
+=== base 59a4998171054d98463f17a08960e4411ce13e59
+=== message
+Row 41: evidence for rag --source and workers --worker/--profile
+
+The Knowledge screen's source name and the Specialists card's profile
+controls were wired to the shared operations, but no host or browser
+check exercised them, so their inventory rows stayed uncounted.
+
+- desktop_knowledge.rs: a source name given over the API names the
+  document exactly as `rag add --source` does, and both listings agree.
+- runs.py `knowledge`: a document added through the host with a source
+  name is listed by the CLI under that name.
+- runs.py `workers`: through the host, a role of another profile
+  (--profile) is assigned to a profile (--worker), readiness for that
+  profile equals `workers status --profile`, the active profile's is
+  untouched, and the revoke for that profile is seen by the CLI.
+- e2e/knowledge.mjs: a file indexed with a source name is listed under
+  it, not under its file name.
+- e2e/workers.mjs: with a second profile, "Workers of" selects it, a role
+  is assigned to the active profile and revoked again; the API confirms
+  both for the profile named and that the active profile is untouched.
+
+No product code changes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent/tests/desktop_knowledge.rs
+--- find
+    // Cleared over the API: the CLI lists nothing.
+    let (status, raw) = call(&runtime, "DELETE", KNOWLEDGE, None);
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(cli_json(&home, &["rag", "list"])["sources"], json!([]));
+}
+--- with
+    // Cleared over the API: the CLI lists nothing.
+    let (status, raw) = call(&runtime, "DELETE", KNOWLEDGE, None);
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(cli_json(&home, &["rag", "list"])["sources"], json!([]));
+}
+
+/// `rag add --source`: the API's `source` names a document exactly as the
+/// CLI's flag does, and both list it under that name.
+#[test]
+fn a_source_name_names_the_document_for_the_cli_and_the_api() {
+    let home = scratch_home("source");
+    cli_ok(&home, &["config", "set", "extensions.enabled", "true"]);
+    cli_ok(&home, &["profile", "create", "work"]);
+    cli_ok(&home, &["profile", "use", "work"]);
+    let docs = home.join("docs");
+    std::fs::create_dir_all(&docs).expect("docs");
+    let api_doc = docs.join("lakes.md");
+    let cli_doc = docs.join("canals.md");
+    std::fs::write(&api_doc, "Lakes hold still water between hills.\n").expect("doc");
+    std::fs::write(&cli_doc, "Canals carry boats between towns.\n").expect("doc");
+    let runtime = start(&home);
+
+    let body = json!({ "path": api_doc, "source": "named-by-api" }).to_string();
+    let (status, raw) = call(&runtime, "POST", KNOWLEDGE, Some(&body));
+    assert_eq!(status, 200, "{raw}");
+    let by_api = parsed(&raw);
+    assert_eq!(by_api["indexed"][0]["source"], "named-by-api", "{by_api}");
+    let by_cli = cli_json(
+        &home,
+        &["rag", "add", arg(&cli_doc), "--source", "named-by-cli"],
+    );
+    assert_eq!(by_cli["indexed"][0]["source"], "named-by-cli", "{by_cli}");
+    assert_eq!(by_api["indexed"][0]["chunks"], by_cli["indexed"][0]["chunks"]);
+
+    let (status, raw) = call(&runtime, "GET", KNOWLEDGE, None);
+    assert_eq!(status, 200, "{raw}");
+    let listed = parsed(&raw);
+    assert_eq!(listed, cli_json(&home, &["rag", "list"]));
+    assert_eq!(
+        sources(&listed),
+        vec!["named-by-api".to_owned(), "named-by-cli".to_owned()]
+    );
+}
+=== replace desktop/e2e/runs.py
+--- find
+        check.expect("indexed through the host",
+                     status == 200 and [i.get("source") for i in (added or {}).get("indexed", [])] == ["host-rivers.md"],
+                     (status, added))
+--- with
+        check.expect("indexed through the host",
+                     status == 200 and [i.get("source") for i in (added or {}).get("indexed", [])] == ["host-rivers.md"],
+                     (status, added))
+        named = os.path.join(work, "host-lakes.md")
+        with open(named, "w", encoding="utf-8") as handle:
+            handle.write("Host lakes hold still water between hills.\n")
+        status, added = host.fetch("POST", f"{API}/knowledge", {"path": named, "source": "host-named-source"})
+        cli_names = [s.get("source") for s in cli_json("rag", "list").get("sources", [])]
+        check.expect("a source name through the host names the document, as --source does for the CLI",
+                     status == 200
+                     and [i.get("source") for i in (added or {}).get("indexed", [])] == ["host-named-source"]
+                     and "host-named-source" in cli_names and "host-lakes.md" not in cli_names,
+                     (status, added, cli_names))
+=== replace desktop/e2e/runs.py
+--- find
+    status, revoked = host.fetch("DELETE", f"{API}/workers/reviewer")
+    check.expect("revoked through the host",
+                 status == 200 and (revoked or {}).get("revoked") is True, (status, revoked))
+    return check
+--- with
+    status, revoked = host.fetch("DELETE", f"{API}/workers/reviewer")
+    check.expect("revoked through the host",
+                 status == 200 and (revoked or {}).get("revoked") is True, (status, revoked))
+
+    # Another profile's workers (--profile), assigned to a profile (--worker).
+    def cli_status_of(profile):
+        return json.loads(harness.run_cli(cli, "--json", "workers", "status", "--profile", profile))
+
+    harness.run_cli(cli, "profile", "create", "e2e-helper")
+    _, catalog = host.fetch("GET", f"{API}/profiles")
+    active = (catalog or {}).get("active_profile")
+    status, assigned = host.fetch("PUT", f"{API}/workers/coder", {"worker": active, "profile": "e2e-helper"})
+    _, helper = host.fetch("GET", f"{API}/workers?profile=e2e-helper")
+    coder = next((w for w in (helper or {}).get("workers", []) if w.get("role") == "coder"), {})
+    check.expect("a role of the profile named assigned through the host to a profile, as the CLI reports it",
+                 status == 200 and isinstance((assigned or {}).get("id"), str)
+                 and str(coder.get("worker", "")).startswith("assigned:")
+                 and (helper or {}).get("workers") == cli_status_of("e2e-helper"), (status, assigned, helper))
+    _, listed = host.fetch("GET", f"{API}/workers")
+    check.expect("the active profile's workers are untouched",
+                 (listed or {}).get("workers") == cli_status(), listed)
+    status, revoked = host.fetch("DELETE", f"{API}/workers/coder?profile=e2e-helper")
+    _, helper = host.fetch("GET", f"{API}/workers?profile=e2e-helper")
+    check.expect("revoked through the host for the profile named, as the CLI reports it",
+                 status == 200 and (revoked or {}).get("revoked") is True
+                 and (helper or {}).get("workers") == cli_status_of("e2e-helper"), (status, revoked, helper))
+    return check
+=== replace e2e/knowledge.mjs
+--- find
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+--- with
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+=== replace e2e/knowledge.mjs
+--- find
+    await step("a missing path is shown as skipped", async () => {
+--- with
+    await step("a source name names the document", async () => {
+      const named = join(dir, "named");
+      await mkdir(named);
+      const file = join(named, "render-probe-lakes.md");
+      await writeFile(file, "Render probe lakes hold still water between hills.\n");
+      await page.locator("#knowledge-path").fill(file);
+      await page.locator("#knowledge-source").fill("render-probe-named");
+      await screen.getByRole("button", { name: "Index", exact: true }).click();
+      await page.getByTestId("knowledge-added").getByText("Indexed render-probe-named", { exact: false }).waitFor({ timeout: 10000 });
+      const names = ((await indexNow(base)).sources ?? []).map((source) => source.source);
+      if (!names.includes("render-probe-named") || names.includes("render-probe-lakes.md")) {
+        throw new Error(`indexed ${JSON.stringify(names)}`);
+      }
+      await page.getByTestId("knowledge-sources").getByText("render-probe-named", { exact: false }).waitFor({ timeout: 10000 });
+      await page.locator("#knowledge-source").fill("");
+    });
+
+    await step("a missing path is shown as skipped", async () => {
+=== write e2e/workers.mjs
+// The Specialists card against the real harness (D7-6): a role is
+// assigned to the built-in worker, and revoking it reports that there was
+// an assignment, then that there is none. With a second profile, "Workers
+// of" selects it (--profile) and a role is assigned to the active profile
+// (--worker) and revoked; the API confirms both for the profile named, and
+// that the active profile's workers are untouched.
+// crates/lightagent/tests/desktop_workers.rs proves the API's assignments
+// are the CLI's.
+
+const HELPER = "render-helper";
+
+async function workersOf(base, profile) {
+  const query = profile ? `?profile=${encodeURIComponent(profile)}` : "";
+  const body = await (await fetch(`${base}/api/lightagent/v1/workers${query}`)).json();
+  return body.workers ?? [];
+}
+
+function workerOf(workers, role) {
+  return String(workers.find((worker) => worker.role === role)?.worker ?? "");
+}
+
+export async function checkWorkers(browser, base, outDir) {
+  const failures = [];
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1500 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  let created = false;
+  try {
+    await page.goto(`${base}/#/tools`);
+    const card = page.getByTestId("specialists");
+    await card.waitFor({ timeout: 15000 });
+    const row = page.getByTestId("worker-coder");
+    await row.waitFor({ timeout: 10000 });
+    await row.getByRole("combobox").selectOption("builtin");
+    await row.getByRole("button", { name: "Assign coder" }).click();
+    await card.getByRole("status").filter({ hasText: "Assigned coder to the built-in worker." }).waitFor({ timeout: 10000 });
+    await page.screenshot({ path: `${outDir}/workers-assigned.png`, fullPage: true });
+    await row.getByRole("button", { name: "Revoke coder" }).click();
+    await card.getByRole("status").filter({ hasText: "Revoked the coder assignment." }).waitFor({ timeout: 10000 });
+    await row.getByRole("button", { name: "Revoke coder" }).click();
+    await card.getByRole("status").filter({ hasText: "There was no coder assignment." }).waitFor({ timeout: 10000 });
+
+    // Another profile's workers (--profile), assigned to a profile (--worker).
+    const active = (await (await fetch(`${base}/api/lightagent/v1/profiles`)).json()).active_profile;
+    const made = await fetch(`${base}/api/lightagent/v1/profiles`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: HELPER }),
+    });
+    if (!made.ok) throw new Error(`could not create the profile ${HELPER}: ${made.status}`);
+    created = true;
+    const before = workerOf(await workersOf(base), "coder");
+    await page.reload();
+    await card.waitFor({ timeout: 15000 });
+    await page.locator("#workers-lead").selectOption(HELPER);
+    // Under the active profile its own id is not offered as a target;
+    // under the helper it is, so this waits for the helper's rows.
+    await row.locator(`option[value="${active}"]`).waitFor({ state: "attached", timeout: 10000 });
+    await row.getByRole("combobox").selectOption(active);
+    await row.getByRole("button", { name: "Assign coder" }).click();
+    await card.getByRole("status").filter({ hasText: `Assigned coder to profile ${active}.` }).waitFor({ timeout: 10000 });
+    if (!workerOf(await workersOf(base, HELPER), "coder").startsWith("assigned:")) {
+      throw new Error(`the ${HELPER} coder is not assigned: ${JSON.stringify(await workersOf(base, HELPER))}`);
+    }
+    if (workerOf(await workersOf(base), "coder") !== before) {
+      throw new Error("assigning for another profile changed the active profile's coder");
+    }
+    await page.screenshot({ path: `${outDir}/workers-other-profile.png`, fullPage: true });
+    await row.getByRole("button", { name: "Revoke coder" }).click();
+    await card.getByRole("status").filter({ hasText: "Revoked the coder assignment." }).waitFor({ timeout: 10000 });
+    if (workerOf(await workersOf(base, HELPER), "coder").startsWith("assigned:")) {
+      throw new Error(`the ${HELPER} coder is still assigned after Revoke`);
+    }
+    if (errors.length) failures.push(`workers: page errors: ${errors.join("; ")}`);
+  } catch (err) {
+    failures.push(`workers: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+    await page.screenshot({ path: `${outDir}/workers-failed.png` }).catch(() => {});
+  } finally {
+    await page.close();
+    await fetch(`${base}/api/lightagent/v1/workers/coder`, { method: "DELETE" }).catch(() => {});
+    if (created) {
+      await fetch(`${base}/api/lightagent/v1/workers/coder?profile=${HELPER}`, { method: "DELETE" }).catch(() => {});
+      await fetch(`${base}/api/lightagent/v1/profiles/${HELPER}`, { method: "DELETE" }).catch(() => {});
+    }
+  }
+  return failures;
+}
+=== end
