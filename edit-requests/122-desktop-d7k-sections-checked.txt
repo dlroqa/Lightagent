@@ -1,0 +1,40 @@
+=== base 500baf3e62043d71ded8add1ec0fc9fb0881f881
+=== message
+Row 45: the bundle is checked against its allowlist of sections
+
+`SECTIONS` was read only by the unit tests, so the library build denied
+it as dead code (check run 41591710461: "constant `SECTIONS` is never
+used"). `bundle` now asserts in debug builds (every test run) that its
+top-level fields are exactly `SECTIONS`, so a field added without being
+listed fails the tests.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent/src/diagnostics.rs
+--- find
+    Ok(json!({
+        "schema": "lightagent-diagnostics/1",
+--- with
+    let bundle = json!({
+        "schema": "lightagent-diagnostics/1",
+=== replace crates/lightagent/src/diagnostics.rs
+--- find
+        "stores": {
+            "identity": identity,
+            "remote_credentials": vault,
+        },
+    }))
+}
+--- with
+        "stores": {
+            "identity": identity,
+            "remote_credentials": vault,
+        },
+    });
+    debug_assert!(
+        bundle.as_object().is_some_and(|fields| fields.len() == SECTIONS.len()
+            && SECTIONS.iter().all(|section| fields.contains_key(*section))),
+        "the bundle's fields are exactly SECTIONS"
+    );
+    Ok(bundle)
+}
+=== end
