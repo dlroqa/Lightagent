@@ -49,7 +49,16 @@ tree are recorded here.
 | 35 | D7-2 the Memory screen | https://github.com/dlroqa/Lightagent/pull/129 | `desktop/d7b-memory-ui` | `desktop/d7a-memory-ops` (`f681980`) | `630988a` | `630988a` |
 | 36 | D7-3 knowledge (RAG) through one shared operation set; the index written under a lock | https://github.com/dlroqa/Lightagent/pull/130 | `desktop/d7c-knowledge-ops` | `desktop/d7b-memory-ui` (`67ed55e`) | `49109b6` | `49109b6` |
 | 37 | D7-4 the Knowledge screen | https://github.com/dlroqa/Lightagent/pull/131 | `desktop/d7d-knowledge-ui` | `desktop/d7c-knowledge-ops` (`49109b6`) | `c65132f` | `c65132f` |
-| 38+ | D7 continues (sessions, workers, identity and remote credentials, init/import/chat, the remaining slash, setup, env and config rows, the diagnostics bundle and its redaction), then D8-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+| 38 | D7-5 sessions proved across CLI, API and desktop; Delete asks first; `sessions delete --json` | https://github.com/dlroqa/Lightagent/pull/132 | `desktop/d7e-sessions` | `desktop/d7d-knowledge-ui` (`d5ed51f`) | `c0b5ed3` | `c0b5ed3` |
+| 39 | D7-6 worker assignments through one shared operation; Specialists assign and revoke | https://github.com/dlroqa/Lightagent/pull/133 | `desktop/d7f-workers` | `desktop/d7e-sessions` (via merge commit `4afe907`) | `4afe907` | `4afe907` |
+| 40 | A profile switch's rejections are applied before its runs are cancelled (D5 race) | https://github.com/dlroqa/Lightagent/pull/134 | `desktop/d5d-switch-rejections` | `desktop/d7f-workers` (via merge commit `627e899`) | `627e899` | `627e899` |
+| 41+ | D7 continues (identity and remote credentials, init/import/chat, the remaining slash, setup, env and config rows, the remaining workers and rag options, the diagnostics bundle and its redaction), then D8-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+
+**D10 decision carried:** rows 21-39 carry the switch rejection race
+(fixed at row 40): with a pending approval, a switch that stops runs may
+cancel the run before it applies the rejection, so no explicit rejection
+is recorded. Backport row 40's change to row 21 (#115) and merge it
+forward before approval, or accept the window.
 
 **D10 decision carried:** rows 15-31 lack `providers.remove`'s
 `expected_revision` in the desktop contract (fixed at row 32), so between

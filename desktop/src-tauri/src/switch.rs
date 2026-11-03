@@ -192,6 +192,7 @@ pub async fn stop_runs(host: &Host) -> Result<(), String> {
         None,
     )
     .await?;
+    let mut rejected: Vec<String> = Vec::new();
     for row in approvals["approvals"].as_array().into_iter().flatten() {
         if row["pending"].is_null() {
             continue;
@@ -206,6 +207,32 @@ pub async fn stop_runs(host: &Host) -> Result<(), String> {
                 Some(json!({ "approve": false })),
             )
             .await?;
+            rejected.push(run.to_owned());
+        }
+    }
+    // A run applies a rejection itself. Cancelling at once could overtake
+    // it (the run would end cancelled with no rejection recorded), so wait
+    // until each rejected run has left its approval wait. The cancel below
+    // still stops whatever has not, once the deadline passes.
+    let deadline = Instant::now() + DRAIN_TIMEOUT;
+    while !rejected.is_empty() && Instant::now() < deadline {
+        let runs = call(
+            host,
+            &base,
+            &authorization,
+            reqwest::Method::GET,
+            "/api/lightagent/v1/runs",
+            None,
+        )
+        .await?;
+        let waiting: Vec<String> = runs_of(&runs)
+            .into_iter()
+            .filter(|run| run["status"] == "awaiting_approval")
+            .filter_map(|run| run["id"].as_str().map(str::to_owned))
+            .collect();
+        rejected.retain(|id| waiting.contains(id));
+        if !rejected.is_empty() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
     let runs = call(

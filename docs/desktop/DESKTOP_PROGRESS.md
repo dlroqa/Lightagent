@@ -1670,6 +1670,61 @@ Coverage: the 24 `cli.memory.*` rows → **92 of 227**.
 Coverage: seven `cli.rag.*` rows → **99 of 227** (`cli.rag.add.opt.source`
 not counted: no test sets the source name yet).
 
+## Row 38 — D7-5: sessions across CLI, API and desktop; Delete asks first
+
+- `lightagent sessions list|show|delete` and the API's session routes
+  already shared the active profile's `SessionStore` (row 10's lock).
+  Proved at every level: backend `desktop_sessions.rs`, host `runs.py
+  sessions`, browser `e2e/sessions.mjs`.
+- Fixed: the Agent screen deleted a conversation as soon as Delete was
+  chosen; it now asks first (Confirm / Keep it). `sessions delete`
+  ignored `--json`; it prints `{"id", "deleted"}` now.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-03 | `102`; draft PR #132 | `0696551` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41567060355 |
+| 2026-11-03 | `check` **failure**: `sessions delete --json` printed text; `104` → `c481a69` | `c481a69` | https://github.com/dlroqa/Lightagent/actions/runs/41567158114 |
+| 2026-11-03 | host **failure**, switch.py `pending` (the race, row 40); the same job rerun **passed** on unchanged code (intermittent; attempt 1 kept) | `c481a69` | https://github.com/dlroqa/Lightagent/actions/runs/41567976364 (job 125694325184) |
+| 2026-11-03 | render **failure** in the sessions check, narrowed step by step (`107`/`108` named steps; `109`/`110`): the row's actions show on hover or focus (keyboard users reach them by Tab) and take no pointer events while hidden; after "Keep it" the pointer was below the row. The check now hovers the row first → `c0b5ed3` | `c0b5ed3` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41572147184 |
+| 2026-11-03 | `check`, `desktop`, `jev evaluation`, `subagents`: **success**, 24 of 24 | `c0b5ed3` | https://github.com/dlroqa/Lightagent/actions/runs/41572984591, https://github.com/dlroqa/Lightagent/actions/runs/41572984624, https://github.com/dlroqa/Lightagent/actions/runs/41572984660, https://github.com/dlroqa/Lightagent/actions/runs/41572984678 |
+
+## Row 39 — D7-6: worker assignments through one shared operation
+
+- `worker_assignment` (crate `lightagent`): assign (a profile or the
+  built-in worker) and revoke, for the active or a named profile, with the
+  CLI's checks; the CLI prints as before and `RunFactory::workers_change`
+  answers the API with the same JSON. API: `PUT|DELETE /workers/{role}`;
+  `GET /workers` takes `profile` in the contract. The Specialists card:
+  whose workers, and per role Assign to (built-in or a profile) / Revoke.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-03 | `103`; draft PR #133; row 38's fixes merged in server-side | `85df9f7` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41567463900 |
+| 2026-11-03 | `check` **failure**: the test expected the profile name in readiness, which reports `assigned:<assignment id>` (API and CLI agreed); `106` fixed the assertion | `b9944df` | https://github.com/dlroqa/Lightagent/actions/runs/41567977741 |
+| 2026-11-03 | `check`, `desktop`, `jev evaluation`, `subagents`: **success**, 24 of 24 | `4afe907` | https://github.com/dlroqa/Lightagent/actions/runs/41572984218, https://github.com/dlroqa/Lightagent/actions/runs/41572984227, https://github.com/dlroqa/Lightagent/actions/runs/41572984266, https://github.com/dlroqa/Lightagent/actions/runs/41572984319 |
+
+## Row 40 — the profile switch's rejections before its cancels (D5 race)
+
+- Found by the host run of row 38: `stop_runs` (row 21) rejected each
+  pending approval and then cancelled every run at once. The run waits on
+  a `tokio::select!` (not biased) over the decision and the cancel token;
+  when both were ready the cancel could win, and the run ended
+  `Cancelled` with no rejection recorded. The D5 acceptance item "a
+  profile switch with a pending approval records an explicit rejection"
+  was therefore not guaranteed.
+- Fix: after rejecting, the host waits (within its drain timeout) until
+  each rejected run has left `awaiting_approval`, then cancels. Evidence:
+  the host `switch.py pending` scenario.
+- D10 decision: rows 21-39 carry the race (see MERGE_ORDER).
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-03 | `105`; draft PR #134 | `bb8241e` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41568476519 |
+| 2026-11-03 | `check`, `desktop`, `jev evaluation`, `subagents`: **success**, 24 of 24 | `627e899` | https://github.com/dlroqa/Lightagent/actions/runs/41572990604, https://github.com/dlroqa/Lightagent/actions/runs/41572990675, https://github.com/dlroqa/Lightagent/actions/runs/41572990742, https://github.com/dlroqa/Lightagent/actions/runs/41572990743 |
+
+Coverage: the five `cli.sessions.*` rows and six `cli.workers.*` rows →
+**110 of 227**.
+
 ## Artifacts and retention
 
 | Artifact | Run | Retention |
@@ -1750,16 +1805,18 @@ The owner's order of 2026-11-02 (fourth continuation, DESKTOP_CLAUDE_PROMPT.md �
    Memory screen), at 92 of 227.
 8. Rows 36-37 (knowledge: shared operations with the index lock fix, then
    the Knowledge screen) are done, at 99 of 227.
-9. **Next in D7:** sessions, workers, identity and remote credentials,
-   init, import and chat, the remaining slash, setup, env and config rows,
-   `cli.rag.add.opt.source` evidence, and the diagnostics bundle with its
-   redaction checks. Then D8-D10 in dependency order. D8 keeps the native
-   WebView checks (Settings, profile switching, close with active runs,
-   run controls, response actions R2-R5, Extensions, MCP, the tool
-   catalog, skill import, Memory and Knowledge). Before merge approval
-   (D10): the `providers.remove` window decision, then the exact
-   candidate merge sequence simulated on hosted runners and every
-   candidate tree validated.
+9. Rows 38-40 (sessions, workers, the switch race) are done, at 110 of
+   227.
+10. **Next in D7:** identity and remote credentials, init, import and
+   chat, the remaining slash, setup, env and config rows, the remaining
+   workers and rag options, and the diagnostics bundle with its redaction
+   checks. Then D8-D10 in dependency order. D8 keeps the native WebView
+   checks (Settings, profile switching, close with active runs, run
+   controls, response actions R2-R5, Extensions, MCP, the tool catalog,
+   skill import, Memory, Knowledge, sessions and workers). Before merge
+   approval (D10): the `providers.remove` and switch-race window
+   decisions, then the exact candidate merge sequence simulated on hosted
+   runners and every candidate tree validated.
 
 Previous order (DESKTOP_CLAUDE_PROMPT.md §5), kept for reference:
 
