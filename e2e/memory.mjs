@@ -9,6 +9,7 @@ import { seededSession } from "./delivery.mjs";
 const PROBE = "Render probe prefers tabs for indentation";
 const EDITED = "Render probe prefers tabs for indentation everywhere";
 const SEED = "Remember that I prefer short answers in render probes";
+const KEPT = "Render probes keep answers short";
 
 async function memoriesNow(base) {
   const response = await fetch(`${base}/api/lightagent/v1/memories`);
@@ -61,7 +62,7 @@ export async function checkMemory(browser, base, outDir) {
     await step("search finds it", async () => {
       await page.locator("#memory-query").fill("tabs indentation");
       await page.locator("#memory-top-k").fill("3");
-      await page.getByRole("button", { name: "Search", exact: true }).click();
+      await page.getByTestId("memory-screen").getByRole("button", { name: "Search", exact: true }).click();
       await page.getByTestId("memory-hits").getByText(PROBE, { exact: false }).waitFor({ timeout: 10000 });
     });
 
@@ -83,13 +84,15 @@ export async function checkMemory(browser, base, outDir) {
       await page.locator("#memory-session").selectOption(sessionId);
       await page.getByRole("button", { name: "Suggest facts" }).click();
       await page.getByTestId("memory-candidates").getByText(SEED, { exact: false }).waitFor({ timeout: 10000 });
+      await page.locator("#memory-promote-text").fill(KEPT);
       await page.locator("#memory-promote-kind").fill("decision");
       await page.locator("#memory-promote-tags").fill("probe");
       await page.getByRole("button", { name: "Remember message 1" }).click();
-      const kept = async () => (await memoriesNow(base)).find((memory) => memory.source?.session_id === sessionId);
+      const kept = async () => (await memoriesNow(base)).find((memory) => memory.text === KEPT);
       if (!(await until(async () => Boolean(await kept())))) throw new Error("the suggested fact was not kept");
       const memory = await kept();
-      if (memory.kind !== "decision" || !memory.tags?.includes("probe") || memory.source.message_index !== 1) {
+      if (memory.kind !== "decision" || !memory.tags?.includes("probe")
+        || memory.source?.session_id !== sessionId || memory.source?.message_index !== 1) {
         throw new Error(`kept as ${JSON.stringify(memory)}`);
       }
     });
