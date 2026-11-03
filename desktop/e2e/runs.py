@@ -1550,6 +1550,104 @@ def scenario_jev(host):
     return check
 
 
+def scenario_environment(command, env, cli, out):
+    """The env rows through a second host, started after the first stops, as
+    a user would start the app: the vault key itself in
+    LIGHTAGENT_CREDENTIAL_KEY (no key file) and HERMES_HOME naming a Hermes
+    home. The vault through the host names the key's source, as the CLI with
+    the same environment does; a grant sealed with that key opens with it
+    while the grants the key file sealed do not; no answer holds the secret
+    or the key. An import with no folder reads HERMES_HOME, as the CLI's
+    does, writes into LIGHTAGENT_HOME only and leaves the Hermes home as it
+    was."""
+    import secrets
+    import shutil
+    import tempfile
+
+    check = Checks("environment")
+    work = tempfile.mkdtemp(prefix="lightagent-e2e-environment-")
+    key = secrets.token_hex(32)
+    hermes = os.path.join(work, "hermes")
+    os.makedirs(os.path.join(hermes, "profiles", "e2e-env-hermes"))
+    with open(os.path.join(hermes, "profiles", "e2e-env-hermes", "SOUL.md"), "w", encoding="utf-8") as handle:
+        handle.write("You came from HERMES_HOME.\n")
+
+    def snapshot(root):
+        found = {}
+        for base, _, files in os.walk(root):
+            for name in files:
+                path = os.path.join(base, name)
+                with open(path, "rb") as handle:
+                    found[os.path.relpath(path, root)] = handle.read()
+        return found
+
+    overrides = {"LIGHTAGENT_CREDENTIAL_KEY": key, "HERMES_HOME": hermes}
+    started = {name: value for name, value in env.items() if name != "LIGHTAGENT_CREDENTIAL_KEY_FILE"}
+    started.update(overrides, LIGHTAGENT_DESKTOP_E2E_REPORT=os.path.join(out, "report-environment.txt"))
+
+    def cli_json(*args):
+        saved = dict(os.environ)
+        os.environ.pop("LIGHTAGENT_CREDENTIAL_KEY_FILE", None)
+        os.environ.update(overrides)
+        try:
+            return json.loads(harness.run_cli(cli, "--json", *args))
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+
+    before = snapshot(hermes)
+    host = harness.Host(command, started, os.path.join(out, "driver-environment.log"))
+    try:
+        host.ready()
+        status, vault = host.fetch("GET", f"{API}/remote-credentials/vault")
+        vault = vault if isinstance(vault, dict) else {}
+        check.expect("LIGHTAGENT_CREDENTIAL_KEY: the vault through the host names it as the key's source, as the CLI does",
+                     status == 200 and vault.get("key_source") == "env"
+                     and vault == cli_json("remote-credential", "status") and key not in json.dumps(vault),
+                     (status, vault))
+        unopenable = vault.get("unopenable_with_configured_key")
+        check.expect("the grants the key file sealed do not open with that key",
+                     isinstance(unopenable, int) and unopenable >= 1, vault)
+        _, catalog = host.fetch("GET", f"{API}/profiles")
+        active = (catalog or {}).get("active_profile")
+        secret = "e2e-env-secret-9c8b7a6f5e4d"
+        secret_file = os.path.join(work, "env.secret")
+        with open(secret_file, "w", encoding="utf-8") as handle:
+            handle.write(secret + "\n")
+        status, added = host.fetch("POST", f"{API}/remote-credentials", {
+            "profile": active, "service": "mcp:e2e-env", "destinations": ["https://env.e2e.invalid"],
+            "secret_file": secret_file})
+        grant = (added or {}).get("added")
+        _, listed = host.fetch("GET", f"{API}/remote-credentials?profile={active}")
+        by_cli = cli_json("remote-credential", "list", "--profile", active)
+        row = next((g for g in by_cli.get("credentials", []) if g.get("id") == grant), {})
+        _, after = host.fetch("GET", f"{API}/remote-credentials/vault")
+        check.expect("a grant sealed through the host with that key is the CLI's, and opens with it",
+                     status == 200 and isinstance(grant, str) and listed == by_cli and row.get("version") == 1
+                     and (after or {}).get("unopenable_with_configured_key") == unopenable,
+                     (status, added, after))
+        answers = json.dumps([added, listed, after])
+        check.expect("no answer holds the secret or the key", secret not in answers and key not in answers)
+        if isinstance(grant, str):
+            host.fetch("POST", f"{API}/remote-credentials/{grant}/revoke")
+        status, dry = host.fetch("POST", f"{API}/import/hermes", {"dry_run": True})
+        check.expect("an import with no folder through the host reads HERMES_HOME, as the CLI's does",
+                     status == 200 and os.path.realpath(str((dry or {}).get("hermes_home"))) == os.path.realpath(hermes)
+                     and (dry or {}).get("profiles") == ["e2e-env-hermes"]
+                     and dry == cli_json("import", "hermes", "--dry-run"), (status, dry))
+        status, applied = host.fetch("POST", f"{API}/import/hermes", {})
+        _, doctor = host.fetch("GET", f"{API}/diagnostics/doctor")
+        check.expect("imported into LIGHTAGENT_HOME, the Hermes home left as it was",
+                     status == 200 and (applied or {}).get("profiles") == ["e2e-env-hermes"]
+                     and "You came from HERMES_HOME." in harness.run_cli(cli, "profile", "show", "e2e-env-hermes")
+                     and os.path.realpath(str((doctor or {}).get("home"))) == os.path.realpath(os.environ["LIGHTAGENT_HOME"])
+                     and snapshot(hermes) == before, (status, applied))
+    finally:
+        host.stop()
+        shutil.rmtree(work, ignore_errors=True)
+    return check
+
+
 def main():
     out = os.path.abspath(sys.argv[1])
     cli = sys.argv[2]
@@ -1624,6 +1722,15 @@ def main():
     finally:
         host.stop()
         provider.close()
+    # After the first host stops: a second, started with the environment
+    # rows set (LIGHTAGENT_CREDENTIAL_KEY, HERMES_HOME).
+    try:
+        check = scenario_environment(command, env, cli, out)
+        results["environment"] = check.results
+        failures.extend(check.failures)
+    except Exception as error:
+        results["environment"] = {"error": repr(error)}
+        failures.append(f"environment: {error!r}")
     results["provider"] = provider.log
     results["failures"] = failures
     with open(os.path.join(out, "runs.json"), "w", encoding="utf-8") as handle:

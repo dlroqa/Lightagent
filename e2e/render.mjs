@@ -30,8 +30,11 @@ import { checkDiagnostics } from "./diagnostics.mjs";
 import { checkUpdate } from "./update.mjs";
 import { checkSecurity } from "./security.mjs";
 import { checkRemoteCredentials } from "./credentials.mjs";
+import { checkEnvironment } from "./environment.mjs";
 
 const BASE = (process.env.PANEL_BASE ?? "http://127.0.0.1:8735").replace(/\/+$/, "");
+// The second server render-panel.sh starts with LIGHTAGENT_CREDENTIAL_KEY and HERMES_HOME.
+const ENV_BASE = (process.env.PANEL_ENV_BASE ?? "").replace(/\/+$/, "");
 const OUT_DIR = process.env.OUT_DIR ?? "screens";
 // A route settles when the panel has either rendered its data or surfaced its
 // own error; this is the ceiling on waiting for whichever comes first.
@@ -473,6 +476,12 @@ async function main() {
     failures.push(...(await checkCommands(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`commands: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // The environment rows, against the second server (its own home).
+  try {
+    failures.push(...(await checkEnvironment(browser, ENV_BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`environment: ${err instanceof Error ? err.message : String(err)}`);
   }
   // Imports and removes a skills pack: after the routes above have rendered.
   try {
