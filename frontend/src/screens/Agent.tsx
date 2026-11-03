@@ -1518,6 +1518,7 @@ function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const menuButton = useRef<HTMLButtonElement | null>(null);
   const label = row.title || "Untitled";
   const rename = () => {
@@ -1566,9 +1567,17 @@ function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete
           <MenuItem onClick={() => { onShare(); setMenuOpen(false); }}><span className="session-menu__item"><Share2 size={17} /> Share</span></MenuItem>
           <div className="menu__divider" role="separator" />
           <MenuItem onClick={() => { void onUpdate(row.id, { archived: !row.archived }); setMenuOpen(false); }}><span className="session-menu__item"><Archive size={17} /> {row.archived ? "Unarchive" : "Archive"}</span></MenuItem>
-          <MenuItem onClick={() => { setMenuOpen(false); onDelete(); }}><span className="session-menu__item session-menu__item--danger"><Trash2 size={17} /> Delete</span></MenuItem>
+          <MenuItem onClick={() => { setMenuOpen(false); setConfirmDelete(true); }}><span className="session-menu__item session-menu__item--danger"><Trash2 size={17} /> Delete</span></MenuItem>
         </Menu>
       </div>
+      {confirmDelete && (
+        <div role="group" aria-label={`Delete ${label}?`} style={{ display: "flex", gap: 6, flexWrap: "wrap", padding: "4px 8px" }}>
+          <button type="button" className="btn btn--danger" onClick={() => { setConfirmDelete(false); onDelete(); }}>
+            {`Confirm: delete ${label}`}
+          </button>
+          <button type="button" className="btn" onClick={() => setConfirmDelete(false)}>Keep it</button>
+        </div>
+      )}
     </li>
   );
 }

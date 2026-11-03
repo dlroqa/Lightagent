@@ -475,6 +475,29 @@ def scenario_extensions(host, cli):
     return check
 
 
+def scenario_sessions(host, cli):
+    """D7 through the host transport: the session list and a saved session
+    through the host equal the CLI's; a delete through the host is seen by
+    the CLI."""
+    check = Checks("sessions")
+
+    def cli_json(*args):
+        return json.loads(harness.run_cli(cli, "--json", *args))
+
+    session = host.new_session()
+    status, listed = host.fetch("GET", f"{API}/sessions")
+    check.expect("the host lists what the CLI lists",
+                 status == 200 and (listed or {}).get("sessions") == cli_json("sessions", "list"), (status, listed))
+    status, shown = host.fetch("GET", f"{API}/sessions/{session}")
+    check.expect("a session through the host is what the CLI shows",
+                 status == 200 and shown == cli_json("sessions", "show", session), (status, shown))
+    status, _ = host.fetch("DELETE", f"{API}/sessions/{session}")
+    remaining = [s.get("id") for s in cli_json("sessions", "list")]
+    check.expect("deleted through the host, gone for the CLI",
+                 status in (200, 204) and session not in remaining, (status, remaining))
+    return check
+
+
 def scenario_knowledge(host, cli):
     """D7 through the host transport: a document indexed through the host is
     listed by the CLI; list, search and a skipped path through the host
@@ -737,6 +760,7 @@ def main():
             ("skills", lambda: scenario_skills(host, cli)),
             ("memory", lambda: scenario_memory(host, cli)),
             ("knowledge", lambda: scenario_knowledge(host, cli)),
+            ("sessions", lambda: scenario_sessions(host, cli)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]
