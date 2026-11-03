@@ -169,9 +169,12 @@ fn init_over_the_api_does_what_the_cli_does() {
         ],
     );
 
-    // The desktop's home: already initialised by its runtime.
+    // The desktop's home: scaffolded by its runtime, initialised over the
+    // API, then refused until forced.
     let by_api = scratch("api");
     let runtime = start(&by_api, &[]);
+    let (status, first) = post(&runtime, &format!("{API}/setup/init"), json!({}));
+    assert_eq!(status, 200, "{first}");
     let (status, refused) = post(&runtime, &format!("{API}/setup/init"), json!({}));
     assert_eq!(status, 409, "{refused}");
     let (status, refused) = post(
