@@ -173,6 +173,18 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/lightagent/v1/identity/audit", get(identity_audit))
         .route(
+            "/api/lightagent/v1/diagnostics/doctor",
+            get(diagnostics_doctor),
+        )
+        .route(
+            "/api/lightagent/v1/diagnostics/architecture",
+            get(diagnostics_architecture),
+        )
+        .route(
+            "/api/lightagent/v1/diagnostics/bundle",
+            get(diagnostics_bundle),
+        )
+        .route(
             "/api/lightagent/v1/remote-credentials",
             get(list_remote_credentials).post(add_remote_credential),
         )
@@ -2818,6 +2830,49 @@ async fn rekey_remote_credentials(
         previous_key_file: body.previous_key_file,
     };
     remote_credential_operation(&state, &headers, admitted, request).await
+}
+
+/// A diagnostics report through the embedder (see
+/// [`ops::DiagnosticsRequest`]), for the local operator only.
+async fn diagnostics_operation(
+    state: &AppState,
+    headers: &HeaderMap,
+    admitted: FromDesktop,
+    request: ops::DiagnosticsRequest,
+) -> Response {
+    if let Some(rejection) = local_operator(state, headers, admitted.is_some()) {
+        return rejection;
+    }
+    match state.manager.diagnostics(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn diagnostics_doctor(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+) -> Response {
+    diagnostics_operation(&state, &headers, admitted, ops::DiagnosticsRequest::Doctor).await
+}
+
+async fn diagnostics_architecture(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+) -> Response {
+    let request = ops::DiagnosticsRequest::Architecture;
+    diagnostics_operation(&state, &headers, admitted, request).await
+}
+
+/// The diagnostics bundle: allowlisted fields only, returned, never sent.
+async fn diagnostics_bundle(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+) -> Response {
+    diagnostics_operation(&state, &headers, admitted, ops::DiagnosticsRequest::Bundle).await
 }
 
 /// An import of skills from a repository or folder (new scope).

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, Clock, CornerDownLeft, Cpu, FilePenLine, FileText, Folder, Globe, KeyRound, Lock, MessageCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, SquarePen, Terminal, Trash2, Wrench, X } from "lucide-react";
+import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, Clock, CornerDownLeft, Cpu, FilePenLine, FileText, Folder, Globe, KeyRound, Lock, MessageCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, SquarePen, Stethoscope, Terminal, Trash2, Wrench, X } from "lucide-react";
 
 import {
   agentApi,
@@ -1123,6 +1123,7 @@ export function Agent() {
               <MenuItem onClick={() => { setAccountOpen(false); navigate("/knowledge"); }}><span className="session-menu__item"><FileText size={17} /> Knowledge</span></MenuItem>
               <MenuItem onClick={() => { setAccountOpen(false); navigate("/admin/identity"); }}><span className="session-menu__item"><KeyRound size={17} /> Identity</span></MenuItem>
               <MenuItem onClick={() => { setAccountOpen(false); navigate("/admin/credentials"); }}><span className="session-menu__item"><Lock size={17} /> Remote credentials</span></MenuItem>
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/diagnostics"); }}><span className="session-menu__item"><Stethoscope size={17} /> Diagnostics</span></MenuItem>
               <MenuItem onClick={() => { setAccountOpen(false); navigate("/settings"); }}><span className="session-menu__item"><ShieldCheck size={17} /> Settings</span></MenuItem>
             </Menu>
           </div>

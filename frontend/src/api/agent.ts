@@ -875,6 +875,13 @@ export const agentApi = {
       method: "POST",
       body: JSON.stringify({ previous_key_file: previousKeyFile }),
     }),
+  /** `lightagent doctor|architecture --json`, and the diagnostics bundle (allowlisted fields only; never uploaded). */
+  doctor: () => jsonRequest<Record<string, unknown>>("/diagnostics/doctor"),
+  architecture: () => jsonRequest<Record<string, unknown>>("/diagnostics/architecture"),
+  diagnosticsBundle: () =>
+    jsonRequest<Record<string, unknown> & { about: string; included: string[]; excluded: string[] }>(
+      "/diagnostics/bundle",
+    ),
   settings: () => jsonRequest<LightagentSettings>("/settings"),
   saveSettings: (settings: LightagentSettings) =>
     jsonRequest<LightagentSettings>("/settings", {

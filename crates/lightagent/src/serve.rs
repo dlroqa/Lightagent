@@ -85,6 +85,26 @@ impl RunFactory for LightweightRunFactory {
         crate::remote_credentials::perform(&self.root, request)
     }
 
+    async fn diagnostics(
+        &self,
+        request: lightagent_api::ops::DiagnosticsRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        use lightagent_api::ops::{DiagnosticsRequest, OpCategory, OpError};
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let internal = |error: String| OpError::new(OpCategory::Internal, error);
+        match request {
+            // The desktop shows no terminal banner.
+            DiagnosticsRequest::Doctor => crate::doctor_report(&paths, false).map_err(internal),
+            DiagnosticsRequest::Architecture => {
+                let config = ConfigStore::at(&paths)
+                    .load()
+                    .map_err(|error| internal(error.to_string()))?;
+                Ok(crate::architecture_report(&config))
+            }
+            DiagnosticsRequest::Bundle => crate::diagnostics::bundle(&self.root).await,
+        }
+    }
+
     async fn workers_change(
         &self,
         request: lightagent_api::ops::WorkerRequest,

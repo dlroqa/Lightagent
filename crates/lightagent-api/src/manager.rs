@@ -448,6 +448,15 @@ pub trait RunFactory: Send + Sync + 'static {
         Err(crate::ops::OpError::unavailable())
     }
 
+    /// A diagnostics report, built by the embedder that owns the home. The
+    /// default refuses.
+    async fn diagnostics(
+        &self,
+        _request: crate::ops::DiagnosticsRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
     /// Tools currently visible to the factory's active target.
     async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
         let registry = lightagent_tools::ToolRegistry::builtin();
@@ -1325,6 +1334,14 @@ impl RunManager {
         request: crate::ops::RemoteCredentialRequest,
     ) -> Result<serde_json::Value, crate::ops::OpError> {
         self.factory.remote_credentials(request).await
+    }
+
+    /// Build a diagnostics report through the factory.
+    pub async fn diagnostics(
+        &self,
+        request: crate::ops::DiagnosticsRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.diagnostics(request).await
     }
 
     /// Perform a worker-assignment change through the factory.

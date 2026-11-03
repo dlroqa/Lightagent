@@ -188,6 +188,15 @@ pub enum RemoteCredentialRequest {
     },
 }
 
+/// A read-only diagnostics report: `lightagent doctor`, `lightagent
+/// architecture`, or the diagnostics bundle (allowlisted fields only).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagnosticsRequest {
+    Doctor,
+    Architecture,
+    Bundle,
+}
+
 /// A stable error category, for the UI to act on without parsing messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpCategory {
