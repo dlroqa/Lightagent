@@ -1,0 +1,300 @@
+=== base 0db0bed923e95db8f15eaaa59a2450026aba47c0
+=== message
+Row 47: evidence for every settable configuration section
+
+The inventory's config.<section> rows were mapped to Settings, but only
+memory.top_k and agent.max_turns had a check. One key of each section the
+CLI can set (inference, agent, web, tools, rag, memory, runtime,
+generation, platform, subagents) and tui.show_reasoning (setup → tui),
+through the shared config operations at every level:
+
+- desktop_config_sections.rs: written over the API, read by `config
+  get`; written by `config set`, read over the API.
+- runs.py `config_sections`: the same through the host transport, each
+  value restored afterwards.
+- e2e/config-sections.mjs: each written with the Advanced configuration
+  card (Read, Value, Set), confirmed through the API, then restored.
+
+[security] has no key `config set` accepts, so it is not covered here and
+stays uncounted. No product code changes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== write crates/lightagent/tests/desktop_config_sections.rs
+//! Every configuration section the CLI can set (inventory rows
+//! config.<section>, and setup → tui): one key of each, written over the
+//! desktop runtime's API, is what `lightagent config get` reads, and a CLI
+//! write is what the API reads. [security] has no settable key. Every
+//! process here is separate.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+
+const KEY: &str = "e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6";
+const CONFIG: &str = "/api/lightagent/v1/config";
+
+/// One key per section: the value the API writes, then the one the CLI writes.
+const SECTIONS: [(&str, &str, &str); 11] = [
+    ("inference.model", "sections-model-a", "sections-model-b"),
+    ("agent.max_turns", "17", "19"),
+    ("web.timeout_secs", "21", "23"),
+    ("tools.profile_policy", "report_only", "enforce"),
+    ("rag.realtime_enabled", "true", "false"),
+    ("memory.top_k", "6", "8"),
+    ("runtime.threads", "3", "5"),
+    ("generation.max_output_tokens", "1234", "2345"),
+    ("platform.infinity.timeout_secs", "11", "13"),
+    ("subagents.selection_profiles", "alpha", "alpha,beta"),
+    ("tui.show_reasoning", "false", "true"),
+];
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-config-sections-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        let _ = reader.read_line(&mut line);
+        let _ = tx.send(line);
+        let mut rest = String::new();
+        while reader.read_line(&mut rest).is_ok_and(|read| read > 0) {
+            rest.clear();
+        }
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+fn call(runtime: &Runtime, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, raw)
+}
+
+fn cli(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent")
+}
+
+fn cli_ok(home: &Path, args: &[&str]) -> String {
+    let output = cli(home, args);
+    assert!(
+        output.status.success(),
+        "lightagent {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+#[test]
+fn one_key_of_every_settable_section_reads_and_writes_alike() {
+    let home = scratch_home("sections");
+    let runtime = start(&home);
+    for (key, by_api, by_cli) in SECTIONS {
+        let body = json!({ "value": by_api }).to_string();
+        let (status, raw) = call(&runtime, "PUT", &format!("{CONFIG}/{key}"), Some(&body));
+        assert_eq!(status, 200, "{key}: {raw}");
+        assert_eq!(cli_ok(&home, &["config", "get", key]), by_api, "{key}");
+        cli_ok(&home, &["config", "set", key, by_cli]);
+        let (status, raw) = call(&runtime, "GET", &format!("{CONFIG}/{key}"), None);
+        assert_eq!(status, 200, "{key}: {raw}");
+        let read: Value = serde_json::from_str(&raw).expect("JSON");
+        assert_eq!(read["value"], by_cli, "{key}: {raw}");
+    }
+}
+=== replace desktop/e2e/runs.py
+--- find
+            ("setup", lambda: scenario_setup(host, cli)),
+--- with
+            ("setup", lambda: scenario_setup(host, cli)),
+            ("config_sections", lambda: scenario_config_sections(host, cli)),
+=== replace desktop/e2e/runs.py
+--- find
+def scenario_setup(host, cli):
+--- with
+CONFIG_SECTIONS = [
+    ("inference.model", "sections-model-a", "sections-model-b"),
+    ("agent.max_turns", "17", "19"),
+    ("web.timeout_secs", "21", "23"),
+    ("tools.profile_policy", "report_only", "enforce"),
+    ("rag.realtime_enabled", "true", "false"),
+    ("memory.top_k", "6", "8"),
+    ("runtime.threads", "3", "5"),
+    ("generation.max_output_tokens", "1234", "2345"),
+    ("platform.infinity.timeout_secs", "11", "13"),
+    ("subagents.selection_profiles", "alpha", "alpha,beta"),
+    ("tui.show_reasoning", "false", "true"),
+]
+
+
+def scenario_config_sections(host, cli):
+    """D7 through the host transport: one key of every settable
+    configuration section, written through the host, is what the CLI reads,
+    and the CLI's write is what the host reads. Every value is restored."""
+    check = Checks("config_sections")
+    for key, by_host, by_cli in CONFIG_SECTIONS:
+        original = harness.run_cli(cli, "config", "get", key).strip()
+        try:
+            status, written = host.fetch("PUT", f"{API}/config/{key}", {"value": by_host})
+            read = harness.run_cli(cli, "config", "get", key).strip()
+            harness.run_cli(cli, "config", "set", key, by_cli)
+            _, shown = host.fetch("GET", f"{API}/config/{key}")
+            check.expect(f"{key}: through the host and by the CLI alike",
+                         status == 200 and read == by_host and (shown or {}).get("value") == by_cli,
+                         (status, written, read, shown))
+        finally:
+            harness.run_cli(cli, "config", "set", key, original)
+    return check
+
+
+def scenario_setup(host, cli):
+=== write e2e/config-sections.mjs
+// One key of every configuration section the CLI can set (inventory rows
+// config.<section>, and setup → tui), written with the Settings screen's
+// Advanced configuration card against the real harness: Read, Value, Set,
+// then the API confirms the value and the original is restored.
+// crates/lightagent/tests/desktop_config_sections.rs proves API = CLI per
+// section; desktop/e2e/runs.py `config_sections` covers the host.
+
+const SECTIONS = [
+  ["inference.model", "sections-model-a"],
+  ["agent.max_turns", "17"],
+  ["web.timeout_secs", "21"],
+  ["tools.profile_policy", "report_only"],
+  ["rag.realtime_enabled", "true"],
+  ["memory.top_k", "6"],
+  ["runtime.threads", "3"],
+  ["generation.max_output_tokens", "1234"],
+  ["platform.infinity.timeout_secs", "11"],
+  ["subagents.selection_profiles", "alpha"],
+  ["tui.show_reasoning", "false"],
+];
+
+export async function checkConfigSections(browser, base, outDir) {
+  const failures = [];
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1100 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const url = (key) => `${base}/api/lightagent/v1/config/${key}`;
+  const valueOf = async (key) => (await (await fetch(url(key))).json()).value;
+  const restore = (key, value) =>
+    fetch(url(key), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ value }) });
+  try {
+    await page.goto(`${base}/#/settings`);
+    await page.getByRole("heading", { name: "Advanced configuration" }).waitFor({ timeout: 15000 });
+    for (const [key, value] of SECTIONS) {
+      const original = await valueOf(key);
+      try {
+        await page.getByLabel("Key", { exact: true }).fill(key);
+        await page.getByRole("button", { name: "Read", exact: true }).click();
+        await page.getByText(`${key} = `, { exact: false }).first().waitFor({ timeout: 5000 });
+        await page.getByLabel("Value", { exact: true }).fill(value);
+        await page.getByRole("button", { name: "Set", exact: true }).click();
+        await page.getByText(`Set ${key} = ${value}.`, { exact: false }).waitFor({ timeout: 5000 });
+        const now = await valueOf(key);
+        if (now !== value) failures.push(`config sections: ${key} is ${JSON.stringify(now)} after the card set ${value}`);
+      } catch (err) {
+        failures.push(`config sections: ${key}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+        await page.screenshot({ path: `${outDir}/config-sections-failed-${key.replace(/\W+/g, "-")}.png` }).catch(() => {});
+      } finally {
+        await restore(key, original ?? "").catch(() => {});
+      }
+    }
+    if (errors.length) failures.push(`config sections: page errors: ${errors.join("; ")}`);
+  } catch (err) {
+    failures.push(`config sections: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  } finally {
+    await page.close();
+  }
+  return failures;
+}
+=== replace e2e/render.mjs
+--- find
+import { checkConfigEditor } from "./config.mjs";
+--- with
+import { checkConfigEditor } from "./config.mjs";
+import { checkConfigSections } from "./config-sections.mjs";
+=== replace e2e/render.mjs
+--- find
+  // Changes the config file.
+--- with
+  // One key of every settable section, each restored.
+  try {
+    failures.push(...(await checkConfigSections(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`config sections: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  }
+  // Changes the config file.
+=== end
