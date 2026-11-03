@@ -1,0 +1,1151 @@
+=== base 3caa0f4c43c95c11577ce13ce0ff506496bcdba7
+=== message
+Row 46: D7-11 — init and import from Hermes through shared operations, and the Setup screen
+
+- init_report: `lightagent init` (scaffold, endpoint and model through
+  the locked config writer, the profile created if needed and made
+  active), shared with the API; the CLI prints as before. An initialised
+  home is refused unless forced (the API answers 409).
+- import::hermes_report: `lightagent import hermes` (profiles and skills
+  from a Hermes home; --from, else HERMES_HOME, else ~/.hermes; dry run;
+  force), shared with the API; the CLI prints as before. Over the API a
+  Hermes home is an absolute path.
+- ops::SetupRequest and RunFactory::setup. API (operator): POST
+  /setup/init, POST /import/hermes; contract setup.init, import.hermes,
+  both refused by the host during a profile switch (they change the
+  profile store and the configuration). Two backend inventory rows (not
+  counted).
+- The Setup screen (#/setup, account menu): initialise, or reconfigure
+  (asks first) with profile, endpoint and model; import from a Hermes
+  home: Preview (a dry run: what would be imported or skipped), then
+  Import, optionally replacing what exists.
+- Tests: desktop_setup.rs (separate processes: init over the API and by
+  the CLI leave the same configuration and active profile; an
+  initialised home and an invalid profile are refused; a Hermes import's
+  dry run, apply, skip and force over the API equal the CLI's and write
+  only when applied; HERMES_HOME is the default; a relative or missing
+  home is refused), runs.py `setup` (host), e2e/setup.mjs (browser).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-api/src/ops.rs
+--- find
+/// A stable error category, for the UI to act on without parsing messages.
+--- with
+/// `lightagent init` or `lightagent import hermes`: set the home up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SetupRequest {
+    Init {
+        force: bool,
+        profile: Option<String>,
+        base_url: Option<String>,
+        model: Option<String>,
+    },
+    ImportHermes {
+        from: Option<String>,
+        dry_run: bool,
+        force: bool,
+    },
+}
+
+/// A stable error category, for the UI to act on without parsing messages.
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    /// Tools currently visible to the factory's active target.
+    async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
+--- with
+    /// A setup command (`lightagent init`, `lightagent import hermes`),
+    /// performed by the embedder that owns the home, answered with the JSON
+    /// the CLI prints. The default refuses.
+    async fn setup(
+        &self,
+        _request: crate::ops::SetupRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
+    /// Tools currently visible to the factory's active target.
+    async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    /// Perform a worker-assignment change through the factory.
+--- with
+    /// Perform a setup command through the factory.
+    pub async fn setup(
+        &self,
+        request: crate::ops::SetupRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.setup(request).await
+    }
+
+    /// Perform a worker-assignment change through the factory.
+=== replace crates/lightagent/src/serve.rs
+--- find
+    async fn workers_change(
+        &self,
+        request: lightagent_api::ops::WorkerRequest,
+--- with
+    async fn setup(
+        &self,
+        request: lightagent_api::ops::SetupRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        use lightagent_api::ops::{OpCategory, OpError, SetupRequest};
+        match request {
+            SetupRequest::Init {
+                force,
+                profile,
+                base_url,
+                model,
+            } => crate::init_report(
+                &LightagentPaths::rooted_at(&self.root),
+                force,
+                profile,
+                base_url,
+                model,
+            )
+            .map_err(|error| {
+                let category = if error.starts_with("already initialised") {
+                    OpCategory::Conflict
+                } else {
+                    OpCategory::Invalid
+                };
+                OpError::new(category, error)
+            }),
+            SetupRequest::ImportHermes {
+                from,
+                dry_run,
+                force,
+            } => {
+                if from
+                    .as_deref()
+                    .is_some_and(|raw| !std::path::Path::new(raw).is_absolute())
+                {
+                    return Err(OpError::new(
+                        OpCategory::Invalid,
+                        "the Hermes home must be an absolute path",
+                    ));
+                }
+                crate::import::hermes_report(
+                    &self.root,
+                    from.map(std::path::PathBuf::from),
+                    dry_run,
+                    force,
+                )
+                .map_err(|error| OpError::new(OpCategory::Invalid, error))
+            }
+        }
+    }
+
+    async fn workers_change(
+        &self,
+        request: lightagent_api::ops::WorkerRequest,
+=== replace crates/lightagent/src/lib.rs
+--- find
+fn init(
+    force: bool,
+    profile: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    json: bool,
+) -> Result<(), String> {
+    let paths = paths()?;
+    let already = paths.config_file().exists();
+--- with
+/// `lightagent init`, shared with the API: scaffold the home, apply the
+/// endpoint and the model through the locked config writer, and make
+/// `profile` (created when missing) active. An initialised home is refused
+/// unless `force`.
+pub(crate) fn init_report(
+    paths: &LightagentPaths,
+    force: bool,
+    profile: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let already = paths.config_file().exists();
+=== replace crates/lightagent/src/lib.rs
+--- find
+    store.set_active(&id).map_err(|error| error.to_string())?;
+
+    if json {
+        let value = serde_json::json!({
+            "home": paths.root().display().to_string(),
+            "config_file": paths.config_file().display().to_string(),
+            "active_profile": id.as_str(),
+            "base_url": config.inference.base_url,
+        });
+        println!("{value:#}");
+    } else {
+        println!("Initialised Lightagent at {}", paths.root().display());
+        println!("  active profile: {}", id.as_str());
+        println!("  provider:       {}", config.inference.base_url);
+        println!("Run `lightagent chat` to start.");
+    }
+    Ok(())
+}
+--- with
+    store.set_active(&id).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({
+        "home": paths.root().display().to_string(),
+        "config_file": paths.config_file().display().to_string(),
+        "active_profile": id.as_str(),
+        "base_url": config.inference.base_url,
+    }))
+}
+
+fn init(
+    force: bool,
+    profile: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    json: bool,
+) -> Result<(), String> {
+    let paths = paths()?;
+    let report = init_report(&paths, force, profile, base_url, model)?;
+    if json {
+        println!("{report:#}");
+    } else {
+        let field = |name: &str| report[name].as_str().unwrap_or_default().to_owned();
+        println!("Initialised Lightagent at {}", field("home"));
+        println!("  active profile: {}", field("active_profile"));
+        println!("  provider:       {}", field("base_url"));
+        println!("Run `lightagent chat` to start.");
+    }
+    Ok(())
+}
+=== replace crates/lightagent/src/import.rs
+--- find
+/// The CLI entry: resolve the homes and run the import.
+pub fn hermes(from: Option<PathBuf>, dry_run: bool, force: bool, json: bool) -> Result<(), String> {
+    let hermes_home = from
+        .or_else(|| std::env::var_os("HERMES_HOME").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".hermes")))
+        .ok_or_else(|| "could not locate a Hermes home; pass --from <dir>".to_owned())?;
+    if !hermes_home.is_dir() {
+        return Err(format!(
+            "no Hermes home at {} (pass --from <dir>)",
+            hermes_home.display()
+        ));
+    }
+    let paths = LightagentPaths::resolve().map_err(|error| error.to_string())?;
+    let store = ProfileStore::new(paths.root());
+    let report = run_import(&hermes_home, &store, &paths.skills_dir(), dry_run, force);
+
+    if json {
+        let value = serde_json::json!({
+            "dry_run": dry_run,
+            "hermes_home": hermes_home.display().to_string(),
+            "profiles": report.profiles,
+            "skills": report.skills,
+            "skipped": report.skipped,
+            "errors": report.errors,
+        });
+        println!("{value:#}");
+        return Ok(());
+    }
+
+    let verb = if dry_run { "would import" } else { "imported" };
+    println!(
+        "{verb} {} profile(s) and {} skill(s) from {}",
+        report.profiles.len(),
+        report.skills.len(),
+        hermes_home.display()
+    );
+--- with
+/// The import into the home at `root`, shared by the CLI and the API: the
+/// report `--json` prints. The Hermes home is `from`, else `HERMES_HOME`,
+/// else `~/.hermes`.
+pub(crate) fn hermes_report(
+    root: &Path,
+    from: Option<PathBuf>,
+    dry_run: bool,
+    force: bool,
+) -> Result<serde_json::Value, String> {
+    let hermes_home = from
+        .or_else(|| std::env::var_os("HERMES_HOME").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".hermes")))
+        .ok_or_else(|| "could not locate a Hermes home; pass --from <dir>".to_owned())?;
+    if !hermes_home.is_dir() {
+        return Err(format!(
+            "no Hermes home at {} (pass --from <dir>)",
+            hermes_home.display()
+        ));
+    }
+    let paths = LightagentPaths::rooted_at(root);
+    let store = ProfileStore::new(paths.root());
+    let report = run_import(&hermes_home, &store, &paths.skills_dir(), dry_run, force);
+    Ok(serde_json::json!({
+        "dry_run": dry_run,
+        "hermes_home": hermes_home.display().to_string(),
+        "profiles": report.profiles,
+        "skills": report.skills,
+        "skipped": report.skipped,
+        "errors": report.errors,
+    }))
+}
+
+/// The CLI entry: resolve the homes and run the import.
+pub fn hermes(from: Option<PathBuf>, dry_run: bool, force: bool, json: bool) -> Result<(), String> {
+    let paths = LightagentPaths::resolve().map_err(|error| error.to_string())?;
+    let value = hermes_report(paths.root(), from, dry_run, force)?;
+    if json {
+        println!("{value:#}");
+        return Ok(());
+    }
+    let list = |field: &str| -> Vec<String> {
+        value[field]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let report = ImportReport {
+        profiles: list("profiles"),
+        skills: list("skills"),
+        skipped: list("skipped"),
+        errors: list("errors"),
+    };
+    let hermes_home = value["hermes_home"].as_str().unwrap_or_default().to_owned();
+
+    let verb = if dry_run { "would import" } else { "imported" };
+    println!(
+        "{verb} {} profile(s) and {} skill(s) from {}",
+        report.profiles.len(),
+        report.skills.len(),
+        hermes_home
+    );
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+        .route("/api/lightagent/v1/identity/audit", get(identity_audit))
+--- with
+        .route("/api/lightagent/v1/identity/audit", get(identity_audit))
+        .route("/api/lightagent/v1/setup/init", post(setup_init))
+        .route("/api/lightagent/v1/import/hermes", post(import_hermes))
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+/// An import of skills from a repository or folder (new scope).
+--- with
+/// A setup command through the embedder (see [`ops::SetupRequest`]).
+/// Operator only: it changes the configuration and the profile store.
+async fn setup_operation(
+    state: &AppState,
+    headers: &HeaderMap,
+    request: ops::SetupRequest,
+) -> Response {
+    if let Some(rejection) = deny(state, headers, Scope::Admin) {
+        return rejection;
+    }
+    match state.manager.setup(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct InitBody {
+    #[serde(default)]
+    force: bool,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// `lightagent init`.
+async fn setup_init(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<InitBody>,
+) -> Response {
+    let request = ops::SetupRequest::Init {
+        force: body.force,
+        profile: body.profile,
+        base_url: body.base_url,
+        model: body.model,
+    };
+    setup_operation(&state, &headers, request).await
+}
+
+#[derive(Deserialize)]
+struct ImportHermesBody {
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default)]
+    force: bool,
+}
+
+/// `lightagent import hermes`.
+async fn import_hermes(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ImportHermesBody>,
+) -> Response {
+    let request = ops::SetupRequest::ImportHermes {
+        from: body.from,
+        dry_run: body.dry_run,
+        force: body.force,
+    };
+    setup_operation(&state, &headers, request).await
+}
+
+/// An import of skills from a repository or folder (new scope).
+=== replace docs/desktop/contract/operations.json
+--- find
+  {
+   "id": "diagnostics.doctor",
+--- with
+  {
+   "id": "setup.init",
+   "method": "POST",
+   "path": "/api/lightagent/v1/setup/init"
+  },
+  {
+   "id": "import.hermes",
+   "method": "POST",
+   "path": "/api/lightagent/v1/import/hermes"
+  },
+  {
+   "id": "diagnostics.doctor",
+=== replace desktop/src-tauri/src/switch.rs
+--- find
+            | "extensions.set_enabled"
+            | "memory.add"
+--- with
+            | "extensions.set_enabled"
+            | "setup.init"
+            | "import.hermes"
+            | "memory.add"
+=== replace desktop/src-tauri/src/switch.rs
+--- find
+        assert!(blocked_while_switching("memory.add"));
+--- with
+        assert!(blocked_while_switching("memory.add"));
+        assert!(blocked_while_switching("setup.init"));
+        assert!(blocked_while_switching("import.hermes"));
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  {
+   "id": "api.get.diagnostics.doctor",
+--- with
+  {
+   "id": "api.post.setup.init",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/setup/init",
+   "source": "crates/lightagent-api/src/lib.rs:177",
+   "behavior": "Initialise or reconfigure the home, as `lightagent init` (D7-11)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/setup/init"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.init)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: init_report via RunFactory::setup",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.post.import.hermes",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/import/hermes",
+   "source": "crates/lightagent-api/src/lib.rs:177",
+   "behavior": "Import profiles and skills from a Hermes home, as `lightagent import hermes` (D7-11)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/import/hermes"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.import.hermes)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: import::hermes_report via RunFactory::setup",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.diagnostics.doctor",
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.get.diagnostics.doctor` | `GET /api/lightagent/v1/diagnostics/doctor` | applicable | no | (backend reuse) | shared: doctor_report via RunFactory::diagnostics | not-started | `crates/lightagent-api/src/lib.rs:177` |
+--- with
+| `api.post.setup.init` | `POST /api/lightagent/v1/setup/init` | applicable | no | (backend reuse) | shared: init_report via RunFactory::setup | not-started | `crates/lightagent-api/src/lib.rs:177` |
+| `api.post.import.hermes` | `POST /api/lightagent/v1/import/hermes` | applicable | no | (backend reuse) | shared: import::hermes_report via RunFactory::setup | not-started | `crates/lightagent-api/src/lib.rs:177` |
+| `api.get.diagnostics.doctor` | `GET /api/lightagent/v1/diagnostics/doctor` | applicable | no | (backend reuse) | shared: doctor_report via RunFactory::diagnostics | not-started | `crates/lightagent-api/src/lib.rs:177` |
+=== write crates/lightagent/tests/desktop_setup.rs
+//! Setup (D7-11): `lightagent init` and `lightagent import hermes` through
+//! the desktop runtime's API do what the CLI does, and the API answers
+//! with the JSON the CLI prints. Every process here is separate.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+
+const KEY: &str = "d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5";
+const API: &str = "/api/lightagent/v1";
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!(
+        "lightagent-desktop-setup-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    dir
+}
+
+fn start(home: &Path, env: &[(&str, &Path)]) -> Runtime {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lightagent"));
+    command
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .env_remove("HERMES_HOME")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let mut child = command.spawn().expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        let _ = reader.read_line(&mut line);
+        let _ = tx.send(line);
+        let mut rest = String::new();
+        while reader.read_line(&mut rest).is_ok_and(|read| read > 0) {
+            rest.clear();
+        }
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+fn call(runtime: &Runtime, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, raw)
+}
+
+fn parsed(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|error| panic!("not JSON ({error}): {raw}"))
+}
+
+fn post(runtime: &Runtime, path: &str, body: Value) -> (u16, Value) {
+    let (status, raw) = call(runtime, "POST", path, Some(&body.to_string()));
+    (status, parsed(&raw))
+}
+
+fn cli(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .env_remove("HERMES_HOME")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent")
+}
+
+fn cli_json(home: &Path, args: &[&str]) -> Value {
+    let mut all = vec!["--json"];
+    all.extend_from_slice(args);
+    let output = cli(home, &all);
+    assert!(
+        output.status.success(),
+        "lightagent {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("JSON output")
+}
+
+fn arg(path: &Path) -> &str {
+    path.to_str().expect("UTF-8 path")
+}
+
+/// The configuration without what differs by home.
+fn settings(home: &Path) -> Value {
+    cli_json(home, &["config", "show"])["config"].clone()
+}
+
+fn active(home: &Path) -> Value {
+    cli_json(home, &["profile", "list"])
+}
+
+const BASE_URL: &str = "http://127.0.0.1:9/v1";
+
+#[test]
+fn init_over_the_api_does_what_the_cli_does() {
+    // The CLI's home.
+    let by_cli = scratch("cli");
+    cli_json(&by_cli, &["init"]);
+    let cli_report = cli_json(
+        &by_cli,
+        &[
+            "init",
+            "--force",
+            "--profile",
+            "fresh",
+            "--base-url",
+            BASE_URL,
+            "--model",
+            "m-test",
+        ],
+    );
+
+    // The desktop's home: already initialised by its runtime.
+    let by_api = scratch("api");
+    let runtime = start(&by_api, &[]);
+    let (status, refused) = post(&runtime, &format!("{API}/setup/init"), json!({}));
+    assert_eq!(status, 409, "{refused}");
+    let (status, refused) = post(
+        &runtime,
+        &format!("{API}/setup/init"),
+        json!({"force": true, "profile": "Not Valid"}),
+    );
+    assert_eq!(status, 400, "{refused}");
+    let (status, api_report) = post(
+        &runtime,
+        &format!("{API}/setup/init"),
+        json!({"force": true, "profile": "fresh", "base_url": BASE_URL, "model": "m-test"}),
+    );
+    assert_eq!(status, 200, "{api_report}");
+    for field in ["active_profile", "base_url"] {
+        assert_eq!(api_report[field], cli_report[field], "{field}");
+    }
+    assert_eq!(api_report["home"], arg(&by_api));
+    assert_eq!(settings(&by_api), settings(&by_cli));
+    let (cli_active, api_active) = (active(&by_cli), active(&by_api));
+    assert_eq!(api_active["active_profile"], "fresh", "{api_active}");
+    assert_eq!(api_active["active_profile"], cli_active["active_profile"]);
+}
+
+/// A Hermes home with one profile and one skill.
+fn hermes_home(label: &str) -> PathBuf {
+    let hermes = scratch(label);
+    let profile = hermes.join("profiles").join("Research Bot");
+    std::fs::create_dir_all(&profile).expect("profile dir");
+    std::fs::write(profile.join("profile.yaml"), "description: Reads papers\n").expect("profile");
+    std::fs::write(profile.join("SOUL.md"), "You read papers carefully.\n").expect("persona");
+    std::fs::write(
+        profile.join("config.yaml"),
+        format!("model:\n  default: paper-model\n  base_url: {BASE_URL}\n"),
+    )
+    .expect("config");
+    let skill = hermes.join("skills").join("summarize");
+    std::fs::create_dir_all(&skill).expect("skill dir");
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: summarize\ndescription: Summarize a text\n---\nSummarize the text.\n",
+    )
+    .expect("skill");
+    hermes
+}
+
+#[test]
+fn a_hermes_import_over_the_api_is_the_clis() {
+    let hermes = hermes_home("hermes");
+    let home = scratch("import");
+    let runtime = start(&home, &[]);
+    let import = format!("{API}/import/hermes");
+    let from = arg(&hermes);
+
+    // Refused: a relative or a missing home.
+    let (status, _) = post(&runtime, &import, json!({"from": "relative/hermes"}));
+    assert_eq!(status, 400);
+    let missing = hermes.join("missing");
+    let (status, _) = post(&runtime, &import, json!({"from": missing}));
+    assert_eq!(status, 400);
+
+    // A dry run writes nothing and equals the CLI's.
+    let (status, dry) = post(&runtime, &import, json!({"from": from, "dry_run": true}));
+    assert_eq!(status, 200, "{dry}");
+    assert_eq!(dry["profiles"], json!(["research-bot"]), "{dry}");
+    assert_eq!(dry["skills"], json!(["summarize"]), "{dry}");
+    assert_eq!(dry, cli_json(&home, &["import", "hermes", "--from", from, "--dry-run"]));
+    let listed = cli_json(&home, &["profile", "list"]).to_string();
+    assert!(!listed.contains("research-bot"), "a dry run wrote: {listed}");
+
+    // Applied over the API: the CLI sees the profile with its persona.
+    let (status, applied) = post(&runtime, &import, json!({"from": from}));
+    assert_eq!(status, 200, "{applied}");
+    assert_eq!(applied["profiles"], json!(["research-bot"]), "{applied}");
+    let shown = cli_json(&home, &["profile", "show", "research-bot"]).to_string();
+    assert!(shown.contains("You read papers carefully."), "{shown}");
+
+    // Again: skipped, alike for the API and the CLI; forced: imported.
+    let (_, again) = post(&runtime, &import, json!({"from": from}));
+    assert_eq!(again["skipped"].as_array().map(Vec::len), Some(2), "{again}");
+    assert_eq!(again, cli_json(&home, &["import", "hermes", "--from", from]));
+    let (_, forced) = post(&runtime, &import, json!({"from": from, "force": true}));
+    assert_eq!(forced["profiles"], json!(["research-bot"]), "{forced}");
+    assert_eq!(forced["skipped"], json!([]), "{forced}");
+    drop(runtime);
+
+    // HERMES_HOME is the default Hermes home, for the runtime as for the CLI.
+    let runtime = start(&home, &[("HERMES_HOME", hermes.as_path())]);
+    let (status, by_default) = post(&runtime, &import, json!({"dry_run": true}));
+    assert_eq!(status, 200, "{by_default}");
+    assert_eq!(by_default["hermes_home"], from, "{by_default}");
+}
+=== replace desktop/e2e/runs.py
+--- find
+            ("diagnostics", lambda: scenario_diagnostics(host, cli)),
+--- with
+            ("diagnostics", lambda: scenario_diagnostics(host, cli)),
+            ("setup", lambda: scenario_setup(host, cli)),
+=== replace desktop/e2e/runs.py
+--- find
+def scenario_diagnostics(host, cli):
+--- with
+def scenario_setup(host, cli):
+    """D7 through the host transport: init on an initialised home is
+    refused; a forced init with the current profile and endpoint keeps
+    both, as the CLI then reports; a Hermes import's dry run equals the
+    CLI's and writes nothing, and the import itself is seen by the CLI."""
+    import shutil
+    import tempfile
+
+    check = Checks("setup")
+    work = tempfile.mkdtemp(prefix="lightagent-e2e-hermes-")
+
+    def cli_json(*args):
+        return json.loads(harness.run_cli(cli, "--json", *args))
+
+    try:
+        _, catalog = host.fetch("GET", f"{API}/profiles")
+        active = (catalog or {}).get("active_profile")
+        base_url = cli_json("config", "show")["config"]["inference"]["base_url"]
+        status, refused = host.fetch("POST", f"{API}/setup/init", {})
+        check.expect("init on an initialised home is refused", status == 409, (status, refused))
+        status, report = host.fetch("POST", f"{API}/setup/init",
+                                    {"force": True, "profile": active, "base_url": base_url})
+        check.expect("a forced init through the host keeps the profile and the endpoint",
+                     status == 200 and (report or {}).get("active_profile") == active
+                     and cli_json("profile", "list").get("active_profile") == active
+                     and cli_json("config", "show")["config"]["inference"]["base_url"] == base_url,
+                     (status, report))
+        profile_dir = os.path.join(work, "profiles", "e2e-hermes")
+        os.makedirs(profile_dir)
+        with open(os.path.join(profile_dir, "SOUL.md"), "w", encoding="utf-8") as handle:
+            handle.write("You came from Hermes.\n")
+        status, dry = host.fetch("POST", f"{API}/import/hermes", {"from": work, "dry_run": True})
+        check.expect("a Hermes dry run through the host equals the CLI's and writes nothing",
+                     status == 200 and (dry or {}).get("profiles") == ["e2e-hermes"]
+                     and dry == cli_json("import", "hermes", "--from", work, "--dry-run")
+                     and "e2e-hermes" not in json.dumps(cli_json("profile", "list")), (status, dry))
+        status, applied = host.fetch("POST", f"{API}/import/hermes", {"from": work})
+        check.expect("imported through the host, seen by the CLI",
+                     status == 200 and (applied or {}).get("profiles") == ["e2e-hermes"]
+                     and "You came from Hermes." in json.dumps(cli_json("profile", "show", "e2e-hermes")),
+                     (status, applied))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return check
+
+
+def scenario_diagnostics(host, cli):
+=== replace frontend/src/api/agent.ts
+--- find
+  settings: () => jsonRequest<LightagentSettings>("/settings"),
+--- with
+  /** `lightagent init`: an initialised home is refused (409) unless `force`. */
+  initHome: (request: { force: boolean; profile?: string; base_url?: string; model?: string }) =>
+    jsonRequest<{ home: string; config_file: string; active_profile: string; base_url: string }>("/setup/init", {
+      method: "POST",
+      body: JSON.stringify(request),
+    }),
+  /** `lightagent import hermes`: a dry run reports what would be imported or skipped. */
+  importHermes: (request: { from?: string; dry_run: boolean; force: boolean }) =>
+    jsonRequest<{ dry_run: boolean; hermes_home: string; profiles: string[]; skills: string[]; skipped: string[]; errors: string[] }>(
+      "/import/hermes",
+      { method: "POST", body: JSON.stringify(request) },
+    ),
+  settings: () => jsonRequest<LightagentSettings>("/settings"),
+=== write frontend/src/screens/SetupScreen.tsx
+import { useEffect, useState } from "react";
+
+import { agentApi } from "../api/agent";
+import { Card } from "../components/Card";
+import { TopBar } from "../components/Shell";
+
+type Imported = Awaited<ReturnType<typeof agentApi.importHermes>>;
+
+function errorText(cause: unknown): string {
+  return (cause instanceof Error ? cause.message : String(cause)).replace(/^\d{3}:\s*/, "");
+}
+
+const errorStyle = { fontSize: 11.5, color: "var(--danger)", marginTop: 4 } as const;
+const rowStyle = { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" } as const;
+
+function ImportLists({ result }: { result: Imported }) {
+  const verb = result.dry_run ? "Would import" : "Imported";
+  return (
+    <div data-testid="setup-hermes-result" role="status" style={{ marginTop: 10, display: "grid", gap: 4 }}>
+      <div>{verb} {result.profiles.length} profile(s) and {result.skills.length} skill(s) from {result.hermes_home}.</div>
+      {result.profiles.length > 0 && <div>Profiles: {result.profiles.join(", ")}</div>}
+      {result.skills.length > 0 && <div>Skills: {result.skills.join(", ")}</div>}
+      {result.skipped.length > 0 && <div>Skipped (already here): {result.skipped.join(", ")}</div>}
+      {result.errors.map((error) => <div key={error} style={{ color: "var(--danger)" }}>{error}</div>)}
+    </div>
+  );
+}
+
+/**
+ * `lightagent init` and `lightagent import hermes`, through the operations
+ * the CLI shares: initialise or reconfigure the home (asks first), and
+ * import profiles and skills from a Hermes home after a preview.
+ */
+export function SetupScreen() {
+  const [home, setHome] = useState<string | null>(null);
+  const [profile, setProfile] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [model, setModel] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [initError, setInitError] = useState<string | null>(null);
+  const [from, setFrom] = useState("");
+  const [force, setForce] = useState(false);
+  const [confirmImport, setConfirmImport] = useState(false);
+  const [imported, setImported] = useState<Imported | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void agentApi.doctor().then((doctor) => setHome(typeof doctor.home === "string" ? doctor.home : null)).catch(() => {});
+    void agentApi.profiles().then((catalog) => setProfile(catalog.active_profile)).catch(() => {});
+    void agentApi.config().then((view) => {
+      const inference = (view.config.inference ?? {}) as { base_url?: string; model?: string | null };
+      setBaseUrl(inference.base_url ?? "");
+      setModel(inference.model ?? "");
+    }).catch(() => {});
+  }, []);
+
+  async function init(forced: boolean) {
+    setBusy(true);
+    setInitError(null);
+    setMessage(null);
+    setConfirm(false);
+    try {
+      const report = await agentApi.initHome({
+        force: forced,
+        profile: profile.trim() || undefined,
+        base_url: baseUrl.trim() || undefined,
+        model: model.trim() || undefined,
+      });
+      setMessage(`${forced ? "Reconfigured" : "Initialised"} ${report.home}: active profile ${report.active_profile}, provider ${report.base_url}.`);
+    } catch (cause) {
+      setInitError(errorText(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runImport(dryRun: boolean) {
+    setBusy(true);
+    setImportError(null);
+    setConfirmImport(false);
+    try {
+      setImported(await agentApi.importHermes({ from: from.trim() || undefined, dry_run: dryRun, force }));
+    } catch (cause) {
+      setImportError(errorText(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <TopBar title="Setup" subtitle="Initialise this Lightagent home, or import from Hermes" />
+      <div className="page" data-testid="setup-screen">
+        {message && <div className="notice notice--info" role="status" data-testid="setup-message">{message}</div>}
+
+        <Card title="Initialise or reconfigure">
+          <p className="card__note">
+            Shared with the terminal CLI (lightagent init). {home ? `This home: ${home}.` : ""} Reconfiguring sets the
+            endpoint and the model and makes the profile active (it is created if it does not exist); the CLI uses it
+            too.
+          </p>
+          <div style={rowStyle}>
+            <div className="field">
+              <label className="field__label" htmlFor="setup-profile">Profile</label>
+              <input id="setup-profile" className="input" value={profile} spellCheck={false} disabled={busy}
+                onChange={(event) => setProfile(event.target.value)} />
+            </div>
+            <div className="field" style={{ flex: "1 1 260px" }}>
+              <label className="field__label" htmlFor="setup-base-url">Provider endpoint</label>
+              <input id="setup-base-url" className="input" value={baseUrl} spellCheck={false} disabled={busy}
+                onChange={(event) => setBaseUrl(event.target.value)} />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="setup-model">Model (optional)</label>
+              <input id="setup-model" className="input" value={model} spellCheck={false} disabled={busy}
+                onChange={(event) => setModel(event.target.value)} />
+            </div>
+          </div>
+          {initError && <div role="alert" data-testid="setup-init-error" style={errorStyle}>{initError}</div>}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+            <button type="button" className="btn" disabled={busy} onClick={() => void init(false)}>Initialise</button>
+            {confirm ? (
+              <>
+                <button type="button" className="btn btn--danger" disabled={busy} onClick={() => void init(true)}>
+                  {`Confirm: reconfigure ${home ?? "this home"}`}
+                </button>
+                <button type="button" className="btn" disabled={busy} onClick={() => setConfirm(false)}>Keep it</button>
+              </>
+            ) : (
+              <button type="button" className="btn" disabled={busy} onClick={() => setConfirm(true)}>Reconfigure…</button>
+            )}
+          </div>
+        </Card>
+
+        <Card title="Import from Hermes">
+          <p className="card__note">
+            Shared with lightagent import hermes. Profiles (persona, description, model) and skills are copied from a
+            Hermes home; preview first. Without a folder, HERMES_HOME (or ~/.hermes) is used.
+          </p>
+          <div className="field">
+            <label className="field__label" htmlFor="setup-hermes-from">Hermes home (absolute path, optional)</label>
+            <input id="setup-hermes-from" className="input" value={from} spellCheck={false} disabled={busy}
+              onChange={(event) => { setFrom(event.target.value); setImported(null); }} />
+          </div>
+          <label style={{ display: "inline-flex", gap: 6, alignItems: "center", marginTop: 6 }}>
+            <input id="setup-hermes-force" type="checkbox" checked={force} disabled={busy}
+              onChange={(event) => setForce(event.target.checked)} />
+            Replace profiles and skills that already exist
+          </label>
+          {importError && <div role="alert" data-testid="setup-hermes-error" style={errorStyle}>{importError}</div>}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+            <button type="button" className="btn" disabled={busy} onClick={() => void runImport(true)}>Preview</button>
+            {force && confirmImport ? (
+              <>
+                <button type="button" className="btn btn--danger" disabled={busy} onClick={() => void runImport(false)}>
+                  Confirm: import and replace
+                </button>
+                <button type="button" className="btn" disabled={busy} onClick={() => setConfirmImport(false)}>Keep it</button>
+              </>
+            ) : (
+              <button type="button" className="btn" disabled={busy}
+                onClick={() => (force ? setConfirmImport(true) : void runImport(false))}>{force ? "Import…" : "Import"}</button>
+            )}
+          </div>
+          {imported && <ImportLists result={imported} />}
+        </Card>
+      </div>
+    </>
+  );
+}
+=== replace frontend/src/App.tsx
+--- find
+import { DiagnosticsScreen } from "./screens/DiagnosticsScreen";
+--- with
+import { DiagnosticsScreen } from "./screens/DiagnosticsScreen";
+import { SetupScreen } from "./screens/SetupScreen";
+=== replace frontend/src/App.tsx
+--- find
+        <Route path="diagnostics" element={<DiagnosticsScreen />} />
+--- with
+        <Route path="diagnostics" element={<DiagnosticsScreen />} />
+        <Route path="setup" element={<SetupScreen />} />
+=== replace frontend/src/components/Shell.tsx
+--- find
+import { ArrowLeft, BookOpen, FileText, KeyRound, Lock, Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Search, Settings, SquarePen, Stethoscope, Users, Wrench } from "lucide-react";
+--- with
+import { ArrowLeft, BookOpen, FileText, KeyRound, Lock, Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Rocket, Search, Settings, SquarePen, Stethoscope, Users, Wrench } from "lucide-react";
+=== replace frontend/src/components/Shell.tsx
+--- find
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/diagnostics"); }}><span className="session-menu__item"><Stethoscope size={17} /> Diagnostics</span></MenuItem>
+--- with
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/diagnostics"); }}><span className="session-menu__item"><Stethoscope size={17} /> Diagnostics</span></MenuItem>
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/setup"); }}><span className="session-menu__item"><Rocket size={17} /> Setup</span></MenuItem>
+=== replace frontend/src/screens/Agent.tsx
+--- find
+import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, Clock, CornerDownLeft, Cpu, FilePenLine, FileText, Folder, Globe, KeyRound, Lock, MessageCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, SquarePen, Stethoscope, Terminal, Trash2, Wrench, X } from "lucide-react";
+--- with
+import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, Clock, CornerDownLeft, Cpu, FilePenLine, FileText, Folder, Globe, KeyRound, Lock, MessageCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, Plus, Rocket, Search, Send, Share2, ShieldCheck, Sparkles, SquarePen, Stethoscope, Terminal, Trash2, Wrench, X } from "lucide-react";
+=== replace frontend/src/screens/Agent.tsx
+--- find
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/diagnostics"); }}><span className="session-menu__item"><Stethoscope size={17} /> Diagnostics</span></MenuItem>
+--- with
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/diagnostics"); }}><span className="session-menu__item"><Stethoscope size={17} /> Diagnostics</span></MenuItem>
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/setup"); }}><span className="session-menu__item"><Rocket size={17} /> Setup</span></MenuItem>
+=== write e2e/setup.mjs
+// The Setup screen against the real harness (D7-11): Initialise on the
+// initialised harness is refused with the server's words; Reconfigure asks
+// first, and with the current profile and endpoint keeps both; a Hermes
+// home is previewed (nothing written), imported, and a second import
+// reports what it skipped. The imported profile is deleted afterwards.
+// crates/lightagent/tests/desktop_setup.rs proves the API is the CLI;
+// desktop/e2e/runs.py `setup` covers the host.
+
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const API = "/api/lightagent/v1";
+
+async function get(base, path) {
+  return (await fetch(`${base}${API}${path}`)).json();
+}
+
+export async function checkSetup(browser, base, outDir) {
+  const failures = [];
+  const dir = await mkdtemp(join(tmpdir(), "lightagent-render-hermes-"));
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1400 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const screen = page.getByTestId("setup-screen");
+  const step = async (name, body) => {
+    try {
+      await body();
+    } catch (err) {
+      failures.push(`setup: ${name}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+      await page.screenshot({ path: `${outDir}/setup-failed-${name.replace(/\W+/g, "-")}.png`, fullPage: true }).catch(() => {});
+    }
+  };
+  let imported = false;
+  try {
+    const before = await get(base, "/profiles");
+    const endpoint = (await get(base, "/config")).config.inference.base_url;
+    await page.goto(`${base}/#/setup`);
+    await screen.waitFor({ timeout: 15000 });
+    await page.locator("#setup-profile").and(page.locator(`[value="${before.active_profile}"]`)).waitFor({ timeout: 10000 });
+    await page.locator("#setup-base-url").and(page.locator(`[value="${endpoint}"]`)).waitFor({ timeout: 10000 });
+
+    await step("initialise is refused on an initialised home", async () => {
+      await screen.getByRole("button", { name: "Initialise", exact: true }).click();
+      await page.getByTestId("setup-init-error").filter({ hasText: "already initialised" }).waitFor({ timeout: 10000 });
+    });
+
+    await step("reconfigure asks first and keeps the profile and endpoint", async () => {
+      await screen.getByRole("button", { name: "Reconfigure…" }).click();
+      await screen.getByRole("button", { name: "Keep it" }).click();
+      await screen.getByRole("button", { name: "Reconfigure…" }).click();
+      await screen.getByRole("button", { name: /^Confirm: reconfigure / }).click();
+      await page.getByTestId("setup-message").filter({ hasText: `active profile ${before.active_profile}` }).waitFor({ timeout: 10000 });
+      if ((await get(base, "/profiles")).active_profile !== before.active_profile) throw new Error("the active profile changed");
+      if ((await get(base, "/config")).config.inference.base_url !== endpoint) throw new Error("the endpoint changed");
+    });
+
+    await step("preview and import from a Hermes home", async () => {
+      const profile = join(dir, "profiles", "render-hermes");
+      await mkdir(profile, { recursive: true });
+      await writeFile(join(profile, "SOUL.md"), "You came from Hermes in the render.\n");
+      await page.locator("#setup-hermes-from").fill(dir);
+      await screen.getByRole("button", { name: "Preview" }).click();
+      const result = page.getByTestId("setup-hermes-result");
+      await result.getByText("Would import 1 profile(s)", { exact: false }).waitFor({ timeout: 10000 });
+      if ((await get(base, "/profiles")).profiles.some((p) => p.id === "render-hermes")) throw new Error("the preview wrote");
+      await screen.getByRole("button", { name: "Import", exact: true }).click();
+      await result.getByText("Imported 1 profile(s)", { exact: false }).waitFor({ timeout: 10000 });
+      imported = true;
+      if (!(await get(base, "/profiles")).profiles.some((p) => p.id === "render-hermes")) throw new Error("not imported");
+      await screen.getByRole("button", { name: "Import", exact: true }).click();
+      await result.getByText("Skipped (already here): profile render-hermes", { exact: false }).waitFor({ timeout: 10000 });
+      await page.screenshot({ path: `${outDir}/setup-imported.png`, fullPage: true });
+    });
+
+    if (errors.length) failures.push(`setup: page errors: ${errors.join("; ")}`);
+  } catch (err) {
+    failures.push(`setup: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  } finally {
+    await page.close();
+    if (imported) await fetch(`${base}${API}/profiles/render-hermes`, { method: "DELETE" }).catch(() => {});
+    await rm(dir, { recursive: true, force: true });
+  }
+  return failures;
+}
+=== replace e2e/render.mjs
+--- find
+import { checkIdentity } from "./identity.mjs";
+--- with
+import { checkIdentity } from "./identity.mjs";
+import { checkSetup } from "./setup.mjs";
+=== replace e2e/render.mjs
+--- find
+  { name: "diagnostics", hash: "#/diagnostics", agentBacked: true, mustContain: "Diagnostics bundle" },
+--- with
+  { name: "diagnostics", hash: "#/diagnostics", agentBacked: true, mustContain: "Diagnostics bundle" },
+  { name: "setup", hash: "#/setup", agentBacked: true, mustContain: "Import from Hermes" },
+=== replace e2e/render.mjs
+--- find
+  // Changes the profile store: after the routes above have rendered.
+--- with
+  // Reconfigures with the current settings and imports a Hermes profile (deleted after).
+  try {
+    failures.push(...(await checkSetup(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`setup: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  }
+  // Changes the profile store: after the routes above have rendered.
+=== end
