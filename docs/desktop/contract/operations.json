@@ -408,6 +408,11 @@
    "path": "/api/lightagent/v1/extensions/{name}/enabled"
   },
   {
+   "id": "commands.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/commands"
+  },
+  {
    "id": "onboarding.get",
    "method": "GET",
    "path": "/api/lightagent/v1/onboarding"

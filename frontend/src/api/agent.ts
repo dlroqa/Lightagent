@@ -691,6 +691,12 @@ export interface ConfigValue {
   revision: string;
 }
 
+/** One of the terminal chat's slash commands. */
+export interface SlashCommandInfo {
+  name: string;
+  summary: string;
+}
+
 /** The profile's onboarding guidance (the chat's /onboard command). */
 export interface Onboarding {
   installed: boolean;
@@ -923,6 +929,8 @@ export const agentApi = {
     }),
   config: () => jsonRequest<ConfigView>("/config"),
   configKey: (key: string) => jsonRequest<ConfigValue>(`/config/${encodeURIComponent(key)}`),
+  /** The terminal chat's slash commands, as its /help lists them. */
+  commands: () => jsonRequest<{ commands: SlashCommandInfo[] }>("/commands"),
   /** The chat's /onboard: the guidance installed for the profile the runtime serves. */
   onboarding: () => jsonRequest<Onboarding>("/onboarding"),
   /** `/onboard <file.md>`: install or replace it from a Markdown file on this machine. */

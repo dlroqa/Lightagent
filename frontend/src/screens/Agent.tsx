@@ -10,6 +10,7 @@ import {
   type SessionSearchResult,
   type SessionMessage,
   type SessionSummary,
+  type SlashCommandInfo,
   type SystemTime,
   type ToolInfo,
   type UploadedAttachment,
@@ -412,6 +413,8 @@ export function Agent() {
   const sidebarCollapsed = preferences.railCollapsed;
   const [showArchived, setShowArchived] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
+  const [commandsOpen, setCommandsOpen] = useState(false);
+  const closeCommands = useCallback(() => setCommandsOpen(false), []);
   const [sidebarNotice, setSidebarNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // The regeneration this page started: its run, and the saved run whose
@@ -1126,6 +1129,7 @@ export function Agent() {
               <MenuItem onClick={() => { setAccountOpen(false); navigate("/diagnostics"); }}><span className="session-menu__item"><Stethoscope size={17} /> Diagnostics</span></MenuItem>
               <MenuItem onClick={() => { setAccountOpen(false); navigate("/setup"); }}><span className="session-menu__item"><Rocket size={17} /> Setup</span></MenuItem>
               <MenuItem onClick={() => { setAccountOpen(false); navigate("/settings"); }}><span className="session-menu__item"><ShieldCheck size={17} /> Settings</span></MenuItem>
+              <MenuItem onClick={() => { setAccountOpen(false); setCommandsOpen(true); }}><span className="session-menu__item"><Terminal size={17} /> Commands</span></MenuItem>
             </Menu>
           </div>
         </aside>
@@ -1176,6 +1180,7 @@ export function Agent() {
             </div>
           </div>
         )}
+        {commandsOpen && <CommandsDialog onClose={closeCommands} />}
         <section className="agent-conversation chat-thread" style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
           {shownError && (
             <div className="notice notice--danger" role="alert">
@@ -1511,6 +1516,77 @@ function SessionGroup({ title, rows, activeId, disabled, onOpen, onUpdate, onSha
         ))}
       </ul>
     </section>
+  );
+}
+
+/** Where each terminal chat command is in the desktop app. */
+const COMMAND_EQUIVALENTS: Record<string, string> = {
+  help: "This list (account menu → Commands)",
+  tools: "Tools screen",
+  skills: "Tools → Installed skills",
+  extensions: "Tools → Extensions",
+  onboard: "Profiles → Guidance",
+  reload: "Tools → Reload tools (every run starts with the current settings)",
+  new: "New chat",
+  continue: "Continue, on a run paused on its time budget",
+  stop: "Stop, beside the running answer",
+  update: "Diagnostics → Check for updates (check only; nothing is installed)",
+  exit: "Close the window",
+};
+
+/** The chat's `/help`: its commands, from the API, and where each is here. */
+function CommandsDialog({ onClose }: { onClose: () => void }) {
+  const [commands, setCommands] = useState<SlashCommandInfo[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    agentApi.commands()
+      .then((answer) => { if (live) setCommands(answer.commands); })
+      .catch((cause) => { if (live) setError(cause instanceof Error ? cause.message : String(cause)); });
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      live = false;
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+  return (
+    <div className="chat-search" role="dialog" aria-modal="true" aria-label="Commands">
+      <button type="button" className="chat-search__backdrop" tabIndex={-1} aria-label="Close commands" onClick={onClose} />
+      <div className="chat-search__panel">
+        <div className="chat-search__header">
+          <h2 className="commands__title">Commands</h2>
+          <div className="chat-search__actions">
+            <button type="button" className="chat-search__close" aria-label="Close commands" autoFocus onClick={onClose}><X size={21} /></button>
+          </div>
+        </div>
+        <p className="commands__note">
+          The terminal chat&apos;s slash commands, and where each one is in the app. Enter sends a message; Shift+Enter starts a new line.
+        </p>
+        {error ? (
+          <p className="config-editor__error" role="alert">{error}</p>
+        ) : !commands ? (
+          <p className="muted">Loading…</p>
+        ) : (
+          <div className="commands__scroll">
+            <table className="commands__table">
+              <thead>
+                <tr><th scope="col">Command</th><th scope="col">What it does</th><th scope="col">In the app</th></tr>
+              </thead>
+              <tbody>
+                {commands.map((command) => (
+                  <tr key={command.name} data-testid={`command-${command.name}`}>
+                    <td><code>/{command.name}</code></td>
+                    <td>{command.summary}</td>
+                    <td>{COMMAND_EQUIVALENTS[command.name] ?? "Not in the app"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

@@ -15,6 +15,7 @@ import { checkSetupSections } from "./setup-sections.mjs";
 import { checkSettingsStates } from "./settings.mjs";
 import { checkExtensions } from "./extensions.mjs";
 import { checkOnboarding } from "./onboarding.mjs";
+import { checkCommands } from "./commands.mjs";
 import { checkMcp } from "./mcp.mjs";
 import { checkToolCatalog } from "./tools.mjs";
 import { checkSkillImport } from "./skills.mjs";
@@ -466,6 +467,12 @@ async function main() {
     failures.push(...(await checkOnboarding(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`onboarding: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // The Commands dialog (/help) and Reload tools (/reload); web access restored.
+  try {
+    failures.push(...(await checkCommands(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`commands: ${err instanceof Error ? err.message : String(err)}`);
   }
   // Imports and removes a skills pack: after the routes above have rendered.
   try {
