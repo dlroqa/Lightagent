@@ -470,6 +470,67 @@ export interface OpenTerminalSettings extends PlatformEndpointSettings {
 }
 
 
+/** `lightagent identity status`: the store's state and counts. Never a secret. */
+export interface IdentityStatus {
+  store: "absent" | "present";
+  schema_supported: number;
+  generation?: number;
+  principals?: { users: number; operators: number; suspended: number };
+  credentials?: { active: number; revoked: number; expired: number };
+  owned_profiles?: { recorded: number; effective: number };
+  multi_user: string;
+}
+
+export interface IdentityPrincipal {
+  id: string;
+  role: "user" | "operator";
+  status: "active" | "suspended";
+  created_unix: number;
+  updated_unix: number;
+  unrevoked_credentials: number;
+}
+
+/** A credential by key id. The secret and its verifier are never listed. */
+export interface IdentityCredential {
+  key_id: string;
+  principal: string;
+  role: string;
+  state: "active" | "revoked" | "expired";
+  created_unix: number;
+  expires_unix: number | null;
+  revoked_unix: number | null;
+  replaces: string | null;
+  restriction: { capabilities?: string[] | null; profiles?: string[] | null } | null;
+}
+
+export interface IdentityOwnership {
+  profile: string;
+  owner: string;
+  effective: boolean;
+  grants: { principal: string; capabilities: string[] }[];
+}
+
+export interface IdentityAuditRecord {
+  at_unix: number;
+  generation: number;
+  action: unknown;
+  principal: unknown;
+  key_id: unknown;
+  subject: unknown;
+  profile: unknown;
+  outcome: unknown;
+  denied: boolean;
+}
+
+/** An issued or rotated credential: its key id only; the secret went to the named file. */
+export interface IdentityIssued {
+  issued: string;
+  principal?: string;
+  replaces?: string;
+  expires_unix: number | null;
+  secret_delivered_to: string;
+}
+
 export interface ApprovalRow {
   run: string;
   pending: PendingApproval | null;
@@ -704,6 +765,51 @@ export const agentApi = {
         : `/workers/${encodeURIComponent(role)}`,
       { method: "DELETE" },
     ),
+  /** `lightagent identity …` as the local operator. A credential's secret goes to a new file, never to the UI. */
+  identityStatus: () => jsonRequest<IdentityStatus>("/identity"),
+  identityUsers: () => jsonRequest<{ principals: IdentityPrincipal[] }>("/identity/users"),
+  createIdentityUser: (id: string) =>
+    jsonRequest<{ created: string }>("/identity/users", { method: "POST", body: JSON.stringify({ id }) }),
+  suspendIdentityUser: (id: string) =>
+    jsonRequest<{ suspended: string }>(`/identity/users/${encodeURIComponent(id)}/suspend`, { method: "POST" }),
+  identityCredentials: (principal?: string) =>
+    jsonRequest<{ credentials: IdentityCredential[] }>(
+      principal ? `/identity/credentials?principal=${encodeURIComponent(principal)}` : "/identity/credentials",
+    ),
+  issueIdentityCredential: (request: {
+    principal: string;
+    expires_in?: number;
+    capabilities: string[];
+    profiles: string[];
+    secret_file: string;
+  }) => jsonRequest<IdentityIssued>("/identity/credentials", { method: "POST", body: JSON.stringify(request) }),
+  rotateIdentityCredential: (keyId: string, request: { expires_in?: number; secret_file: string }) =>
+    jsonRequest<IdentityIssued>(`/identity/credentials/${encodeURIComponent(keyId)}/rotate`, {
+      method: "POST",
+      body: JSON.stringify(request),
+    }),
+  revokeIdentityCredential: (keyId: string) =>
+    jsonRequest<{ revoked: string }>(`/identity/credentials/${encodeURIComponent(keyId)}/revoke`, { method: "POST" }),
+  assignIdentityOwner: (profile: string, principal: string) =>
+    jsonRequest<{ owner: string; assignment: string }>(`/identity/owners/${encodeURIComponent(profile)}`, {
+      method: "PUT",
+      body: JSON.stringify({ principal }),
+    }),
+  reassignIdentityOwner: (profile: string, principal: string) =>
+    jsonRequest<{ owner: string; assignment: string }>(`/identity/owners/${encodeURIComponent(profile)}/reassign`, {
+      method: "POST",
+      body: JSON.stringify({ principal }),
+    }),
+  removeIdentityOwner: (profile: string) =>
+    jsonRequest<{ owner: null }>(`/identity/owners/${encodeURIComponent(profile)}`, { method: "DELETE" }),
+  identityGrants: (profile?: string) =>
+    jsonRequest<{ profiles: IdentityOwnership[] }>(
+      profile ? `/identity/grants?profile=${encodeURIComponent(profile)}` : "/identity/grants",
+    ),
+  revokeIdentityGrant: (request: { profile: string; principal: string; capability: string }) =>
+    jsonRequest<{ revoked: string }>("/identity/grants/revoke", { method: "POST", body: JSON.stringify(request) }),
+  identityAudit: (limit: number) =>
+    jsonRequest<{ records: IdentityAuditRecord[] }>(`/identity/audit?limit=${limit}`),
   settings: () => jsonRequest<LightagentSettings>("/settings"),
   saveSettings: (settings: LightagentSettings) =>
     jsonRequest<LightagentSettings>("/settings", {
