@@ -1,0 +1,624 @@
+=== base 46abd19cfdbc92d84ef73c0636ec95ff882affd2
+=== message
+Row 56a: Jev status and the connection check, evidence (test-only)
+
+GET /jev and POST /jev/verify are the operations the Settings and Tools
+screens use; the desktop runtime serves them from the same coordinator
+code as lightagent serve. This adds the missing backend and host
+evidence and the failure states in the browser. No product code changes.
+
+All of it runs against deterministic local stubs of TypeSafe's SystemOne
+endpoint (Rust, Python, Node). It is stub evidence, not live Jev; the
+live check stays jev-live.yml. Each stub checks what the client sends:
+one POST to /v1/systemone with the configured bearer key and one
+synthetic noul question. It answers with TypeSafe's envelope, or as a
+broken service would.
+
+- Backend (desktop_jev.rs, serve --desktop): no endpoint (nothing sent),
+  a success with its model, a rejected key (401), a rejected request
+  (422), a failing status (503), an unavailable service (refused), and
+  four malformed answers (not JSON, no answers, a question unanswered,
+  the wrong answer type). Each is the check's result, one request per
+  check. The status reports a check only while the settings it checked
+  are in force, and neither answer holds the key or its variable.
+- Host (runs.py jev): the same through the host transport. Settings are
+  saved with PUT /settings and put back afterwards.
+- Browser (e2e/jev.mjs): Test connection against a non-JSON answer, an
+  unanswered question, a refused port and a 503. Each is shown as an
+  alert and reported by the status.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== write crates/lightagent/tests/desktop_jev.rs
+//! Jev status and the connection check on the desktop runtime (D7, row 56):
+//! `GET /jev` and `POST /jev/verify` on `lightagent serve --desktop`, the
+//! operations the Settings and Tools screens use, against a deterministic
+//! local stub of TypeSafe's SystemOne endpoint. This is stub evidence, not
+//! live Jev evidence (that is `jev-live.yml`, with a real key). The stub
+//! checks the request the client sends (one POST to `/v1/systemone`, the
+//! configured bearer key, one synthetic noul question) and answers as
+//! TypeSafe does, or as a broken service would: a success, a rejected key,
+//! a rejected request, a failing status, an unavailable service and
+//! malformed answers are each the check's result, and the status reports a
+//! check only while the settings it checked are in force. Neither answer
+//! holds the key. Every process here is separate.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+
+const KEY: &str = "8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f";
+/// The variable the Jev key is read from; set for the runtime only.
+const JEV_KEY_VAR: &str = "LIGHTAGENT_TEST_JEV_STUB_KEY";
+/// A placeholder the stub expects as the bearer key; it is no real key.
+const JEV_KEY: &str = "jev-stub-placeholder-3c4d5e";
+const STATUS: &str = "/api/lightagent/v1/jev";
+const VERIFY: &str = "/api/lightagent/v1/jev/verify";
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-jev-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .env(JEV_KEY_VAR, JEV_KEY)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+/// One authenticated request: the status and the raw body.
+fn call(runtime: &Runtime, method: &str, path: &str, body: &str) -> (u16, String) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, raw)
+}
+
+fn parsed(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|error| panic!("not JSON ({error}): {raw}"))
+}
+
+/// `GET /jev`, which must answer, and its raw body.
+fn status_now(runtime: &Runtime) -> (Value, String) {
+    let (status, raw) = call(runtime, "GET", STATUS, "");
+    assert_eq!(status, 200, "{raw}");
+    (parsed(&raw), raw)
+}
+
+/// `POST /jev/verify`, which must answer, and its raw body.
+fn verify(runtime: &Runtime) -> (Value, String) {
+    let (status, raw) = call(runtime, "POST", VERIFY, "{}");
+    assert_eq!(status, 200, "{raw}");
+    (parsed(&raw), raw)
+}
+
+fn edit_config(home: &Path, change: impl FnOnce(&mut Value)) {
+    let path = home.join("config.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("config JSON");
+    change(&mut value);
+    std::fs::write(&path, serde_json::to_vec_pretty(&value).expect("JSON")).expect("write");
+}
+
+/// Jev at `base_url`, its key read from [`JEV_KEY_VAR`].
+fn configure(home: &Path, base_url: &str) {
+    edit_config(home, |config| {
+        config["platform"]["jev"]["base_url"] = json!(base_url);
+        config["platform"]["jev"]["api_key"] = json!({ "kind": "env", "var": JEV_KEY_VAR });
+        config["platform"]["jev"]["timeout_secs"] = json!(5);
+    });
+}
+
+/// What the stub received: the path, the bearer key and the JSON body.
+#[derive(Clone, Debug)]
+struct Seen {
+    path: String,
+    bearer: Option<String>,
+    body: Value,
+}
+
+/// A local stand-in for TypeSafe's SystemOne endpoint. The first path
+/// segment picks its answer; every request it receives is recorded before
+/// it answers.
+struct Stub {
+    url: String,
+    seen: Arc<Mutex<Vec<Seen>>>,
+}
+
+impl Stub {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("stub listener");
+        let url = format!("http://{}", listener.local_addr().expect("stub address"));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                serve_one(stream, &record);
+            }
+        });
+        Self { url, seen }
+    }
+
+    fn seen(&self) -> Vec<Seen> {
+        self.seen.lock().expect("stub record").clone()
+    }
+}
+
+fn serve_one(mut stream: TcpStream, record: &Mutex<Vec<Seen>>) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let Ok(reading) = stream.try_clone() else {
+        return;
+    };
+    let mut reader = BufReader::new(reading);
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).is_err() {
+        return;
+    }
+    let path = request_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or_default()
+        .to_owned();
+    let mut length = 0_usize;
+    let mut bearer = None;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            let value = value.trim();
+            if name.eq_ignore_ascii_case("content-length") {
+                length = value.parse().unwrap_or(0);
+            } else if name.eq_ignore_ascii_case("authorization") {
+                bearer = value.strip_prefix("Bearer ").map(str::to_owned);
+            }
+        }
+    }
+    let mut body = vec![0; length];
+    if reader.read_exact(&mut body).is_err() {
+        return;
+    }
+    let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let (status, reply) = answer(&path, &body);
+    record
+        .lock()
+        .expect("stub record")
+        .push(Seen { path, bearer, body });
+    let head = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        reply.len()
+    );
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(reply.as_bytes());
+}
+
+/// The stub's answer: TypeSafe's envelope, or what a broken service sends.
+fn answer(path: &str, body: &Value) -> (&'static str, String) {
+    let envelope = |answers: Value| {
+        json!({
+            "model": "jev-1.13.0",
+            "answers": answers,
+            "usage": { "input_tokens": 12, "output_tokens": 2 },
+        })
+        .to_string()
+    };
+    match path.trim_start_matches('/').split('/').next() {
+        Some("ok") => {
+            // Every question asked, answered with its own (noul) type.
+            let answers: serde_json::Map<String, Value> = body["questions"]
+                .as_object()
+                .map(|questions| {
+                    questions
+                        .keys()
+                        .map(|id| (id.clone(), json!({ "type": "noul", "noul": 0.9 })))
+                        .collect()
+                })
+                .unwrap_or_default();
+            ("200 OK", envelope(Value::Object(answers)))
+        }
+        Some("auth") => (
+            "401 Unauthorized",
+            json!({ "error": "invalid API key" }).to_string(),
+        ),
+        Some("reject") => (
+            "422 Unprocessable Entity",
+            json!({ "error": "invalid request" }).to_string(),
+        ),
+        Some("busy") => (
+            "503 Service Unavailable",
+            json!({ "error": "unavailable" }).to_string(),
+        ),
+        Some("text") => ("200 OK", "this is not JSON".to_owned()),
+        Some("empty") => ("200 OK", "{}".to_owned()),
+        Some("unanswered") => ("200 OK", envelope(json!({}))),
+        Some("wrong-type") => (
+            "200 OK",
+            envelope(json!({
+                "reachable": {
+                    "type": "choice",
+                    "choice": "yes",
+                    "probabilities": { "yes": 1.0 },
+                    "confidence": 1.0,
+                },
+            })),
+        ),
+        _ => ("404 Not Found", "{}".to_owned()),
+    }
+}
+
+#[test]
+fn the_check_and_the_status_report_what_the_service_answered() {
+    let home = scratch_home("checks");
+    // The config file exists once something saved it: the CLI, here.
+    let created = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["config", "set", "inference.model", "m1"])
+        .env("LIGHTAGENT_HOME", &home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent");
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let stub = Stub::start();
+    let runtime = start(&home);
+
+    // Nothing configured: the status says so, and the check sends nothing.
+    let (shown, _) = status_now(&runtime);
+    assert_eq!(shown["name"], "Jev Task Classification", "{shown}");
+    assert_eq!(shown["endpoint_configured"], false, "{shown}");
+    assert_eq!(shown["configured"], false, "{shown}");
+    assert!(
+        shown["profile"]
+            .as_str()
+            .is_some_and(|profile| !profile.is_empty()),
+        "{shown}"
+    );
+    assert!(shown["verification"].is_null(), "{shown}");
+    let (unconfigured, _) = verify(&runtime);
+    assert_eq!(unconfigured["ok"], false, "{unconfigured}");
+    assert_eq!(unconfigured["error"], "no_endpoint", "{unconfigured}");
+    assert!(stub.seen().is_empty(), "{:?}", stub.seen());
+
+    // A success: one request, as the client sends it, and its model.
+    configure(&home, &format!("{}/ok", stub.url));
+    let (verified, raw_verified) = verify(&runtime);
+    assert_eq!(verified["ok"], true, "{verified}");
+    assert_eq!(verified["model_version"], "jev-1.13.0", "{verified}");
+    assert!(verified["error"].is_null(), "{verified}");
+    assert!(verified["latency_ms"].is_u64(), "{verified}");
+    assert!(
+        verified["checked_at_unix"]
+            .as_u64()
+            .is_some_and(|at| at > 0),
+        "{verified}"
+    );
+    let seen = stub.seen();
+    assert_eq!(seen.len(), 1, "one request per check: {seen:?}");
+    assert_eq!(seen[0].path, "/ok/v1/systemone", "{seen:?}");
+    assert_eq!(seen[0].bearer.as_deref(), Some(JEV_KEY), "{seen:?}");
+    let questions = seen[0].body["questions"]
+        .as_object()
+        .unwrap_or_else(|| panic!("no questions: {}", seen[0].body));
+    assert_eq!(questions.len(), 1, "{}", seen[0].body);
+    assert_eq!(questions["reachable"]["type"], "noul", "{}", seen[0].body);
+    assert!(
+        seen[0]
+            .body
+            .to_string()
+            .contains("Lightagent connection check."),
+        "{}",
+        seen[0].body
+    );
+    let (shown, raw_shown) = status_now(&runtime);
+    assert_eq!(
+        shown["verification"], verified,
+        "the status reports the check just made"
+    );
+    assert_eq!(shown["endpoint_configured"], true, "{shown}");
+    assert_eq!(shown["api_key_configured"], true, "{shown}");
+    assert_eq!(shown["api_key_resolvable"], true, "{shown}");
+    assert_eq!(shown["configured"], true, "{shown}");
+    for raw in [&raw_verified, &raw_shown] {
+        assert!(
+            !raw.contains(JEV_KEY) && !raw.contains(JEV_KEY_VAR),
+            "an answer holds the key or its variable: {raw}"
+        );
+    }
+
+    // Other settings: the earlier check is not reported for them.
+    configure(&home, &format!("{}/auth", stub.url));
+    let (shown, _) = status_now(&runtime);
+    assert!(
+        shown["verification"].is_null(),
+        "a check of other settings is reported: {shown}"
+    );
+
+    // Each failure is the check's result, and the status reports it.
+    let closed = {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("port");
+        format!("http://{}", listener.local_addr().expect("address"))
+    };
+    for (base_url, error, requests) in [
+        (format!("{}/auth", stub.url), "unauthorized", 1),
+        (format!("{}/reject", stub.url), "rejected", 1),
+        (format!("{}/busy", stub.url), "status", 1),
+        (closed, "connect", 0),
+        (format!("{}/text", stub.url), "malformed", 1),
+        (format!("{}/empty", stub.url), "malformed", 1),
+        (format!("{}/unanswered", stub.url), "malformed", 1),
+        (format!("{}/wrong-type", stub.url), "malformed", 1),
+    ] {
+        configure(&home, &base_url);
+        let before = stub.seen().len();
+        let (checked, raw) = verify(&runtime);
+        assert_eq!(checked["ok"], false, "{base_url}: {checked}");
+        assert_eq!(checked["error"], error, "{base_url}: {checked}");
+        assert!(
+            checked["model_version"].is_null(),
+            "{base_url}: {checked}"
+        );
+        assert!(!raw.contains(JEV_KEY), "{base_url}: the key is in {raw}");
+        assert_eq!(
+            stub.seen().len() - before,
+            requests,
+            "{base_url}: requests sent"
+        );
+        let (shown, _) = status_now(&runtime);
+        assert_eq!(
+            shown["verification"], checked,
+            "{base_url}: the status reports the failed check"
+        );
+    }
+
+    // And the service answering again verifies again.
+    configure(&home, &format!("{}/ok", stub.url));
+    let (verified, _) = verify(&runtime);
+    assert_eq!(verified["ok"], true, "{verified}");
+}
+=== replace desktop/e2e/runs.py
+--- find
+def main():
+--- with
+class _Jev(http.server.BaseHTTPRequestHandler):
+    """A deterministic stand-in for TypeSafe's SystemOne endpoint on
+    loopback (stub evidence, not live Jev): the path's first segment picks
+    the answer, TypeSafe's envelope or what a broken service sends, and
+    every request is recorded before it is answered."""
+    seen = []
+
+    def do_POST(self):
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            body = None
+        _Jev.seen.append({"path": self.path, "authorization": self.headers.get("Authorization"), "body": body})
+        mode = self.path.lstrip("/").split("/", 1)[0]
+        questions = (body or {}).get("questions") or {}
+
+        def envelope(answers):
+            return {"model": "jev-1.13.0", "answers": answers, "usage": {"input_tokens": 12, "output_tokens": 2}}
+
+        status, reply = {
+            "ok": (200, envelope({name: {"type": "noul", "noul": 0.9} for name in questions})),
+            "auth": (401, {"error": "invalid API key"}),
+            "busy": (503, {"error": "unavailable"}),
+            "unanswered": (200, envelope({})),
+        }.get(mode, (404, {}))
+        data = json.dumps(reply).encode()
+        if mode == "text":
+            status, data = 200, b"this is not JSON"
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+def scenario_jev(host):
+    """D7 through the host transport, against a local SystemOne stub (stub
+    evidence, not live Jev): the connection check reports a success, a
+    rejected key, a failing status, an unavailable service and malformed
+    answers, with one request per check carrying the configured key and one
+    synthetic question; the status reports each check while its settings
+    are in force and holds no key. The settings are put back."""
+    import socket
+
+    check = Checks("jev")
+    stub = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Jev)
+    threading.Thread(target=stub.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{stub.server_address[1]}"
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    closed = f"http://127.0.0.1:{probe.getsockname()[1]}"
+    probe.close()
+    placeholder = f"e2e-jev-placeholder-{os.getpid()}"
+    _, original = host.fetch("GET", f"{API}/settings")
+
+    def configure(base_url, **extra):
+        _, settings = host.fetch("GET", f"{API}/settings")
+        settings["jev"] = dict(settings["jev"], base_url=base_url, **extra)
+        return host.fetch("PUT", f"{API}/settings", settings)
+
+    def verify():
+        before = len(_Jev.seen)
+        status, checked = host.fetch("POST", f"{API}/jev/verify", {})
+        _, shown = host.fetch("GET", f"{API}/jev")
+        return status, checked or {}, shown or {}, _Jev.seen[before:]
+
+    try:
+        status, saved = configure(f"{url}/ok", api_key=placeholder, timeout_secs=5)
+        check.expect("the Jev settings are saved through the host", status == 200, (status, saved))
+        status, checked, shown, seen = verify()
+        check.expect("a check against the stub verifies, with its model",
+                     status == 200 and checked.get("ok") is True and checked.get("model_version") == "jev-1.13.0"
+                     and checked.get("error") is None, (status, checked))
+        body = (seen[0]["body"] or {}) if len(seen) == 1 else {}
+        check.expect("one request: POST /v1/systemone with the key and one synthetic question",
+                     len(seen) == 1 and seen[0]["path"] == "/ok/v1/systemone"
+                     and seen[0]["authorization"] == f"Bearer {placeholder}"
+                     and list((body.get("questions") or {}).keys()) == ["reachable"]
+                     and "Lightagent connection check." in json.dumps(body), seen)
+        check.expect("the status reports that check, configured, and neither answer holds the key",
+                     shown.get("verification") == checked and shown.get("configured") is True
+                     and placeholder not in json.dumps(shown) and placeholder not in json.dumps(checked), shown)
+        for label, base_url, error, requests in (
+            ("rejected key", f"{url}/auth", "unauthorized", 1),
+            ("failing status", f"{url}/busy", "status", 1),
+            ("unavailable service", closed, "connect", 0),
+            ("not JSON", f"{url}/text", "malformed", 1),
+            ("unanswered", f"{url}/unanswered", "malformed", 1),
+        ):
+            configure(base_url)
+            status, checked, shown, seen = verify()
+            check.expect(f"{label}: {error}, from the check and the status",
+                         status == 200 and checked.get("ok") is False and checked.get("error") == error
+                         and len(seen) == requests and shown.get("verification") == checked,
+                         (status, checked, len(seen)))
+    finally:
+        if isinstance(original, dict):
+            host.fetch("PUT", f"{API}/settings", original)
+        stub.shutdown()
+    return check
+
+
+def main():
+=== replace desktop/e2e/runs.py
+--- find
+            ("reload", lambda: scenario_reload(host, provider, cli)),
+--- with
+            ("reload", lambda: scenario_reload(host, provider, cli)),
+            ("jev", lambda: scenario_jev(host)),
+=== replace e2e/jev.mjs
+--- find
+// The stub's path prefix selects its behaviour: /ok, /low, /auth, /slow.
+--- with
+// The stub's path prefix selects its behaviour: /ok, /low, /auth, /slow,
+// and a broken service's /busy (503), /text (not JSON) and /unanswered.
+=== replace e2e/jev.mjs
+--- find
+      if (path.startsWith("/slow/")) return void setTimeout(() => reply(200, {}), 4000);
+--- with
+      if (path.startsWith("/slow/")) return void setTimeout(() => reply(200, {}), 4000);
+      if (path.startsWith("/busy/")) return reply(503, { error: "unavailable" });
+      if (path.startsWith("/text/")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        return response.end("this is not JSON");
+      }
+      if (path.startsWith("/unanswered/")) {
+        return reply(200, { model: "jev-1.13.0", answers: {}, usage: { input_tokens: 12, output_tokens: 2 } });
+      }
+=== replace e2e/jev.mjs
+--- find
+    // The controls themselves: keyboard, labels and inline errors.
+--- with
+    // Test connection against a service that answers badly: each failure is
+    // the check's result, shown as an alert, and the status reports it.
+    {
+      const kept = (await settingsNow()).base_url;
+      const closed = await new Promise((resolve) => {
+        const probe = createServer();
+        probe.listen(0, "127.0.0.1", () => {
+          const { port } = probe.address();
+          probe.close(() => resolve(`http://127.0.0.1:${port}`));
+        });
+      });
+      for (const [name, url, code] of [
+        ["20-malformed-text", `${stubUrl}/text`, "malformed"],
+        ["21-malformed-unanswered", `${stubUrl}/unanswered`, "malformed"],
+        ["22-unavailable", closed, "connect"],
+        ["23-service-error", `${stubUrl}/busy`, "status"],
+      ]) {
+        await configure({ jev: { base_url: url } });
+        await open("settings");
+        await page.getByRole("button", { name: "Test connection" }).click({ timeout: 15000 });
+        await page.getByRole("alert").filter({ hasText: `Connection check failed: ${code}.` }).waitFor({ timeout: 15000 });
+        const reported = (await api("/jev")).verification;
+        if (reported?.ok !== false || reported?.error !== code) {
+          failures.push(`${name}: the status reports ${JSON.stringify(reported)}`);
+        }
+        await endpointsCard().screenshot({ path: `${dir}/${name}-settings.png` });
+        console.log(`  [ok] jev ${name}: Test connection reports ${code}`);
+      }
+      await configure({ jev: { base_url: kept } });
+    }
+
+    // The controls themselves: keyboard, labels and inline errors.
+=== end
