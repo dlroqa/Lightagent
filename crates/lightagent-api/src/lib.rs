@@ -3190,7 +3190,7 @@ async fn list_commands(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     if let Some(rejection) = deny(&state, &headers, Scope::ToolsRead) {
         return rejection;
     }
-    let commands: Vec<Value> = lightagent_core::commands::SLASH_COMMANDS
+    let commands: Vec<serde_json::Value> = lightagent_core::commands::SLASH_COMMANDS
         .iter()
         .map(|command| json!({ "name": command.name, "summary": command.summary }))
         .collect();
