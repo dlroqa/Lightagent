@@ -1,0 +1,1723 @@
+=== base 7cb8bfaad0f07fcee5c49ffb3440114104c75e68
+=== message
+Row 42: D7-7 — identity through one shared operation set for the CLI, the API and the desktop
+
+`lightagent identity` managed the home's identity store directly, and
+nothing else could: the API had no identity route.
+
+- identity_admin::perform: the API's entry to the same `execute` the CLI
+  runs, as the local operator. A credential's secret goes only to a new
+  owner-only file named by an absolute path, created before anything is
+  issued; no answer carries it. A missing or relative path, or an
+  existing file, is refused and nothing is issued; a refused command
+  leaves no file; an undelivered credential is revoked before the answer
+  (shared with the CLI through `complete`, which the CLI now uses too).
+- Local operator only (decision C4): the identity routes answer only the
+  desktop host's own runtime (a request the desktop guard admitted is
+  marked `desktop::Admitted`, which no client can set) or a server on an
+  open loopback bind. A keyed `serve` can be reached from elsewhere, and
+  multi-user mode serves users: both refuse (403) whatever the caller's
+  scopes, and a refused request does not create the store.
+- ops::IdentityRequest and RunFactory::identity (default: unavailable);
+  `lightagent serve` performs it.
+- API: GET /identity (status); GET|POST /identity/users;
+  POST /identity/users/{id}/suspend; GET|POST /identity/credentials
+  (`principal`); POST /identity/credentials/{key_id}/rotate|revoke;
+  PUT|DELETE /identity/owners/{profile};
+  POST /identity/owners/{profile}/reassign; GET /identity/grants
+  (`profile`); POST /identity/grants/revoke; GET /identity/audit
+  (`limit`). Contract identity.* with each query listed. Fourteen backend
+  inventory rows (not counted; the CLI rows are counted with the UI
+  slice).
+- Tests (separate processes, desktop_identity.rs): every command through
+  the API equals the CLI's --json and what one writes the other reads; the
+  secret is only in its owner-only file, never in an answer, the audit or
+  any file under the home; refusals leave the file and the credentials
+  untouched and name no path; users created by the CLI and the API at once
+  are all kept; a keyed server refuses every identity route, an open
+  loopback server answers. Host: runs.py `identity`.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-api/src/ops.rs
+--- find
+/// A stable error category, for the UI to act on without parsing messages.
+--- with
+/// One `lightagent identity …` command, performed as the local operator.
+/// A credential's secret goes only to `secret_file`: a new, owner-only file
+/// named by an absolute path. No answer carries it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IdentityRequest {
+    Status,
+    UserCreate(String),
+    UserList,
+    UserSuspend(String),
+    CredentialIssue {
+        principal: String,
+        expires_in: Option<u64>,
+        capabilities: Vec<String>,
+        profiles: Vec<String>,
+        secret_file: Option<String>,
+    },
+    CredentialRotate {
+        key_id: String,
+        expires_in: Option<u64>,
+        secret_file: Option<String>,
+    },
+    CredentialRevoke(String),
+    CredentialList {
+        principal: Option<String>,
+    },
+    OwnerAssign {
+        profile: String,
+        principal: String,
+    },
+    OwnerReassign {
+        profile: String,
+        principal: String,
+    },
+    OwnerRemove(String),
+    GrantsList {
+        profile: Option<String>,
+    },
+    GrantsRevoke {
+        profile: String,
+        principal: String,
+        capability: String,
+    },
+    Audit {
+        limit: Option<usize>,
+    },
+}
+
+/// A stable error category, for the UI to act on without parsing messages.
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    /// Tools currently visible to the factory's active target.
+    async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
+--- with
+    /// An identity command (`lightagent identity …`), performed by the
+    /// embedder that owns the home's identity store, answered with the JSON
+    /// the CLI prints. The default refuses.
+    async fn identity(
+        &self,
+        _request: crate::ops::IdentityRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
+    /// Tools currently visible to the factory's active target.
+    async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    /// Perform a worker-assignment change through the factory.
+--- with
+    /// Perform an identity command through the factory.
+    pub async fn identity(
+        &self,
+        request: crate::ops::IdentityRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.identity(request).await
+    }
+
+    /// Perform a worker-assignment change through the factory.
+=== replace crates/lightagent/src/serve.rs
+--- find
+    async fn workers_change(
+        &self,
+        request: lightagent_api::ops::WorkerRequest,
+--- with
+    async fn identity(
+        &self,
+        request: lightagent_api::ops::IdentityRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        crate::identity_admin::perform(&self.root, request)
+    }
+
+    async fn workers_change(
+        &self,
+        request: lightagent_api::ops::WorkerRequest,
+=== replace crates/lightagent/src/identity_admin.rs
+--- find
+use serde_json::{Value, json};
+--- with
+use lightagent_api::ops::{IdentityRequest, OpCategory, OpError};
+use serde_json::{Value, json};
+=== replace crates/lightagent/src/identity_admin.rs
+--- find
+/// The CLI entry point.
+pub(crate) fn run(action: IdentityAction, json_output: bool) -> Result<(), String> {
+--- with
+/// Run `action` as the local operator and deliver its secret, if any, to
+/// `target`, chosen (and its file created) before anything was issued. A
+/// refused command leaves no file behind, and an undelivered credential is
+/// revoked before this returns. Shared by the CLI and the API.
+fn complete(
+    store: &IdentityStore,
+    action: &IdentityAction,
+    target: Option<Delivery>,
+) -> Result<Value, String> {
+    let actor = operator();
+    let now = now_unix();
+    let executed = match execute(store, &actor, now, action) {
+        Ok(executed) => executed,
+        Err(error) => {
+            // Never leave an empty secret file behind a refused command.
+            if let Some(Delivery::File(file, path)) = target {
+                drop(file);
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(error);
+        }
+    };
+    let mut report = executed.report;
+    if let (Some(token), Some(target)) = (executed.secret, target) {
+        let key_id = report["issued"].as_str().unwrap_or_default().to_owned();
+        match deliver(target, &token) {
+            Ok(target) => report["secret_delivered_to"] = json!(target),
+            Err(error) => {
+                // An undelivered credential must not stay valid.
+                let revoked = store
+                    .transact(&actor, now, None, |tx| tx.revoke_credential(&key_id))
+                    .is_ok();
+                return Err(if revoked {
+                    format!("{error}; the new credential {key_id} was revoked")
+                } else {
+                    format!("{error}; revoke the new credential {key_id} now")
+                });
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// `lightagent identity …` for the API (the API admits only the local
+/// operator). A secret goes only to a new owner-only file named by an
+/// absolute path, created before anything is issued; it is never in the
+/// answer.
+pub(crate) fn perform(root: &Path, request: IdentityRequest) -> Result<Value, OpError> {
+    let invalid = |message: String| OpError::new(OpCategory::Invalid, message);
+    let (action, secret_file) = action_of(request).map_err(invalid)?;
+    let target = match secret_file {
+        None => None,
+        Some(None) => {
+            return Err(invalid(
+                "a credential is never returned over the API: name a new secret file (an absolute path)"
+                    .to_owned(),
+            ));
+        }
+        Some(Some(path)) if !path.is_absolute() => {
+            return Err(invalid(
+                "the secret file must be an absolute path".to_owned(),
+            ));
+        }
+        Some(Some(path)) => Some(delivery(Some(&path), true).map_err(invalid)?),
+    };
+    complete(&IdentityStore::new(root), &action, target).map_err(invalid)
+}
+
+/// The CLI command an API request is, and, for an issue or a rotation, the
+/// secret file it names.
+fn action_of(request: IdentityRequest) -> Result<(IdentityAction, Option<Option<PathBuf>>), String> {
+    let user = |action| IdentityAction::User { action };
+    let credential = |action| IdentityAction::Credential { action };
+    let owner = |action| IdentityAction::Owner { action };
+    Ok(match request {
+        IdentityRequest::Status => (IdentityAction::Status, None),
+        IdentityRequest::UserCreate(id) => (user(UserAction::Create { id }), None),
+        IdentityRequest::UserList => (user(UserAction::List), None),
+        IdentityRequest::UserSuspend(id) => (user(UserAction::Suspend { id }), None),
+        IdentityRequest::CredentialIssue {
+            principal,
+            expires_in,
+            capabilities,
+            profiles,
+            secret_file,
+        } => {
+            let capabilities = capabilities
+                .iter()
+                .map(String::as_str)
+                .map(parse_capability)
+                .collect::<Result<Vec<_>, _>>()?;
+            let secret_file = secret_file.map(PathBuf::from);
+            let action = CredentialAction::Issue {
+                principal,
+                expires_in,
+                capabilities,
+                profiles,
+                secret_file: secret_file.clone(),
+            };
+            (credential(action), Some(secret_file))
+        }
+        IdentityRequest::CredentialRotate {
+            key_id,
+            expires_in,
+            secret_file,
+        } => {
+            let secret_file = secret_file.map(PathBuf::from);
+            let action = CredentialAction::Rotate {
+                key_id,
+                expires_in,
+                secret_file: secret_file.clone(),
+            };
+            (credential(action), Some(secret_file))
+        }
+        IdentityRequest::CredentialRevoke(key_id) => {
+            (credential(CredentialAction::Revoke { key_id }), None)
+        }
+        IdentityRequest::CredentialList { principal } => {
+            (credential(CredentialAction::List { principal }), None)
+        }
+        IdentityRequest::OwnerAssign { profile, principal } => {
+            (owner(OwnerAction::Assign { profile, principal }), None)
+        }
+        IdentityRequest::OwnerReassign { profile, principal } => {
+            (owner(OwnerAction::Reassign { profile, principal }), None)
+        }
+        IdentityRequest::OwnerRemove(profile) => (owner(OwnerAction::Remove { profile }), None),
+        IdentityRequest::GrantsList { profile } => (
+            IdentityAction::Grants {
+                action: Some(GrantsAction::List { profile }),
+            },
+            None,
+        ),
+        IdentityRequest::GrantsRevoke {
+            profile,
+            principal,
+            capability,
+        } => {
+            let capability = parse_capability(&capability)?;
+            (
+                IdentityAction::Grants {
+                    action: Some(GrantsAction::Revoke {
+                        profile,
+                        principal,
+                        capability,
+                    }),
+                },
+                None,
+            )
+        }
+        IdentityRequest::Audit { limit } => (
+            IdentityAction::Audit {
+                limit: limit.unwrap_or(50),
+            },
+            None,
+        ),
+    })
+}
+
+/// The CLI entry point.
+pub(crate) fn run(action: IdentityAction, json_output: bool) -> Result<(), String> {
+=== replace crates/lightagent/src/identity_admin.rs
+--- find
+    let actor = operator();
+    let now = now_unix();
+    let executed = match execute(&store, &actor, now, &action) {
+        Ok(executed) => executed,
+        Err(error) => {
+            // Never leave an empty secret file behind a refused command.
+            if let Some(Delivery::File(file, path)) = target {
+                drop(file);
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(error);
+        }
+    };
+    let mut report = executed.report;
+    if let (Some(token), Some(target)) = (executed.secret, target) {
+        let key_id = report["issued"].as_str().unwrap_or_default().to_owned();
+        match deliver(target, &token) {
+            Ok(target) => report["secret_delivered_to"] = json!(target),
+            Err(error) => {
+                // An undelivered credential must not stay valid.
+                let revoked = store
+                    .transact(&actor, now, None, |tx| tx.revoke_credential(&key_id))
+                    .is_ok();
+                return Err(if revoked {
+                    format!("{error}; the new credential {key_id} was revoked")
+                } else {
+                    format!("{error}; revoke the new credential {key_id} now")
+                });
+            }
+        }
+    }
+    if json_output {
+--- with
+    let report = complete(&store, &action, target)?;
+    if json_output {
+=== replace crates/lightagent-api/src/desktop.rs
+--- find
+/// Axum middleware applying [`DesktopGuard::check`] to every request.
+pub async fn guard(State(guard): State<DesktopGuard>, request: Request, next: Next) -> Response {
+    match guard.check(request.headers()) {
+        Ok(()) => next.run(request).await,
+--- with
+/// Marks a request the guard admitted: it came from the desktop host that
+/// started this runtime. No client can set it; routes reserved to the local
+/// operator read it.
+#[derive(Clone, Copy, Debug)]
+pub struct Admitted;
+
+/// Axum middleware applying [`DesktopGuard::check`] to every request.
+pub async fn guard(
+    State(guard): State<DesktopGuard>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    match guard.check(request.headers()) {
+        Ok(()) => {
+            request.extensions_mut().insert(Admitted);
+            next.run(request).await
+        }
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+        .route("/api/lightagent/v1/skills/imports", post(import_skills))
+--- with
+        .route("/api/lightagent/v1/skills/imports", post(import_skills))
+        .route("/api/lightagent/v1/identity", get(identity_status))
+        .route(
+            "/api/lightagent/v1/identity/users",
+            get(list_identity_users).post(create_identity_user),
+        )
+        .route(
+            "/api/lightagent/v1/identity/users/{id}/suspend",
+            post(suspend_identity_user),
+        )
+        .route(
+            "/api/lightagent/v1/identity/credentials",
+            get(list_identity_credentials).post(issue_identity_credential),
+        )
+        .route(
+            "/api/lightagent/v1/identity/credentials/{key_id}/rotate",
+            post(rotate_identity_credential),
+        )
+        .route(
+            "/api/lightagent/v1/identity/credentials/{key_id}/revoke",
+            post(revoke_identity_credential),
+        )
+        .route(
+            "/api/lightagent/v1/identity/owners/{profile}",
+            axum::routing::put(assign_identity_owner).delete(remove_identity_owner),
+        )
+        .route(
+            "/api/lightagent/v1/identity/owners/{profile}/reassign",
+            post(reassign_identity_owner),
+        )
+        .route("/api/lightagent/v1/identity/grants", get(list_identity_grants))
+        .route(
+            "/api/lightagent/v1/identity/grants/revoke",
+            post(revoke_identity_grant),
+        )
+        .route("/api/lightagent/v1/identity/audit", get(identity_audit))
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+/// An import of skills from a repository or folder (new scope).
+--- with
+/// Identity administration belongs to the local operator (decision C4):
+/// the desktop host's own runtime, or a server on an open loopback bind. A
+/// keyed server may be reached from elsewhere, and multi-user mode serves
+/// users, so both refuse whatever the caller holds.
+fn local_operator(state: &AppState, headers: &HeaderMap, admitted: bool) -> Option<Response> {
+    if let Some(rejection) = deny(state, headers, Scope::Admin) {
+        return Some(rejection);
+    }
+    let local = state.auth.identity().is_none() && (admitted || !state.auth.requires_key());
+    (!local).then(|| {
+        ops::OpError::new(
+            ops::OpCategory::Denied,
+            "identity is managed only by the local operator: use `lightagent identity`, or the desktop app",
+        )
+        .into_response()
+    })
+}
+
+/// Present when the desktop guard admitted the request.
+type FromDesktop = Option<axum::Extension<desktop::Admitted>>;
+
+/// A `lightagent identity …` command through the embedder (see
+/// [`ops::IdentityRequest`]), for the local operator only. No answer
+/// carries a credential's secret.
+async fn identity_operation(
+    state: &AppState,
+    headers: &HeaderMap,
+    admitted: FromDesktop,
+    request: ops::IdentityRequest,
+) -> Response {
+    if let Some(rejection) = local_operator(state, headers, admitted.is_some()) {
+        return rejection;
+    }
+    match state.manager.identity(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn identity_status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+) -> Response {
+    identity_operation(&state, &headers, admitted, ops::IdentityRequest::Status).await
+}
+
+async fn list_identity_users(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+) -> Response {
+    identity_operation(&state, &headers, admitted, ops::IdentityRequest::UserList).await
+}
+
+#[derive(Deserialize)]
+struct IdentityUserBody {
+    id: String,
+}
+
+async fn create_identity_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Json(body): Json<IdentityUserBody>,
+) -> Response {
+    let request = ops::IdentityRequest::UserCreate(body.id);
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+async fn suspend_identity_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(id): Path<String>,
+) -> Response {
+    let request = ops::IdentityRequest::UserSuspend(id);
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct PrincipalQuery {
+    #[serde(default)]
+    principal: Option<String>,
+}
+
+async fn list_identity_credentials(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Query(query): Query<PrincipalQuery>,
+) -> Response {
+    let request = ops::IdentityRequest::CredentialList {
+        principal: query.principal,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct IssueCredentialBody {
+    principal: String,
+    #[serde(default)]
+    expires_in: Option<u64>,
+    #[serde(default)]
+    capabilities: Vec<String>,
+    #[serde(default)]
+    profiles: Vec<String>,
+    #[serde(default)]
+    secret_file: Option<String>,
+}
+
+async fn issue_identity_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Json(body): Json<IssueCredentialBody>,
+) -> Response {
+    let request = ops::IdentityRequest::CredentialIssue {
+        principal: body.principal,
+        expires_in: body.expires_in,
+        capabilities: body.capabilities,
+        profiles: body.profiles,
+        secret_file: body.secret_file,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct RotateCredentialBody {
+    #[serde(default)]
+    expires_in: Option<u64>,
+    #[serde(default)]
+    secret_file: Option<String>,
+}
+
+async fn rotate_identity_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(key_id): Path<String>,
+    Json(body): Json<RotateCredentialBody>,
+) -> Response {
+    let request = ops::IdentityRequest::CredentialRotate {
+        key_id,
+        expires_in: body.expires_in,
+        secret_file: body.secret_file,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+async fn revoke_identity_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(key_id): Path<String>,
+) -> Response {
+    let request = ops::IdentityRequest::CredentialRevoke(key_id);
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct OwnerBody {
+    principal: String,
+}
+
+async fn assign_identity_owner(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(profile): Path<String>,
+    Json(body): Json<OwnerBody>,
+) -> Response {
+    let request = ops::IdentityRequest::OwnerAssign {
+        profile,
+        principal: body.principal,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+async fn reassign_identity_owner(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(profile): Path<String>,
+    Json(body): Json<OwnerBody>,
+) -> Response {
+    let request = ops::IdentityRequest::OwnerReassign {
+        profile,
+        principal: body.principal,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+async fn remove_identity_owner(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(profile): Path<String>,
+) -> Response {
+    let request = ops::IdentityRequest::OwnerRemove(profile);
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+async fn list_identity_grants(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Query(query): Query<ProfileQuery>,
+) -> Response {
+    let request = ops::IdentityRequest::GrantsList {
+        profile: query.profile,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct RevokeGrantBody {
+    profile: String,
+    principal: String,
+    capability: String,
+}
+
+async fn revoke_identity_grant(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Json(body): Json<RevokeGrantBody>,
+) -> Response {
+    let request = ops::IdentityRequest::GrantsRevoke {
+        profile: body.profile,
+        principal: body.principal,
+        capability: body.capability,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct AuditQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn identity_audit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Query(query): Query<AuditQuery>,
+) -> Response {
+    let request = ops::IdentityRequest::Audit { limit: query.limit };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+/// An import of skills from a repository or folder (new scope).
+=== replace docs/desktop/contract/operations.json
+--- find
+  {
+   "id": "skills.import",
+   "method": "POST",
+   "path": "/api/lightagent/v1/skills/imports"
+  },
+--- with
+  {
+   "id": "skills.import",
+   "method": "POST",
+   "path": "/api/lightagent/v1/skills/imports"
+  },
+  {
+   "id": "identity.status",
+   "method": "GET",
+   "path": "/api/lightagent/v1/identity"
+  },
+  {
+   "id": "identity.users.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/identity/users"
+  },
+  {
+   "id": "identity.users.create",
+   "method": "POST",
+   "path": "/api/lightagent/v1/identity/users"
+  },
+  {
+   "id": "identity.users.suspend",
+   "method": "POST",
+   "path": "/api/lightagent/v1/identity/users/{id}/suspend",
+   "destructive": true
+  },
+  {
+   "id": "identity.credentials.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/identity/credentials",
+   "query": [
+    "principal"
+   ]
+  },
+  {
+   "id": "identity.credentials.issue",
+   "method": "POST",
+   "path": "/api/lightagent/v1/identity/credentials"
+  },
+  {
+   "id": "identity.credentials.rotate",
+   "method": "POST",
+   "path": "/api/lightagent/v1/identity/credentials/{key_id}/rotate"
+  },
+  {
+   "id": "identity.credentials.revoke",
+   "method": "POST",
+   "path": "/api/lightagent/v1/identity/credentials/{key_id}/revoke",
+   "destructive": true
+  },
+  {
+   "id": "identity.owners.assign",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/identity/owners/{profile}"
+  },
+  {
+   "id": "identity.owners.remove",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/identity/owners/{profile}",
+   "destructive": true
+  },
+  {
+   "id": "identity.owners.reassign",
+   "method": "POST",
+   "path": "/api/lightagent/v1/identity/owners/{profile}/reassign"
+  },
+  {
+   "id": "identity.grants.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/identity/grants",
+   "query": [
+    "profile"
+   ]
+  },
+  {
+   "id": "identity.grants.revoke",
+   "method": "POST",
+   "path": "/api/lightagent/v1/identity/grants/revoke",
+   "destructive": true
+  },
+  {
+   "id": "identity.audit",
+   "method": "GET",
+   "path": "/api/lightagent/v1/identity/audit",
+   "query": [
+    "limit"
+   ]
+  },
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  {
+   "id": "api.get.memories",
+--- with
+  {
+   "id": "api.get.identity",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/identity",
+   "source": "crates/lightagent-api/src/lib.rs:137",
+   "behavior": "The identity store's status: schema, generation and counts, no secret (D7-7)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/identity"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.identity.status)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: identity_admin::perform via RunFactory::identity",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.identity.users",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/identity/users",
+   "source": "crates/lightagent-api/src/lib.rs:137",
+   "behavior": "Principals with status and credential counts (D7-7)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/identity/users"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.identity.user.list)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: identity_admin::perform via RunFactory::identity",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.post.identity.users",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/identity/users",
+   "source": "crates/lightagent-api/src/lib.rs:137",
+   "behavior": "Create a user principal (D7-7)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/identity/users"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.identity.user.create)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: identity_admin::perform via RunFactory::identity",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.post.identity.users.id.suspend",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/identity/users/{id}/suspend",
+   "source": "crates/lightagent-api/src/lib.rs:137",
+   "behavior": "Suspend a user; its credentials are revoked (D7-7)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/identity/users/{id}/suspend"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.identity.user.suspend)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: identity_admin::perform via RunFactory::identity",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.identity.credentials",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/identity/credentials",
+   "source": "crates/lightagent-api/src/lib.rs:137",
+   "behavior": "Credentials by key id, never a secret or verifier (D7-7)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/identity/credentials"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.identity.credential.list)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: identity_admin::perform via RunFactory::identity",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.post.identity.credentials",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/identity/credentials",
+   "source": "crates/lightagent-api/src/lib.rs:137",
+   "behavior": "Issue a credential; its secret goes only to a new owner-only file (D7-7)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/identity/credentials"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.identity.credential.issue)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: identity_admin::perform via RunFactory::identity",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.post.identity.credentials.key_id.rotate",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/identity/credentials/{key_id}/rotate",
+   "source": "crates/lightagent-api/src/lib.rs:137",
+   "behavior": "Issue a replacement credential to a new owner-only file (D7-7)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/identity/credentials/{key_id}/rotate"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.identity.credential.rotate)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: identity_admin::perform via RunFactory::identity",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.post.identity.credentials.key_id.revoke",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/identity/credentials/{key_id}/revoke",
+   "source": "crates/lightagent-api/src/lib.rs:137",
+   "behavior": "Revoke a credential (D7-7)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/identity/credentials/{key_id}/revoke"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.identity.credential.revoke)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: identity_admin::perform via RunFactory::identity",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.put.identity.owners.profile",
+   "kind": "api",
+   "surface": "PUT /api/lightagent/v1/identity/owners/{profile}",
+   "source": "crates/lightagent-api/src/lib.rs:137",
+   "behavior": "Make a user the owner of an unowned profile (D7-7)",
+   "tree_key": null,
+   "tokens": [
+    "PUT /api/lightagent/v1/identity/owners/{profile}"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.identity.owner.assign)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: identity_admin::perform via RunFactory::identity",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.delete.identity.owners.profile",
+   "kind": "api",
+   "surface": "DELETE /api/lightagent/v1/identity/owners/{profile}",
+   "source": "crates/lightagent-api/src/lib.rs:137",
+   "behavior": "Remove a profile's owner (D7-7)",
+   "tree_key": null,
+   "tokens": [
+    "DELETE /api/lightagent/v1/identity/owners/{profile}"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.identity.owner.remove)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: identity_admin::perform via RunFactory::identity",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.post.identity.owners.profile.reassign",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/identity/owners/{profile}/reassign",
+   "source": "crates/lightagent-api/src/lib.rs:137",
+   "behavior": "Move a profile to another user (D7-7)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/identity/owners/{profile}/reassign"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.identity.owner.reassign)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: identity_admin::perform via RunFactory::identity",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.identity.grants",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/identity/grants",
+   "source": "crates/lightagent-api/src/lib.rs:137",
+   "behavior": "Profile owners and grants (D7-7)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/identity/grants"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.identity.grants.list)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: identity_admin::perform via RunFactory::identity",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.post.identity.grants.revoke",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/identity/grants/revoke",
+   "source": "crates/lightagent-api/src/lib.rs:137",
+   "behavior": "Revoke one capability granted on a profile (D7-7)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/identity/grants/revoke"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.identity.grants.revoke)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: identity_admin::perform via RunFactory::identity",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.identity.audit",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/identity/audit",
+   "source": "crates/lightagent-api/src/lib.rs:137",
+   "behavior": "The most recent audit records: codes and identifiers only (D7-7)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/identity/audit"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.identity.audit)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: identity_admin::perform via RunFactory::identity",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.memories",
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.get.memories` |
+--- with
+| `api.get.identity` | `GET /api/lightagent/v1/identity` | applicable | no | (backend reuse) | shared: identity_admin::perform via RunFactory::identity | not-started | `crates/lightagent-api/src/lib.rs:137` |
+| `api.get.identity.users` | `GET /api/lightagent/v1/identity/users` | applicable | no | (backend reuse) | shared: identity_admin::perform via RunFactory::identity | not-started | `crates/lightagent-api/src/lib.rs:137` |
+| `api.post.identity.users` | `POST /api/lightagent/v1/identity/users` | applicable | no | (backend reuse) | shared: identity_admin::perform via RunFactory::identity | not-started | `crates/lightagent-api/src/lib.rs:137` |
+| `api.post.identity.users.id.suspend` | `POST /api/lightagent/v1/identity/users/{id}/suspend` | applicable | no | (backend reuse) | shared: identity_admin::perform via RunFactory::identity | not-started | `crates/lightagent-api/src/lib.rs:137` |
+| `api.get.identity.credentials` | `GET /api/lightagent/v1/identity/credentials` | applicable | no | (backend reuse) | shared: identity_admin::perform via RunFactory::identity | not-started | `crates/lightagent-api/src/lib.rs:137` |
+| `api.post.identity.credentials` | `POST /api/lightagent/v1/identity/credentials` | applicable | no | (backend reuse) | shared: identity_admin::perform via RunFactory::identity | not-started | `crates/lightagent-api/src/lib.rs:137` |
+| `api.post.identity.credentials.key_id.rotate` | `POST /api/lightagent/v1/identity/credentials/{key_id}/rotate` | applicable | no | (backend reuse) | shared: identity_admin::perform via RunFactory::identity | not-started | `crates/lightagent-api/src/lib.rs:137` |
+| `api.post.identity.credentials.key_id.revoke` | `POST /api/lightagent/v1/identity/credentials/{key_id}/revoke` | applicable | no | (backend reuse) | shared: identity_admin::perform via RunFactory::identity | not-started | `crates/lightagent-api/src/lib.rs:137` |
+| `api.put.identity.owners.profile` | `PUT /api/lightagent/v1/identity/owners/{profile}` | applicable | no | (backend reuse) | shared: identity_admin::perform via RunFactory::identity | not-started | `crates/lightagent-api/src/lib.rs:137` |
+| `api.delete.identity.owners.profile` | `DELETE /api/lightagent/v1/identity/owners/{profile}` | applicable | no | (backend reuse) | shared: identity_admin::perform via RunFactory::identity | not-started | `crates/lightagent-api/src/lib.rs:137` |
+| `api.post.identity.owners.profile.reassign` | `POST /api/lightagent/v1/identity/owners/{profile}/reassign` | applicable | no | (backend reuse) | shared: identity_admin::perform via RunFactory::identity | not-started | `crates/lightagent-api/src/lib.rs:137` |
+| `api.get.identity.grants` | `GET /api/lightagent/v1/identity/grants` | applicable | no | (backend reuse) | shared: identity_admin::perform via RunFactory::identity | not-started | `crates/lightagent-api/src/lib.rs:137` |
+| `api.post.identity.grants.revoke` | `POST /api/lightagent/v1/identity/grants/revoke` | applicable | no | (backend reuse) | shared: identity_admin::perform via RunFactory::identity | not-started | `crates/lightagent-api/src/lib.rs:137` |
+| `api.get.identity.audit` | `GET /api/lightagent/v1/identity/audit` | applicable | no | (backend reuse) | shared: identity_admin::perform via RunFactory::identity | not-started | `crates/lightagent-api/src/lib.rs:137` |
+| `api.get.memories` |
+=== write crates/lightagent/tests/desktop_identity.rs
+//! Identity through one shared operation set (D7-7): `lightagent identity`
+//! and the desktop runtime's API manage one identity store as the local
+//! operator. What one writes the other lists, and the API answers with the
+//! JSON the CLI prints. A credential's secret reaches only a new owner-only
+//! file: no answer, audit record or file under the home carries it. A
+//! server that is not the local operator's (keyed, so reachable from
+//! elsewhere) refuses every identity route. Every process here is separate.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+
+const KEY: &str = "a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192";
+const IDENTITY: &str = "/api/lightagent/v1/identity";
+
+struct Runtime {
+    child: Child,
+    _lifeline: Option<ChildStdin>,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-identity-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+/// The first line `child` prints, within a minute. The rest of its output
+/// is read and dropped, so a later line never meets a closed pipe.
+fn first_line(child: &mut Child) -> String {
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        let _ = reader.read_line(&mut line);
+        let _ = tx.send(line);
+        let mut rest = String::new();
+        while reader.read_line(&mut rest).is_ok_and(|read| read > 0) {
+            rest.clear();
+        }
+    });
+    rx.recv_timeout(Duration::from_secs(60))
+        .expect("first line")
+}
+
+/// The desktop app's runtime: `serve --desktop`, behind the desktop guard.
+fn start_desktop(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let line = first_line(&mut child);
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: Some(lifeline),
+        addr,
+    }
+}
+
+/// `lightagent serve` on loopback: open, or keyed when `key` is given.
+fn start_plain(home: &Path, key: Option<&str>) -> Runtime {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lightagent"));
+    command
+        .args(["serve", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(key) = key {
+        command
+            .args(["--key-env", "LIGHTAGENT_TEST_IDENTITY_KEY"])
+            .env("LIGHTAGENT_TEST_IDENTITY_KEY", key);
+    }
+    let mut child = command.spawn().expect("start lightagent serve");
+    // "Lightagent API listening on http://<addr>/api/lightagent/v1  (profile '…')"
+    let line = first_line(&mut child);
+    let addr = line
+        .split("http://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or_else(|| panic!("no address in {line:?}"))
+        .to_owned();
+    Runtime {
+        child,
+        _lifeline: None,
+        addr,
+    }
+}
+
+/// One request, with the key when given: the status and the raw body.
+fn send(
+    runtime: &Runtime,
+    key: Option<&str>,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> (u16, String) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let auth = key
+        .map(|key| format!("Authorization: Bearer {key}\r\n"))
+        .unwrap_or_default();
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\n{auth}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, raw)
+}
+
+fn call(runtime: &Runtime, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    send(runtime, Some(KEY), method, path, body)
+}
+
+fn parsed(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|error| panic!("not JSON ({error}): {raw}"))
+}
+
+/// A request that must succeed; its JSON answer.
+fn ok(runtime: &Runtime, method: &str, path: &str, body: Option<Value>) -> Value {
+    let body = body.map(|body| body.to_string());
+    let (status, raw) = call(runtime, method, path, body.as_deref());
+    assert_eq!(status, 200, "{method} {path}: {raw}");
+    parsed(&raw)
+}
+
+fn cli(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent")
+}
+
+fn cli_ok(home: &Path, args: &[&str]) {
+    let output = cli(home, args);
+    assert!(
+        output.status.success(),
+        "lightagent {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn cli_json(home: &Path, args: &[&str]) -> Value {
+    let mut all = vec!["--json"];
+    all.extend_from_slice(args);
+    let output = cli(home, &all);
+    assert!(
+        output.status.success(),
+        "lightagent {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("JSON output")
+}
+
+fn arg(path: &Path) -> &str {
+    path.to_str().expect("UTF-8 path")
+}
+
+/// The secret part of the credential in `file` (`la_<key id>_<secret>`).
+fn secret_in(file: &Path) -> String {
+    let token = std::fs::read_to_string(file).expect("secret file");
+    let secret = token.trim().rsplit('_').next().unwrap_or_default().to_owned();
+    assert!(secret.len() >= 32, "no secret in {}", file.display());
+    secret
+}
+
+/// Fail if any file under `dir`, except those under `skip`, holds `secret`.
+fn assert_nowhere(dir: &Path, skip: &Path, secret: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.starts_with(skip) {
+            continue;
+        }
+        if path.is_dir() {
+            assert_nowhere(&path, skip, secret);
+        } else if let Ok(bytes) = std::fs::read(&path) {
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains(secret),
+                "{} holds a credential's secret",
+                path.display()
+            );
+        }
+    }
+}
+
+fn row<'a>(rows: &'a Value, key: &str, id: &str) -> &'a Value {
+    rows.as_array()
+        .and_then(|rows| rows.iter().find(|row| row[key] == id))
+        .unwrap_or(&Value::Null)
+}
+
+#[test]
+fn the_cli_and_the_api_manage_one_identity_store() {
+    let home = scratch_home("one");
+    cli_ok(&home, &["config", "set", "extensions.enabled", "true"]);
+    cli_ok(&home, &["profile", "create", "work"]);
+    let handed = home.join("handed-out");
+    std::fs::create_dir_all(&handed).expect("dir");
+    let runtime = start_desktop(&home);
+
+    // Reads never create the store; the API reports what the CLI does.
+    assert_eq!(
+        ok(&runtime, "GET", IDENTITY, None),
+        cli_json(&home, &["identity", "status"])
+    );
+    assert_eq!(ok(&runtime, "GET", IDENTITY, None)["store"], "absent");
+
+    // A user created over the API and one by the CLI: listed alike.
+    let users = format!("{IDENTITY}/users");
+    let created = ok(&runtime, "POST", &users, Some(json!({"id": "alice"})));
+    assert_eq!(created["created"], "alice", "{created}");
+    cli_ok(&home, &["identity", "user", "create", "bob"]);
+    assert_eq!(
+        ok(&runtime, "GET", &users, None),
+        cli_json(&home, &["identity", "user", "list"])
+    );
+    assert_eq!(
+        ok(&runtime, "GET", IDENTITY, None),
+        cli_json(&home, &["identity", "status"])
+    );
+
+    // Issued over the API: the secret goes only to the new owner-only file.
+    let credentials = format!("{IDENTITY}/credentials");
+    let alice_key = handed.join("alice.key");
+    let body = json!({
+        "principal": "alice",
+        "expires_in": 3600,
+        "capabilities": ["runs_read", "sessions_read"],
+        "profiles": ["work"],
+        "secret_file": alice_key,
+    })
+    .to_string();
+    let (status, issued_raw) = call(&runtime, "POST", &credentials, Some(&body));
+    assert_eq!(status, 200, "{issued_raw}");
+    let issued = parsed(&issued_raw);
+    let key_id = issued["issued"].as_str().expect("key id").to_owned();
+    assert_eq!(issued["secret_delivered_to"], "file", "{issued}");
+    assert_eq!(
+        issued["restriction"],
+        cli_json(&home, &["identity", "credential", "list"])["credentials"][0]["restriction"]
+    );
+    let token = std::fs::read_to_string(&alice_key).expect("secret file");
+    assert!(
+        token.starts_with(&format!("la_{key_id}_")),
+        "the file holds the issued credential"
+    );
+    let secret = secret_in(&alice_key);
+    assert!(!issued_raw.contains(&secret), "the answer carries the secret");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&alice_key)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "the secret file is owner-only");
+    }
+
+    // Refused without a new, absolute file, or for an unknown user: nothing
+    // is issued, no file is overwritten or left behind, no path is named.
+    let before = ok(&runtime, "GET", &credentials, None);
+    let stray = handed.join("nobody.key");
+    for body in [
+        json!({"principal": "alice"}),
+        json!({"principal": "alice", "secret_file": "relative.key"}),
+        json!({"principal": "alice", "secret_file": alice_key}),
+        json!({"principal": "nobody", "secret_file": stray}),
+        json!({"principal": "alice", "capabilities": ["fly"], "secret_file": stray}),
+    ] {
+        let (status, raw) = call(&runtime, "POST", &credentials, Some(&body.to_string()));
+        assert_eq!(status, 400, "{body}: {raw}");
+        assert!(!raw.contains(arg(&handed)), "the error names the file: {raw}");
+        assert!(!raw.contains(&secret), "the error carries a secret: {raw}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(&alice_key).expect("secret file"),
+        token
+    );
+    assert!(!stray.exists(), "a refused issue left its file");
+    assert_eq!(ok(&runtime, "GET", &credentials, None), before);
+
+    // Listed alike; a rotation by the CLI is listed over the API, one over
+    // the API by the CLI.
+    let alice_only = format!("{credentials}?principal=alice");
+    let cli_alice = ["identity", "credential", "list", "--principal", "alice"];
+    assert_eq!(ok(&runtime, "GET", &alice_only, None), cli_json(&home, &cli_alice));
+    let rotated_key = handed.join("alice-rotated.key");
+    let rotated = cli_json(
+        &home,
+        &[
+            "identity",
+            "credential",
+            "rotate",
+            &key_id,
+            "--secret-file",
+            arg(&rotated_key),
+        ],
+    );
+    let second = rotated["issued"].as_str().expect("new key id").to_owned();
+    let api_rotated_key = handed.join("alice-api-rotated.key");
+    let api_rotated = ok(
+        &runtime,
+        "POST",
+        &format!("{credentials}/{second}/rotate"),
+        Some(json!({"expires_in": 600, "secret_file": api_rotated_key})),
+    );
+    assert_eq!(api_rotated["replaces"], second.as_str(), "{api_rotated}");
+    assert_eq!(api_rotated["previous_still_valid"], true, "{api_rotated}");
+    assert_eq!(api_rotated["secret_delivered_to"], "file", "{api_rotated}");
+    let listed = ok(&runtime, "GET", &alice_only, None);
+    assert_eq!(listed, cli_json(&home, &cli_alice));
+    assert_eq!(listed["credentials"].as_array().map(Vec::len), Some(3), "{listed}");
+
+    // Revoked over the API: revoked for the CLI.
+    let revoked = ok(
+        &runtime,
+        "POST",
+        &format!("{credentials}/{key_id}/revoke"),
+        None,
+    );
+    assert_eq!(revoked["revoked"], key_id.as_str(), "{revoked}");
+    let listed = cli_json(&home, &cli_alice);
+    assert_eq!(row(&listed["credentials"], "key_id", &key_id)["state"], "revoked");
+
+    // Ownership: assigned over the API, reassigned by the CLI, moved back
+    // over the API, removed over the API; the listings agree throughout.
+    let owner = format!("{IDENTITY}/owners/work");
+    let grants = format!("{IDENTITY}/grants");
+    let work_grants = format!("{grants}?profile=work");
+    let cli_work = ["identity", "grants", "list", "--profile", "work"];
+    let assigned = ok(&runtime, "PUT", &owner, Some(json!({"principal": "alice"})));
+    assert_eq!(assigned["owner"], "alice", "{assigned}");
+    assert_eq!(assigned["profile"], "work", "{assigned}");
+    let listed = ok(&runtime, "GET", &work_grants, None);
+    assert_eq!(listed, cli_json(&home, &cli_work));
+    assert_eq!(listed["profiles"][0]["owner"], "alice", "{listed}");
+    let (status, raw) = call(
+        &runtime,
+        "PUT",
+        &owner,
+        Some(&json!({"principal": "bob"}).to_string()),
+    );
+    assert_eq!(status, 400, "an owned profile is not assigned again: {raw}");
+    cli_ok(&home, &["identity", "owner", "reassign", "work", "bob"]);
+    assert_eq!(
+        ok(&runtime, "GET", &grants, None),
+        cli_json(&home, &["identity", "grants"])
+    );
+    let moved = ok(
+        &runtime,
+        "POST",
+        &format!("{owner}/reassign"),
+        Some(json!({"principal": "alice"})),
+    );
+    assert_eq!(moved["owner"], "alice", "{moved}");
+    let revoked = ok(
+        &runtime,
+        "POST",
+        &format!("{grants}/revoke"),
+        Some(json!({"profile": "work", "principal": "bob", "capability": "sessions_read"})),
+    );
+    assert_eq!(revoked["revoked"], "sessions_read", "{revoked}");
+    let (status, raw) = call(
+        &runtime,
+        "POST",
+        &format!("{grants}/revoke"),
+        Some(&json!({"profile": "work", "principal": "bob", "capability": "fly"}).to_string()),
+    );
+    assert_eq!(status, 400, "{raw}");
+    assert_eq!(ok(&runtime, "GET", &work_grants, None), cli_json(&home, &cli_work));
+    let removed = ok(&runtime, "DELETE", &owner, None);
+    assert_eq!(removed["owner"], Value::Null, "{removed}");
+    assert_eq!(cli_json(&home, &cli_work)["profiles"], json!([]));
+
+    // Suspended over the API: suspended for the CLI, its credentials revoked.
+    let suspended = ok(&runtime, "POST", &format!("{users}/alice/suspend"), None);
+    assert_eq!(suspended["suspended"], "alice", "{suspended}");
+    let listed = cli_json(&home, &["identity", "user", "list"]);
+    let alice = row(&listed["principals"], "id", "alice");
+    assert_eq!(alice["status"], "suspended", "{listed}");
+    assert_eq!(alice["unrevoked_credentials"], 0, "{listed}");
+
+    // The audit over the API is the CLI's.
+    let audit = ok(&runtime, "GET", &format!("{IDENTITY}/audit?limit=5"), None);
+    assert_eq!(audit, cli_json(&home, &["identity", "audit", "--limit", "5"]));
+    assert_eq!(audit["records"].as_array().map(Vec::len), Some(5), "{audit}");
+    let full = ok(&runtime, "GET", &format!("{IDENTITY}/audit?limit=1000"), None);
+
+    // No secret anywhere but its own file.
+    for file in [&alice_key, &rotated_key, &api_rotated_key] {
+        let secret = secret_in(file);
+        assert_nowhere(&home, &handed, &secret);
+        assert!(!full.to_string().contains(&secret), "the audit holds a secret");
+    }
+}
+
+#[test]
+fn users_created_by_the_cli_and_the_api_at_once_are_all_kept() {
+    let home = scratch_home("concurrent");
+    let runtime = start_desktop(&home);
+    let users = format!("{IDENTITY}/users");
+    std::thread::scope(|scope| {
+        let api = scope.spawn(|| {
+            (0..4)
+                .map(|n| {
+                    let body = json!({"id": format!("api-{n}")}).to_string();
+                    call(&runtime, "POST", &users, Some(&body)).0
+                })
+                .collect::<Vec<_>>()
+        });
+        let by_cli = scope.spawn(|| {
+            for n in 0..4 {
+                cli_ok(&home, &["identity", "user", "create", &format!("cli-{n}")]);
+            }
+        });
+        assert_eq!(api.join().expect("api"), vec![200; 4]);
+        by_cli.join().expect("cli");
+    });
+    let listed = cli_json(&home, &["identity", "user", "list"]);
+    let mut ids: Vec<String> = listed["principals"]
+        .as_array()
+        .expect("principals")
+        .iter()
+        .filter_map(|row| row["id"].as_str().map(str::to_owned))
+        .collect();
+    ids.sort();
+    let expected: Vec<String> = ["api-0", "api-1", "api-2", "api-3", "cli-0", "cli-1", "cli-2", "cli-3"]
+        .iter()
+        .map(|id| (*id).to_owned())
+        .collect();
+    assert_eq!(ids, expected);
+}
+
+#[test]
+fn only_the_local_operator_reaches_identity() {
+    let home = scratch_home("gate");
+    cli_ok(&home, &["config", "set", "extensions.enabled", "true"]);
+    cli_ok(&home, &["profile", "create", "work"]);
+    cli_ok(&home, &["profile", "use", "work"]);
+
+    // A keyed server may be reached from elsewhere: every identity route
+    // refuses, even with the key, and nothing is created.
+    let keyed = start_plain(&home, Some(KEY));
+    let routes: [(&str, String, Option<&str>); 6] = [
+        ("GET", IDENTITY.to_owned(), None),
+        ("GET", format!("{IDENTITY}/users"), None),
+        ("POST", format!("{IDENTITY}/users"), Some(r#"{"id":"mallory"}"#)),
+        ("GET", format!("{IDENTITY}/credentials"), None),
+        ("DELETE", format!("{IDENTITY}/owners/work"), None),
+        ("GET", format!("{IDENTITY}/audit"), None),
+    ];
+    for (method, path, body) in &routes {
+        let (status, raw) = send(&keyed, Some(KEY), method, path, *body);
+        assert_eq!(status, 403, "{method} {path}: {raw}");
+        let (status, _) = send(&keyed, None, method, path, *body);
+        assert!(matches!(status, 401 | 403), "{method} {path} without the key: {status}");
+    }
+    drop(keyed);
+    assert_eq!(cli_json(&home, &["identity", "status"])["store"], "absent");
+
+    // An open server is reachable only on loopback: it answers.
+    let open = start_plain(&home, None);
+    let (status, raw) = send(&open, None, "GET", IDENTITY, None);
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(parsed(&raw), cli_json(&home, &["identity", "status"]));
+}
+=== replace desktop/e2e/runs.py
+--- find
+            ("workers", lambda: scenario_workers(host, cli)),
+--- with
+            ("workers", lambda: scenario_workers(host, cli)),
+            ("identity", lambda: scenario_identity(host, cli)),
+=== replace desktop/e2e/runs.py
+--- find
+def scenario_sessions(host, cli):
+--- with
+def scenario_identity(host, cli):
+    """D7 through the host transport: identity status, a user, a credential
+    issued to a new file (its secret never in an answer), credentials,
+    revocation, ownership and the audit through the host equal the CLI's;
+    an issue without a secret file is refused and issues nothing."""
+    import shutil
+    import tempfile
+
+    check = Checks("identity")
+    work = tempfile.mkdtemp(prefix="lightagent-e2e-identity-")
+
+    def cli_json(*args):
+        return json.loads(harness.run_cli(cli, "--json", *args))
+
+    try:
+        status, shown = host.fetch("GET", f"{API}/identity")
+        check.expect("status through the host equals the CLI's",
+                     status == 200 and shown == cli_json("identity", "status"), (status, shown))
+        status, created = host.fetch("POST", f"{API}/identity/users", {"id": "e2e-alice"})
+        _, users = host.fetch("GET", f"{API}/identity/users")
+        check.expect("a user created through the host, listed alike",
+                     status == 200 and (created or {}).get("created") == "e2e-alice"
+                     and users == cli_json("identity", "user", "list"), (status, created, users))
+        status, refused = host.fetch("POST", f"{API}/identity/credentials", {"principal": "e2e-alice"})
+        listed = cli_json("identity", "credential", "list", "--principal", "e2e-alice")
+        check.expect("an issue without a secret file is refused and issues nothing",
+                     status == 400 and listed.get("credentials") == [], (status, refused, listed))
+        secret_file = os.path.join(work, "e2e-alice.key")
+        status, issued = host.fetch("POST", f"{API}/identity/credentials", {
+            "principal": "e2e-alice", "expires_in": 600, "capabilities": ["runs_read"], "secret_file": secret_file})
+        key_id = (issued or {}).get("issued")
+        token = ""
+        if os.path.exists(secret_file):
+            with open(secret_file, encoding="utf-8") as handle:
+                token = handle.read().strip()
+        secret = token.rsplit("_", 1)[-1] if token else "<no secret was delivered>"
+        check.expect("issued through the host: the secret only in the new file",
+                     status == 200 and isinstance(key_id, str) and token.startswith(f"la_{key_id}_")
+                     and secret not in json.dumps(issued), (status, issued))
+        _, listed = host.fetch("GET", f"{API}/identity/credentials?principal=e2e-alice")
+        check.expect("credentials through the host equal the CLI's, with no secret",
+                     listed == cli_json("identity", "credential", "list", "--principal", "e2e-alice")
+                     and secret not in json.dumps(listed), listed)
+        status, revoked = host.fetch("POST", f"{API}/identity/credentials/{key_id}/revoke")
+        states = [c.get("state") for c in
+                  cli_json("identity", "credential", "list", "--principal", "e2e-alice").get("credentials", [])]
+        check.expect("revoked through the host, revoked for the CLI",
+                     status == 200 and states == ["revoked"], (status, revoked, states))
+        _, catalog = host.fetch("GET", f"{API}/profiles")
+        active = (catalog or {}).get("active_profile")
+        status, owned = host.fetch("PUT", f"{API}/identity/owners/{active}", {"principal": "e2e-alice"})
+        _, grants = host.fetch("GET", f"{API}/identity/grants?profile={active}")
+        check.expect("ownership through the host equals the CLI's",
+                     status == 200 and (owned or {}).get("owner") == "e2e-alice"
+                     and grants == cli_json("identity", "grants", "list", "--profile", active),
+                     (status, owned, grants))
+        status, removed = host.fetch("DELETE", f"{API}/identity/owners/{active}")
+        check.expect("ownership removed through the host",
+                     status == 200 and cli_json("identity", "grants", "list", "--profile", active).get("profiles") == [],
+                     (status, removed))
+        status, audit = host.fetch("GET", f"{API}/identity/audit?limit=4")
+        check.expect("the audit through the host equals the CLI's, and holds no secret",
+                     status == 200 and audit == cli_json("identity", "audit", "--limit", "4")
+                     and secret not in json.dumps(audit), (status, audit))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return check
+
+
+def scenario_sessions(host, cli):
+=== end
