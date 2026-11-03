@@ -106,3 +106,18 @@
   white-space: pre-wrap;
   color: var(--text-soft);
 }
+
+.profile-guidance {
+  margin-bottom: 12px;
+}
+
+.profile-guidance pre {
+  max-height: 240px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--text-soft);
+  white-space: pre-wrap;
+}

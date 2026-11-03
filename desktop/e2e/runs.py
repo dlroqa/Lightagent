@@ -951,6 +951,59 @@ def scenario_setup_sections(host, cli):
     return check
 
 
+def scenario_onboarding(host, cli, workspace):
+    """D7 through the host transport: guidance installed through the host is
+    what the chat's `/onboard remove` removes, and what the chat's `/onboard
+    <file>` installs is what the host shows; replaced and removed through the
+    host. Whatever was there before, and the extensions switch, are put back."""
+    check = Checks("onboarding")
+    status, before = host.fetch("GET", f"{API}/onboarding")
+    check.expect("guidance through the host", status == 200 and isinstance((before or {}).get("installed"), bool),
+                 (status, before))
+    if status != 200:
+        return check
+    config = json.loads(harness.run_cli(cli, "--json", "config", "show"))
+    switch = (config.get("extensions") or {}).get("enabled")
+    first = os.path.join(workspace, "e2e-guidance-first.md")
+    second = os.path.join(workspace, "e2e-guidance-second.md")
+    for path, text in ((first, "Answer as a heron would."), (second, "Answer as an egret would.")):
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    try:
+        status, refused = host.fetch("PUT", f"{API}/onboarding", {"path": "relative.md"})
+        check.expect("a relative path is refused", status == 400, (status, refused))
+        status, put = host.fetch("PUT", f"{API}/onboarding", {"path": first})
+        check.expect("installed through the host, shown alike",
+                     status == 200 and (put or {}).get("text") == "Answer as a heron would.", (status, put))
+        extensions = json.loads(harness.run_cli(cli, "--json", "config", "show")).get("extensions") or {}
+        check.expect("installing turns the guidance on, as /onboard does",
+                     extensions.get("enabled") is True and "user-onboarding" not in (extensions.get("disabled") or []),
+                     extensions)
+        harness.run_cli_input(cli, "/onboard remove\n/exit\n", "chat")
+        _, shown = host.fetch("GET", f"{API}/onboarding")
+        check.expect("the chat's /onboard remove removes what the host installed",
+                     (shown or {}).get("installed") is False, shown)
+        harness.run_cli_input(cli, f"/onboard {second}\n/exit\n", "chat")
+        _, shown = host.fetch("GET", f"{API}/onboarding")
+        check.expect("what the chat's /onboard installs, the host shows",
+                     (shown or {}).get("text") == "Answer as an egret would.", shown)
+        status, gone = host.fetch("DELETE", f"{API}/onboarding")
+        again, refused = host.fetch("DELETE", f"{API}/onboarding")
+        check.expect("removed through the host; removing nothing is refused",
+                     status == 200 and (gone or {}).get("installed") is False and again == 404, (status, gone, again, refused))
+    finally:
+        if before.get("installed"):
+            restore = os.path.join(workspace, "e2e-guidance-restore.md")
+            with open(restore, "w", encoding="utf-8") as handle:
+                handle.write(before.get("text") or "")
+            host.fetch("PUT", f"{API}/onboarding", {"path": restore})
+        else:
+            host.fetch("DELETE", f"{API}/onboarding")
+        if isinstance(switch, bool):
+            harness.run_cli(cli, "config", "set", "extensions.enabled", str(switch).lower())
+    return check
+
+
 def scenario_conversations(host, provider, cli):
     """D7 through the host transport: a conversation held by the desktop
     continues in `lightagent chat --session` with its earlier turn, and one
@@ -1404,6 +1457,7 @@ def main():
             ("update_check", lambda: scenario_update_check(host, cli)),
             ("security", lambda: scenario_security(host, cli)),
             ("setup_sections", lambda: scenario_setup_sections(host, cli)),
+            ("onboarding", lambda: scenario_onboarding(host, cli, workspace)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]

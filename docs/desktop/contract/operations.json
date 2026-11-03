@@ -408,6 +408,21 @@
    "path": "/api/lightagent/v1/extensions/{name}/enabled"
   },
   {
+   "id": "onboarding.get",
+   "method": "GET",
+   "path": "/api/lightagent/v1/onboarding"
+  },
+  {
+   "id": "onboarding.set",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/onboarding"
+  },
+  {
+   "id": "onboarding.remove",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/onboarding"
+  },
+  {
    "id": "mcp.get",
    "method": "GET",
    "path": "/api/lightagent/v1/mcp"

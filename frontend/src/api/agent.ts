@@ -691,6 +691,12 @@ export interface ConfigValue {
   revision: string;
 }
 
+/** The profile's onboarding guidance (the chat's /onboard command). */
+export interface Onboarding {
+  installed: boolean;
+  text: string | null;
+}
+
 export const agentApi = {
   /**
    * The tool catalog. MCP servers are connected (a local MCP command is
@@ -917,6 +923,13 @@ export const agentApi = {
     }),
   config: () => jsonRequest<ConfigView>("/config"),
   configKey: (key: string) => jsonRequest<ConfigValue>(`/config/${encodeURIComponent(key)}`),
+  /** The chat's /onboard: the guidance installed for the profile the runtime serves. */
+  onboarding: () => jsonRequest<Onboarding>("/onboarding"),
+  /** `/onboard <file.md>`: install or replace it from a Markdown file on this machine. */
+  setOnboarding: (path: string) =>
+    jsonRequest<Onboarding>("/onboarding", { method: "PUT", body: JSON.stringify({ path }) }),
+  /** `/onboard remove`. */
+  removeOnboarding: () => jsonRequest<Onboarding>("/onboarding", { method: "DELETE" }),
   /** `lightagent config set`; refused with 409 when `expectedRevision` is stale. */
   setConfigKey: (key: string, value: string, expectedRevision?: string) =>
     jsonRequest<ConfigValue>(`/config/${encodeURIComponent(key)}`, {
