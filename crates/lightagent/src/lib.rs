@@ -1426,7 +1426,7 @@ pub(crate) fn init_report(
     }
     paths.scaffold().map_err(|error| error.to_string())?;
 
-    let (config, _) = ConfigStore::at(&paths)
+    let (config, _) = ConfigStore::at(paths)
         .update(None, |config| {
             if let Some(base_url) = base_url {
                 // The endpoint's own key only, never the previous endpoint's.

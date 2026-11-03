@@ -544,7 +544,7 @@ def scenario_setup(host, cli):
                                     {"force": True, "profile": active, "base_url": base_url})
         check.expect("a forced init through the host keeps the profile and the endpoint",
                      status == 200 and (report or {}).get("active_profile") == active
-                     and cli_json("profile", "list").get("active_profile") == active
+                     and cli_json("profile", "list").get("active") == active
                      and cli_json("config", "show")["inference"]["base_url"] == base_url,
                      (status, report))
         profile_dir = os.path.join(work, "profiles", "e2e-hermes")
@@ -559,7 +559,7 @@ def scenario_setup(host, cli):
         status, applied = host.fetch("POST", f"{API}/import/hermes", {"from": work})
         check.expect("imported through the host, seen by the CLI",
                      status == 200 and (applied or {}).get("profiles") == ["e2e-hermes"]
-                     and "You came from Hermes." in json.dumps(cli_json("profile", "show", "e2e-hermes")),
+                     and "You came from Hermes." in harness.run_cli(cli, "profile", "show", "e2e-hermes"),
                      (status, applied))
     finally:
         shutil.rmtree(work, ignore_errors=True)
