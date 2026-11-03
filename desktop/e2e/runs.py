@@ -475,6 +475,28 @@ def scenario_extensions(host, cli):
     return check
 
 
+def scenario_workers(host, cli):
+    """D7 through the host transport: a role assigned and revoked through the
+    host; readiness through the host equals the CLI's before and after."""
+    check = Checks("workers")
+
+    def cli_status():
+        return json.loads(harness.run_cli(cli, "--json", "workers", "status"))
+
+    status, listed = host.fetch("GET", f"{API}/workers")
+    check.expect("readiness through the host equals the CLI's",
+                 status == 200 and (listed or {}).get("workers") == cli_status(), (status, listed))
+    status, assigned = host.fetch("PUT", f"{API}/workers/reviewer", {})
+    _, listed = host.fetch("GET", f"{API}/workers")
+    check.expect("assigned through the host, as the CLI reports it",
+                 status == 200 and isinstance((assigned or {}).get("id"), str)
+                 and (listed or {}).get("workers") == cli_status(), (status, assigned))
+    status, revoked = host.fetch("DELETE", f"{API}/workers/reviewer")
+    check.expect("revoked through the host",
+                 status == 200 and (revoked or {}).get("revoked") is True, (status, revoked))
+    return check
+
+
 def scenario_sessions(host, cli):
     """D7 through the host transport: the session list and a saved session
     through the host equal the CLI's; a delete through the host is seen by
@@ -761,6 +783,7 @@ def main():
             ("memory", lambda: scenario_memory(host, cli)),
             ("knowledge", lambda: scenario_knowledge(host, cli)),
             ("sessions", lambda: scenario_sessions(host, cli)),
+            ("workers", lambda: scenario_workers(host, cli)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]

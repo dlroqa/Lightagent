@@ -7441,6 +7441,54 @@
    "actions_evidence": null
   },
   {
+   "id": "api.put.workers.role",
+   "kind": "api",
+   "surface": "PUT /api/lightagent/v1/workers/{role}",
+   "source": "crates/lightagent-api/src/lib.rs:85",
+   "behavior": "Assign a specialist role to a profile or the built-in worker (D7-6)",
+   "tree_key": null,
+   "tokens": [
+    "PUT /api/lightagent/v1/workers/{role}"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.workers.assign)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: crate lightagent worker_assignment via RunFactory::workers_change",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.delete.workers.role",
+   "kind": "api",
+   "surface": "DELETE /api/lightagent/v1/workers/{role}",
+   "source": "crates/lightagent-api/src/lib.rs:85",
+   "behavior": "Revoke a specialist role's assignment (D7-6)",
+   "tree_key": null,
+   "tokens": [
+    "DELETE /api/lightagent/v1/workers/{role}"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.workers.revoke)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: crate lightagent worker_assignment via RunFactory::workers_change",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
    "id": "api.get.sessions",
    "kind": "api",
    "surface": "GET /api/lightagent/v1/sessions",

@@ -19,7 +19,23 @@
   {
    "id": "workers.list",
    "method": "GET",
-   "path": "/api/lightagent/v1/workers"
+   "path": "/api/lightagent/v1/workers",
+   "query": [
+    "profile"
+   ]
+  },
+  {
+   "id": "workers.assign",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/workers/{role}"
+  },
+  {
+   "id": "workers.revoke",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/workers/{role}",
+   "query": [
+    "profile"
+   ]
   },
   {
    "id": "provider.get",

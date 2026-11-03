@@ -90,6 +90,22 @@ pub enum RagRequest {
     Clear,
 }
 
+/// One worker-assignment change (`lightagent workers assign|revoke`), for
+/// the active profile or the one named.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkerRequest {
+    /// Assign `role` to the profile `worker`, or to the built-in worker.
+    Assign {
+        role: String,
+        worker: Option<String>,
+        profile: Option<String>,
+    },
+    Revoke {
+        role: String,
+        profile: Option<String>,
+    },
+}
+
 /// A stable error category, for the UI to act on without parsing messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpCategory {

@@ -914,6 +914,43 @@ fn worker_role(raw: &str) -> Result<lightagent_core::WorkerRole, String> {
         .ok_or_else(|| format!("unknown role {raw:?}: use researcher, coder, reviewer or tester"))
 }
 
+/// `lightagent workers assign|revoke`, shared with the HTTP API
+/// (`RunFactory::workers_change`): the JSON the CLI prints for `--json`.
+pub(crate) fn worker_assignment(
+    root: &std::path::Path,
+    config: &Config,
+    request: lightagent_api::ops::WorkerRequest,
+) -> Result<serde_json::Value, String> {
+    let profiles = ProfileStore::new(root);
+    match request {
+        lightagent_api::ops::WorkerRequest::Assign {
+            role,
+            worker,
+            profile,
+        } => {
+            let lead = chat::resolve_profile(&profiles, config, profile)?;
+            let role = worker_role(&role)?;
+            let target = match worker {
+                Some(id) => lightagent_core::AssignmentTarget::Profile {
+                    profile: ProfileId::new(&id).map_err(|error| error.to_string())?,
+                },
+                None => lightagent_core::AssignmentTarget::Builtin,
+            };
+            let assignment = workers::assign(root, &lead.id, role, target)?;
+            serde_json::to_value(&assignment).map_err(|error| error.to_string())
+        }
+        lightagent_api::ops::WorkerRequest::Revoke { role, profile } => {
+            let lead = chat::resolve_profile(&profiles, config, profile)?;
+            let role = worker_role(&role)?;
+            let dir = profiles.handle(&lead.id).dir().to_path_buf();
+            let removed = lightagent_core::WorkerAssignments::new(lead.id.clone(), &dir)
+                .revoke(role)
+                .map_err(|error| error.to_string())?;
+            Ok(serde_json::json!({ "role": role, "revoked": removed }))
+        }
+    }
+}
+
 async fn workers_cmd(action: WorkersAction, json: bool) -> Result<(), String> {
     let paths = paths()?;
     let config = load_config(&paths)?;
@@ -953,47 +990,43 @@ async fn workers_cmd(action: WorkersAction, json: bool) -> Result<(), String> {
             profile,
         } => {
             let lead = chat::resolve_profile(&profiles, &config, profile)?;
-            let role = worker_role(&role)?;
-            let target = match worker {
-                Some(id) => lightagent_core::AssignmentTarget::Profile {
-                    profile: ProfileId::new(&id).map_err(|error| error.to_string())?,
-                },
-                None => lightagent_core::AssignmentTarget::Builtin,
+            let role_name = worker_role(&role)?.as_str();
+            let request = lightagent_api::ops::WorkerRequest::Assign {
+                role,
+                worker,
+                profile: Some(lead.id.as_str().to_owned()),
             };
-            let assignment = workers::assign(paths.root(), &lead.id, role, target)?;
+            let value = worker_assignment(paths.root(), &config, request)?;
             if json {
-                let value = serde_json::to_value(&assignment).map_err(|error| error.to_string())?;
                 println!("{value}");
             } else {
                 println!(
                     "Assigned {} for {} ({}).",
-                    role.as_str(),
+                    role_name,
                     lead.id.as_str(),
-                    assignment.id
+                    value["id"].as_str().unwrap_or_default()
                 );
             }
             Ok(())
         }
         WorkersAction::Revoke { role, profile } => {
             let lead = chat::resolve_profile(&profiles, &config, profile)?;
-            let role = worker_role(&role)?;
-            let dir = profiles.handle(&lead.id).dir().to_path_buf();
-            let removed = lightagent_core::WorkerAssignments::new(lead.id.clone(), &dir)
-                .revoke(role)
-                .map_err(|error| error.to_string())?;
+            let role_name = worker_role(&role)?.as_str();
+            let request = lightagent_api::ops::WorkerRequest::Revoke {
+                role,
+                profile: Some(lead.id.as_str().to_owned()),
+            };
+            let value = worker_assignment(paths.root(), &config, request)?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({ "role": role, "revoked": removed })
-                );
-            } else if removed {
+                println!("{value}");
+            } else if value["revoked"] == true {
                 println!(
                     "Revoked the {} assignment of {}.",
-                    role.as_str(),
+                    role_name,
                     lead.id.as_str()
                 );
             } else {
-                println!("{} had no {} assignment.", lead.id.as_str(), role.as_str());
+                println!("{} had no {} assignment.", lead.id.as_str(), role_name);
             }
             Ok(())
         }

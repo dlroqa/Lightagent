@@ -418,6 +418,16 @@ pub trait RunFactory: Send + Sync + 'static {
         Err(crate::ops::OpError::unavailable())
     }
 
+    /// A worker-assignment change, performed by the embedder that owns the
+    /// profiles, answered with the JSON `lightagent workers … --json`
+    /// prints. The default refuses.
+    async fn workers_change(
+        &self,
+        _request: crate::ops::WorkerRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
     /// Tools currently visible to the factory's active target.
     async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
         let registry = lightagent_tools::ToolRegistry::builtin();
@@ -1279,6 +1289,14 @@ impl RunManager {
         request: crate::ops::ProfileRequest,
     ) -> Result<serde_json::Value, crate::ops::OpError> {
         self.factory.profiles(request).await
+    }
+
+    /// Perform a worker-assignment change through the factory.
+    pub async fn workers_change(
+        &self,
+        request: crate::ops::WorkerRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.workers_change(request).await
     }
 
     /// Perform a knowledge (RAG) operation through the factory.
