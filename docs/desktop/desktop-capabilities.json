@@ -117,7 +117,7 @@
    "not-applicable": 29
   },
   "parity_denominator": 227,
-  "parity_implemented": 99,
+  "parity_implemented": 110,
   "pending_decision_rows": 0,
   "not_counted_duplicates": 26
  },
@@ -1481,10 +1481,10 @@
    "backend": "api: GET /sessions",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_sessions.rs (CLI and API alike); host: desktop/e2e/runs.py sessions (list, show, delete through the host, matched with the CLI); browser: e2e/sessions.mjs (listed, opened, delete asks first, Keep it, Confirm; real harness); native WebView: D8",
+   "tested_sha": "c0b5ed32dba60587aa4656d16ec1f6c53b9dc1d0",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984591, https://github.com/dlroqa/Lightagent/actions/runs/41572984624, https://github.com/dlroqa/Lightagent/actions/runs/41572984660, https://github.com/dlroqa/Lightagent/actions/runs/41572984678"
   },
   {
    "id": "cli.sessions.show",
@@ -1503,10 +1503,10 @@
    "backend": "api: GET /sessions/{id}",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_sessions.rs (CLI and API alike); host: desktop/e2e/runs.py sessions (list, show, delete through the host, matched with the CLI); browser: e2e/sessions.mjs (listed, opened, delete asks first, Keep it, Confirm; real harness); native WebView: D8",
+   "tested_sha": "c0b5ed32dba60587aa4656d16ec1f6c53b9dc1d0",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984591, https://github.com/dlroqa/Lightagent/actions/runs/41572984624, https://github.com/dlroqa/Lightagent/actions/runs/41572984660, https://github.com/dlroqa/Lightagent/actions/runs/41572984678"
   },
   {
    "id": "cli.sessions.show.arg.id",
@@ -1525,10 +1525,10 @@
    "backend": "api: GET /sessions/{id}",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_sessions.rs (CLI and API alike); host: desktop/e2e/runs.py sessions (list, show, delete through the host, matched with the CLI); browser: e2e/sessions.mjs (listed, opened, delete asks first, Keep it, Confirm; real harness); native WebView: D8",
+   "tested_sha": "c0b5ed32dba60587aa4656d16ec1f6c53b9dc1d0",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984591, https://github.com/dlroqa/Lightagent/actions/runs/41572984624, https://github.com/dlroqa/Lightagent/actions/runs/41572984660, https://github.com/dlroqa/Lightagent/actions/runs/41572984678"
   },
   {
    "id": "cli.sessions.delete",
@@ -1547,10 +1547,10 @@
    "backend": "api: DELETE /sessions/{id}",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_sessions.rs (CLI and API alike); host: desktop/e2e/runs.py sessions (list, show, delete through the host, matched with the CLI); browser: e2e/sessions.mjs (listed, opened, delete asks first, Keep it, Confirm; real harness); native WebView: D8",
+   "tested_sha": "c0b5ed32dba60587aa4656d16ec1f6c53b9dc1d0",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984591, https://github.com/dlroqa/Lightagent/actions/runs/41572984624, https://github.com/dlroqa/Lightagent/actions/runs/41572984660, https://github.com/dlroqa/Lightagent/actions/runs/41572984678"
   },
   {
    "id": "cli.sessions.delete.arg.id",
@@ -1569,10 +1569,10 @@
    "backend": "api: DELETE /sessions/{id}",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_sessions.rs (CLI and API alike); host: desktop/e2e/runs.py sessions (list, show, delete through the host, matched with the CLI); browser: e2e/sessions.mjs (listed, opened, delete asks first, Keep it, Confirm; real harness); native WebView: D8",
+   "tested_sha": "c0b5ed32dba60587aa4656d16ec1f6c53b9dc1d0",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984591, https://github.com/dlroqa/Lightagent/actions/runs/41572984624, https://github.com/dlroqa/Lightagent/actions/runs/41572984660, https://github.com/dlroqa/Lightagent/actions/runs/41572984678"
   },
   {
    "id": "cli.workers",
@@ -1613,10 +1613,10 @@
    "backend": "api: GET /workers",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_workers.rs (CLI and API alike, both directions); host: desktop/e2e/runs.py workers (status, assign built-in, revoke through the host, matched with the CLI); browser: e2e/workers.mjs (assign built-in and revoke; real harness); native WebView: D8",
+   "tested_sha": "4afe90708243838d7174d898408cefd93f892bbf",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984218, https://github.com/dlroqa/Lightagent/actions/runs/41572984227, https://github.com/dlroqa/Lightagent/actions/runs/41572984266, https://github.com/dlroqa/Lightagent/actions/runs/41572984319"
   },
   {
    "id": "cli.workers.status.opt.profile",
@@ -1657,10 +1657,10 @@
    "backend": "extract: workers_cmd(Assign)",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_workers.rs (CLI and API alike, both directions); host: desktop/e2e/runs.py workers (status, assign built-in, revoke through the host, matched with the CLI); browser: e2e/workers.mjs (assign built-in and revoke; real harness); native WebView: D8",
+   "tested_sha": "4afe90708243838d7174d898408cefd93f892bbf",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984218, https://github.com/dlroqa/Lightagent/actions/runs/41572984227, https://github.com/dlroqa/Lightagent/actions/runs/41572984266, https://github.com/dlroqa/Lightagent/actions/runs/41572984319"
   },
   {
    "id": "cli.workers.assign.arg.role",
@@ -1679,10 +1679,10 @@
    "backend": "extract: workers_cmd(Assign)",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_workers.rs (CLI and API alike, both directions); host: desktop/e2e/runs.py workers (status, assign built-in, revoke through the host, matched with the CLI); browser: e2e/workers.mjs (assign built-in and revoke; real harness); native WebView: D8",
+   "tested_sha": "4afe90708243838d7174d898408cefd93f892bbf",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984218, https://github.com/dlroqa/Lightagent/actions/runs/41572984227, https://github.com/dlroqa/Lightagent/actions/runs/41572984266, https://github.com/dlroqa/Lightagent/actions/runs/41572984319"
   },
   {
    "id": "cli.workers.assign.opt.worker",
@@ -1723,10 +1723,10 @@
    "backend": "extract: workers_cmd(Assign)",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_workers.rs (CLI and API alike, both directions); host: desktop/e2e/runs.py workers (status, assign built-in, revoke through the host, matched with the CLI); browser: e2e/workers.mjs (assign built-in and revoke; real harness); native WebView: D8",
+   "tested_sha": "4afe90708243838d7174d898408cefd93f892bbf",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984218, https://github.com/dlroqa/Lightagent/actions/runs/41572984227, https://github.com/dlroqa/Lightagent/actions/runs/41572984266, https://github.com/dlroqa/Lightagent/actions/runs/41572984319"
   },
   {
    "id": "cli.workers.assign.opt.profile",
@@ -1767,10 +1767,10 @@
    "backend": "extract: workers_cmd(Revoke)",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_workers.rs (CLI and API alike, both directions); host: desktop/e2e/runs.py workers (status, assign built-in, revoke through the host, matched with the CLI); browser: e2e/workers.mjs (assign built-in and revoke; real harness); native WebView: D8",
+   "tested_sha": "4afe90708243838d7174d898408cefd93f892bbf",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984218, https://github.com/dlroqa/Lightagent/actions/runs/41572984227, https://github.com/dlroqa/Lightagent/actions/runs/41572984266, https://github.com/dlroqa/Lightagent/actions/runs/41572984319"
   },
   {
    "id": "cli.workers.revoke.arg.role",
@@ -1789,10 +1789,10 @@
    "backend": "extract: workers_cmd(Revoke)",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_workers.rs (CLI and API alike, both directions); host: desktop/e2e/runs.py workers (status, assign built-in, revoke through the host, matched with the CLI); browser: e2e/workers.mjs (assign built-in and revoke; real harness); native WebView: D8",
+   "tested_sha": "4afe90708243838d7174d898408cefd93f892bbf",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984218, https://github.com/dlroqa/Lightagent/actions/runs/41572984227, https://github.com/dlroqa/Lightagent/actions/runs/41572984266, https://github.com/dlroqa/Lightagent/actions/runs/41572984319"
   },
   {
    "id": "cli.workers.revoke.opt.profile",
