@@ -1,0 +1,827 @@
+=== base 0e53dd366178d59a67bede2aa21a2f1b53890183
+=== message
+Docs: rows 53-56 counted, 218 of 222
+
+Fourteen rows are now implemented, each with backend, host and browser
+evidence at the commit whose runs passed:
+- Row 53 (67b8124): rotate --expires-in, remote-credential list
+  --profile, init --profile and --base-url, LIGHTAGENT_HOME.
+- Rows 54-55 (940b1f5, 46abd19): /onboard, /onboard remove, /help and
+  /reload.
+- Row 56a (4e1aa34): GET /jev and POST /jev/verify. This is stub
+  evidence; live Jev is not claimed.
+- Row 56b (03f4cfe): LIGHTAGENT_CREDENTIAL_KEY and HERMES_HOME.
+- Row 56c (0e53dd3, host at 03f4cfe): regenerate on the real backend in
+  the browser.
+
+Each row was counted once; none was counted before, and none was
+recounted. Four rows remain: two --secret-stdin rows and
+LIGHTAGENT_API_KEY (D8), and chat --profile (an owner decision; see
+DESKTOP_PROGRESS.md). Docs only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.identity.credential.rotate.opt.expires-in",
+   "kind": "option",
+   "surface": "lightagent identity credential rotate --expires-in",
+   "source": "crates/lightagent/src/identity_admin.rs:97",
+   "behavior": "Expiry seconds",
+   "tree_key": "arg lightagent identity credential rotate --expires-in",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Settings/Identity: rotate — input 'expires-in'",
+   "backend": "extract: identity_admin",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.identity.credential.rotate.opt.expires-in",
+   "kind": "option",
+   "surface": "lightagent identity credential rotate --expires-in",
+   "source": "crates/lightagent/src/identity_admin.rs:97",
+   "behavior": "Expiry seconds",
+   "tree_key": "arg lightagent identity credential rotate --expires-in",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Settings/Identity: rotate — input 'expires-in'",
+   "backend": "extract: identity_admin",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "implemented",
+   "verification": "Browser e2e/identity.mjs rotates with an expiry of 900 s and the replacement expires in about that time (row 53); backend crates/lightagent/tests/desktop_identity.rs and host runs.py identity (rows 43-44, 48)",
+   "tested_sha": "67b812451c1fc22ee9f0469d4b51dc848dfdc0a2",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41635762293 (check); https://github.com/dlroqa/Lightagent/actions/runs/41635762498 (desktop)"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.identity.credential.rotate.opt.expires-in` | `lightagent identity credential rotate --expires-in` | applicable | yes | Settings/Identity: rotate — input 'expires-in' | extract: identity_admin | not-started | `crates/lightagent/src/identity_admin.rs:97` |
+--- with
+| `cli.identity.credential.rotate.opt.expires-in` | `lightagent identity credential rotate --expires-in` | applicable | yes | Settings/Identity: rotate — input 'expires-in' | extract: identity_admin | implemented | `crates/lightagent/src/identity_admin.rs:97` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.remote-credential.list.opt.profile",
+   "kind": "option",
+   "surface": "lightagent remote-credential list --profile",
+   "source": "crates/lightagent/src/remote_credentials.rs:61",
+   "behavior": "Filter by profile",
+   "tree_key": "arg lightagent remote-credential list --profile",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Settings/Credentials — input 'profile'",
+   "backend": "extract: remote_credentials",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.remote-credential.list.opt.profile",
+   "kind": "option",
+   "surface": "lightagent remote-credential list --profile",
+   "source": "crates/lightagent/src/remote_credentials.rs:61",
+   "behavior": "Filter by profile",
+   "tree_key": "arg lightagent remote-credential list --profile",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Settings/Credentials — input 'profile'",
+   "backend": "extract: remote_credentials",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "implemented",
+   "verification": "Browser e2e/credentials.mjs: the Show filter asks the API for one profile, and a profile with no grants shows none (row 53); backend desktop_remote_credentials.rs and host runs.py remote_credentials (list --profile equal to the CLI's)",
+   "tested_sha": "67b812451c1fc22ee9f0469d4b51dc848dfdc0a2",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41635762293 (check); https://github.com/dlroqa/Lightagent/actions/runs/41635762498 (desktop)"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.remote-credential.list.opt.profile` | `lightagent remote-credential list --profile` | applicable | yes | Settings/Credentials — input 'profile' | extract: remote_credentials | not-started | `crates/lightagent/src/remote_credentials.rs:61` |
+--- with
+| `cli.remote-credential.list.opt.profile` | `lightagent remote-credential list --profile` | applicable | yes | Settings/Credentials — input 'profile' | extract: remote_credentials | implemented | `crates/lightagent/src/remote_credentials.rs:61` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.init.opt.profile",
+   "kind": "option",
+   "surface": "lightagent init --profile",
+   "source": "crates/lightagent/src/lib.rs:73",
+   "behavior": "Profile id to create",
+   "tree_key": "arg lightagent init --profile",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "First-run wizard — input 'profile'",
+   "backend": "extract: lib.rs init()",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.init.opt.profile",
+   "kind": "option",
+   "surface": "lightagent init --profile",
+   "source": "crates/lightagent/src/lib.rs:73",
+   "behavior": "Profile id to create",
+   "tree_key": "arg lightagent init --profile",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "First-run wizard — input 'profile'",
+   "backend": "extract: lib.rs init()",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "implemented",
+   "verification": "Browser e2e/setup.mjs asserts what Reconfigure sent (force, profile, base URL, model) (row 53); backend desktop_setup.rs and host runs.py setup (a forced init keeps the profile and endpoint, as the CLI reports)",
+   "tested_sha": "67b812451c1fc22ee9f0469d4b51dc848dfdc0a2",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41635762293 (check); https://github.com/dlroqa/Lightagent/actions/runs/41635762498 (desktop)"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.init.opt.profile` | `lightagent init --profile` | applicable | yes | First-run wizard — input 'profile' | extract: lib.rs init() | not-started | `crates/lightagent/src/lib.rs:73` |
+--- with
+| `cli.init.opt.profile` | `lightagent init --profile` | applicable | yes | First-run wizard — input 'profile' | extract: lib.rs init() | implemented | `crates/lightagent/src/lib.rs:73` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.init.opt.base-url",
+   "kind": "option",
+   "surface": "lightagent init --base-url",
+   "source": "crates/lightagent/src/lib.rs:73",
+   "behavior": "Provider base URL",
+   "tree_key": "arg lightagent init --base-url",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "First-run wizard — input 'base-url'",
+   "backend": "extract: lib.rs init()",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.init.opt.base-url",
+   "kind": "option",
+   "surface": "lightagent init --base-url",
+   "source": "crates/lightagent/src/lib.rs:73",
+   "behavior": "Provider base URL",
+   "tree_key": "arg lightagent init --base-url",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "First-run wizard — input 'base-url'",
+   "backend": "extract: lib.rs init()",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "implemented",
+   "verification": "Browser e2e/setup.mjs asserts what Reconfigure sent (force, profile, base URL, model) (row 53); backend desktop_setup.rs and host runs.py setup (a forced init keeps the profile and endpoint, as the CLI reports)",
+   "tested_sha": "67b812451c1fc22ee9f0469d4b51dc848dfdc0a2",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41635762293 (check); https://github.com/dlroqa/Lightagent/actions/runs/41635762498 (desktop)"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.init.opt.base-url` | `lightagent init --base-url` | applicable | yes | First-run wizard — input 'base-url' | extract: lib.rs init() | not-started | `crates/lightagent/src/lib.rs:73` |
+--- with
+| `cli.init.opt.base-url` | `lightagent init --base-url` | applicable | yes | First-run wizard — input 'base-url' | extract: lib.rs init() | implemented | `crates/lightagent/src/lib.rs:73` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "env.LIGHTAGENT_HOME",
+   "kind": "env",
+   "surface": "LIGHTAGENT_HOME",
+   "source": "crates (string literal)",
+   "behavior": "Home directory override",
+   "tree_key": null,
+   "tokens": [
+    "LIGHTAGENT_HOME"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Settings/Diagnostics: active home (host passes through to sidecar)",
+   "backend": "sidecar process environment",
+   "permission": "local-operator",
+   "data_scope": "process",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "env.LIGHTAGENT_HOME",
+   "kind": "env",
+   "surface": "LIGHTAGENT_HOME",
+   "source": "crates (string literal)",
+   "behavior": "Home directory override",
+   "tree_key": null,
+   "tokens": [
+    "LIGHTAGENT_HOME"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Settings/Diagnostics: active home (host passes through to sidecar)",
+   "backend": "sidecar process environment",
+   "permission": "local-operator",
+   "data_scope": "process",
+   "desktop_status": "implemented",
+   "verification": "The home doctor reports is the variable's home: backend desktop_diagnostics.rs, host runs.py diagnostics (the host passes its environment to the runtime), browser e2e/diagnostics.mjs (row 53)",
+   "tested_sha": "67b812451c1fc22ee9f0469d4b51dc848dfdc0a2",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41635762293 (check); https://github.com/dlroqa/Lightagent/actions/runs/41635762498 (desktop)"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `env.LIGHTAGENT_HOME` | `LIGHTAGENT_HOME` | applicable | yes | Settings/Diagnostics: active home (host passes through to sidecar) | sidecar process environment | not-started | `crates (string literal)` |
+--- with
+| `env.LIGHTAGENT_HOME` | `LIGHTAGENT_HOME` | applicable | yes | Settings/Diagnostics: active home (host passes through to sidecar) | sidecar process environment | implemented | `crates (string literal)` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "slash.onboard",
+   "kind": "slash",
+   "surface": "/onboard",
+   "source": "crates/lightagent/src/slash.rs:75",
+   "behavior": "Install dropped Markdown as profile guidance",
+   "tree_key": null,
+   "tokens": [
+    "onboard"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Profiles/Workspaces: guidance (file picker / drop)",
+   "backend": "extract: chat.rs onboard",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "slash.onboard",
+   "kind": "slash",
+   "surface": "/onboard",
+   "source": "crates/lightagent/src/slash.rs:75",
+   "behavior": "Install dropped Markdown as profile guidance",
+   "tree_key": null,
+   "tokens": [
+    "onboard"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Profiles/Workspaces: guidance (file picker / drop)",
+   "backend": "extract: chat.rs onboard",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "One shared operation (lightagent_extensions::onboarding) behind the chat's /onboard and PUT /onboarding: backend desktop_onboarding.rs, host runs.py onboarding, browser e2e/onboarding.mjs (Profiles Guidance card) (row 54, fixed at 940b1f5)",
+   "tested_sha": "940b1f53200f6542084805945f986fc1556ecfa8",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41640425496 (check); https://github.com/dlroqa/Lightagent/actions/runs/41640425480 (desktop)"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `slash.onboard` | `/onboard` | applicable | yes | Profiles/Workspaces: guidance (file picker / drop) | extract: chat.rs onboard | not-started | `crates/lightagent/src/slash.rs:75` |
+--- with
+| `slash.onboard` | `/onboard` | applicable | yes | Profiles/Workspaces: guidance (file picker / drop) | extract: chat.rs onboard | implemented | `crates/lightagent/src/slash.rs:75` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "slash.onboard-remove",
+   "kind": "slash",
+   "surface": "/onboard remove",
+   "source": "crates/lightagent/src/slash.rs:76",
+   "behavior": "Withdraw profile guidance",
+   "tree_key": null,
+   "tokens": [
+    "remove"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Profiles/Workspaces: guidance remove",
+   "backend": "extract: chat.rs onboard remove",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "slash.onboard-remove",
+   "kind": "slash",
+   "surface": "/onboard remove",
+   "source": "crates/lightagent/src/slash.rs:76",
+   "behavior": "Withdraw profile guidance",
+   "tree_key": null,
+   "tokens": [
+    "remove"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Profiles/Workspaces: guidance remove",
+   "backend": "extract: chat.rs onboard remove",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "One shared operation (lightagent_extensions::onboarding) behind the chat's /onboard remove and DELETE /onboarding: backend desktop_onboarding.rs, host runs.py onboarding, browser e2e/onboarding.mjs (row 54, fixed at 940b1f5)",
+   "tested_sha": "940b1f53200f6542084805945f986fc1556ecfa8",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41640425496 (check); https://github.com/dlroqa/Lightagent/actions/runs/41640425480 (desktop)"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `slash.onboard-remove` | `/onboard remove` | applicable | yes | Profiles/Workspaces: guidance remove | extract: chat.rs onboard remove | not-started | `crates/lightagent/src/slash.rs:76` |
+--- with
+| `slash.onboard-remove` | `/onboard remove` | applicable | yes | Profiles/Workspaces: guidance remove | extract: chat.rs onboard remove | implemented | `crates/lightagent/src/slash.rs:76` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "slash.help",
+   "kind": "slash",
+   "surface": "/help",
+   "source": "crates/lightagent/src/slash.rs:56",
+   "behavior": "List the commands",
+   "tree_key": null,
+   "tokens": [
+    "help",
+    "h",
+    "?"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Command palette: help",
+   "backend": "static",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "slash.help",
+   "kind": "slash",
+   "surface": "/help",
+   "source": "crates/lightagent/src/slash.rs:56",
+   "behavior": "List the commands",
+   "tree_key": null,
+   "tokens": [
+    "help",
+    "h",
+    "?"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Command palette: help",
+   "backend": "static",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "One list (lightagent_core::commands::SLASH_COMMANDS) behind the chat's /help and GET /commands: backend desktop_commands_reload.rs, host runs.py commands, browser e2e/commands.mjs (Commands dialog) (row 55, fixed at 46abd19)",
+   "tested_sha": "46abd19cfdbc92d84ef73c0636ec95ff882affd2",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41640613895 (check); https://github.com/dlroqa/Lightagent/actions/runs/41640614038 (desktop)"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `slash.help` | `/help` | applicable | yes | Command palette: help | static | not-started | `crates/lightagent/src/slash.rs:56` |
+--- with
+| `slash.help` | `/help` | applicable | yes | Command palette: help | static | implemented | `crates/lightagent/src/slash.rs:56` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "slash.reload",
+   "kind": "slash",
+   "surface": "/reload",
+   "source": "crates/lightagent/src/slash.rs:59",
+   "behavior": "Reload extensions and tool settings between turns",
+   "tree_key": null,
+   "tokens": [
+    "reload"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions: reload",
+   "backend": "extract: chat.rs reload path",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "slash.reload",
+   "kind": "slash",
+   "surface": "/reload",
+   "source": "crates/lightagent/src/slash.rs:59",
+   "behavior": "Reload extensions and tool settings between turns",
+   "tree_key": null,
+   "tokens": [
+    "reload"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Tools/MCP/Extensions: reload",
+   "backend": "extract: chat.rs reload path",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "A desktop run is built from the current settings, so a change by the CLI applies to the next run with no restart; Tools Reload tools re-reads the catalog: backend desktop_commands_reload.rs, host runs.py reload, browser e2e/commands.mjs (row 55, fixed at 46abd19)",
+   "tested_sha": "46abd19cfdbc92d84ef73c0636ec95ff882affd2",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41640613895 (check); https://github.com/dlroqa/Lightagent/actions/runs/41640614038 (desktop)"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `slash.reload` | `/reload` | applicable | yes | Tools/MCP/Extensions: reload | extract: chat.rs reload path | not-started | `crates/lightagent/src/slash.rs:59` |
+--- with
+| `slash.reload` | `/reload` | applicable | yes | Tools/MCP/Extensions: reload | extract: chat.rs reload path | implemented | `crates/lightagent/src/slash.rs:59` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "api.get.jev",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/jev",
+   "source": "crates/lightagent-api/src/lib.rs:82",
+   "behavior": "Existing HTTP API operation",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/jev"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Settings: Jev status / verify (already in WebUI)",
+   "backend": "api: GET /jev",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "api.get.jev",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/jev",
+   "source": "crates/lightagent-api/src/lib.rs:82",
+   "behavior": "Existing HTTP API operation",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/jev"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Settings: Jev status / verify (already in WebUI)",
+   "backend": "api: GET /jev",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "STUB evidence, not live Jev (live Jev is jev-live.yml and is not claimed): deterministic SystemOne stubs check the request sent; backend desktop_jev.rs (no endpoint, success, 401, 422, 503, refused port, four malformed answers; a check is reported only for the settings in force; no key in any answer), host runs.py jev, browser e2e/jev.mjs (row 56a)",
+   "tested_sha": "4e1aa343f5e9bfcb5f1197b7dadceb33cfc3ede5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41642067618 (check); https://github.com/dlroqa/Lightagent/actions/runs/41642067501 (desktop)"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.get.jev` | `GET /api/lightagent/v1/jev` | applicable | yes | Settings: Jev status / verify (already in WebUI) | api: GET /jev | not-started | `crates/lightagent-api/src/lib.rs:82` |
+--- with
+| `api.get.jev` | `GET /api/lightagent/v1/jev` | applicable | yes | Settings: Jev status / verify (already in WebUI) | api: GET /jev | implemented | `crates/lightagent-api/src/lib.rs:82` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "api.post.jev.verify",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/jev/verify",
+   "source": "crates/lightagent-api/src/lib.rs:83",
+   "behavior": "Existing HTTP API operation",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/jev/verify"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Settings: Jev status / verify (already in WebUI)",
+   "backend": "api: POST /jev/verify",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "api.post.jev.verify",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/jev/verify",
+   "source": "crates/lightagent-api/src/lib.rs:83",
+   "behavior": "Existing HTTP API operation",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/jev/verify"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Settings: Jev status / verify (already in WebUI)",
+   "backend": "api: POST /jev/verify",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "STUB evidence, not live Jev (live Jev is jev-live.yml and is not claimed): Test connection and POST /jev/verify against deterministic SystemOne stubs; backend desktop_jev.rs (one request per check, the configured key, one synthetic question; success, 401, 422, 503, refused port, malformed), host runs.py jev, browser e2e/jev.mjs (row 56a)",
+   "tested_sha": "4e1aa343f5e9bfcb5f1197b7dadceb33cfc3ede5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41642067618 (check); https://github.com/dlroqa/Lightagent/actions/runs/41642067501 (desktop)"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.post.jev.verify` | `POST /api/lightagent/v1/jev/verify` | applicable | yes | Settings: Jev status / verify (already in WebUI) | api: POST /jev/verify | not-started | `crates/lightagent-api/src/lib.rs:83` |
+--- with
+| `api.post.jev.verify` | `POST /api/lightagent/v1/jev/verify` | applicable | yes | Settings: Jev status / verify (already in WebUI) | api: POST /jev/verify | implemented | `crates/lightagent-api/src/lib.rs:83` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "env.LIGHTAGENT_CREDENTIAL_KEY",
+   "kind": "env",
+   "surface": "LIGHTAGENT_CREDENTIAL_KEY",
+   "source": "crates (string literal)",
+   "behavior": "Vault master key",
+   "tree_key": null,
+   "tokens": [
+    "LIGHTAGENT_CREDENTIAL_KEY"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Settings/Credentials: key source status",
+   "backend": "sidecar process environment",
+   "permission": "local-operator",
+   "data_scope": "process",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "env.LIGHTAGENT_CREDENTIAL_KEY",
+   "kind": "env",
+   "surface": "LIGHTAGENT_CREDENTIAL_KEY",
+   "source": "crates (string literal)",
+   "behavior": "Vault master key",
+   "tree_key": null,
+   "tokens": [
+    "LIGHTAGENT_CREDENTIAL_KEY"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Settings/Credentials: key source status",
+   "backend": "sidecar process environment",
+   "permission": "local-operator",
+   "data_scope": "process",
+   "desktop_status": "implemented",
+   "verification": "The vault master key, not a provider key: with the variable alone a grant seals and opens (source env, as the CLI), another key opens nothing, the key file wins when both are set, an invalid value refuses every command without repeating it, an empty value is no key: backend desktop_remote_credentials.rs, host runs.py environment (a second host), browser e2e/environment.mjs (a second server, random key, no key in any JSON answer) (row 56b)",
+   "tested_sha": "03f4cfe28f3d12cc46d280df78e866807afc73b1",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41643110520 (check); https://github.com/dlroqa/Lightagent/actions/runs/41643110546 (desktop)"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `env.LIGHTAGENT_CREDENTIAL_KEY` | `LIGHTAGENT_CREDENTIAL_KEY` | applicable | yes | Settings/Credentials: key source status | sidecar process environment | not-started | `crates (string literal)` |
+--- with
+| `env.LIGHTAGENT_CREDENTIAL_KEY` | `LIGHTAGENT_CREDENTIAL_KEY` | applicable | yes | Settings/Credentials: key source status | sidecar process environment | implemented | `crates (string literal)` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "env.HERMES_HOME",
+   "kind": "env",
+   "surface": "HERMES_HOME",
+   "source": "crates (string literal)",
+   "behavior": "Default Hermes home for import",
+   "tree_key": null,
+   "tokens": [
+    "HERMES_HOME"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Profiles/Workspaces: import default folder",
+   "backend": "sidecar process environment",
+   "permission": "local-operator",
+   "data_scope": "process",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "env.HERMES_HOME",
+   "kind": "env",
+   "surface": "HERMES_HOME",
+   "source": "crates (string literal)",
+   "behavior": "Default Hermes home for import",
+   "tree_key": null,
+   "tokens": [
+    "HERMES_HOME"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Profiles/Workspaces: import default folder",
+   "backend": "sidecar process environment",
+   "permission": "local-operator",
+   "data_scope": "process",
+   "desktop_status": "implemented",
+   "verification": "The import source: with no folder HERMES_HOME is read before ~/.hermes, a given folder wins, the import writes only into LIGHTAGENT_HOME and leaves the Hermes home unchanged, a missing folder is refused with no fallback; an empty value is refused as a value (Unix; current behavior): backend desktop_setup.rs, host runs.py environment, browser e2e/environment.mjs (row 56b)",
+   "tested_sha": "03f4cfe28f3d12cc46d280df78e866807afc73b1",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41643110520 (check); https://github.com/dlroqa/Lightagent/actions/runs/41643110546 (desktop)"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `env.HERMES_HOME` | `HERMES_HOME` | applicable | yes | Profiles/Workspaces: import default folder | sidecar process environment | not-started | `crates (string literal)` |
+--- with
+| `env.HERMES_HOME` | `HERMES_HOME` | applicable | yes | Profiles/Workspaces: import default folder | sidecar process environment | implemented | `crates (string literal)` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "api.post.sessions.id.regenerate",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/sessions/{id}/regenerate",
+   "source": "crates/lightagent-api/src/lib.rs:122",
+   "behavior": "Replace the session's latest answer with a new run of its prompt; the saved answer is kept unless the new run completes with an answer (#98)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/sessions/{id}/regenerate"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: Try again under the final answer (WebUI, #98)",
+   "backend": "api: POST /sessions/{id}/regenerate",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "api.post.sessions.id.regenerate",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/sessions/{id}/regenerate",
+   "source": "crates/lightagent-api/src/lib.rs:122",
+   "behavior": "Replace the session's latest answer with a new run of its prompt; the saved answer is kept unless the new run completes with an answer (#98)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/sessions/{id}/regenerate"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: Try again under the final answer (WebUI, #98)",
+   "backend": "api: POST /sessions/{id}/regenerate",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "Browser on the real backend with a local model stub (e2e/regenerate.mjs, row 56c, check at 0e53dd3): a finished answer replaces the saved one; failure, refusal, empty and Stop keep it; a stale Try again is refused 409 with the runs unchanged. Host runs.py regenerate (R1; desktop run at 03f4cfe); backend api.rs and profile_scoped.rs (ownership, write permission, stale ids); the switch gate is switch.rs. Native WebView R2-R5 stay D8",
+   "tested_sha": "0e53dd366178d59a67bede2aa21a2f1b53890183",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41651923887 (check); https://github.com/dlroqa/Lightagent/actions/runs/41643110546 (desktop)"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.post.sessions.id.regenerate` | `POST /api/lightagent/v1/sessions/{id}/regenerate` | applicable | yes | Conversations: Try again under the final answer (WebUI, #98) | api: POST /sessions/{id}/regenerate | not-started | `crates/lightagent-api/src/lib.rs:122` |
+--- with
+| `api.post.sessions.id.regenerate` | `POST /api/lightagent/v1/sessions/{id}/regenerate` | applicable | yes | Conversations: Try again under the final answer (WebUI, #98) | api: POST /sessions/{id}/regenerate | implemented | `crates/lightagent-api/src/lib.rs:122` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "parity_implemented": 204,
+--- with
+  "parity_implemented": 218,
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Implemented: 204 of 222
+--- with
+- Implemented: 218 of 222
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `setup.tui.reasoning` | `cc2829d` | Settings Web access, tool switches, approval policy and reasoning write what `lightagent setup` writes (shared lightagent_core::WebMode; backend crates/lightagent/tests/desktop_setup_sections.rs two homes compared per choice; host runs.py `setup_sections`; browser e2e/setup-sections.mjs); native WebView is D8 | [check](https://github.com/dlroqa/Lightagent/actions/runs/41613505978), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41613505967) |
+--- with
+| `setup.tui.reasoning` | `cc2829d` | Settings Web access, tool switches, approval policy and reasoning write what `lightagent setup` writes (shared lightagent_core::WebMode; backend crates/lightagent/tests/desktop_setup_sections.rs two homes compared per choice; host runs.py `setup_sections`; browser e2e/setup-sections.mjs); native WebView is D8 | [check](https://github.com/dlroqa/Lightagent/actions/runs/41613505978), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41613505967) |
+| `cli.identity.credential.rotate.opt.expires-in` | `67b8124` | Browser e2e/identity.mjs rotates with an expiry of 900 s and the replacement expires in about that time (row 53); backend crates/lightagent/tests/desktop_identity.rs and host runs.py identity (rows 43-44, 48) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41635762293), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41635762498) |
+| `cli.remote-credential.list.opt.profile` | `67b8124` | Browser e2e/credentials.mjs: the Show filter asks the API for one profile, and a profile with no grants shows none (row 53); backend desktop_remote_credentials.rs and host runs.py remote_credentials (list --profile equal to the CLI's) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41635762293), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41635762498) |
+| `cli.init.opt.profile` | `67b8124` | Browser e2e/setup.mjs asserts what Reconfigure sent (force, profile, base URL, model) (row 53); backend desktop_setup.rs and host runs.py setup (a forced init keeps the profile and endpoint, as the CLI reports) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41635762293), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41635762498) |
+| `cli.init.opt.base-url` | `67b8124` | Browser e2e/setup.mjs asserts what Reconfigure sent (force, profile, base URL, model) (row 53); backend desktop_setup.rs and host runs.py setup (a forced init keeps the profile and endpoint, as the CLI reports) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41635762293), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41635762498) |
+| `env.LIGHTAGENT_HOME` | `67b8124` | The home doctor reports is the variable's home: backend desktop_diagnostics.rs, host runs.py diagnostics (the host passes its environment to the runtime), browser e2e/diagnostics.mjs (row 53) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41635762293), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41635762498) |
+| `slash.onboard` | `940b1f5` | One shared operation (lightagent_extensions::onboarding) behind the chat's /onboard and PUT /onboarding: backend desktop_onboarding.rs, host runs.py onboarding, browser e2e/onboarding.mjs (Profiles Guidance card) (row 54, fixed at 940b1f5) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41640425496), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41640425480) |
+| `slash.onboard-remove` | `940b1f5` | One shared operation (lightagent_extensions::onboarding) behind the chat's /onboard remove and DELETE /onboarding: backend desktop_onboarding.rs, host runs.py onboarding, browser e2e/onboarding.mjs (row 54, fixed at 940b1f5) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41640425496), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41640425480) |
+| `slash.help` | `46abd19` | One list (lightagent_core::commands::SLASH_COMMANDS) behind the chat's /help and GET /commands: backend desktop_commands_reload.rs, host runs.py commands, browser e2e/commands.mjs (Commands dialog) (row 55, fixed at 46abd19) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41640613895), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41640614038) |
+| `slash.reload` | `46abd19` | A desktop run is built from the current settings, so a change by the CLI applies to the next run with no restart; Tools Reload tools re-reads the catalog: backend desktop_commands_reload.rs, host runs.py reload, browser e2e/commands.mjs (row 55, fixed at 46abd19) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41640613895), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41640614038) |
+| `api.get.jev` | `4e1aa34` | STUB evidence, not live Jev (live Jev is jev-live.yml and is not claimed): deterministic SystemOne stubs check the request sent; backend desktop_jev.rs (no endpoint, success, 401, 422, 503, refused port, four malformed answers; a check is reported only for the settings in force; no key in any answer), host runs.py jev, browser e2e/jev.mjs (row 56a) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41642067618), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41642067501) |
+| `api.post.jev.verify` | `4e1aa34` | STUB evidence, not live Jev (live Jev is jev-live.yml and is not claimed): Test connection and POST /jev/verify against deterministic SystemOne stubs; backend desktop_jev.rs (one request per check, the configured key, one synthetic question; success, 401, 422, 503, refused port, malformed), host runs.py jev, browser e2e/jev.mjs (row 56a) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41642067618), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41642067501) |
+| `env.LIGHTAGENT_CREDENTIAL_KEY` | `03f4cfe` | The vault master key, not a provider key: with the variable alone a grant seals and opens (source env, as the CLI), another key opens nothing, the key file wins when both are set, an invalid value refuses every command without repeating it, an empty value is no key: backend desktop_remote_credentials.rs, host runs.py environment (a second host), browser e2e/environment.mjs (a second server, random key, no key in any JSON answer) (row 56b) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41643110520), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41643110546) |
+| `env.HERMES_HOME` | `03f4cfe` | The import source: with no folder HERMES_HOME is read before ~/.hermes, a given folder wins, the import writes only into LIGHTAGENT_HOME and leaves the Hermes home unchanged, a missing folder is refused with no fallback; an empty value is refused as a value (Unix; current behavior): backend desktop_setup.rs, host runs.py environment, browser e2e/environment.mjs (row 56b) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41643110520), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41643110546) |
+| `api.post.sessions.id.regenerate` | `0e53dd3` | Browser on the real backend with a local model stub (e2e/regenerate.mjs, row 56c, check at 0e53dd3): a finished answer replaces the saved one; failure, refusal, empty and Stop keep it; a stale Try again is refused 409 with the runs unchanged. Host runs.py regenerate (R1; desktop run at 03f4cfe); backend api.rs and profile_scoped.rs (ownership, write permission, stale ids); the switch gate is switch.rs. Native WebView R2-R5 stay D8 | [check](https://github.com/dlroqa/Lightagent/actions/runs/41651923887), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41643110546) |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- D7 note (2026-11-03, rows 41-52): 94 rows implemented with backend, host and browser evidence (see the table below and DESKTOP_PROGRESS.md). Not counted yet, with the reason: `cli.identity.credential.rotate.opt.expires-in` and `cli.remote-credential.list.opt.profile` (UI controls, no browser check), `cli.init.opt.profile` and `cli.init.opt.base-url` (the browser check does not assert what the request carried), `env.LIGHTAGENT_HOME` (no explicit check that the home shown is the variable's), the two `--secret-stdin` rows (D8 host-side secret input), `env.LIGHTAGENT_CREDENTIAL_KEY` (backend only), `env.LIGHTAGENT_API_KEY` (remote mode, D8), `env.HERMES_HOME`, `slash.help`, `slash.reload`, `slash.onboard`, `slash.onboard-remove`, `api.get.jev`, `api.post.jev.verify`, `api.post.sessions.id.regenerate` (its browser check is scripted, not the real backend) and `cli.chat.opt.profile`
+--- with
+- D7 note (2026-11-03, rows 41-52): 94 rows implemented with backend, host and browser evidence (see the table below and DESKTOP_PROGRESS.md). Not counted yet, with the reason: `cli.identity.credential.rotate.opt.expires-in` and `cli.remote-credential.list.opt.profile` (UI controls, no browser check), `cli.init.opt.profile` and `cli.init.opt.base-url` (the browser check does not assert what the request carried), `env.LIGHTAGENT_HOME` (no explicit check that the home shown is the variable's), the two `--secret-stdin` rows (D8 host-side secret input), `env.LIGHTAGENT_CREDENTIAL_KEY` (backend only), `env.LIGHTAGENT_API_KEY` (remote mode, D8), `env.HERMES_HOME`, `slash.help`, `slash.reload`, `slash.onboard`, `slash.onboard-remove`, `api.get.jev`, `api.post.jev.verify`, `api.post.sessions.id.regenerate` (its browser check is scripted, not the real backend) and `cli.chat.opt.profile`
+- D7 note (2026-11-03, rows 53-56, owner `a0fb357c`): 14 rows implemented with backend, host and browser evidence (table below). `api.get.jev` and `api.post.jev.verify` rest on deterministic stub evidence; live Jev is not claimed. `env.HERMES_HOME`: an empty value is refused as a value (current behavior, recorded, not changed). Remaining 4: `cli.remote-credential.add.opt.secret-stdin` and `cli.remote-credential.rotate.opt.secret-stdin` (D8 host-side secret input), `env.LIGHTAGENT_API_KEY` (D8 remote mode), `cli.chat.opt.profile` (owner decision: the desktop's profile switch persists the active profile, which `chat --profile` does not).
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+## Next
+--- with
+## Rows 53-56 (2026-11-03, owner `a0fb357c`)
+
+Ownership: session `a0fb357c` (lightagent-c7) took over from
+`445d73de`, which had no live process and had ended its last turn at
+12:44Z (claim: #144 issuecomment-6604428555).
+
+Failures diagnosed (each a product or test defect, fixed by source edit;
+no rerun was needed):
+- #149: the secrets gate rejected a home-directory placeholder, and the
+  contract check read a backticked `/onboard` in an agent.ts comment as a
+  client path. Request 143 → 940b1f5.
+- #150: `Vec<Value>` without `Value` in scope, and the same contract
+  issue for `/help`. Request 144 → 7315635, then the two-parent merge
+  46abd19 (tree 7423c97, row 54's fix carried up; POST /merges
+  conflicted).
+- #153: the sidebar shortens long titles (request 148), and the stale
+  check first counted model requests, which the server can make after
+  a saved run (request 149). It now asserts the 409 and unchanged runs.
+
+| Row | PR | Head | Evidence |
+|---|---|---|---|
+| 53 | #148 | `67b8124` | rotate --expires-in, rc list --profile, init --profile/--base-url, LIGHTAGENT_HOME |
+| 54 | #149 | `940b1f5` | /onboard, /onboard remove |
+| 55 | #150 | `46abd19` | /help, /reload |
+| 56a | #151 | `4e1aa34` | Jev status and check (stub evidence; desktop_jev.rs, runs.py jev, jev.mjs) |
+| 56b | #152 | `03f4cfe` | LIGHTAGENT_CREDENTIAL_KEY, HERMES_HOME (second host, second server) |
+| 56c | #153 | `0e53dd3` | regenerate on the real backend in the browser |
+
+Coverage: 218 of 222. Remaining, with the stage and the criterion:
+
+| ID | Missing | Stage | Done when |
+|---|---|---|---|
+| `cli.remote-credential.add.opt.secret-stdin` | host-side secret input | D8 | a native picker or host-owned input; no secret byte in WebView state, IPC answers, logs, diagnostics, screenshots or artifacts (seeded-secret tests); cancel, unreadable and invalid fail safely; the source file is never deleted |
+| `cli.remote-credential.rotate.opt.secret-stdin` | the same | D8 | the same, for rotate |
+| `env.LIGHTAGENT_API_KEY` | remote mode | D8 | the desktop against a `serve --key-env LIGHTAGENT_API_KEY` server: the key held by the host, never in the renderer; a failing remote is an error with no local execution |
+| `cli.chat.opt.profile` | an owner decision | D7/D8 | the desktop's profile switch persists the active profile (DESKTOP_ARCHITECTURE.md §7); `chat --profile` does not. Either accept the switch as the equivalent and document the difference, or build a non-persisting per-conversation profile; then evidence |
+
+## Next
+
+The owner's order of 2026-11-03 (sole owner `a0fb357c`):
+
+1. The owner's decision on `cli.chat.opt.profile`.
+2. D8: native WebView verification (an e2e-hooks evaluation channel into
+   the real WebView, or tauri-driver where it exists, with unavailable
+   platforms stated), host-side secret input for the two
+   `--secret-stdin` rows, and remote mode with `LIGHTAGENT_API_KEY`.
+3. Before merge approval: the backport or reordered delivery for the
+   rows 15-31 and 21-39 defect windows, and #147's placement.
+
+=== end
