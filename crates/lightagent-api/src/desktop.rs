@@ -96,10 +96,23 @@ impl DesktopGuard {
     }
 }
 
+/// Marks a request the guard admitted: it came from the desktop host that
+/// started this runtime. No client can set it; routes reserved to the local
+/// operator read it.
+#[derive(Clone, Copy, Debug)]
+pub struct Admitted;
+
 /// Axum middleware applying [`DesktopGuard::check`] to every request.
-pub async fn guard(State(guard): State<DesktopGuard>, request: Request, next: Next) -> Response {
+pub async fn guard(
+    State(guard): State<DesktopGuard>,
+    mut request: Request,
+    next: Next,
+) -> Response {
     match guard.check(request.headers()) {
-        Ok(()) => next.run(request).await,
+        Ok(()) => {
+            request.extensions_mut().insert(Admitted);
+            next.run(request).await
+        }
         Err(refusal) => (
             refusal.status(),
             Json(json!({

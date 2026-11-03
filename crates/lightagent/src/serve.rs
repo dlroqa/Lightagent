@@ -71,6 +71,13 @@ impl RunFactory for LightweightRunFactory {
         let paths = LightagentPaths::rooted_at(&self.root);
         crate::ops::Profiles::open(&paths)?.perform(request)
     }
+    async fn identity(
+        &self,
+        request: lightagent_api::ops::IdentityRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        crate::identity_admin::perform(&self.root, request)
+    }
+
     async fn workers_change(
         &self,
         request: lightagent_api::ops::WorkerRequest,
