@@ -1,0 +1,1261 @@
+=== base 630988a5922fe50a64b6ef7478479a669540ffe5
+=== message
+Desktop docs: rows 34-35 (memory), 92 of 227
+
+- PROGRESS: row 34 (memory through one shared operation set: the
+  RunFactory route, the /memories paths that keep the checkers' self-tests
+  meaningful, empty text refused) and row 35 (the Memory screen; the
+  render failure and its two test causes; the host scenario widened to
+  every memory operation); Next.
+- MERGE_ORDER: rows 34-35.
+- Inventory and parity: the 24 `cli.memory.*` rows implemented at
+  `630988a` with backend, host and browser evidence (native WebView is
+  D8): 68 → 92 of 227.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.add",
+   "kind": "command",
+   "surface": "lightagent memory add",
+   "source": "crates/lightagent/src/lib.rs:299",
+   "behavior": "Remember a fact",
+   "tree_key": "cmd lightagent memory add",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: add",
+   "backend": "extract: memory::add()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.add",
+   "kind": "command",
+   "surface": "lightagent memory add",
+   "source": "crates/lightagent/src/lib.rs:299",
+   "behavior": "Remember a fact",
+   "tree_key": "cmd lightagent memory add",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: add",
+   "backend": "extract: memory::add()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.add` | `lightagent memory add` | applicable | yes | Memory/Knowledge: add | extract: memory::add() | not-started | `crates/lightagent/src/lib.rs:299` |
+--- with
+| `cli.memory.add` | `lightagent memory add` | applicable | yes | Memory/Knowledge: add | extract: memory::add() | implemented | `crates/lightagent/src/lib.rs:299` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.add.arg.text",
+   "kind": "argument",
+   "surface": "lightagent memory add <text>",
+   "source": "crates/lightagent/src/lib.rs:299",
+   "behavior": "Fact",
+   "tree_key": "arg lightagent memory add <text>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: add — input 'text'",
+   "backend": "extract: memory::add()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.add.arg.text",
+   "kind": "argument",
+   "surface": "lightagent memory add <text>",
+   "source": "crates/lightagent/src/lib.rs:299",
+   "behavior": "Fact",
+   "tree_key": "arg lightagent memory add <text>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: add — input 'text'",
+   "backend": "extract: memory::add()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.add.arg.text` | `lightagent memory add <text>` | applicable | yes | Memory/Knowledge: add — input 'text' | extract: memory::add() | not-started | `crates/lightagent/src/lib.rs:299` |
+--- with
+| `cli.memory.add.arg.text` | `lightagent memory add <text>` | applicable | yes | Memory/Knowledge: add — input 'text' | extract: memory::add() | implemented | `crates/lightagent/src/lib.rs:299` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.add.opt.kind",
+   "kind": "option",
+   "surface": "lightagent memory add --kind",
+   "source": "crates/lightagent/src/lib.rs:299",
+   "behavior": "Kind",
+   "tree_key": "arg lightagent memory add --kind",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: add — input 'kind'",
+   "backend": "extract: memory::add()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.add.opt.kind",
+   "kind": "option",
+   "surface": "lightagent memory add --kind",
+   "source": "crates/lightagent/src/lib.rs:299",
+   "behavior": "Kind",
+   "tree_key": "arg lightagent memory add --kind",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: add — input 'kind'",
+   "backend": "extract: memory::add()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.add.opt.kind` | `lightagent memory add --kind` | applicable | yes | Memory/Knowledge: add — input 'kind' | extract: memory::add() | not-started | `crates/lightagent/src/lib.rs:299` |
+--- with
+| `cli.memory.add.opt.kind` | `lightagent memory add --kind` | applicable | yes | Memory/Knowledge: add — input 'kind' | extract: memory::add() | implemented | `crates/lightagent/src/lib.rs:299` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.add.opt.tag",
+   "kind": "option",
+   "surface": "lightagent memory add --tag",
+   "source": "crates/lightagent/src/lib.rs:299",
+   "behavior": "Tag (repeat)",
+   "tree_key": "arg lightagent memory add --tag",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: add — input 'tag'",
+   "backend": "extract: memory::add()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.add.opt.tag",
+   "kind": "option",
+   "surface": "lightagent memory add --tag",
+   "source": "crates/lightagent/src/lib.rs:299",
+   "behavior": "Tag (repeat)",
+   "tree_key": "arg lightagent memory add --tag",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: add — input 'tag'",
+   "backend": "extract: memory::add()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.add.opt.tag` | `lightagent memory add --tag` | applicable | yes | Memory/Knowledge: add — input 'tag' | extract: memory::add() | not-started | `crates/lightagent/src/lib.rs:299` |
+--- with
+| `cli.memory.add.opt.tag` | `lightagent memory add --tag` | applicable | yes | Memory/Knowledge: add — input 'tag' | extract: memory::add() | implemented | `crates/lightagent/src/lib.rs:299` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.list",
+   "kind": "command",
+   "surface": "lightagent memory list",
+   "source": "crates/lightagent/src/lib.rs:307",
+   "behavior": "List memories",
+   "tree_key": "cmd lightagent memory list",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: memories",
+   "backend": "extract: memory::list()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.list",
+   "kind": "command",
+   "surface": "lightagent memory list",
+   "source": "crates/lightagent/src/lib.rs:307",
+   "behavior": "List memories",
+   "tree_key": "cmd lightagent memory list",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: memories",
+   "backend": "extract: memory::list()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.list` | `lightagent memory list` | applicable | yes | Memory/Knowledge: memories | extract: memory::list() | not-started | `crates/lightagent/src/lib.rs:307` |
+--- with
+| `cli.memory.list` | `lightagent memory list` | applicable | yes | Memory/Knowledge: memories | extract: memory::list() | implemented | `crates/lightagent/src/lib.rs:307` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.reflect",
+   "kind": "command",
+   "surface": "lightagent memory reflect",
+   "source": "crates/lightagent/src/lib.rs:309",
+   "behavior": "Structured working knowledge",
+   "tree_key": "cmd lightagent memory reflect",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: reflect",
+   "backend": "extract: memory::reflect()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.reflect",
+   "kind": "command",
+   "surface": "lightagent memory reflect",
+   "source": "crates/lightagent/src/lib.rs:309",
+   "behavior": "Structured working knowledge",
+   "tree_key": "cmd lightagent memory reflect",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: reflect",
+   "backend": "extract: memory::reflect()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.reflect` | `lightagent memory reflect` | applicable | yes | Memory/Knowledge: reflect | extract: memory::reflect() | not-started | `crates/lightagent/src/lib.rs:309` |
+--- with
+| `cli.memory.reflect` | `lightagent memory reflect` | applicable | yes | Memory/Knowledge: reflect | extract: memory::reflect() | implemented | `crates/lightagent/src/lib.rs:309` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.reflect.arg.topic",
+   "kind": "argument",
+   "surface": "lightagent memory reflect <topic>",
+   "source": "crates/lightagent/src/lib.rs:309",
+   "behavior": "Optional topic",
+   "tree_key": "arg lightagent memory reflect <topic>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: reflect — input 'topic'",
+   "backend": "extract: memory::reflect()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.reflect.arg.topic",
+   "kind": "argument",
+   "surface": "lightagent memory reflect <topic>",
+   "source": "crates/lightagent/src/lib.rs:309",
+   "behavior": "Optional topic",
+   "tree_key": "arg lightagent memory reflect <topic>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: reflect — input 'topic'",
+   "backend": "extract: memory::reflect()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.reflect.arg.topic` | `lightagent memory reflect <topic>` | applicable | yes | Memory/Knowledge: reflect — input 'topic' | extract: memory::reflect() | not-started | `crates/lightagent/src/lib.rs:309` |
+--- with
+| `cli.memory.reflect.arg.topic` | `lightagent memory reflect <topic>` | applicable | yes | Memory/Knowledge: reflect — input 'topic' | extract: memory::reflect() | implemented | `crates/lightagent/src/lib.rs:309` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.search",
+   "kind": "command",
+   "surface": "lightagent memory search",
+   "source": "crates/lightagent/src/lib.rs:311",
+   "behavior": "Recall relevant memories",
+   "tree_key": "cmd lightagent memory search",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: search",
+   "backend": "extract: memory::search()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.search",
+   "kind": "command",
+   "surface": "lightagent memory search",
+   "source": "crates/lightagent/src/lib.rs:311",
+   "behavior": "Recall relevant memories",
+   "tree_key": "cmd lightagent memory search",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: search",
+   "backend": "extract: memory::search()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.search` | `lightagent memory search` | applicable | yes | Memory/Knowledge: search | extract: memory::search() | not-started | `crates/lightagent/src/lib.rs:311` |
+--- with
+| `cli.memory.search` | `lightagent memory search` | applicable | yes | Memory/Knowledge: search | extract: memory::search() | implemented | `crates/lightagent/src/lib.rs:311` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.search.arg.query",
+   "kind": "argument",
+   "surface": "lightagent memory search <query>",
+   "source": "crates/lightagent/src/lib.rs:311",
+   "behavior": "Query",
+   "tree_key": "arg lightagent memory search <query>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: search — input 'query'",
+   "backend": "extract: memory::search()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.search.arg.query",
+   "kind": "argument",
+   "surface": "lightagent memory search <query>",
+   "source": "crates/lightagent/src/lib.rs:311",
+   "behavior": "Query",
+   "tree_key": "arg lightagent memory search <query>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: search — input 'query'",
+   "backend": "extract: memory::search()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.search.arg.query` | `lightagent memory search <query>` | applicable | yes | Memory/Knowledge: search — input 'query' | extract: memory::search() | not-started | `crates/lightagent/src/lib.rs:311` |
+--- with
+| `cli.memory.search.arg.query` | `lightagent memory search <query>` | applicable | yes | Memory/Knowledge: search — input 'query' | extract: memory::search() | implemented | `crates/lightagent/src/lib.rs:311` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.search.opt.top-k",
+   "kind": "option",
+   "surface": "lightagent memory search --top-k",
+   "source": "crates/lightagent/src/lib.rs:311",
+   "behavior": "Result count",
+   "tree_key": "arg lightagent memory search --top-k",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: search — input 'top-k'",
+   "backend": "extract: memory::search()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.search.opt.top-k",
+   "kind": "option",
+   "surface": "lightagent memory search --top-k",
+   "source": "crates/lightagent/src/lib.rs:311",
+   "behavior": "Result count",
+   "tree_key": "arg lightagent memory search --top-k",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: search — input 'top-k'",
+   "backend": "extract: memory::search()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.search.opt.top-k` | `lightagent memory search --top-k` | applicable | yes | Memory/Knowledge: search — input 'top-k' | extract: memory::search() | not-started | `crates/lightagent/src/lib.rs:311` |
+--- with
+| `cli.memory.search.opt.top-k` | `lightagent memory search --top-k` | applicable | yes | Memory/Knowledge: search — input 'top-k' | extract: memory::search() | implemented | `crates/lightagent/src/lib.rs:311` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.candidates",
+   "kind": "command",
+   "surface": "lightagent memory candidates",
+   "source": "crates/lightagent/src/lib.rs:317",
+   "behavior": "Durable-fact candidates from a session",
+   "tree_key": "cmd lightagent memory candidates",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: session → memory candidates",
+   "backend": "extract: memory::candidates()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.candidates",
+   "kind": "command",
+   "surface": "lightagent memory candidates",
+   "source": "crates/lightagent/src/lib.rs:317",
+   "behavior": "Durable-fact candidates from a session",
+   "tree_key": "cmd lightagent memory candidates",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: session → memory candidates",
+   "backend": "extract: memory::candidates()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.candidates` | `lightagent memory candidates` | applicable | yes | Conversations: session → memory candidates | extract: memory::candidates() | not-started | `crates/lightagent/src/lib.rs:317` |
+--- with
+| `cli.memory.candidates` | `lightagent memory candidates` | applicable | yes | Conversations: session → memory candidates | extract: memory::candidates() | implemented | `crates/lightagent/src/lib.rs:317` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.candidates.arg.session",
+   "kind": "argument",
+   "surface": "lightagent memory candidates <session>",
+   "source": "crates/lightagent/src/lib.rs:317",
+   "behavior": "Session id",
+   "tree_key": "arg lightagent memory candidates <session>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: session → memory candidates — input 'session'",
+   "backend": "extract: memory::candidates()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.candidates.arg.session",
+   "kind": "argument",
+   "surface": "lightagent memory candidates <session>",
+   "source": "crates/lightagent/src/lib.rs:317",
+   "behavior": "Session id",
+   "tree_key": "arg lightagent memory candidates <session>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: session → memory candidates — input 'session'",
+   "backend": "extract: memory::candidates()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.candidates.arg.session` | `lightagent memory candidates <session>` | applicable | yes | Conversations: session → memory candidates — input 'session' | extract: memory::candidates() | not-started | `crates/lightagent/src/lib.rs:317` |
+--- with
+| `cli.memory.candidates.arg.session` | `lightagent memory candidates <session>` | applicable | yes | Conversations: session → memory candidates — input 'session' | extract: memory::candidates() | implemented | `crates/lightagent/src/lib.rs:317` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.promote",
+   "kind": "command",
+   "surface": "lightagent memory promote",
+   "source": "crates/lightagent/src/lib.rs:319",
+   "behavior": "Save a reviewed session message as memory",
+   "tree_key": "cmd lightagent memory promote",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: message → remember",
+   "backend": "extract: memory::promote()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.promote",
+   "kind": "command",
+   "surface": "lightagent memory promote",
+   "source": "crates/lightagent/src/lib.rs:319",
+   "behavior": "Save a reviewed session message as memory",
+   "tree_key": "cmd lightagent memory promote",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: message → remember",
+   "backend": "extract: memory::promote()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.promote` | `lightagent memory promote` | applicable | yes | Conversations: message → remember | extract: memory::promote() | not-started | `crates/lightagent/src/lib.rs:319` |
+--- with
+| `cli.memory.promote` | `lightagent memory promote` | applicable | yes | Conversations: message → remember | extract: memory::promote() | implemented | `crates/lightagent/src/lib.rs:319` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.promote.arg.session",
+   "kind": "argument",
+   "surface": "lightagent memory promote <session>",
+   "source": "crates/lightagent/src/lib.rs:319",
+   "behavior": "Session id",
+   "tree_key": "arg lightagent memory promote <session>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: message → remember — input 'session'",
+   "backend": "extract: memory::promote()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.promote.arg.session",
+   "kind": "argument",
+   "surface": "lightagent memory promote <session>",
+   "source": "crates/lightagent/src/lib.rs:319",
+   "behavior": "Session id",
+   "tree_key": "arg lightagent memory promote <session>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: message → remember — input 'session'",
+   "backend": "extract: memory::promote()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.promote.arg.session` | `lightagent memory promote <session>` | applicable | yes | Conversations: message → remember — input 'session' | extract: memory::promote() | not-started | `crates/lightagent/src/lib.rs:319` |
+--- with
+| `cli.memory.promote.arg.session` | `lightagent memory promote <session>` | applicable | yes | Conversations: message → remember — input 'session' | extract: memory::promote() | implemented | `crates/lightagent/src/lib.rs:319` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.promote.arg.message",
+   "kind": "argument",
+   "surface": "lightagent memory promote <message>",
+   "source": "crates/lightagent/src/lib.rs:319",
+   "behavior": "1-based message number",
+   "tree_key": "arg lightagent memory promote <message>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: message → remember — input 'message'",
+   "backend": "extract: memory::promote()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.promote.arg.message",
+   "kind": "argument",
+   "surface": "lightagent memory promote <message>",
+   "source": "crates/lightagent/src/lib.rs:319",
+   "behavior": "1-based message number",
+   "tree_key": "arg lightagent memory promote <message>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: message → remember — input 'message'",
+   "backend": "extract: memory::promote()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.promote.arg.message` | `lightagent memory promote <message>` | applicable | yes | Conversations: message → remember — input 'message' | extract: memory::promote() | not-started | `crates/lightagent/src/lib.rs:319` |
+--- with
+| `cli.memory.promote.arg.message` | `lightagent memory promote <message>` | applicable | yes | Conversations: message → remember — input 'message' | extract: memory::promote() | implemented | `crates/lightagent/src/lib.rs:319` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.promote.opt.text",
+   "kind": "option",
+   "surface": "lightagent memory promote --text",
+   "source": "crates/lightagent/src/lib.rs:319",
+   "behavior": "Edited fact",
+   "tree_key": "arg lightagent memory promote --text",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: message → remember — input 'text'",
+   "backend": "extract: memory::promote()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.promote.opt.text",
+   "kind": "option",
+   "surface": "lightagent memory promote --text",
+   "source": "crates/lightagent/src/lib.rs:319",
+   "behavior": "Edited fact",
+   "tree_key": "arg lightagent memory promote --text",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: message → remember — input 'text'",
+   "backend": "extract: memory::promote()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.promote.opt.text` | `lightagent memory promote --text` | applicable | yes | Conversations: message → remember — input 'text' | extract: memory::promote() | not-started | `crates/lightagent/src/lib.rs:319` |
+--- with
+| `cli.memory.promote.opt.text` | `lightagent memory promote --text` | applicable | yes | Conversations: message → remember — input 'text' | extract: memory::promote() | implemented | `crates/lightagent/src/lib.rs:319` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.promote.opt.kind",
+   "kind": "option",
+   "surface": "lightagent memory promote --kind",
+   "source": "crates/lightagent/src/lib.rs:319",
+   "behavior": "Kind",
+   "tree_key": "arg lightagent memory promote --kind",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: message → remember — input 'kind'",
+   "backend": "extract: memory::promote()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.promote.opt.kind",
+   "kind": "option",
+   "surface": "lightagent memory promote --kind",
+   "source": "crates/lightagent/src/lib.rs:319",
+   "behavior": "Kind",
+   "tree_key": "arg lightagent memory promote --kind",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: message → remember — input 'kind'",
+   "backend": "extract: memory::promote()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.promote.opt.kind` | `lightagent memory promote --kind` | applicable | yes | Conversations: message → remember — input 'kind' | extract: memory::promote() | not-started | `crates/lightagent/src/lib.rs:319` |
+--- with
+| `cli.memory.promote.opt.kind` | `lightagent memory promote --kind` | applicable | yes | Conversations: message → remember — input 'kind' | extract: memory::promote() | implemented | `crates/lightagent/src/lib.rs:319` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.promote.opt.tag",
+   "kind": "option",
+   "surface": "lightagent memory promote --tag",
+   "source": "crates/lightagent/src/lib.rs:319",
+   "behavior": "Tag (repeat)",
+   "tree_key": "arg lightagent memory promote --tag",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: message → remember — input 'tag'",
+   "backend": "extract: memory::promote()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.promote.opt.tag",
+   "kind": "option",
+   "surface": "lightagent memory promote --tag",
+   "source": "crates/lightagent/src/lib.rs:319",
+   "behavior": "Tag (repeat)",
+   "tree_key": "arg lightagent memory promote --tag",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: message → remember — input 'tag'",
+   "backend": "extract: memory::promote()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.promote.opt.tag` | `lightagent memory promote --tag` | applicable | yes | Conversations: message → remember — input 'tag' | extract: memory::promote() | not-started | `crates/lightagent/src/lib.rs:319` |
+--- with
+| `cli.memory.promote.opt.tag` | `lightagent memory promote --tag` | applicable | yes | Conversations: message → remember — input 'tag' | extract: memory::promote() | implemented | `crates/lightagent/src/lib.rs:319` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.update",
+   "kind": "command",
+   "surface": "lightagent memory update",
+   "source": "crates/lightagent/src/lib.rs:332",
+   "behavior": "Correct a fact",
+   "tree_key": "cmd lightagent memory update",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: edit",
+   "backend": "extract: memory::update()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.update",
+   "kind": "command",
+   "surface": "lightagent memory update",
+   "source": "crates/lightagent/src/lib.rs:332",
+   "behavior": "Correct a fact",
+   "tree_key": "cmd lightagent memory update",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: edit",
+   "backend": "extract: memory::update()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.update` | `lightagent memory update` | applicable | yes | Memory/Knowledge: edit | extract: memory::update() | not-started | `crates/lightagent/src/lib.rs:332` |
+--- with
+| `cli.memory.update` | `lightagent memory update` | applicable | yes | Memory/Knowledge: edit | extract: memory::update() | implemented | `crates/lightagent/src/lib.rs:332` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.update.arg.id",
+   "kind": "argument",
+   "surface": "lightagent memory update <id>",
+   "source": "crates/lightagent/src/lib.rs:332",
+   "behavior": "Memory id",
+   "tree_key": "arg lightagent memory update <id>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: edit — input 'id'",
+   "backend": "extract: memory::update()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.update.arg.id",
+   "kind": "argument",
+   "surface": "lightagent memory update <id>",
+   "source": "crates/lightagent/src/lib.rs:332",
+   "behavior": "Memory id",
+   "tree_key": "arg lightagent memory update <id>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: edit — input 'id'",
+   "backend": "extract: memory::update()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.update.arg.id` | `lightagent memory update <id>` | applicable | yes | Memory/Knowledge: edit — input 'id' | extract: memory::update() | not-started | `crates/lightagent/src/lib.rs:332` |
+--- with
+| `cli.memory.update.arg.id` | `lightagent memory update <id>` | applicable | yes | Memory/Knowledge: edit — input 'id' | extract: memory::update() | implemented | `crates/lightagent/src/lib.rs:332` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.update.arg.text",
+   "kind": "argument",
+   "surface": "lightagent memory update <text>",
+   "source": "crates/lightagent/src/lib.rs:332",
+   "behavior": "Corrected text",
+   "tree_key": "arg lightagent memory update <text>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: edit — input 'text'",
+   "backend": "extract: memory::update()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.update.arg.text",
+   "kind": "argument",
+   "surface": "lightagent memory update <text>",
+   "source": "crates/lightagent/src/lib.rs:332",
+   "behavior": "Corrected text",
+   "tree_key": "arg lightagent memory update <text>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: edit — input 'text'",
+   "backend": "extract: memory::update()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.update.arg.text` | `lightagent memory update <text>` | applicable | yes | Memory/Knowledge: edit — input 'text' | extract: memory::update() | not-started | `crates/lightagent/src/lib.rs:332` |
+--- with
+| `cli.memory.update.arg.text` | `lightagent memory update <text>` | applicable | yes | Memory/Knowledge: edit — input 'text' | extract: memory::update() | implemented | `crates/lightagent/src/lib.rs:332` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.forget",
+   "kind": "command",
+   "surface": "lightagent memory forget",
+   "source": "crates/lightagent/src/lib.rs:334",
+   "behavior": "Forget one memory",
+   "tree_key": "cmd lightagent memory forget",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: forget (confirm)",
+   "backend": "extract: memory::forget()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.forget",
+   "kind": "command",
+   "surface": "lightagent memory forget",
+   "source": "crates/lightagent/src/lib.rs:334",
+   "behavior": "Forget one memory",
+   "tree_key": "cmd lightagent memory forget",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: forget (confirm)",
+   "backend": "extract: memory::forget()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.forget` | `lightagent memory forget` | applicable | yes | Memory/Knowledge: forget (confirm) | extract: memory::forget() | not-started | `crates/lightagent/src/lib.rs:334` |
+--- with
+| `cli.memory.forget` | `lightagent memory forget` | applicable | yes | Memory/Knowledge: forget (confirm) | extract: memory::forget() | implemented | `crates/lightagent/src/lib.rs:334` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.forget.arg.id",
+   "kind": "argument",
+   "surface": "lightagent memory forget <id>",
+   "source": "crates/lightagent/src/lib.rs:334",
+   "behavior": "Memory id",
+   "tree_key": "arg lightagent memory forget <id>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: forget (confirm) — input 'id'",
+   "backend": "extract: memory::forget()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.forget.arg.id",
+   "kind": "argument",
+   "surface": "lightagent memory forget <id>",
+   "source": "crates/lightagent/src/lib.rs:334",
+   "behavior": "Memory id",
+   "tree_key": "arg lightagent memory forget <id>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: forget (confirm) — input 'id'",
+   "backend": "extract: memory::forget()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.forget.arg.id` | `lightagent memory forget <id>` | applicable | yes | Memory/Knowledge: forget (confirm) — input 'id' | extract: memory::forget() | not-started | `crates/lightagent/src/lib.rs:334` |
+--- with
+| `cli.memory.forget.arg.id` | `lightagent memory forget <id>` | applicable | yes | Memory/Knowledge: forget (confirm) — input 'id' | extract: memory::forget() | implemented | `crates/lightagent/src/lib.rs:334` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.memory.clear",
+   "kind": "command",
+   "surface": "lightagent memory clear",
+   "source": "crates/lightagent/src/lib.rs:336",
+   "behavior": "Forget everything",
+   "tree_key": "cmd lightagent memory clear",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: clear (typed confirmation)",
+   "backend": "extract: memory::clear()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.memory.clear",
+   "kind": "command",
+   "surface": "lightagent memory clear",
+   "source": "crates/lightagent/src/lib.rs:336",
+   "behavior": "Forget everything",
+   "tree_key": "cmd lightagent memory clear",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: clear (typed confirmation)",
+   "backend": "extract: memory::clear()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.memory.clear` | `lightagent memory clear` | applicable | yes | Memory/Knowledge: clear (typed confirmation) | extract: memory::clear() | not-started | `crates/lightagent/src/lib.rs:336` |
+--- with
+| `cli.memory.clear` | `lightagent memory clear` | applicable | yes | Memory/Knowledge: clear (typed confirmation) | extract: memory::clear() | implemented | `crates/lightagent/src/lib.rs:336` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "parity_implemented": 68,
+--- with
+  "parity_implemented": 92,
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Implemented: 68 of 227
+--- with
+- Implemented: 92 of 227
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Total rows: 355
+--- with
+- D7 note (2026-11-03, rows 34-35): the 24 `cli.memory.*` rows (add, list, search, reflect, candidates, promote, update, forget, clear, with their arguments and options) are implemented at `630988a` through one shared implementation (`memory::perform` via `RunFactory::memory`): backend `desktop_memory.rs` (CLI and API alike), host `runs.py memory` (every operation through the host, matched with the CLI) and browser `e2e/memory.mjs`; native WebView is D8. The nine `api.*.memories*` rows are backend rows and not counted; `config.memory` (auto capture, injected count, result count) has no control yet
+- Total rows: 355
+=== replace docs/desktop/DESKTOP_MERGE_ORDER.md
+--- find
+| 34+ | D7 (remaining CLI parity, diagnostics bundle and its redaction), then D8-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+--- with
+| 34 | D7-1 memory through one shared operation set for the CLI, the API and the desktop | https://github.com/dlroqa/Lightagent/pull/128 | `desktop/d7a-memory-ops` | `desktop/d6h-git-fixture` (`dd83001`) | `f681980` | `f681980` |
+| 35 | D7-2 the Memory screen | https://github.com/dlroqa/Lightagent/pull/129 | `desktop/d7b-memory-ui` | `desktop/d7a-memory-ops` (`f681980`) | `630988a` | `630988a` |
+| 36+ | D7 continues (RAG, sessions, workers, identity and remote credentials, init/import/chat, the remaining slash, setup, env and config rows, the diagnostics bundle and its redaction), then D8-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+## Artifacts and retention
+--- with
+## Row 34 — D7-1: memory through one shared operation set
+
+- `lightagent memory` worked on the active profile's memory file directly
+  and the API had no memory route. One implementation now
+  (`crates/lightagent/src/memory.rs`): list, add, update, forget, clear,
+  search (hybrid recall with the configured semantic embedder), reflect,
+  candidates and promote, returning typed results. The CLI prints them as
+  before; `memory::perform` answers the API with exactly the CLI's
+  `--json`, through `ops::MemoryRequest` and `RunFactory::memory` (the
+  profiles pattern; the default refuses). `MemoryStore` locks and
+  re-reads before each change, so the CLI and the API never overwrite each
+  other. New: an empty text is refused for add and update.
+- API (operator) under `/memories` — not `/memory`, which the inventory
+  and contract checkers' self-tests inject as their unlisted probe.
+  Contract `memory.*` with every query listed; the host refuses the memory
+  writes during a profile switch (memory belongs to the active profile).
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-03 | `094`; branch `desktop/d7a-memory-ops`, draft PR #128 | `f681980` / `4f03211` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41558246059 |
+| 2026-11-03 | `check`, `desktop`, `jev evaluation`, `subagents`: **success**, 24 of 24, first run | `f681980` | https://github.com/dlroqa/Lightagent/actions/runs/41558340948, https://github.com/dlroqa/Lightagent/actions/runs/41558341043, https://github.com/dlroqa/Lightagent/actions/runs/41558341167, https://github.com/dlroqa/Lightagent/actions/runs/41558341185 |
+
+## Row 35 — D7-2: the Memory screen
+
+- A Memory screen (account menus, `/memory`): remember with kind and
+  tags, search with a result count, edit, forget (asks first), forget
+  everything (asks first and states the count), the knowledge page with a
+  topic, and from a saved conversation the suggested facts and keeping any
+  user message by its number, optionally edited, with kind and tags.
+- Browser `e2e/memory.mjs` (real harness) and host `runs.py memory` (every
+  operation through the host, matched with the CLI).
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-03 | `095`; branch `desktop/d7b-memory-ui`, draft PR #129 | `d691c90` / `7dd2106` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41559560433 |
+| 2026-11-03 | render **failure**, two test causes: "Search" also named the workspace rail's button; and the harness remembers durable statements automatically (`memory.auto_capture`), so promoting the seeded message's own text merged into that memory | `d691c90` | https://github.com/dlroqa/Lightagent/actions/runs/41559630729 |
+| 2026-11-03 | `096` (scope Search to the screen; promote an edited text, the CLI's `--text`) → `f43378f`: 24 of 24 | `f43378f` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41560232731 |
+| 2026-11-03 | `097`: the host scenario adds reflect, update, promote and clear, so every memory operation has host evidence → `630988a`: **success**, 24 of 24 | `630988a` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41561924601; https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752 |
+
+Coverage: the 24 `cli.memory.*` rows → **92 of 227**.
+
+## Artifacts and retention
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+7. **Next: D7** (remaining CLI parity: memory and RAG, agents and
+   subagents, scheduling, diagnostics with the bundle's redaction checks,
+   import/export, provisioning, where present), then D8-D10 in dependency
+   order. D8 keeps the native WebView checks (Settings, profile switching,
+   close with active runs, run controls, response actions R2-R5,
+   Extensions, MCP, the tool catalog and skill import). Before merge
+   approval (D10): the `providers.remove` window decision, then the exact
+   candidate merge sequence simulated on hosted runners and every
+   candidate tree validated.
+--- with
+7. D7 has started: rows 34-35 (memory: shared operations, then the
+   Memory screen), at 92 of 227.
+8. **Next in D7:** RAG (shared operations and a knowledge view), then
+   sessions, workers, identity and remote credentials, init, import and
+   chat, the remaining slash, setup, env and config rows, and the
+   diagnostics bundle with its redaction checks. Then D8-D10 in dependency
+   order. D8 keeps the native WebView checks (Settings, profile switching,
+   close with active runs, run controls, response actions R2-R5,
+   Extensions, MCP, the tool catalog, skill import and Memory). Before
+   merge approval (D10): the `providers.remove` window decision, then the
+   exact candidate merge sequence simulated on hosted runners and every
+   candidate tree validated.
+=== end
