@@ -1,0 +1,27 @@
+=== base 06965514305d3d5c271e5f5a9317ab8b7ae29a62
+=== message
+D7-5: `lightagent sessions delete --json` prints JSON
+
+check run 41567158114: `sessions delete` ignored --json and printed text,
+so a script (and the new test) could not read it. With --json it now
+prints {"id", "deleted"}; the text output is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent/src/lib.rs
+--- find
+            let id = SessionId::parse(&id).map_err(|error| error.to_string())?;
+            if sessions.delete(&id).map_err(|error| error.to_string())? {
+                println!("Deleted session {}.", id.as_str());
+            } else {
+--- with
+            let id = SessionId::parse(&id).map_err(|error| error.to_string())?;
+            let deleted = sessions.delete(&id).map_err(|error| error.to_string())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "id": id.as_str(), "deleted": deleted })
+                );
+            } else if deleted {
+                println!("Deleted session {}.", id.as_str());
+            } else {
+=== end
