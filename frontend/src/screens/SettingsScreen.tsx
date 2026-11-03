@@ -18,6 +18,7 @@ import { Card } from "../components/Card";
 import { ConfigEditorCard } from "../components/ConfigEditor";
 import { ProviderCredentialCard } from "../components/ProviderCredential";
 import { ProvidersCard } from "../components/Providers";
+import { SecurityCard } from "../components/SecurityCard";
 import { WorkspaceCard } from "../components/Workspace";
 import { TopBar } from "../components/Shell";
 import { usePoll } from "../hooks/usePoll";
@@ -177,6 +178,8 @@ export function SettingsScreen() {
               value={value?.wall_clock_secs} disabled={!value || saving}
               onSave={(wall_clock_secs) => persist({ wall_clock_secs })} />
           </Card>
+
+          <SecurityCard />
 
           <Card title="Profiles">
             <p className="card__note">

@@ -24,6 +24,7 @@ import { checkIdentity } from "./identity.mjs";
 import { checkSetup } from "./setup.mjs";
 import { checkDiagnostics } from "./diagnostics.mjs";
 import { checkUpdate } from "./update.mjs";
+import { checkSecurity } from "./security.mjs";
 import { checkRemoteCredentials } from "./credentials.mjs";
 
 const BASE = (process.env.PANEL_BASE ?? "http://127.0.0.1:8735").replace(/\/+$/, "");
@@ -492,6 +493,12 @@ async function main() {
     failures.push(...(await checkConfigEditor(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`config editor: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Reads the [security] section; changes nothing.
+  try {
+    failures.push(...(await checkSecurity(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`security: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
   }
   // Changes the config file and saves a test secret: last.
   try {

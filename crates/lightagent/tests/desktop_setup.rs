@@ -192,6 +192,7 @@ fn init_over_the_api_does_what_the_cli_does() {
     );
     assert_eq!(status, 200, "{api_report}");
     for field in ["active_profile", "base_url"] {
+        assert!(cli_report[field].is_string(), "{field}: {cli_report}");
         assert_eq!(api_report[field], cli_report[field], "{field}");
     }
     assert_eq!(api_report["home"], arg(&by_api));

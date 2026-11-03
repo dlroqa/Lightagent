@@ -1117,6 +1117,37 @@ class _Releases(http.server.BaseHTTPRequestHandler):
         pass
 
 
+def scenario_security(host, cli):
+    """D7 through the host transport: [security] as GET /config reports it
+    is `config show`'s, every field present; an approval policy saved
+    through PUT /settings is what the CLI reports, and is restored."""
+    check = Checks("security")
+
+    def cli_security():
+        return json.loads(harness.run_cli(cli, "--json", "config", "show")).get("security") or {}
+
+    status, view = host.fetch("GET", f"{API}/config")
+    by_cli = cli_security()
+    check.expect("[security] through the host is the CLI's, every field present",
+                 status == 200 and ((view or {}).get("config") or {}).get("security") == by_cli
+                 and isinstance(by_cli.get("approval_policy"), str)
+                 and isinstance(by_cli.get("remote_tools_default"), bool)
+                 and isinstance(by_cli.get("privacy_mode"), bool), (status, view, by_cli))
+    status, settings = host.fetch("GET", f"{API}/settings")
+    original = (settings or {}).get("approval_policy")
+    target = "strict" if original != "strict" else "permissive"
+    try:
+        status, saved = host.fetch("PUT", f"{API}/settings", dict(settings or {}, approval_policy=target))
+        after = cli_security()
+        check.expect("an approval policy saved through the host is the CLI's",
+                     status == 200 and after.get("approval_policy") == target
+                     and after.get("privacy_mode") == by_cli.get("privacy_mode"), (status, saved, after))
+    finally:
+        _, current = host.fetch("GET", f"{API}/settings")
+        host.fetch("PUT", f"{API}/settings", dict(current or {}, approval_policy=original))
+    return check
+
+
 def scenario_update_check(host, cli):
     """D7 through the host transport, against the controlled release API:
     the runtime's check reports the release the CLI's check reports, only
@@ -1188,6 +1219,7 @@ def main():
             ("setup", lambda: scenario_setup(host, cli)),
             ("config_sections", lambda: scenario_config_sections(host, cli)),
             ("update_check", lambda: scenario_update_check(host, cli)),
+            ("security", lambda: scenario_security(host, cli)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]
