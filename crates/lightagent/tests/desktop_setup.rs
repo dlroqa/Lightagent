@@ -141,7 +141,9 @@ fn arg(path: &Path) -> &str {
 
 /// The configuration without what differs by home.
 fn settings(home: &Path) -> Value {
-    cli_json(home, &["config", "show"])["config"].clone()
+    let shown = cli_json(home, &["config", "show"]);
+    assert!(shown["inference"].is_object(), "{shown}");
+    shown
 }
 
 fn active(home: &Path) -> Value {
