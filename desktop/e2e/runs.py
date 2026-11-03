@@ -494,6 +494,29 @@ def scenario_workers(host, cli):
     status, revoked = host.fetch("DELETE", f"{API}/workers/reviewer")
     check.expect("revoked through the host",
                  status == 200 and (revoked or {}).get("revoked") is True, (status, revoked))
+
+    # Another profile's workers (--profile), assigned to a profile (--worker).
+    def cli_status_of(profile):
+        return json.loads(harness.run_cli(cli, "--json", "workers", "status", "--profile", profile))
+
+    harness.run_cli(cli, "profile", "create", "e2e-helper")
+    _, catalog = host.fetch("GET", f"{API}/profiles")
+    active = (catalog or {}).get("active_profile")
+    status, assigned = host.fetch("PUT", f"{API}/workers/coder", {"worker": active, "profile": "e2e-helper"})
+    _, helper = host.fetch("GET", f"{API}/workers?profile=e2e-helper")
+    coder = next((w for w in (helper or {}).get("workers", []) if w.get("role") == "coder"), {})
+    check.expect("a role of the profile named assigned through the host to a profile, as the CLI reports it",
+                 status == 200 and isinstance((assigned or {}).get("id"), str)
+                 and str(coder.get("worker", "")).startswith("assigned:")
+                 and (helper or {}).get("workers") == cli_status_of("e2e-helper"), (status, assigned, helper))
+    _, listed = host.fetch("GET", f"{API}/workers")
+    check.expect("the active profile's workers are untouched",
+                 (listed or {}).get("workers") == cli_status(), listed)
+    status, revoked = host.fetch("DELETE", f"{API}/workers/coder?profile=e2e-helper")
+    _, helper = host.fetch("GET", f"{API}/workers?profile=e2e-helper")
+    check.expect("revoked through the host for the profile named, as the CLI reports it",
+                 status == 200 and (revoked or {}).get("revoked") is True
+                 and (helper or {}).get("workers") == cli_status_of("e2e-helper"), (status, revoked, helper))
     return check
 
 
@@ -541,6 +564,16 @@ def scenario_knowledge(host, cli):
         check.expect("indexed through the host",
                      status == 200 and [i.get("source") for i in (added or {}).get("indexed", [])] == ["host-rivers.md"],
                      (status, added))
+        named = os.path.join(work, "host-lakes.md")
+        with open(named, "w", encoding="utf-8") as handle:
+            handle.write("Host lakes hold still water between hills.\n")
+        status, added = host.fetch("POST", f"{API}/knowledge", {"path": named, "source": "host-named-source"})
+        cli_names = [s.get("source") for s in cli_json("rag", "list").get("sources", [])]
+        check.expect("a source name through the host names the document, as --source does for the CLI",
+                     status == 200
+                     and [i.get("source") for i in (added or {}).get("indexed", [])] == ["host-named-source"]
+                     and "host-named-source" in cli_names and "host-lakes.md" not in cli_names,
+                     (status, added, cli_names))
         status, listed = host.fetch("GET", f"{API}/knowledge")
         check.expect("the host lists what the CLI lists", status == 200 and listed == cli_json("rag", "list"),
                      (status, listed))
