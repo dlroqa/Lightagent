@@ -17,6 +17,7 @@ import { checkToolCatalog } from "./tools.mjs";
 import { checkSkillImport } from "./skills.mjs";
 import { checkMemory } from "./memory.mjs";
 import { checkKnowledge } from "./knowledge.mjs";
+import { checkSessions } from "./sessions.mjs";
 
 const BASE = (process.env.PANEL_BASE ?? "http://127.0.0.1:8735").replace(/\/+$/, "");
 const OUT_DIR = process.env.OUT_DIR ?? "screens";
@@ -384,6 +385,12 @@ async function main() {
     failures.push(...(await checkJevStates(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`jev states: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Seeds, opens and deletes a conversation.
+  try {
+    failures.push(...(await checkSessions(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`sessions: ${err instanceof Error ? err.message : String(err)}`);
   }
   // Indexes documents (and clears them only when the index was empty).
   try {
