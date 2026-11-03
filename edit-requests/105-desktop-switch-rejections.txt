@@ -1,0 +1,82 @@
+=== base c426c091c0d33ab4802a1e04b4d5c3d79e205651
+=== message
+Desktop host: a profile switch's rejections are applied before its runs are cancelled
+
+stop_runs rejected each pending approval and then cancelled every run at
+once. The run applies a rejection itself, while waiting with a select on
+the decision and the cancel token; when both were ready, the cancel could
+win, and the run ended Cancelled with no rejection recorded (desktop host
+run 41567976364, switch.py `pending`: "the approval was rejected
+explicitly" not seen; every earlier run had passed). The D5 acceptance
+item "a profile switch with a pending approval records an explicit
+rejection" was therefore not guaranteed.
+
+The host now waits, within the drain timeout it already uses, until each
+run it rejected has left its approval wait, and only then cancels. A run
+the rejection let finish is simply not running any more; the cancel and
+the drain below are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace desktop/src-tauri/src/switch.rs
+--- find
+    for row in approvals["approvals"].as_array().into_iter().flatten() {
+        if row["pending"].is_null() {
+            continue;
+        }
+        if let Some(run) = row["run"].as_str() {
+            call(
+                host,
+                &base,
+                &authorization,
+                reqwest::Method::POST,
+                &format!("/api/lightagent/v1/approvals/{run}"),
+                Some(json!({ "approve": false })),
+            )
+            .await?;
+        }
+    }
+--- with
+    let mut rejected: Vec<String> = Vec::new();
+    for row in approvals["approvals"].as_array().into_iter().flatten() {
+        if row["pending"].is_null() {
+            continue;
+        }
+        if let Some(run) = row["run"].as_str() {
+            call(
+                host,
+                &base,
+                &authorization,
+                reqwest::Method::POST,
+                &format!("/api/lightagent/v1/approvals/{run}"),
+                Some(json!({ "approve": false })),
+            )
+            .await?;
+            rejected.push(run.to_owned());
+        }
+    }
+    // A run applies a rejection itself. Cancelling at once could overtake
+    // it (the run would end cancelled with no rejection recorded), so wait
+    // until each rejected run has left its approval wait. The cancel below
+    // still stops whatever has not, once the deadline passes.
+    let deadline = Instant::now() + DRAIN_TIMEOUT;
+    while !rejected.is_empty() && Instant::now() < deadline {
+        let runs = call(
+            host,
+            &base,
+            &authorization,
+            reqwest::Method::GET,
+            "/api/lightagent/v1/runs",
+            None,
+        )
+        .await?;
+        let waiting: Vec<String> = runs_of(&runs)
+            .into_iter()
+            .filter(|run| run["status"] == "awaiting_approval")
+            .filter_map(|run| run["id"].as_str().map(str::to_owned))
+            .collect();
+        rejected.retain(|id| waiting.contains(id));
+        if !rejected.is_empty() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+=== end
