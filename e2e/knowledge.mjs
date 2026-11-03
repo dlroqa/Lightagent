@@ -5,7 +5,7 @@
 // crates/lightagent/tests/desktop_knowledge.rs proves the API's index is
 // the CLI's.
 
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -61,6 +61,23 @@ export async function checkKnowledge(browser, base, outDir) {
       await page.locator("#knowledge-top-k").fill("2");
       await screen.getByRole("button", { name: "Search documents" }).click();
       await page.getByTestId("knowledge-hits").getByText("render-probe-rivers.md", { exact: false }).first().waitFor({ timeout: 10000 });
+    });
+
+    await step("a source name names the document", async () => {
+      const named = join(dir, "named");
+      await mkdir(named);
+      const file = join(named, "render-probe-lakes.md");
+      await writeFile(file, "Render probe lakes hold still water between hills.\n");
+      await page.locator("#knowledge-path").fill(file);
+      await page.locator("#knowledge-source").fill("render-probe-named");
+      await screen.getByRole("button", { name: "Index", exact: true }).click();
+      await page.getByTestId("knowledge-added").getByText("Indexed render-probe-named", { exact: false }).waitFor({ timeout: 10000 });
+      const names = ((await indexNow(base)).sources ?? []).map((source) => source.source);
+      if (!names.includes("render-probe-named") || names.includes("render-probe-lakes.md")) {
+        throw new Error(`indexed ${JSON.stringify(names)}`);
+      }
+      await page.getByTestId("knowledge-sources").getByText("render-probe-named", { exact: false }).waitFor({ timeout: 10000 });
+      await page.locator("#knowledge-source").fill("");
     });
 
     await step("a missing path is shown as skipped", async () => {

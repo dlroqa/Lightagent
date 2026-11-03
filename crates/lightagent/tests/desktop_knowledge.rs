@@ -246,3 +246,44 @@ fn the_cli_and_the_api_keep_one_index() {
     assert_eq!(status, 200, "{raw}");
     assert_eq!(cli_json(&home, &["rag", "list"])["sources"], json!([]));
 }
+
+/// `rag add --source`: the API's `source` names a document exactly as the
+/// CLI's flag does, and both list it under that name.
+#[test]
+fn a_source_name_names_the_document_for_the_cli_and_the_api() {
+    let home = scratch_home("source");
+    cli_ok(&home, &["config", "set", "extensions.enabled", "true"]);
+    cli_ok(&home, &["profile", "create", "work"]);
+    cli_ok(&home, &["profile", "use", "work"]);
+    let docs = home.join("docs");
+    std::fs::create_dir_all(&docs).expect("docs");
+    let api_doc = docs.join("lakes.md");
+    let cli_doc = docs.join("canals.md");
+    std::fs::write(&api_doc, "Lakes hold still water between hills.\n").expect("doc");
+    std::fs::write(&cli_doc, "Canals carry boats between towns.\n").expect("doc");
+    let runtime = start(&home);
+
+    let body = json!({ "path": api_doc, "source": "named-by-api" }).to_string();
+    let (status, raw) = call(&runtime, "POST", KNOWLEDGE, Some(&body));
+    assert_eq!(status, 200, "{raw}");
+    let by_api = parsed(&raw);
+    assert_eq!(by_api["indexed"][0]["source"], "named-by-api", "{by_api}");
+    let by_cli = cli_json(
+        &home,
+        &["rag", "add", arg(&cli_doc), "--source", "named-by-cli"],
+    );
+    assert_eq!(by_cli["indexed"][0]["source"], "named-by-cli", "{by_cli}");
+    assert_eq!(
+        by_api["indexed"][0]["chunks"],
+        by_cli["indexed"][0]["chunks"]
+    );
+
+    let (status, raw) = call(&runtime, "GET", KNOWLEDGE, None);
+    assert_eq!(status, 200, "{raw}");
+    let listed = parsed(&raw);
+    assert_eq!(listed, cli_json(&home, &["rag", "list"]));
+    assert_eq!(
+        sources(&listed),
+        vec!["named-by-api".to_owned(), "named-by-cli".to_owned()]
+    );
+}
