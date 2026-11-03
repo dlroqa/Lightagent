@@ -687,6 +687,23 @@ export const agentApi = {
   checkMcpServer: (name: string) =>
     jsonRequest<McpCheck>(`/mcp/servers/${encodeURIComponent(name)}/check`, { method: "POST" }),
   workers: () => jsonRequest<{ workers: WorkerReadiness[] }>("/workers"),
+  /** `lightagent workers status|assign|revoke`, for the active profile or the one named. */
+  workersFor: (profile?: string) =>
+    jsonRequest<{ workers: WorkerReadiness[] }>(
+      profile ? `/workers?profile=${encodeURIComponent(profile)}` : "/workers",
+    ),
+  assignWorker: (role: string, worker: string | null, profile?: string) =>
+    jsonRequest<Record<string, unknown>>(`/workers/${encodeURIComponent(role)}`, {
+      method: "PUT",
+      body: JSON.stringify({ worker, profile }),
+    }),
+  revokeWorker: (role: string, profile?: string) =>
+    jsonRequest<{ role: string; revoked: boolean }>(
+      profile
+        ? `/workers/${encodeURIComponent(role)}?profile=${encodeURIComponent(profile)}`
+        : `/workers/${encodeURIComponent(role)}`,
+      { method: "DELETE" },
+    ),
   settings: () => jsonRequest<LightagentSettings>("/settings"),
   saveSettings: (settings: LightagentSettings) =>
     jsonRequest<LightagentSettings>("/settings", {

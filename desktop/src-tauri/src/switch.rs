@@ -91,6 +91,8 @@ pub fn blocked_while_switching(operation: &str) -> bool {
             | "memory.promote"
             | "knowledge.add"
             | "knowledge.clear"
+            | "workers.assign"
+            | "workers.revoke"
     )
 }
 
@@ -452,6 +454,8 @@ mod tests {
         assert!(blocked_while_switching("memory.promote"));
         assert!(blocked_while_switching("knowledge.add"));
         assert!(blocked_while_switching("knowledge.clear"));
+        assert!(blocked_while_switching("workers.assign"));
+        assert!(blocked_while_switching("workers.revoke"));
         for reading in [
             "extensions.list",
             "extensions.show",

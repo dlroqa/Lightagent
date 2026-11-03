@@ -83,6 +83,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/lightagent/v1/tools", get(list_tools))
         .route("/api/lightagent/v1/workers", get(list_workers))
         .route(
+            "/api/lightagent/v1/workers/{role}",
+            axum::routing::put(assign_worker).delete(revoke_worker),
+        )
+        .route(
             "/api/lightagent/v1/provider",
             get(get_provider_capabilities),
         )
@@ -674,6 +678,56 @@ async fn list_tools(
 /// Each specialist role's readiness: state, worker, model, skill, tools and
 /// reason codes. An ordinary user sees only their own profile's, as an
 /// untrusted run of it would have it; nothing names another profile.
+#[derive(Deserialize)]
+struct AssignWorkerBody {
+    #[serde(default)]
+    worker: Option<String>,
+    #[serde(default)]
+    profile: Option<String>,
+}
+
+/// `lightagent workers assign <role>`: to the profile `worker`, or the
+/// built-in worker; for the active profile or the one named. Operator only.
+async fn assign_worker(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(role): Path<String>,
+    Json(body): Json<AssignWorkerBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let request = ops::WorkerRequest::Assign {
+        role,
+        worker: body.worker,
+        profile: body.profile,
+    };
+    match state.manager.workers_change(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+/// `lightagent workers revoke <role>`. Operator only.
+async fn revoke_worker(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(role): Path<String>,
+    Query(query): Query<ProfileQuery>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let request = ops::WorkerRequest::Revoke {
+        role,
+        profile: query.profile,
+    };
+    match state.manager.workers_change(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
 async fn list_workers(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

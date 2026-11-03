@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Wrench } from "lucide-react";
 
-import { agentApi, type SkillInfo, type ToolInfo, type WorkerReadiness } from "../api/agent";
+import { agentApi, type ProfileSummary, type SkillInfo, type ToolInfo, type WorkerReadiness } from "../api/agent";
 import { Card } from "../components/Card";
 import { Empty, Pill } from "../components/Bits";
 import { ExtensionsCard } from "../components/Extensions";
@@ -52,27 +52,78 @@ const READINESS: Record<WorkerReadiness["state"], { label: string; tone: Tone }>
   unavailable: { label: "Unavailable", tone: "neutral" },
 };
 
+function causeText(cause: unknown): string {
+  return (cause instanceof Error ? cause.message : String(cause)).replace(/^\d{3}:\s*/, "");
+}
+
+/**
+ * Each specialist role's readiness, and its assignment, through the
+ * operations `lightagent workers` shares: whose workers (when there is more
+ * than one profile), and per role Assign (the built-in worker or another
+ * profile) and Revoke.
+ */
 function Specialists() {
   const [workers, setWorkers] = useState<WorkerReadiness[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
+  const [lead, setLead] = useState("");
+  const [targets, setTargets] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function load(profile: string) {
+    try {
+      setWorkers((await agentApi.workersFor(profile || undefined)).workers);
+      setError(null);
+    } catch (cause) {
+      setError(causeText(cause));
+    }
+  }
+
   useEffect(() => {
-    let live = true;
     agentApi
-      .workers()
-      .then((response) => live && setWorkers(response.workers))
-      .catch((cause) => live && setError(cause instanceof Error ? cause.message : String(cause)));
-    return () => {
-      live = false;
-    };
+      .profiles()
+      .then((catalog) => {
+        setProfiles(catalog.profiles);
+        setLead(catalog.active_profile);
+        void load(catalog.active_profile);
+      })
+      .catch(() => void load(""));
   }, []);
+
+  async function change(action: () => Promise<string>) {
+    setBusy(true);
+    setMessage(null);
+    try {
+      setMessage(await action());
+    } catch (cause) {
+      setMessage(causeText(cause));
+    } finally {
+      setBusy(false);
+      void load(lead);
+    }
+  }
+
   if (error) return <p className="muted">Specialist readiness is unavailable: {error}</p>;
   if (!workers) return <span className="muted">Loading specialists…</span>;
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+    <div data-testid="specialists" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {profiles.length > 1 && (
+        <div className="field">
+          <label className="field__label" htmlFor="workers-lead">Workers of</label>
+          <select id="workers-lead" className="input" value={lead} disabled={busy}
+            onChange={(event) => { setLead(event.target.value); setWorkers(null); void load(event.target.value); }}>
+            {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name || profile.id}</option>)}
+          </select>
+        </div>
+      )}
+      {message && <div className="notice notice--info" role="status">{message}</div>}
       {workers.map((worker) => {
         const state = READINESS[worker.state] ?? { label: worker.state, tone: "neutral" as Tone };
+        const choice = targets[worker.role] ?? "builtin";
         return (
-          <div key={worker.role} style={{ padding: "10px 12px", border: "1px solid var(--border, #2a2a2a)", borderRadius: 8 }}>
+          <div key={worker.role} data-testid={`worker-${worker.role}`}
+            style={{ padding: "10px 12px", border: "1px solid var(--border, #2a2a2a)", borderRadius: 8 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <strong style={{ minWidth: 90, textTransform: "capitalize" }}>{worker.role}</strong>
               <Pill tone={state.tone}>{state.label}</Pill>
@@ -87,6 +138,30 @@ function Specialists() {
                 {worker.reasons.join(", ").replaceAll("_", " ")}
               </p>
             )}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
+              <label className="muted" htmlFor={`worker-target-${worker.role}`}>Assign to</label>
+              <select id={`worker-target-${worker.role}`} className="input" style={{ maxWidth: 220 }} value={choice}
+                disabled={busy} onChange={(event) => setTargets((current) => ({ ...current, [worker.role]: event.target.value }))}>
+                <option value="builtin">Built-in worker</option>
+                {profiles.filter((profile) => profile.id !== lead).map((profile) => (
+                  <option key={profile.id} value={profile.id}>{`Profile ${profile.name || profile.id}`}</option>
+                ))}
+              </select>
+              <button type="button" className="btn" disabled={busy} aria-label={`Assign ${worker.role}`}
+                onClick={() => void change(async () => {
+                  await agentApi.assignWorker(worker.role, choice === "builtin" ? null : choice, lead || undefined);
+                  return `Assigned ${worker.role} to ${choice === "builtin" ? "the built-in worker" : `profile ${choice}`}.`;
+                })}>
+                Assign
+              </button>
+              <button type="button" className="btn" disabled={busy} aria-label={`Revoke ${worker.role}`}
+                onClick={() => void change(async () => {
+                  const result = await agentApi.revokeWorker(worker.role, lead || undefined);
+                  return result.revoked ? `Revoked the ${worker.role} assignment.` : `There was no ${worker.role} assignment.`;
+                })}>
+                Revoke
+              </button>
+            </div>
           </div>
         );
       })}

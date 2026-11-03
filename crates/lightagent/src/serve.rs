@@ -71,6 +71,19 @@ impl RunFactory for LightweightRunFactory {
         let paths = LightagentPaths::rooted_at(&self.root);
         crate::ops::Profiles::open(&paths)?.perform(request)
     }
+    async fn workers_change(
+        &self,
+        request: lightagent_api::ops::WorkerRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        use lightagent_api::ops::{OpCategory, OpError};
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let config = ConfigStore::at(&paths)
+            .load()
+            .map_err(|error| OpError::new(OpCategory::Internal, error.to_string()))?;
+        crate::worker_assignment(&self.root, &config, request)
+            .map_err(|error| OpError::new(OpCategory::Invalid, error))
+    }
+
     async fn rag(
         &self,
         request: lightagent_api::ops::RagRequest,
