@@ -4,6 +4,7 @@ import { Shell } from "./components/Shell";
 import { Agent } from "./screens/Agent";
 import { AgentTools } from "./screens/AgentTools";
 import { IdentityScreen } from "./screens/IdentityScreen";
+import { RemoteCredentialsScreen } from "./screens/RemoteCredentialsScreen";
 import { KnowledgeScreen } from "./screens/KnowledgeScreen";
 import { MemoryScreen } from "./screens/MemoryScreen";
 import { ProfilesScreen } from "./screens/ProfilesScreen";
@@ -20,6 +21,7 @@ export function App() {
         <Route path="memory" element={<MemoryScreen />} />
         <Route path="knowledge" element={<KnowledgeScreen />} />
         <Route path="admin/identity" element={<IdentityScreen />} />
+        <Route path="admin/credentials" element={<RemoteCredentialsScreen />} />
         <Route path="profiles" element={<ProfilesScreen />} />
         <Route path="settings" element={<SettingsScreen />} />
         <Route path="*" element={<Navigate to="/" replace />} />

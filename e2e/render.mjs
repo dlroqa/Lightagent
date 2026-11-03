@@ -20,6 +20,7 @@ import { checkKnowledge } from "./knowledge.mjs";
 import { checkSessions } from "./sessions.mjs";
 import { checkWorkers } from "./workers.mjs";
 import { checkIdentity } from "./identity.mjs";
+import { checkRemoteCredentials } from "./credentials.mjs";
 
 const BASE = (process.env.PANEL_BASE ?? "http://127.0.0.1:8735").replace(/\/+$/, "");
 const OUT_DIR = process.env.OUT_DIR ?? "screens";
@@ -51,6 +52,7 @@ const ROUTES = [
   { name: "memory", hash: "#/memory", agentBacked: true, mustContain: "Remember something" },
   { name: "knowledge", hash: "#/knowledge", agentBacked: true, mustContain: "Add documents" },
   { name: "identity", hash: "#/admin/identity", agentBacked: true, mustContain: "Identity store" },
+  { name: "credentials", hash: "#/admin/credentials", agentBacked: true, mustContain: "Master key" },
 ];
 
 /** Wait until `mustContain` shows, or a fallback sign does, or time runs out. */
@@ -388,6 +390,12 @@ async function main() {
     failures.push(...(await checkJevStates(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`jev states: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Adds, rotates and revokes a remote credential; re-seals the harness's.
+  try {
+    failures.push(...(await checkRemoteCredentials(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`credentials: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
   }
   // Creates users, issues, rotates and revokes credentials, owns a profile.
   try {

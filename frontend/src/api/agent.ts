@@ -531,6 +531,34 @@ export interface IdentityIssued {
   secret_delivered_to: string;
 }
 
+/** `lightagent remote-credential status`: the vault and its key, never a secret. */
+export interface RemoteCredentialStatus {
+  vault: "absent" | "present";
+  generation?: number;
+  grants?: { active: number; revoked: number; expired: number };
+  key_configured: boolean;
+  key_fingerprint?: string | null;
+  key_source: "file" | "env" | null;
+  unopenable_with_configured_key?: number;
+}
+
+/** One grant: metadata only, never a secret or ciphertext. */
+export interface RemoteCredentialGrant {
+  id: string;
+  profile: string;
+  service: string;
+  operations: string[] | null;
+  destinations: string[];
+  state: string;
+  version: number;
+  created_unix: number;
+  expires_unix: number | null;
+  revoked_unix: number | null;
+  rotated_unix: number | null;
+  max_requests_per_run: number | null;
+  key_fingerprint: string;
+}
+
 export interface ApprovalRow {
   run: string;
   pending: PendingApproval | null;
@@ -810,6 +838,43 @@ export const agentApi = {
     jsonRequest<{ revoked: string }>("/identity/grants/revoke", { method: "POST", body: JSON.stringify(request) }),
   identityAudit: (limit: number) =>
     jsonRequest<{ records: IdentityAuditRecord[] }>(`/identity/audit?limit=${limit}`),
+  /** `lightagent remote-credential …` as the local operator. Secrets are read by the runtime from files; never sent here. */
+  remoteCredentialStatus: () => jsonRequest<RemoteCredentialStatus>("/remote-credentials/vault"),
+  createCredentialKey: (path: string) =>
+    jsonRequest<{ key_file: string; key_fingerprint: string; next: string }>("/remote-credentials/keys", {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    }),
+  remoteCredentials: (profile?: string) =>
+    jsonRequest<{ credentials: RemoteCredentialGrant[] }>(
+      profile ? `/remote-credentials?profile=${encodeURIComponent(profile)}` : "/remote-credentials",
+    ),
+  addRemoteCredential: (request: {
+    profile: string;
+    service: string;
+    destinations: string[];
+    operations: string[];
+    expires_in?: number;
+    max_requests_per_run?: number;
+    secret_file: string;
+  }) => jsonRequest<{ added: string; profile: string; service: string }>("/remote-credentials", {
+    method: "POST",
+    body: JSON.stringify(request),
+  }),
+  rotateRemoteCredential: (id: string, secretFile: string) =>
+    jsonRequest<{ rotated: string; version: number }>(`/remote-credentials/${encodeURIComponent(id)}/rotate`, {
+      method: "POST",
+      body: JSON.stringify({ secret_file: secretFile }),
+    }),
+  revokeRemoteCredential: (id: string) =>
+    jsonRequest<{ revoked: string }>(`/remote-credentials/${encodeURIComponent(id)}/revoke`, { method: "POST" }),
+  remoteCredentialAudit: (limit: number) =>
+    jsonRequest<{ records: Record<string, unknown>[] }>(`/remote-credentials/audit?limit=${limit}`),
+  rekeyRemoteCredentials: (previousKeyFile: string) =>
+    jsonRequest<{ resealed: number; key_fingerprint: string }>("/remote-credentials/rekey", {
+      method: "POST",
+      body: JSON.stringify({ previous_key_file: previousKeyFile }),
+    }),
   settings: () => jsonRequest<LightagentSettings>("/settings"),
   saveSettings: (settings: LightagentSettings) =>
     jsonRequest<LightagentSettings>("/settings", {

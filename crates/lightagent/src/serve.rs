@@ -78,6 +78,13 @@ impl RunFactory for LightweightRunFactory {
         crate::identity_admin::perform(&self.root, request)
     }
 
+    async fn remote_credentials(
+        &self,
+        request: lightagent_api::ops::RemoteCredentialRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        crate::remote_credentials::perform(&self.root, request)
+    }
+
     async fn workers_change(
         &self,
         request: lightagent_api::ops::WorkerRequest,

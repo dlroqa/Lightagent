@@ -173,6 +173,34 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/lightagent/v1/identity/audit", get(identity_audit))
         .route(
+            "/api/lightagent/v1/remote-credentials",
+            get(list_remote_credentials).post(add_remote_credential),
+        )
+        .route(
+            "/api/lightagent/v1/remote-credentials/vault",
+            get(remote_credential_vault),
+        )
+        .route(
+            "/api/lightagent/v1/remote-credentials/keys",
+            post(create_credential_key),
+        )
+        .route(
+            "/api/lightagent/v1/remote-credentials/audit",
+            get(remote_credential_audit),
+        )
+        .route(
+            "/api/lightagent/v1/remote-credentials/rekey",
+            post(rekey_remote_credentials),
+        )
+        .route(
+            "/api/lightagent/v1/remote-credentials/{id}/rotate",
+            post(rotate_remote_credential),
+        )
+        .route(
+            "/api/lightagent/v1/remote-credentials/{id}/revoke",
+            post(revoke_remote_credential),
+        )
+        .route(
             "/api/lightagent/v1/memories",
             get(list_memories).post(add_memory).delete(clear_memories),
         )
@@ -2645,6 +2673,151 @@ async fn identity_audit(
 ) -> Response {
     let request = ops::IdentityRequest::Audit { limit: query.limit };
     identity_operation(&state, &headers, admitted, request).await
+}
+
+/// A `lightagent remote-credential …` command through the embedder (see
+/// [`ops::RemoteCredentialRequest`]), for the local operator only. No
+/// request or answer carries a secret.
+async fn remote_credential_operation(
+    state: &AppState,
+    headers: &HeaderMap,
+    admitted: FromDesktop,
+    request: ops::RemoteCredentialRequest,
+) -> Response {
+    if let Some(rejection) = local_operator(state, headers, admitted.is_some()) {
+        return rejection;
+    }
+    match state.manager.remote_credentials(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn remote_credential_vault(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+) -> Response {
+    let request = ops::RemoteCredentialRequest::Status;
+    remote_credential_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct KeyFileBody {
+    path: String,
+}
+
+async fn create_credential_key(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Json(body): Json<KeyFileBody>,
+) -> Response {
+    let request = ops::RemoteCredentialRequest::Keygen { path: body.path };
+    remote_credential_operation(&state, &headers, admitted, request).await
+}
+
+async fn list_remote_credentials(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Query(query): Query<ProfileQuery>,
+) -> Response {
+    let request = ops::RemoteCredentialRequest::List {
+        profile: query.profile,
+    };
+    remote_credential_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct AddRemoteCredentialBody {
+    profile: String,
+    service: String,
+    #[serde(default)]
+    destinations: Vec<String>,
+    #[serde(default)]
+    operations: Vec<String>,
+    #[serde(default)]
+    expires_in: Option<u64>,
+    #[serde(default)]
+    max_requests_per_run: Option<u32>,
+    #[serde(default)]
+    secret_file: Option<String>,
+}
+
+async fn add_remote_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Json(body): Json<AddRemoteCredentialBody>,
+) -> Response {
+    let request = ops::RemoteCredentialRequest::Add {
+        profile: body.profile,
+        service: body.service,
+        destinations: body.destinations,
+        operations: body.operations,
+        expires_in: body.expires_in,
+        max_requests_per_run: body.max_requests_per_run,
+        secret_file: body.secret_file,
+    };
+    remote_credential_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct SecretFileBody {
+    #[serde(default)]
+    secret_file: Option<String>,
+}
+
+async fn rotate_remote_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(id): Path<String>,
+    Json(body): Json<SecretFileBody>,
+) -> Response {
+    let request = ops::RemoteCredentialRequest::Rotate {
+        id,
+        secret_file: body.secret_file,
+    };
+    remote_credential_operation(&state, &headers, admitted, request).await
+}
+
+async fn revoke_remote_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(id): Path<String>,
+) -> Response {
+    let request = ops::RemoteCredentialRequest::Revoke(id);
+    remote_credential_operation(&state, &headers, admitted, request).await
+}
+
+async fn remote_credential_audit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Query(query): Query<AuditQuery>,
+) -> Response {
+    let request = ops::RemoteCredentialRequest::Audit { limit: query.limit };
+    remote_credential_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct RekeyBody {
+    previous_key_file: String,
+}
+
+async fn rekey_remote_credentials(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Json(body): Json<RekeyBody>,
+) -> Response {
+    let request = ops::RemoteCredentialRequest::Rekey {
+        previous_key_file: body.previous_key_file,
+    };
+    remote_credential_operation(&state, &headers, admitted, request).await
 }
 
 /// An import of skills from a repository or folder (new scope).

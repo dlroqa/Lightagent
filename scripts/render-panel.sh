@@ -56,6 +56,19 @@ cargo build -p lightagent --bin lightagent
 # model. Port zero is deliberately unreachable and keeps the test isolated.
 ./target/debug/lightagent init --base-url http://127.0.0.1:0 >/dev/null
 
+# The credential vault: the server opens it with a key outside the home. One
+# grant, for an MCP server that does not exist, is sealed with a previous key
+# so the browser check has something to re-seal.
+export RENDER_PREVIOUS_CREDENTIAL_KEY="$work_dir/previous-credential.key"
+./target/debug/lightagent remote-credential keygen "$RENDER_PREVIOUS_CREDENTIAL_KEY" >/dev/null
+printf 'render-previous-secret\n' >"$work_dir/previous.secret"
+LIGHTAGENT_CREDENTIAL_KEY_FILE="$RENDER_PREVIOUS_CREDENTIAL_KEY" ./target/debug/lightagent \
+  remote-credential add default --service mcp:render-seed --destination https://seed.render.invalid \
+  --secret-file "$work_dir/previous.secret" >/dev/null
+rm -f -- "$work_dir/previous.secret"
+./target/debug/lightagent remote-credential keygen "$work_dir/credential.key" >/dev/null
+export LIGHTAGENT_CREDENTIAL_KEY_FILE="$work_dir/credential.key"
+
 echo "== start standalone Lightagent (port $AGENT_PORT) =="
 ./target/debug/lightagent serve --host 127.0.0.1 --port "$AGENT_PORT" \
   --web-root frontend/dist >"$agent_log" 2>&1 &

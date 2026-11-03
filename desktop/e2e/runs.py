@@ -520,6 +520,64 @@ def scenario_workers(host, cli):
     return check
 
 
+def scenario_remote_credentials(host, cli):
+    """D7 through the host transport: the vault's status (with its key's
+    source), a grant added from a secret file (its secret never in an
+    answer), the listing, a rotation, a revocation and the audit equal the
+    CLI's; an add without a secret file is refused and adds nothing."""
+    import shutil
+    import tempfile
+
+    check = Checks("remote_credentials")
+    work = tempfile.mkdtemp(prefix="lightagent-e2e-credentials-")
+
+    def cli_json(*args):
+        return json.loads(harness.run_cli(cli, "--json", *args))
+
+    try:
+        _, catalog = host.fetch("GET", f"{API}/profiles")
+        active = (catalog or {}).get("active_profile")
+        status, shown = host.fetch("GET", f"{API}/remote-credentials/vault")
+        check.expect("status through the host equals the CLI's, the key from a file",
+                     status == 200 and shown == cli_json("remote-credential", "status")
+                     and (shown or {}).get("key_source") == "file", (status, shown))
+        secret = "e2e-host-secret-4d5e6f7a8b9c"
+        secret_file = os.path.join(work, "host.secret")
+        with open(secret_file, "w", encoding="utf-8") as handle:
+            handle.write(secret + "\n")
+        body = {"profile": active, "service": "mcp:e2e-docs", "destinations": ["https://docs.e2e.invalid"]}
+        status, refused = host.fetch("POST", f"{API}/remote-credentials", body)
+        check.expect("an add without a secret file is refused and adds nothing",
+                     status == 400 and cli_json("remote-credential", "list").get("credentials") == [],
+                     (status, refused))
+        status, added = host.fetch("POST", f"{API}/remote-credentials", dict(body, secret_file=secret_file))
+        grant = (added or {}).get("added")
+        check.expect("added through the host from the file, the secret not in the answer",
+                     status == 200 and isinstance(grant, str) and secret not in json.dumps(added), (status, added))
+        _, listed = host.fetch("GET", f"{API}/remote-credentials?profile={active}")
+        check.expect("grants through the host equal the CLI's, with no secret",
+                     listed == cli_json("remote-credential", "list", "--profile", active)
+                     and secret not in json.dumps(listed), listed)
+        rotated_file = os.path.join(work, "host-rotated.secret")
+        with open(rotated_file, "w", encoding="utf-8") as handle:
+            handle.write("e2e-host-secret-rotated-1a2b3c\n")
+        status, rotated = host.fetch("POST", f"{API}/remote-credentials/{grant}/rotate", {"secret_file": rotated_file})
+        versions = [g.get("version") for g in cli_json("remote-credential", "list").get("credentials", [])]
+        check.expect("rotated through the host, version 2 for the CLI",
+                     status == 200 and (rotated or {}).get("version") == 2 and versions == [2], (status, rotated))
+        status, revoked = host.fetch("POST", f"{API}/remote-credentials/{grant}/revoke")
+        states = [g.get("state") for g in cli_json("remote-credential", "list").get("credentials", [])]
+        check.expect("revoked through the host, revoked for the CLI",
+                     status == 200 and states == ["revoked"], (status, revoked, states))
+        status, audit = host.fetch("GET", f"{API}/remote-credentials/audit?limit=3")
+        check.expect("the audit through the host equals the CLI's, and holds no secret",
+                     status == 200 and audit == cli_json("remote-credential", "audit", "--limit", "3")
+                     and secret not in json.dumps(audit), (status, audit))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return check
+
+
 def scenario_identity(host, cli):
     """D7 through the host transport: identity status, a user, a credential
     issued to a new file (its secret never in an answer), credentials,
@@ -862,6 +920,12 @@ def main():
     provider = harness.FakeProvider()
     scripts(provider)
     harness.prepare_home(cli, home, provider)
+    # The vault's key, outside the home; the host's runtime and the CLI
+    # calls here both inherit it.
+    import tempfile
+    key_dir = tempfile.mkdtemp(prefix="lightagent-e2e-credential-key-")
+    harness.run_cli(cli, "remote-credential", "keygen", os.path.join(key_dir, "credential.key"))
+    os.environ["LIGHTAGENT_CREDENTIAL_KEY_FILE"] = os.path.join(key_dir, "credential.key")
     env = dict(os.environ, LIGHTAGENT_DESKTOP_E2E_DRIVER="1", LIGHTAGENT_DESKTOP_E2E_REPORT=report)
     host = harness.Host(command, env, os.path.join(out, "driver-runs.log"))
     results, failures = {}, []
@@ -887,6 +951,7 @@ def main():
             ("sessions", lambda: scenario_sessions(host, cli)),
             ("workers", lambda: scenario_workers(host, cli)),
             ("identity", lambda: scenario_identity(host, cli)),
+            ("remote_credentials", lambda: scenario_remote_credentials(host, cli)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]
