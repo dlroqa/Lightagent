@@ -1,0 +1,161 @@
+=== base e366bdd9c7769185a782271fd58447995f89be18
+=== message
+Row 53: the audit's evidence gaps (test-only)
+
+The rows 41-52 evidence audit found five rows with a UI path and backend
+tests but no complete check at one level. This adds those checks; no
+product code changes.
+
+- identity credential rotate --expires-in: the browser rotates with an
+  expiry and the replacement expires in about that time.
+- remote-credential list --profile: the browser's Show filter asks the API
+  for one profile, and a profile with no grants shows none.
+- init --profile and --base-url: the browser asserts what Reconfigure sent
+  (force, profile, base URL, model).
+- LIGHTAGENT_HOME: the home doctor reports is the variable's home in the
+  backend test, through the host (which passes its environment to the
+  runtime), and on the Diagnostics screen.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace e2e/identity.mjs
+--- find
+      await page.locator("#identity-rotate-file").fill(rotated);
+      await row.getByRole("button", { name: `Rotate ${keyId}` }).click();
+      await announced(`to replace ${keyId}`);
+--- with
+      await page.locator("#identity-rotate-file").fill(rotated);
+      await page.locator("#identity-rotate-expires").fill("900");
+      await row.getByRole("button", { name: `Rotate ${keyId}` }).click();
+      await announced(`to replace ${keyId}`);
+      // `identity credential rotate --expires-in`: the replacement expires in about that time.
+      const replacement = (await get(base, `${API}/credentials?principal=render-alice`)).credentials
+        .find((credential) => credential.replaces === keyId);
+      const left = (replacement?.expires_unix ?? 0) - Date.now() / 1000;
+      if (!(left > 600 && left <= 960)) {
+        throw new Error(`the replacement expires in ${Math.round(left)} s, not about 900: ${JSON.stringify(replacement)}`);
+      }
+=== replace e2e/credentials.mjs
+--- find
+const API = "/api/lightagent/v1/remote-credentials";
+--- with
+const API = "/api/lightagent/v1/remote-credentials";
+const OTHER = "render-rc-other";
+=== replace e2e/credentials.mjs
+--- find
+  let id = "";
+--- with
+  let id = "";
+  let otherMade = false;
+=== replace e2e/credentials.mjs
+--- find
+      await page.screenshot({ path: `${outDir}/credentials-added.png`, fullPage: true });
+    });
+--- with
+      await page.screenshot({ path: `${outDir}/credentials-added.png`, fullPage: true });
+    });
+
+    await step("the list for one profile (remote-credential list --profile)", async () => {
+      const made = await fetch(`${base}/api/lightagent/v1/profiles`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: OTHER }),
+      });
+      if (!made.ok) throw new Error(`could not create the profile ${OTHER}: ${made.status}`);
+      otherMade = true;
+      await page.reload();
+      await screen.waitFor({ timeout: 15000 });
+      const asked = [];
+      const listen = (request) => {
+        const url = new URL(request.url());
+        if (url.pathname === API) asked.push(url.searchParams.get("profile"));
+      };
+      page.on("request", listen);
+      const show = page.locator("#rc-profile");
+      await show.selectOption(OTHER);
+      await page.getByTestId(`rc-${id}`).waitFor({ state: "detached", timeout: 10000 });
+      await screen.getByText("No credentials", { exact: true }).first().waitFor({ timeout: 10000 });
+      await show.selectOption(active);
+      await page.getByTestId(`rc-${id}`).waitFor({ timeout: 10000 });
+      page.off("request", listen);
+      if (!asked.includes(OTHER) || !asked.includes(active)) throw new Error(`the page asked for ${JSON.stringify(asked)}`);
+      await show.selectOption("");
+      await page.getByTestId(`rc-${id}`).waitFor({ timeout: 10000 });
+    });
+=== replace e2e/credentials.mjs
+--- find
+  } finally {
+    await page.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+--- with
+  } finally {
+    await page.close();
+    await rm(dir, { recursive: true, force: true });
+    if (otherMade) await fetch(`${base}/api/lightagent/v1/profiles/${OTHER}`, { method: "DELETE" }).catch(() => {});
+  }
+=== replace e2e/setup.mjs
+--- find
+    const originalModel = (await get(base, "/config")).config.inference.model;
+--- with
+    const originalModel = (await get(base, "/config")).config.inference.model;
+    // What each init request carried (`init --force --profile --base-url --model`).
+    const inits = [];
+    page.on("request", (request) => {
+      if (request.method() === "POST" && new URL(request.url()).pathname === "/api/lightagent/v1/setup/init") {
+        try {
+          inits.push(JSON.parse(request.postData() ?? "{}"));
+        } catch {
+          inits.push({});
+        }
+      }
+    });
+=== replace e2e/setup.mjs
+--- find
+      if ((await get(base, "/profiles")).active_profile !== before.active_profile) throw new Error("the active profile changed");
+--- with
+      const forced = inits.find((sent) => sent.force === true);
+      if (!forced || forced.profile !== before.active_profile || forced.base_url !== endpoint
+        || forced.model !== "render-init-model") {
+        throw new Error(`Reconfigure sent ${JSON.stringify(forced)}`);
+      }
+      if ((await get(base, "/profiles")).active_profile !== before.active_profile) throw new Error("the active profile changed");
+=== replace e2e/diagnostics.mjs
+--- find
+import { readFile } from "node:fs/promises";
+--- with
+import { readFile, realpath } from "node:fs/promises";
+=== replace e2e/diagnostics.mjs
+--- find
+    await page.getByTestId("diagnostics-doctor").getByText(String(doctor.home), { exact: true }).waitFor({ timeout: 15000 });
+--- with
+    await page.getByTestId("diagnostics-doctor").getByText(String(doctor.home), { exact: true }).waitFor({ timeout: 15000 });
+    // The home shown is the one LIGHTAGENT_HOME names (render-panel.sh exports it).
+    const named = process.env.LIGHTAGENT_HOME;
+    const resolve = (path) => realpath(path).catch(() => path);
+    if (!named || (await resolve(String(doctor.home))) !== (await resolve(named))) {
+      failures.push(`diagnostics: the home shown (${doctor.home}) is not LIGHTAGENT_HOME (${named})`);
+    }
+=== replace desktop/e2e/runs.py
+--- find
+    check.expect("doctor through the host equals the CLI's",
+                 status == 200 and doctor == cli_json("doctor"), (status, doctor))
+--- with
+    check.expect("doctor through the host equals the CLI's",
+                 status == 200 and doctor == cli_json("doctor"), (status, doctor))
+    named = os.environ["LIGHTAGENT_HOME"]
+    check.expect("the home doctor reports through the host is LIGHTAGENT_HOME, passed by the host to its runtime",
+                 status == 200 and os.path.realpath(str((doctor or {}).get("home"))) == os.path.realpath(named),
+                 ((doctor or {}).get("home"), named))
+=== replace crates/lightagent/tests/desktop_diagnostics.rs
+--- find
+    assert_eq!(doctor, cli_json(&home, &["doctor"]));
+--- with
+    assert_eq!(doctor, cli_json(&home, &["doctor"]));
+    // The home is the one LIGHTAGENT_HOME names, for the runtime and the CLI.
+    let reported = PathBuf::from(doctor["home"].as_str().expect("doctor home"));
+    assert_eq!(
+        reported.canonicalize().expect("canonical reported home"),
+        home.canonicalize().expect("canonical home"),
+        "{doctor}"
+    );
+=== end
