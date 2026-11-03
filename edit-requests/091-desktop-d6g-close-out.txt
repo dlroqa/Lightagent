@@ -1,0 +1,430 @@
+=== base 5c98b3eee5d2ac49f52de497ca839a670eb6cd9e
+=== message
+D6 close-out: GET /skills through the host, MCP auth and profile fields in the browser, the extensions master switch, every client query in the contract
+
+- Parity correction: `slash.skills` and `skills.roots` were marked
+  implemented at 5c98b3e citing the host `skills` scenario, which never
+  called GET /skills. They are not-started again (62 of 227) until the new
+  host check passes.
+- Host: `skills` now lists GET /skills through the host and checks a
+  global, a profile and an extension skill each with its scope and
+  source; `mcp` saves an HTTP server's auth reference and profile lists
+  through the host and reads them back by name; `extensions` turns the
+  master switch off through the host (the CLI sees it) and on through the
+  CLI (the host sees it).
+- Browser: the MCP form's auth variable, other-profiles and credential
+  profiles are saved and shown by name; the Extensions card gains the
+  master switch (`extensions.enabled`, through the shared config.set
+  operation `lightagent config set` uses), checked off and on.
+- Backend: desktop_extensions.rs, the master switch set over the API is
+  what the CLI lists, and set by the CLI is what the API lists.
+- Contract: the desktop host refuses query parameters its contract does
+  not list. A third one was missing: providers.remove's
+  `expected_revision` (the Providers card's remove, row 15), so removing a
+  saved provider in the desktop app was refused. It is listed now, and
+  scripts/check-desktop-contract.py checks every query parameter the
+  client sends against the contract (with a self-test case), so a missing
+  one fails CI.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace scripts/check-desktop-contract.py
+--- find
+  * cover every path the frontend client (frontend/src/api/agent.ts) calls.
+--- with
+  * cover every path the frontend client (frontend/src/api/agent.ts) calls,
+    and allow every query parameter it sends on that path (the host refuses
+    an unlisted one).
+=== replace scripts/check-desktop-contract.py
+--- find
+def check(contract, server_text, client_text, scan_routes):
+--- with
+def client_queries(text):
+    """Each (path shape, query parameter name) the client sends."""
+    text = text.replace("${BASE}", "")
+    found = set()
+    for literal in re.findall(r'[`"](/[^`"\s]*)[`"]', text):
+        if "?" not in literal:
+            continue
+        path, query = literal.split("?", 1)
+        path = re.sub(r"\$\{[^}]*\}", "{}", path)
+        for pair in query.split("&"):
+            key = pair.split("=", 1)[0]
+            if key and not key.startswith("$"):
+                found.add((path, key))
+    return found
+
+
+def check(contract, server_text, client_text, scan_routes):
+=== replace scripts/check-desktop-contract.py
+--- find
+    for path in sorted(client_paths(client_text) - shapes):
+        errors.append(f"client: frontend calls {path} but no contract operation has that path")
+    return errors
+--- with
+    for path in sorted(client_paths(client_text) - shapes):
+        errors.append(f"client: frontend calls {path} but no contract operation has that path")
+    allowed = {}
+    for op in ops:
+        allowed.setdefault(shape(op["path"]), set()).update(op.get("query", []))
+    for path, key in sorted(client_queries(client_text)):
+        if key not in allowed.get(path, set()):
+            errors.append(f"client: frontend sends ?{key}= to {path} but no contract operation for that path allows it")
+    return errors
+=== replace scripts/check-desktop-contract.py
+--- find
+        for label, args, prefix in (("server route", (added_route, client), "server:"),
+                                    ("client path", (server, added_call), "client:")):
+--- with
+        added_query = client + '\nconst probeQuery = () => jsonRequest("/tools?probe=1");\n'
+        for label, args, prefix in (("server route", (added_route, client), "server:"),
+                                    ("client path", (server, added_call), "client:"),
+                                    ("client query", (server, added_query), "client:")):
+=== replace docs/desktop/contract/operations.json
+--- find
+   "id": "providers.remove",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/providers/{id}"
+  },
+--- with
+   "id": "providers.remove",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/providers/{id}",
+   "query": [
+    "expected_revision"
+   ]
+  },
+=== replace frontend/src/components/Extensions.tsx
+--- find
+        {listing && !listing.enabled && (
+          <div className="notice notice--warn" role="status">
+            Extensions are off for every profile (extensions.enabled), so none of them is used.
+          </div>
+        )}
+--- with
+        {listing && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", margin: "4px 0 8px" }}>
+            <strong>Extensions</strong>
+            <Pill tone={listing.enabled ? "ok" : "neutral"}>
+              {listing.enabled ? "On for every profile" : "Off for every profile"}
+            </Pill>
+            <button type="button" className="btn" disabled={busy}
+              onClick={() => void act(async () => {
+                await agentApi.setConfigKey("extensions.enabled", listing.enabled ? "false" : "true");
+                return listing.enabled
+                  ? "Extensions are off: none adds skills, instructions or MCP servers to new runs. Each keeps its own enabled state."
+                  : "Extensions are on: the active ones add their skills, instructions and MCP servers to new runs (MCP servers still need MCP on).";
+              })}>
+              {listing.enabled ? "Turn extensions off" : "Turn extensions on"}
+            </button>
+          </div>
+        )}
+        {listing && !listing.enabled && (
+          <div className="notice notice--warn" role="status">
+            Extensions are off for every profile (extensions.enabled), so none of them is used.
+          </div>
+        )}
+=== replace e2e/extensions.mjs
+--- find
+    await step("uninstall asks first", async () => {
+--- with
+    await step("the master switch turns every extension off and on", async () => {
+      await card.getByRole("button", { name: "Turn extensions off" }).click();
+      if (!(await until(async () => (await api(base, "/extensions")).body.enabled === false))) {
+        throw new Error("Turn extensions off did not reach the server");
+      }
+      await card.getByText("Off for every profile", { exact: true }).waitFor({ timeout: 10000 });
+      if ((await installed(base))?.active !== false) throw new Error("an extension stayed active with the switch off");
+      await card.getByRole("button", { name: "Turn extensions on" }).click();
+      if (!(await until(async () => (await api(base, "/extensions")).body.enabled === true))) {
+        throw new Error("Turn extensions on did not reach the server");
+      }
+    });
+
+    await step("uninstall asks first", async () => {
+=== replace e2e/extensions.mjs
+--- find
+    // Leave the harness as it was, even after a failed step.
+--- with
+    // Leave the harness as it was, even after a failed step.
+    await fetch(`${base}/api/lightagent/v1/config/extensions.enabled`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: "true" }),
+    }).catch(() => {});
+=== replace e2e/mcp.mjs
+--- find
+const HTTP = "render-probe-http";
+--- with
+const HTTP = "render-probe-http";
+const AUTH = "render-probe-auth";
+=== replace e2e/mcp.mjs
+--- find
+  const httpRow = page.getByTestId(`mcp-${HTTP}`);
+--- with
+  const httpRow = page.getByTestId(`mcp-${HTTP}`);
+  const authRow = page.getByTestId(`mcp-${AUTH}`);
+=== replace e2e/mcp.mjs
+--- find
+    await step("removal asks first", async () => {
+--- with
+    await step("auth and profile fields are saved and shown by name", async () => {
+      await card.getByRole("radio", { name: "HTTP endpoint" }).check();
+      await page.locator("#mcp-name").fill(AUTH);
+      await page.locator("#mcp-url").fill("https://mcp.example.invalid/mcp");
+      await page.locator("#mcp-auth").fill("RENDER_MCP_TOKEN");
+      await page.locator("#mcp-untrusted").fill("research");
+      await page.locator("#mcp-credential").fill("research, billing");
+      await card.getByRole("button", { name: "Add server" }).click();
+      await authRow.waitFor({ timeout: 10000 });
+      const saved = (await mcpNow(base)).mcp.servers.find((server) => server.name === AUTH);
+      if (JSON.stringify(saved?.auth) !== JSON.stringify({ kind: "env", var: "RENDER_MCP_TOKEN" })) {
+        throw new Error(`auth saved as ${JSON.stringify(saved?.auth)}`);
+      }
+      if (JSON.stringify(saved?.untrusted_profiles) !== '["research"]') {
+        throw new Error(`other profiles saved as ${JSON.stringify(saved?.untrusted_profiles)}`);
+      }
+      if (JSON.stringify(saved?.credential_profiles) !== '["research","billing"]') {
+        throw new Error(`credential profiles saved as ${JSON.stringify(saved?.credential_profiles)}`);
+      }
+      const text = await authRow.innerText();
+      for (const expected of ["environment variable RENDER_MCP_TOKEN", "other profiles allowed: research", "credentials for: research, billing"]) {
+        if (!text.includes(expected)) throw new Error(`the row does not show "${expected}"`);
+      }
+      await page.screenshot({ path: `${outDir}/mcp-auth-fields.png` });
+      await authRow.getByRole("button", { name: `Remove ${AUTH}` }).click();
+      await authRow.getByRole("button", { name: `Confirm: remove ${AUTH}` }).click();
+      if (!(await until(async () => !(await mcpNow(base)).mcp.servers.some((server) => server.name === AUTH)))) {
+        throw new Error(`Confirm did not remove ${AUTH}`);
+      }
+    });
+
+    await step("removal asks first", async () => {
+=== replace e2e/mcp.mjs
+--- find
+    for (const name of [STDIO, HTTP]) {
+--- with
+    for (const name of [STDIO, HTTP, AUTH]) {
+=== replace desktop/e2e/runs.py
+--- find
+        status, removed = host.fetch("DELETE", f"{API}/extensions/host-probe?scope=global")
+--- with
+        status, off = host.fetch("PUT", f"{API}/config/extensions.enabled", {"value": "false"})
+        by_cli = json.loads(harness.run_cli(cli, "--json", "extensions", "list"))
+        check.expect("the master switch turned off through the host is off for the CLI",
+                     status == 200 and by_cli.get("enabled") is False, (status, off, by_cli))
+        harness.run_cli(cli, "config", "set", "extensions.enabled", "true")
+        status, listed = host.fetch("GET", f"{API}/extensions")
+        check.expect("turned on by the CLI, on through the host",
+                     status == 200 and (listed or {}).get("enabled") is True, (status, listed))
+        status, removed = host.fetch("DELETE", f"{API}/extensions/host-probe?scope=global")
+=== replace desktop/e2e/runs.py
+--- find
+        check.expect("a check does not turn MCP on", ((view or {}).get("mcp") or {}).get("enabled") is False, view)
+--- with
+        check.expect("a check does not turn MCP on", ((view or {}).get("mcp") or {}).get("enabled") is False, view)
+        fields = {"transport": "http", "name": "hostauth", "url": "https://mcp.example.invalid/mcp",
+                  "auth": {"kind": "env", "var": "HOST_MCP_TOKEN"},
+                  "untrusted_profiles": ["research"], "credential_profiles": ["research"]}
+        status, _ = host.fetch("POST", f"{API}/mcp/servers", {"server": fields})
+        _, view = host.fetch("GET", f"{API}/mcp")
+        saved = next((s for s in ((view or {}).get("mcp") or {}).get("servers", []) if s.get("name") == "hostauth"), {})
+        check.expect("auth and profile fields saved through the host and shown by name",
+                     status == 201 and saved.get("auth") == {"kind": "env", "var": "HOST_MCP_TOKEN"}
+                     and saved.get("untrusted_profiles") == ["research"]
+                     and saved.get("credential_profiles") == ["research"], (status, saved))
+        host.fetch("DELETE", f"{API}/mcp/servers/hostauth")
+=== replace desktop/e2e/runs.py
+--- find
+        status, _ = host.fetch("DELETE", f"{API}/extensions/host-pack")
+        check.expect("removed through the host", status == 200, status)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+--- with
+        # GET /skills through the host: each skill with its scope and source.
+        home = os.environ["LIGHTAGENT_HOME"]
+        active = json.loads(harness.run_cli(cli, "profile", "list", "--json")).get("active") or "default"
+        for root, name in ((os.path.join(home, "skills"), "host-global"),
+                           (os.path.join(home, "profiles", active, "skills"), "host-profile")):
+            os.makedirs(os.path.join(root, name), exist_ok=True)
+            created.append(os.path.join(root, name))
+            with open(os.path.join(root, name, "SKILL.md"), "w", encoding="utf-8") as handle:
+                handle.write(f"---\nname: {name}\ndescription: Host\n---\nDo it.\n")
+        status, _ = host.fetch("PUT", f"{API}/extensions/host-pack/enabled", {"enabled": True})
+        status, skills = host.fetch("GET", f"{API}/skills")
+        by_name = {s.get("name"): s for s in (skills or {}).get("skills", [])}
+        check.expect("GET /skills through the host lists each skill with its scope and source",
+                     status == 200
+                     and by_name.get("host-global", {}).get("source") == {"scope": "global"}
+                     and by_name.get("host-profile", {}).get("source") == {"scope": "profile"}
+                     and by_name.get("host-skill", {}).get("source") == {"scope": "extension", "extension": "host-pack"}
+                     and all(isinstance(s.get("description"), str) for s in by_name.values()),
+                     (status, skills))
+        status, _ = host.fetch("DELETE", f"{API}/extensions/host-pack")
+        check.expect("removed through the host", status == 200, status)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+        for path in created:
+            shutil.rmtree(path, ignore_errors=True)
+=== replace desktop/e2e/runs.py
+--- find
+    check = Checks("skills")
+    work = tempfile.mkdtemp(prefix="lightagent-e2e-skills-")
+--- with
+    check = Checks("skills")
+    work = tempfile.mkdtemp(prefix="lightagent-e2e-skills-")
+    created = []
+=== replace crates/lightagent/tests/desktop_extensions.rs
+--- find
+#[test]
+fn a_profile_install_stays_with_its_profile_and_mcp_waits_to_be_asked() {
+--- with
+#[test]
+fn the_master_switch_is_one_setting_for_the_cli_and_the_api() {
+    let work = scratch("switch");
+    let home = work.join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    cli_ok(&home, &["config", "set", "extensions.enabled", "true"]);
+    let source = bundle(&work, "switched", false);
+    cli_json(&home, &["extensions", "install", arg(&source)]);
+    let runtime = start(&home);
+
+    // Off over the API (the shared config.set operation): off for the CLI.
+    let (status, raw) = call(
+        &runtime,
+        "PUT",
+        "/api/lightagent/v1/config/extensions.enabled",
+        Some(r#"{"value":"false"}"#),
+    );
+    assert_eq!(status, 200, "{raw}");
+    let listed = cli_json(&home, &["extensions", "list"]);
+    assert_eq!(listed["enabled"], false, "{listed}");
+    assert_eq!(listed["extensions"][0]["active"], false, "{listed}");
+    let (_, raw) = call(&runtime, "GET", EXTENSIONS, None);
+    assert_eq!(parsed(&raw), listed, "the API and the CLI list the same");
+
+    // On by the CLI: on for the API.
+    cli_ok(&home, &["config", "set", "extensions.enabled", "true"]);
+    let (_, raw) = call(&runtime, "GET", EXTENSIONS, None);
+    let listed = parsed(&raw);
+    assert_eq!(listed["enabled"], true, "{listed}");
+    assert_eq!(listed["extensions"][0]["active"], true, "{listed}");
+}
+
+#[test]
+fn a_profile_install_stays_with_its_profile_and_mcp_waits_to_be_asked() {
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "slash.skills",
+   "kind": "slash",
+   "surface": "/skills",
+   "source": "crates/lightagent/src/slash.rs:58",
+   "behavior": "List skills loaded for the session incl. extensions'",
+   "tree_key": null,
+   "tokens": [
+    "skills"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Skills",
+   "backend": "api: GET /skills",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_tools.rs (skills as a run loads them, with source); browser: e2e/tools.mjs (source and version shown); host: desktop/e2e/runs.py skills; native WebView: D8",
+   "tested_sha": "62e87e6307a1746ce2d20e0c20530f6726aac400",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41506198528, https://github.com/dlroqa/Lightagent/actions/runs/41506198503"
+--- with
+   "id": "slash.skills",
+   "kind": "slash",
+   "surface": "/skills",
+   "source": "crates/lightagent/src/slash.rs:58",
+   "behavior": "List skills loaded for the session incl. extensions'",
+   "tree_key": null,
+   "tokens": [
+    "skills"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Skills",
+   "backend": "api: GET /skills",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": "pending: host GET /skills scenario (row 32); backend desktop_tools.rs and browser e2e/tools.mjs passed at 62e87e6",
+   "tested_sha": null,
+   "actions_evidence": null
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `slash.skills` | `/skills` | applicable | yes | Skills | api: GET /skills | implemented | `crates/lightagent/src/slash.rs:58` |
+--- with
+| `slash.skills` | `/skills` | applicable | yes | Skills | api: GET /skills | not-started | `crates/lightagent/src/slash.rs:58` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "skills.roots",
+   "kind": "skill-registration",
+   "surface": "<home>/skills and <profile>/skills (SKILL.md)",
+   "source": "crates/lightagent-core/src/skills.rs:204",
+   "behavior": "Skill discovery roots",
+   "tree_key": null,
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Skills: list with scope and source",
+   "backend": "api: GET /skills",
+   "permission": "local-operator",
+   "data_scope": "home|profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_tools.rs (skills as a run loads them, with source); browser: e2e/tools.mjs (source and version shown); host: desktop/e2e/runs.py skills; native WebView: D8",
+   "tested_sha": "62e87e6307a1746ce2d20e0c20530f6726aac400",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41506198528, https://github.com/dlroqa/Lightagent/actions/runs/41506198503"
+--- with
+   "id": "skills.roots",
+   "kind": "skill-registration",
+   "surface": "<home>/skills and <profile>/skills (SKILL.md)",
+   "source": "crates/lightagent-core/src/skills.rs:204",
+   "behavior": "Skill discovery roots",
+   "tree_key": null,
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Skills: list with scope and source",
+   "backend": "api: GET /skills",
+   "permission": "local-operator",
+   "data_scope": "home|profile",
+   "desktop_status": "not-started",
+   "verification": "pending: host GET /skills scenario (row 32); backend desktop_tools.rs and browser e2e/tools.mjs passed at 62e87e6",
+   "tested_sha": null,
+   "actions_evidence": null
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `skills.roots` | `<home>/skills and <profile>/skills (SKILL.md)` | applicable | yes | Skills: list with scope and source | api: GET /skills | implemented | `crates/lightagent-core/src/skills.rs:204` |
+--- with
+| `skills.roots` | `<home>/skills and <profile>/skills (SKILL.md)` | applicable | yes | Skills: list with scope and source | api: GET /skills | not-started | `crates/lightagent-core/src/skills.rs:204` |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- D6 note (2026-11-02, rows 28-31): `mcp.server.stdio` (+`command`, `args`, `env`), `mcp.server.http` (+`url`, `headers`), `config.mcp`, `cli.tools.list`, `slash.skills` and `skills.roots` are implemented at `62e87e6` with backend, host and browser evidence; native WebView is D8. `mcp.server.http.auth`, `mcp.server.http.untrusted_profiles` and `mcp.server.http.credential_profiles` are supported by the shared operation and the MCP card's form but not yet exercised by a browser check, so they are not counted. Difference recorded: `lightagent extensions install` turns MCP on for a bundle with MCP servers (and says so); the API and desktop do only when asked, and the desktop's MCP switch asks for confirmation. Skill import (`api.post.skills.imports`) is new scope beyond the CLI and never counted
+--- with
+- D6 note (2026-11-02, rows 28-31): `mcp.server.stdio` (+`command`, `args`, `env`), `mcp.server.http` (+`url`, `headers`), `config.mcp`, `cli.tools.list` are implemented at `62e87e6` with backend, host and browser evidence; native WebView is D8. `mcp.server.http.auth`, `mcp.server.http.untrusted_profiles` and `mcp.server.http.credential_profiles` are supported by the shared operation and the MCP card's form but not yet exercised by a browser check, so they are not counted. Difference recorded: `lightagent extensions install` turns MCP on for a bundle with MCP servers (and says so); the API and desktop do only when asked, and the desktop's MCP switch asks for confirmation. Skill import (`api.post.skills.imports`) is new scope beyond the CLI and never counted Correction (row 32): `slash.skills` and `skills.roots` were counted at `5c98b3e` without host evidence (runs.py `skills` never called GET /skills); they are not-started again until the row 32 host scenario passes.
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Implemented: 64 of 227
+--- with
+- Implemented: 62 of 227
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "parity_implemented": 64,
+--- with
+  "parity_implemented": 62,
+=== end
