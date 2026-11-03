@@ -11,6 +11,7 @@ import { checkJevStates } from "./jev.mjs";
 import { checkProfileStates } from "./profiles.mjs";
 import { checkConfigEditor } from "./config.mjs";
 import { checkConfigSections } from "./config-sections.mjs";
+import { checkSetupSections } from "./setup-sections.mjs";
 import { checkSettingsStates } from "./settings.mjs";
 import { checkExtensions } from "./extensions.mjs";
 import { checkMcp } from "./mcp.mjs";
@@ -494,6 +495,13 @@ async function main() {
     failures.push(...(await checkConfigSections(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`config sections: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  }
+  // Each choice `lightagent setup` offers for tools, web, approvals and the
+  // terminal UI, made in Settings; everything restored.
+  try {
+    failures.push(...(await checkSetupSections(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`setup sections: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
   }
   // Changes the config file.
   try {

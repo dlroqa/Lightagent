@@ -316,6 +316,10 @@ export interface LightagentSettings {
   wall_clock_secs: number | null;
   approval_policy: "permissive" | "balanced" | "strict";
   web_enabled: boolean;
+  /** `lightagent setup` → web; servers before it omit it. */
+  web_mode?: "off" | "fetch" | "duckduckgo" | "custom";
+  /** The custom search URL; the configured search endpoint in a response. */
+  web_search_endpoint?: string | null;
   filesystem_tools_enabled: boolean;
   terminal_enabled: boolean;
   memory_enabled: boolean;

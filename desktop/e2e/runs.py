@@ -880,6 +880,73 @@ def scenario_sessions(host, cli):
     return check
 
 
+SETUP_WEB = [
+    ("fetch", None, "2. Fetch web pages only (current)"),
+    ("duckduckgo", "https://html.duckduckgo.com/html/", "3. Agentic search — DuckDuckGo (no account) (current)"),
+    ("custom", "http://127.0.0.1:9/search?format=json", "4. Agentic search — SearXNG or custom JSON endpoint (current)"),
+    ("off", None, "1. Off (current)"),
+]
+
+SETUP_CHOICES = [
+    ({"filesystem_tools_enabled": True, "terminal_enabled": False, "show_reasoning_in_tui": False,
+      "approval_policy": "strict"},
+     (True, False, False, "strict"),
+     ["2. Files — confined to a workspace (current)", "2. Hide reasoning — show the animated Lightagent star (current)",
+      "2. Strict — prompt for everything beyond basic reads (current)"]),
+    ({"filesystem_tools_enabled": False, "terminal_enabled": False, "show_reasoning_in_tui": True,
+      "approval_policy": "permissive"},
+     (False, False, True, "permissive"),
+     ["1. Off (current)", "1. Show reasoning — stream the reasoning panel (current)",
+      "3. Permissive — auto-approve lower-risk tools (current)"]),
+]
+
+
+def scenario_setup_sections(host, cli):
+    """D7 through the host transport: each web mode Settings saves through
+    the host is the one `lightagent setup` → web shows as current, with the
+    keys setup writes; so are the tools, reasoning and approval choices.
+    Everything is restored."""
+    check = Checks("setup_sections")
+    status, original = host.fetch("GET", f"{API}/settings")
+    check.expect("settings through the host", status == 200 and isinstance(original, dict), (status, original))
+    if status != 200 or not isinstance(original, dict):
+        return check
+
+    def shown():
+        return json.loads(harness.run_cli(cli, "--json", "config", "show"))
+
+    try:
+        for mode, endpoint, current in SETUP_WEB:
+            body = dict(original, web_mode=mode, web_enabled=mode != "off",
+                        web_search_endpoint="http://127.0.0.1:9/search?format=json" if mode == "custom" else None)
+            status, saved = host.fetch("PUT", f"{API}/settings", body)
+            config = shown()
+            web = config.get("web") or {}
+            menu = harness.run_cli_input(cli, "\n\n", "setup", "web")
+            check.expect(f"web {mode}: saved through the host, read alike by the CLI and setup",
+                         status == 200 and (saved or {}).get("web_mode") == mode
+                         and web.get("enabled") is (mode != "off")
+                         and (web.get("search") or {}).get("endpoint") == endpoint
+                         and (config.get("rag") or {}).get("realtime_enabled") is (mode in ("duckduckgo", "custom"))
+                         and current in menu,
+                         (status, (saved or {}).get("web_mode"), web, menu[-400:]))
+        status, refused = host.fetch("PUT", f"{API}/settings", dict(original, web_mode="custom", web_search_endpoint="  "))
+        check.expect("a custom web search without its URL is refused", status == 400, (status, refused))
+        for patch, (files, terminal, reasoning, policy), menus in SETUP_CHOICES:
+            status, saved = host.fetch("PUT", f"{API}/settings", dict(original, **patch))
+            config = shown()
+            seen = ((config.get("tools") or {}).get("enabled"), (config.get("tools") or {}).get("allow_terminal"),
+                    (config.get("tui") or {}).get("show_reasoning"), (config.get("security") or {}).get("approval_policy"))
+            menu = (harness.run_cli_input(cli, "\n\n", "setup", "tools") + harness.run_cli_input(cli, "\n", "setup", "tui")
+                    + harness.run_cli_input(cli, "\n", "setup", "approvals"))
+            check.expect(f"{policy}: tools, reasoning and approvals saved through the host, read alike by the CLI and setup",
+                         status == 200 and seen == (files, terminal, reasoning, policy) and all(line in menu for line in menus),
+                         (status, seen, menu[-600:]))
+    finally:
+        host.fetch("PUT", f"{API}/settings", original)
+    return check
+
+
 def scenario_conversations(host, provider, cli):
     """D7 through the host transport: a conversation held by the desktop
     continues in `lightagent chat --session` with its earlier turn, and one
@@ -1332,6 +1399,7 @@ def main():
             ("config_sections", lambda: scenario_config_sections(host, cli)),
             ("update_check", lambda: scenario_update_check(host, cli)),
             ("security", lambda: scenario_security(host, cli)),
+            ("setup_sections", lambda: scenario_setup_sections(host, cli)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]

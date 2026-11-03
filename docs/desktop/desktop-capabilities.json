@@ -112,12 +112,12 @@
    "value": 6
   },
   "by_applicability": {
-   "applicable": 298,
+   "applicable": 293,
    "host-owned": 7,
-   "not-applicable": 29
+   "not-applicable": 34
   },
-  "parity_denominator": 227,
-  "parity_implemented": 110,
+  "parity_denominator": 222,
+  "parity_implemented": 204,
   "pending_decision_rows": 0,
   "not_counted_duplicates": 26
  },
@@ -183,10 +183,10 @@
    "backend": "api: POST /runs, GET /runs/{id}/events",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Conversations: a conversation continues between the desktop and `lightagent chat --session` both ways; search by message and by title; rename in place; attachments saved byte for byte, owner-only; Enter sends, Shift+Enter is a new line; New chat (browser e2e/conversations.mjs; host runs.py `conversations`; backend crates/lightagent/tests/desktop_conversations.rs); native WebView is D8",
+   "tested_sha": "9f4dbc5841c030c1f2012a3e8852c3d4dc1483b6",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41611764860 (check); https://github.com/dlroqa/Lightagent/actions/runs/41611764757 (desktop)"
   },
   {
    "id": "cli.chat.opt.profile",
@@ -227,10 +227,10 @@
    "backend": "api: POST /runs {session_id}",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Conversations: a conversation continues between the desktop and `lightagent chat --session` both ways; search by message and by title; rename in place; attachments saved byte for byte, owner-only; Enter sends, Shift+Enter is a new line; New chat (browser e2e/conversations.mjs; host runs.py `conversations`; backend crates/lightagent/tests/desktop_conversations.rs); native WebView is D8",
+   "tested_sha": "9f4dbc5841c030c1f2012a3e8852c3d4dc1483b6",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41611764860 (check); https://github.com/dlroqa/Lightagent/actions/runs/41611764757 (desktop)"
   },
   {
    "id": "cli.init",
@@ -249,10 +249,10 @@
    "backend": "extract: lib.rs init()",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Setup screen #/setup (browser e2e/setup.mjs: refused on an initialised home, Reconfigure asks first, Preview, Import, forced import asks first); host runs.py `setup`; backend crates/lightagent/tests/desktop_setup.rs; native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.init.opt.force",
@@ -271,10 +271,10 @@
    "backend": "extract: lib.rs init()",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Setup screen #/setup (browser e2e/setup.mjs: refused on an initialised home, Reconfigure asks first, Preview, Import, forced import asks first); host runs.py `setup`; backend crates/lightagent/tests/desktop_setup.rs; native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.init.opt.profile",
@@ -337,10 +337,10 @@
    "backend": "extract: lib.rs init()",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Setup screen #/setup (browser e2e/setup.mjs: refused on an initialised home, Reconfigure asks first, Preview, Import, forced import asks first); host runs.py `setup`; backend crates/lightagent/tests/desktop_setup.rs; native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.setup",
@@ -1635,10 +1635,10 @@
    "backend": "api: GET /workers",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Specialists card Workers of / assign to a profile (browser e2e/workers.mjs); host runs.py `workers`; backend crates/lightagent/tests/desktop_workers.rs; native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.workers.assign",
@@ -1701,10 +1701,10 @@
    "backend": "extract: workers_cmd(Assign)",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Specialists card Workers of / assign to a profile (browser e2e/workers.mjs); host runs.py `workers`; backend crates/lightagent/tests/desktop_workers.rs; native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.workers.assign.opt.builtin",
@@ -1745,10 +1745,10 @@
    "backend": "extract: workers_cmd(Assign)",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Specialists card Workers of / assign to a profile (browser e2e/workers.mjs); host runs.py `workers`; backend crates/lightagent/tests/desktop_workers.rs; native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.workers.revoke",
@@ -1811,10 +1811,10 @@
    "backend": "extract: workers_cmd(Revoke)",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Specialists card Workers of / assign to a profile (browser e2e/workers.mjs); host runs.py `workers`; backend crates/lightagent/tests/desktop_workers.rs; native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.serve",
@@ -2009,10 +2009,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.user",
@@ -2053,10 +2053,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.user.create.arg.id",
@@ -2075,10 +2075,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.user.list",
@@ -2097,10 +2097,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.user.suspend",
@@ -2119,10 +2119,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.user.suspend.arg.id",
@@ -2141,10 +2141,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.credential",
@@ -2185,10 +2185,10 @@
    "backend": "extract: identity_admin (secret goes to an owner-only file; never into renderer state)",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.credential.issue.arg.principal",
@@ -2207,10 +2207,10 @@
    "backend": "extract: identity_admin (secret goes to an owner-only file; never into renderer state)",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.credential.issue.opt.expires-in",
@@ -2229,10 +2229,10 @@
    "backend": "extract: identity_admin (secret goes to an owner-only file; never into renderer state)",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.credential.issue.opt.capability",
@@ -2251,10 +2251,10 @@
    "backend": "extract: identity_admin (secret goes to an owner-only file; never into renderer state)",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.credential.issue.opt.profile",
@@ -2273,10 +2273,10 @@
    "backend": "extract: identity_admin (secret goes to an owner-only file; never into renderer state)",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.credential.issue.opt.secret-file",
@@ -2295,10 +2295,10 @@
    "backend": "extract: identity_admin (secret goes to an owner-only file; never into renderer state)",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.credential.rotate",
@@ -2317,10 +2317,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.credential.rotate.arg.key_id",
@@ -2339,10 +2339,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.credential.rotate.opt.expires-in",
@@ -2383,10 +2383,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.credential.revoke",
@@ -2405,10 +2405,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.credential.revoke.arg.key_id",
@@ -2427,10 +2427,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.credential.list",
@@ -2449,10 +2449,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.credential.list.opt.principal",
@@ -2471,10 +2471,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.owner",
@@ -2515,10 +2515,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.owner.assign.arg.profile",
@@ -2537,10 +2537,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.owner.assign.arg.principal",
@@ -2559,10 +2559,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.owner.reassign",
@@ -2581,10 +2581,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.owner.reassign.arg.profile",
@@ -2603,10 +2603,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.owner.reassign.arg.principal",
@@ -2625,10 +2625,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.owner.remove",
@@ -2647,10 +2647,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.owner.remove.arg.profile",
@@ -2669,10 +2669,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.grants",
@@ -2713,10 +2713,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.grants.list.opt.profile",
@@ -2735,10 +2735,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.grants.revoke",
@@ -2757,10 +2757,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.grants.revoke.arg.profile",
@@ -2779,10 +2779,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.grants.revoke.arg.principal",
@@ -2801,10 +2801,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.grants.revoke.arg.capability",
@@ -2823,10 +2823,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.audit",
@@ -2845,10 +2845,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.identity.audit.opt.limit",
@@ -2867,10 +2867,10 @@
    "backend": "extract: identity_admin",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Identity screen #/admin/identity (browser e2e/identity.mjs); host desktop/e2e/runs.py `identity` through the desktop transport; backend crates/lightagent/tests/desktop_identity.rs (CLI and API alike, all four platforms); operator-only (local operator gate); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential",
@@ -2911,10 +2911,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.keygen",
@@ -2933,10 +2933,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.keygen.arg.path",
@@ -2955,10 +2955,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.add",
@@ -2977,10 +2977,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.add.arg.profile",
@@ -2999,10 +2999,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.add.opt.service",
@@ -3021,10 +3021,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.add.opt.destination",
@@ -3043,10 +3043,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.add.opt.operation",
@@ -3065,10 +3065,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.add.opt.expires-in",
@@ -3087,10 +3087,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.add.opt.max-requests-per-run",
@@ -3109,10 +3109,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.add.opt.secret-file",
@@ -3131,10 +3131,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.add.opt.secret-stdin",
@@ -3175,10 +3175,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.rotate.arg.id",
@@ -3197,10 +3197,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.rotate.opt.secret-file",
@@ -3219,10 +3219,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.rotate.opt.secret-stdin",
@@ -3263,10 +3263,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.revoke.arg.id",
@@ -3285,10 +3285,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.list",
@@ -3307,10 +3307,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.list.opt.profile",
@@ -3351,10 +3351,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.audit.opt.limit",
@@ -3373,10 +3373,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.rekey",
@@ -3395,10 +3395,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.remote-credential.rekey.opt.previous-key-file",
@@ -3417,10 +3417,10 @@
    "backend": "extract: remote_credentials",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote credentials screen #/admin/credentials (browser e2e/credentials.mjs, no secret in the page or storage); host runs.py `remote_credentials`; backend crates/lightagent/tests/desktop_remote_credentials.rs (CLI and API alike); native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.acp",
@@ -3461,10 +3461,10 @@
    "backend": "extract: lib.rs architecture()",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Diagnostics screen #/diagnostics (browser e2e/diagnostics.mjs); host runs.py `diagnostics` (equal to the CLI); backend crates/lightagent/tests/desktop_diagnostics.rs; the bundle is an explicit allowlist tested with seeded secrets; native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.doctor",
@@ -3483,10 +3483,10 @@
    "backend": "extract: lib.rs doctor(); api: GET /health (partial)",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Diagnostics screen #/diagnostics (browser e2e/diagnostics.mjs); host runs.py `diagnostics` (equal to the CLI); backend crates/lightagent/tests/desktop_diagnostics.rs; the bundle is an explicit allowlist tested with seeded secrets; native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.import",
@@ -3527,10 +3527,10 @@
    "backend": "extract: import::hermes()",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Setup screen #/setup (browser e2e/setup.mjs: refused on an initialised home, Reconfigure asks first, Preview, Import, forced import asks first); host runs.py `setup`; backend crates/lightagent/tests/desktop_setup.rs; native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.import.hermes.opt.from",
@@ -3549,10 +3549,10 @@
    "backend": "extract: import::hermes()",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Setup screen #/setup (browser e2e/setup.mjs: refused on an initialised home, Reconfigure asks first, Preview, Import, forced import asks first); host runs.py `setup`; backend crates/lightagent/tests/desktop_setup.rs; native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.import.hermes.opt.dry-run",
@@ -3571,10 +3571,10 @@
    "backend": "extract: import::hermes()",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Setup screen #/setup (browser e2e/setup.mjs: refused on an initialised home, Reconfigure asks first, Preview, Import, forced import asks first); host runs.py `setup`; backend crates/lightagent/tests/desktop_setup.rs; native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.import.hermes.opt.force",
@@ -3593,10 +3593,10 @@
    "backend": "extract: import::hermes()",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Setup screen #/setup (browser e2e/setup.mjs: refused on an initialised home, Reconfigure asks first, Preview, Import, forced import asks first); host runs.py `setup`; backend crates/lightagent/tests/desktop_setup.rs; native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.rag",
@@ -3681,10 +3681,10 @@
    "backend": "extract: rag::add()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Knowledge screen source name (browser e2e/knowledge.mjs); host runs.py `knowledge`; backend crates/lightagent/tests/desktop_knowledge.rs; native WebView is D8",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "cli.rag.search",
@@ -4429,10 +4429,10 @@
    "backend": "extract: release_update check-only operation",
    "permission": "local-operator",
    "data_scope": "network (release feed)",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Read-only update check, nothing downloaded or installed. Fixture evidence (loopback release API): newer, equal, older, server error, rate limit, malformed and tagless answers, timeout (crates/lightagent/tests/desktop_update_check.rs), host runs.py `update_check`, browser e2e/update.mjs. Live evidence, kept apart: update-check-live.yml against github.com",
+   "tested_sha": "2b79e05bf19bfc0756bbe88c1cc70535dffa7170",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608937007 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608937124 (desktop); https://github.com/dlroqa/Lightagent/actions/runs/41608936949 (live, read-only)"
   },
   {
    "id": "cli.update.opt.force",
@@ -4627,10 +4627,10 @@
    "backend": "api: PUT /settings (partial)",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Settings Web access, tool switches, approval policy and reasoning write what `lightagent setup` writes (shared lightagent_core::WebMode; backend crates/lightagent/tests/desktop_setup_sections.rs two homes compared per choice; host runs.py `setup_sections`; browser e2e/setup-sections.mjs); native WebView is D8",
+   "tested_sha": "cc2829d33cbb6203151c29324f4358b70067b804",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41613505978 (check); https://github.com/dlroqa/Lightagent/actions/runs/41613505967 (desktop)"
   },
   {
    "id": "setup.tools.workspace",
@@ -4671,10 +4671,10 @@
    "backend": "api: PUT /settings (partial)",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Settings Web access, tool switches, approval policy and reasoning write what `lightagent setup` writes (shared lightagent_core::WebMode; backend crates/lightagent/tests/desktop_setup_sections.rs two homes compared per choice; host runs.py `setup_sections`; browser e2e/setup-sections.mjs); native WebView is D8",
+   "tested_sha": "cc2829d33cbb6203151c29324f4358b70067b804",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41613505978 (check); https://github.com/dlroqa/Lightagent/actions/runs/41613505967 (desktop)"
   },
   {
    "id": "setup.approvals.policy",
@@ -4693,10 +4693,10 @@
    "backend": "api: PUT /settings (partial)",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Settings Web access, tool switches, approval policy and reasoning write what `lightagent setup` writes (shared lightagent_core::WebMode; backend crates/lightagent/tests/desktop_setup_sections.rs two homes compared per choice; host runs.py `setup_sections`; browser e2e/setup-sections.mjs); native WebView is D8",
+   "tested_sha": "cc2829d33cbb6203151c29324f4358b70067b804",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41613505978 (check); https://github.com/dlroqa/Lightagent/actions/runs/41613505967 (desktop)"
   },
   {
    "id": "setup.tui.reasoning",
@@ -4715,10 +4715,10 @@
    "backend": "config [tui] (no API today)",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Settings Web access, tool switches, approval policy and reasoning write what `lightagent setup` writes (shared lightagent_core::WebMode; backend crates/lightagent/tests/desktop_setup_sections.rs two homes compared per choice; host runs.py `setup_sections`; browser e2e/setup-sections.mjs); native WebView is D8",
+   "tested_sha": "cc2829d33cbb6203151c29324f4358b70067b804",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41613505978 (check); https://github.com/dlroqa/Lightagent/actions/runs/41613505967 (desktop)"
   },
   {
    "id": "slash.help",
@@ -4958,10 +4958,10 @@
    "backend": "api: POST /sessions",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Conversations: a conversation continues between the desktop and `lightagent chat --session` both ways; search by message and by title; rename in place; attachments saved byte for byte, owner-only; Enter sends, Shift+Enter is a new line; New chat (browser e2e/conversations.mjs; host runs.py `conversations`; backend crates/lightagent/tests/desktop_conversations.rs); native WebView is D8",
+   "tested_sha": "9f4dbc5841c030c1f2012a3e8852c3d4dc1483b6",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41611764860 (check); https://github.com/dlroqa/Lightagent/actions/runs/41611764757 (desktop)"
   },
   {
    "id": "slash.approve",
@@ -5133,10 +5133,10 @@
    "backend": "api: POST /runs",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Conversations: a conversation continues between the desktop and `lightagent chat --session` both ways; search by message and by title; rename in place; attachments saved byte for byte, owner-only; Enter sends, Shift+Enter is a new line; New chat (browser e2e/conversations.mjs; host runs.py `conversations`; backend crates/lightagent/tests/desktop_conversations.rs); native WebView is D8",
+   "tested_sha": "9f4dbc5841c030c1f2012a3e8852c3d4dc1483b6",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41611764860 (check); https://github.com/dlroqa/Lightagent/actions/runs/41611764757 (desktop)"
   },
   {
    "id": "key.ctrl-c",
@@ -5875,10 +5875,10 @@
    "backend": "api: GET/PUT /settings (subset); extract: typed config read/write",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "One key of the section read and set with the Advanced configuration card (browser e2e/config-sections.mjs, including unset optional keys refused as `config get` refuses them); host runs.py `config_sections`; backend crates/lightagent/tests/desktop_config_sections.rs (API = CLI); native WebView is D8",
+   "tested_sha": "8f2496b16546795f0fa307c9661021e40af3a801",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608931747 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608931818 (desktop)"
   },
   {
    "id": "config.agent",
@@ -5899,10 +5899,10 @@
    "backend": "api: GET/PUT /settings (subset); extract: typed config read/write",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "One key of the section read and set with the Advanced configuration card (browser e2e/config-sections.mjs, including unset optional keys refused as `config get` refuses them); host runs.py `config_sections`; backend crates/lightagent/tests/desktop_config_sections.rs (API = CLI); native WebView is D8",
+   "tested_sha": "8f2496b16546795f0fa307c9661021e40af3a801",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608931747 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608931818 (desktop)"
   },
   {
    "id": "config.security",
@@ -5923,10 +5923,10 @@
    "backend": "api: GET/PUT /settings (subset); extract: typed config read/write",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Read-only Security card (browser e2e/security.mjs, secret-safe); the approval policy saved in Settings is what the CLI reads (host runs.py `security`; backend crates/lightagent/tests/desktop_security.rs); no setter is invented for keys without a writer; native WebView is D8",
+   "tested_sha": "f17115c927ce8117dbe53b6f6fabbb9999f4d470",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608939464 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608939285 (desktop)"
   },
   {
    "id": "config.web",
@@ -5947,10 +5947,10 @@
    "backend": "api: GET/PUT /settings (subset); extract: typed config read/write",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "One key of the section read and set with the Advanced configuration card (browser e2e/config-sections.mjs, including unset optional keys refused as `config get` refuses them); host runs.py `config_sections`; backend crates/lightagent/tests/desktop_config_sections.rs (API = CLI); native WebView is D8",
+   "tested_sha": "8f2496b16546795f0fa307c9661021e40af3a801",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608931747 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608931818 (desktop)"
   },
   {
    "id": "config.tools",
@@ -5971,10 +5971,10 @@
    "backend": "api: GET/PUT /settings (subset); extract: typed config read/write",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "One key of the section read and set with the Advanced configuration card (browser e2e/config-sections.mjs, including unset optional keys refused as `config get` refuses them); host runs.py `config_sections`; backend crates/lightagent/tests/desktop_config_sections.rs (API = CLI); native WebView is D8",
+   "tested_sha": "8f2496b16546795f0fa307c9661021e40af3a801",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608931747 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608931818 (desktop)"
   },
   {
    "id": "config.mcp",
@@ -6019,10 +6019,10 @@
    "backend": "api: GET/PUT /settings (subset); extract: typed config read/write",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "One key of the section read and set with the Advanced configuration card (browser e2e/config-sections.mjs, including unset optional keys refused as `config get` refuses them); host runs.py `config_sections`; backend crates/lightagent/tests/desktop_config_sections.rs (API = CLI); native WebView is D8",
+   "tested_sha": "8f2496b16546795f0fa307c9661021e40af3a801",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608931747 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608931818 (desktop)"
   },
   {
    "id": "config.memory",
@@ -6043,10 +6043,10 @@
    "backend": "api: GET/PUT /settings (subset); extract: typed config read/write",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "One key of the section read and set with the Advanced configuration card (browser e2e/config-sections.mjs, including unset optional keys refused as `config get` refuses them); host runs.py `config_sections`; backend crates/lightagent/tests/desktop_config_sections.rs (API = CLI); native WebView is D8",
+   "tested_sha": "8f2496b16546795f0fa307c9661021e40af3a801",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608931747 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608931818 (desktop)"
   },
   {
    "id": "config.extensions",
@@ -6091,10 +6091,10 @@
    "backend": "api: GET/PUT /settings (subset); extract: typed config read/write",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "One key of the section read and set with the Advanced configuration card (browser e2e/config-sections.mjs, including unset optional keys refused as `config get` refuses them); host runs.py `config_sections`; backend crates/lightagent/tests/desktop_config_sections.rs (API = CLI); native WebView is D8",
+   "tested_sha": "8f2496b16546795f0fa307c9661021e40af3a801",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608931747 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608931818 (desktop)"
   },
   {
    "id": "config.generation",
@@ -6115,10 +6115,10 @@
    "backend": "api: GET/PUT /settings (subset); extract: typed config read/write",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "One key of the section read and set with the Advanced configuration card (browser e2e/config-sections.mjs, including unset optional keys refused as `config get` refuses them); host runs.py `config_sections`; backend crates/lightagent/tests/desktop_config_sections.rs (API = CLI); native WebView is D8",
+   "tested_sha": "8f2496b16546795f0fa307c9661021e40af3a801",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608931747 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608931818 (desktop)"
   },
   {
    "id": "config.tui",
@@ -6163,10 +6163,10 @@
    "backend": "api: GET/PUT /settings (subset); extract: typed config read/write",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "One key of the section read and set with the Advanced configuration card (browser e2e/config-sections.mjs, including unset optional keys refused as `config get` refuses them); host runs.py `config_sections`; backend crates/lightagent/tests/desktop_config_sections.rs (API = CLI); native WebView is D8",
+   "tested_sha": "8f2496b16546795f0fa307c9661021e40af3a801",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608931747 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608931818 (desktop)"
   },
   {
    "id": "config.subagents",
@@ -6187,10 +6187,10 @@
    "backend": "api: GET/PUT /settings (subset); extract: typed config read/write",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "One key of the section read and set with the Advanced configuration card (browser e2e/config-sections.mjs, including unset optional keys refused as `config get` refuses them); host runs.py `config_sections`; backend crates/lightagent/tests/desktop_config_sections.rs (API = CLI); native WebView is D8",
+   "tested_sha": "8f2496b16546795f0fa307c9661021e40af3a801",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608931747 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608931818 (desktop)"
   },
   {
    "id": "env.LIGHTAGENT_HOME",
@@ -6226,16 +6226,16 @@
    "tokens": [
     "LIGHTAGENT_PROVIDER_KEY"
    ],
-   "applicability": "applicable",
+   "applicability": "not-applicable",
    "decision": null,
-   "reason": null,
-   "counts_toward_parity": true,
+   "reason": "Test input only (audit 2026-11-03): read nowhere in product code; the name appears in a config_keys unit test and a desktop diagnostics test as an example env reference. Provider keys use any user-chosen name through inference.api_key env references",
+   "counts_toward_parity": false,
    "duplicate_of": null,
    "ui": "Providers/Models: key source shown as env reference (redacted)",
    "backend": "sidecar process environment",
    "permission": "local-operator",
    "data_scope": "process",
-   "desktop_status": "not-started",
+   "desktop_status": "not-applicable",
    "verification": null,
    "tested_sha": null,
    "actions_evidence": null
@@ -6307,10 +6307,10 @@
    "backend": "sidecar process environment",
    "permission": "local-operator",
    "data_scope": "process",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "The vault key from a key file: Remote credentials status from a key file (browser e2e/credentials.mjs, the render harness exports the variable); host runs.py `remote_credentials` status; backend desktop_remote_credentials.rs and desktop_diagnostics.rs key_source file; the host passes its environment to the runtime unchanged",
+   "tested_sha": "9013dd347b74ebdcded42fbf449ca92d2bae3a46",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41608933114 (check); https://github.com/dlroqa/Lightagent/actions/runs/41608933059 (desktop)"
   },
   {
    "id": "env.LIGHTAGENT_QDRANT_URL",
@@ -6322,16 +6322,16 @@
    "tokens": [
     "LIGHTAGENT_QDRANT_URL"
    ],
-   "applicability": "applicable",
+   "applicability": "not-applicable",
    "decision": null,
-   "reason": null,
-   "counts_toward_parity": true,
+   "reason": "Test input only (audit 2026-11-03): read only by crates/lightagent/tests/platform_services.rs, set by check.yml and scripts/test-platform-integration.sh; the product reads platform.qdrant from the configuration",
+   "counts_toward_parity": false,
    "duplicate_of": null,
    "ui": "Settings: platform endpoints",
    "backend": "sidecar process environment",
    "permission": "local-operator",
    "data_scope": "process",
-   "desktop_status": "not-started",
+   "desktop_status": "not-applicable",
    "verification": null,
    "tested_sha": null,
    "actions_evidence": null
@@ -6346,16 +6346,16 @@
    "tokens": [
     "LIGHTAGENT_INFINITY_URL"
    ],
-   "applicability": "applicable",
+   "applicability": "not-applicable",
    "decision": null,
-   "reason": null,
-   "counts_toward_parity": true,
+   "reason": "Test input only (audit 2026-11-03): read only by crates/lightagent/tests/platform_services.rs, set by check.yml and scripts/test-platform-integration.sh; the product reads platform.infinity from the configuration",
+   "counts_toward_parity": false,
    "duplicate_of": null,
    "ui": "Settings: platform endpoints",
    "backend": "sidecar process environment",
    "permission": "local-operator",
    "data_scope": "process",
-   "desktop_status": "not-started",
+   "desktop_status": "not-applicable",
    "verification": null,
    "tested_sha": null,
    "actions_evidence": null
@@ -6370,16 +6370,16 @@
    "tokens": [
     "LIGHTAGENT_OPEN_TERMINAL_URL"
    ],
-   "applicability": "applicable",
+   "applicability": "not-applicable",
    "decision": null,
-   "reason": null,
-   "counts_toward_parity": true,
+   "reason": "Test input only (audit 2026-11-03): read only by the ignored live test in crates/lightagent-tools/src/builtins/open_terminal.rs (check.yml live contract job); the product reads platform.open_terminal from the configuration",
+   "counts_toward_parity": false,
    "duplicate_of": null,
    "ui": "Settings: platform endpoints",
    "backend": "sidecar process environment",
    "permission": "local-operator",
    "data_scope": "process",
-   "desktop_status": "not-started",
+   "desktop_status": "not-applicable",
    "verification": null,
    "tested_sha": null,
    "actions_evidence": null
@@ -6394,16 +6394,16 @@
    "tokens": [
     "LIGHTAGENT_OPEN_TERMINAL_TOKEN"
    ],
-   "applicability": "applicable",
+   "applicability": "not-applicable",
    "decision": null,
-   "reason": null,
-   "counts_toward_parity": true,
+   "reason": "Test input only (audit 2026-11-03): read only by the ignored live test in crates/lightagent-tools/src/builtins/open_terminal.rs and seeded as a redaction probe in desktop_diagnostics.rs; the product reads the token from platform.open_terminal",
+   "counts_toward_parity": false,
    "duplicate_of": null,
    "ui": "Settings: platform endpoints (redacted)",
    "backend": "sidecar process environment",
    "permission": "local-operator",
    "data_scope": "process",
-   "desktop_status": "not-started",
+   "desktop_status": "not-applicable",
    "verification": null,
    "tested_sha": null,
    "actions_evidence": null
@@ -8371,10 +8371,10 @@
    "backend": "api: GET /sessions/search",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Conversations: a conversation continues between the desktop and `lightagent chat --session` both ways; search by message and by title; rename in place; attachments saved byte for byte, owner-only; Enter sends, Shift+Enter is a new line; New chat (browser e2e/conversations.mjs; host runs.py `conversations`; backend crates/lightagent/tests/desktop_conversations.rs); native WebView is D8",
+   "tested_sha": "9f4dbc5841c030c1f2012a3e8852c3d4dc1483b6",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41611764860 (check); https://github.com/dlroqa/Lightagent/actions/runs/41611764757 (desktop)"
   },
   {
    "id": "api.get.sessions.id",
@@ -8419,10 +8419,10 @@
    "backend": "api: PATCH /sessions/{id}",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Conversations: a conversation continues between the desktop and `lightagent chat --session` both ways; search by message and by title; rename in place; attachments saved byte for byte, owner-only; Enter sends, Shift+Enter is a new line; New chat (browser e2e/conversations.mjs; host runs.py `conversations`; backend crates/lightagent/tests/desktop_conversations.rs); native WebView is D8",
+   "tested_sha": "9f4dbc5841c030c1f2012a3e8852c3d4dc1483b6",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41611764860 (check); https://github.com/dlroqa/Lightagent/actions/runs/41611764757 (desktop)"
   },
   {
    "id": "api.delete.sessions.id",
@@ -8467,10 +8467,10 @@
    "backend": "api: POST /sessions/{id}/attachments",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Conversations: a conversation continues between the desktop and `lightagent chat --session` both ways; search by message and by title; rename in place; attachments saved byte for byte, owner-only; Enter sends, Shift+Enter is a new line; New chat (browser e2e/conversations.mjs; host runs.py `conversations`; backend crates/lightagent/tests/desktop_conversations.rs); native WebView is D8",
+   "tested_sha": "9f4dbc5841c030c1f2012a3e8852c3d4dc1483b6",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41611764860 (check); https://github.com/dlroqa/Lightagent/actions/runs/41611764757 (desktop)"
   },
   {
    "id": "api.post.sessions.id.regenerate",

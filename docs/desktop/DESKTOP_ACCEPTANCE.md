@@ -45,6 +45,23 @@ investigated, never re-run until green:
 | D9 | Installers for all four targets with SHA-256 checksums, an SBOM, and a license inventory; vulnerability gate (cargo-audit, npm audit, high or critical) clean or documented; clean-user smoke install, launch, and uninstall where the runner allows; per-target report of build, launch, native UI, signing (unsigned), and minimum-OS evidence |
 | D10 | The combined tree of all slice heads, in merge order, passes `check` and `desktop` on all four platforms. Parity is reconciled with no unexplained gaps |
 
+## Carried requirements: host-side secret input (D8, owner decision 2026-11-03)
+
+The two `--secret-stdin` rows count only when implemented and verified
+this way. A secret typed into a WebView field has already entered the
+renderer, so that is not an acceptable path.
+
+- The host reads the secret with a native mechanism: a native file
+  picker returns a path and the host reads the bytes itself, or a native
+  secure input owned by the host.
+- No secret byte enters WebView state, an IPC response, a log, the
+  diagnostics bundle, a screenshot or an artifact (tested with seeded
+  secrets).
+- Cancellation, an unreadable file and an invalid value fail safely and
+  say why, with nothing stored.
+- A user-selected source file is never deleted automatically; what
+  persists, and where, is documented.
+
 ## Carried requirements: response actions (#98)
 
 The response action row (Copy response, Rate response, Read aloud, Share,

@@ -52,7 +52,26 @@ tree are recorded here.
 | 38 | D7-5 sessions proved across CLI, API and desktop; Delete asks first; `sessions delete --json` | https://github.com/dlroqa/Lightagent/pull/132 | `desktop/d7e-sessions` | `desktop/d7d-knowledge-ui` (`d5ed51f`) | `c0b5ed3` | `c0b5ed3` |
 | 39 | D7-6 worker assignments through one shared operation; Specialists assign and revoke | https://github.com/dlroqa/Lightagent/pull/133 | `desktop/d7f-workers` | `desktop/d7e-sessions` (via merge commit `4afe907`) | `4afe907` | `4afe907` |
 | 40 | A profile switch's rejections are applied before its runs are cancelled (D5 race) | https://github.com/dlroqa/Lightagent/pull/134 | `desktop/d5d-switch-rejections` | `desktop/d7f-workers` (via merge commit `627e899`) | `627e899` | `627e899` |
-| 41+ | D7 continues (identity and remote credentials, init/import/chat, the remaining slash, setup, env and config rows, the remaining workers and rag options, the diagnostics bundle and its redaction), then D8-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+| 41 | D7 evidence gaps: `rag --source`, workers `--worker`/`--profile` | https://github.com/dlroqa/Lightagent/pull/135 | `desktop/d7g-evidence-gaps` | `desktop/d5d-switch-rejections` (`59a4998`) | `7cb8bfa` | `7cb8bfa` |
+| 42 | D7 identity through one shared operation | https://github.com/dlroqa/Lightagent/pull/136 | `desktop/d7h-identity-ops` | `desktop/d7g-evidence-gaps` | `a0b82e8` | `a0b82e8` |
+| 43 | D7 the Identity screen | https://github.com/dlroqa/Lightagent/pull/137 | `desktop/d7i-identity-ui` | `desktop/d7h-identity-ops` | `2d572cc` | `2d572cc` |
+| 44 | D7 remote credentials | https://github.com/dlroqa/Lightagent/pull/138 | `desktop/d7j-remote-credentials` | `desktop/d7i-identity-ui` | `b24d10f` | `b24d10f` |
+| 45 | D7 diagnostics and the allowlisted bundle | https://github.com/dlroqa/Lightagent/pull/139 | `desktop/d7k-diagnostics` | `desktop/d7j-remote-credentials` | `443df6e` | `443df6e` |
+| 46 | D7 setup: init and import | https://github.com/dlroqa/Lightagent/pull/140 | `desktop/d7l-setup` | `desktop/d7k-diagnostics` | `3fde996` | `3fde996` (subagents: hosted queueing) |
+| 47 | D7 configuration sections | https://github.com/dlroqa/Lightagent/pull/141 | `desktop/d7m-config-sections` | `desktop/d7l-setup` | `8f2496b` | `8f2496b` (subagents: hosted queueing) |
+| 48 | D7 evidence completion | https://github.com/dlroqa/Lightagent/pull/142 | `desktop/d7n-evidence-completion` | `desktop/d7m-config-sections` (via merge commit `9013dd3`) | `9013dd3` | `9013dd3` (subagents: hosted queueing) |
+| 49 | D7 `update --check`, read-only | https://github.com/dlroqa/Lightagent/pull/143 | `desktop/d7o-update-check` | `desktop/d7n-evidence-completion` (via merge commit `2b79e05`) | `2b79e05` | `2b79e05` (subagents: hosted queueing) |
+| 50 | D7 the Security card | https://github.com/dlroqa/Lightagent/pull/144 | `desktop/d7p-security` | `desktop/d7o-update-check` (via merge commit `f17115c`) | `f17115c` | `f17115c` (subagents: hosted queueing) |
+| 51 | D7 conversations | https://github.com/dlroqa/Lightagent/pull/145 | `desktop/d7q-conversations` | `desktop/d7p-security` (`f17115c`) | `9f4dbc5` | `9f4dbc5` |
+| 52 | D7 the setup sections in Settings (shared WebMode) | https://github.com/dlroqa/Lightagent/pull/146 | `desktop/d7r-setup-sections` | `desktop/d7q-conversations` (`9f4dbc5`) | `cc2829d` | `cc2829d` |
+| 53+ | D7 continues (the audit's evidence gaps, the remaining slash, Jev, regenerate, chat profile and env rows), then D8-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+
+**Outside the stack: #147** (`fix/broker-queue-wait`, base `master`): the
+broker's separate queue and run waits. It changes merged subagents code
+and the subagents workflow, so it merges before the stack. Rows 46-50's
+subagents parents failed only on hosted queueing (their children behaved
+as intended), and rows 51-52, whose trees contain them, passed. The D10
+candidate sequence validates the combined tree with #147.
 
 **D10 decision carried:** rows 21-39 carry the switch rejection race
 (fixed at row 40): with a pending approval, a switch that stops runs may

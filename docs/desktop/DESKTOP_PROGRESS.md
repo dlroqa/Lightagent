@@ -1725,6 +1725,133 @@ not counted: no test sets the source name yet).
 Coverage: the five `cli.sessions.*` rows and six `cli.workers.*` rows →
 **110 of 227**.
 
+## Rows 41-50 — D7: identity, remote credentials, diagnostics, setup, configuration, update check, security
+
+Implemented by session `978317c3` (owner from 2026-11-03T05:5xZ, claim on
+#134), then session `445d73de` (owner from 09:0xZ, claim on #144, handoff
+confirmed by the previous owner). Every head below is the row's current
+head; every gate named passed on that exact commit.
+
+| Row | PR | Branch | Head / tree | Gates |
+|---|---|---|---|---|
+| 41 the `rag --source` and workers `--worker`/`--profile` gaps at host and browser | #135 | `desktop/d7g-evidence-gaps` | `7cb8bfa` / `090da94` | check 41587423780, desktop 41587423781, jev 41587423772, subagents 41587423775 |
+| 42 identity through one shared operation (`identity_admin::perform`, local-operator gate) | #136 | `desktop/d7h-identity-ops` | `a0b82e8` / `5bedc8c` | check 41588561713, desktop 41588561702, jev 41588561690, subagents 41588561683 |
+| 43 the Identity screen | #137 | `desktop/d7i-identity-ui` | `2d572cc` / `2249fe8` | check 41589056316, desktop 41589056278, jev 41589056276, subagents 41589056380 |
+| 44 remote credentials (keygen needs no key, fix `121`) | #138 | `desktop/d7j-remote-credentials` | `b24d10f` / `1abc992` | check 41592699058, desktop 41592698681, jev 41592698713, subagents 41592698833 |
+| 45 diagnostics: doctor, architecture, the allowlisted bundle | #139 | `desktop/d7k-diagnostics` | `443df6e` / `bdbf16f` | check 41596482239, desktop 41596482116, jev 41596482297, subagents 41596482376 |
+| 46 setup: init and the Hermes import | #140 | `desktop/d7l-setup` | `3fde996` / `f6b220f` | check 41601200056, desktop 41601199989, jev 41601200159; subagents 41601199941 failed twice on hosted queueing (below) |
+| 47 one key of every settable configuration section | #141 | `desktop/d7m-config-sections` | `8f2496b` / `c2747be` | check 41608931747, desktop 41608931818, jev 41608931918; subagents 41608931679 hosted queueing |
+| 48 evidence completion (host and browser gaps for identity, remote credentials, setup) | #142 | `desktop/d7n-evidence-completion` | `9013dd3` / `f7dac7e` | check 41608933114, desktop 41608933059, jev 41608933107; subagents 41608933089 hosted queueing |
+| 49 `update --check`, read-only | #143 | `desktop/d7o-update-check` | `2b79e05` / `48deb34` | check 41608937007, desktop 41608937124, jev 41608936951, live 41608936949 (and 41601568852 at `78a4536`); subagents 41608936930 hosted queueing |
+| 50 the Security card; parity-test hardening F2-F4 | #144 | `desktop/d7p-security` | `f17115c` / `a53d052` | check 41608939464, desktop 41608939285 (attempt 2), jev 41608939327; subagents 41608939492 hosted queueing |
+
+Rows 51 and 52 (below) passed all four workflows, subagents included,
+and their trees contain rows 46-50, as row 17's did for row 16.
+
+**Failures and fixes.**
+- `122` (row 47): an unused SECTIONS table became a debug assertion.
+  `125`: `POST /sessions` answers 201. `126`: `lightagent --json config
+  show` prints the configuration itself; only `GET /config` wraps it in
+  `config`. `130` (row 46): a clippy borrow; `profile list --json` prints
+  `active` (not `active_profile`); a persona lives in `SOUL.md`, and only
+  the text `profile show` prints it.
+- Row 48's conflict with row 47 was resolved by re-applying its edits on
+  the fixed base (`127`, `131`) under two-parent merge commits. The
+  resolution was reviewed by content, not by ancestry: the earlier fixes
+  above are present at `f17115c`.
+- `132` (row 47, 2026-11-03): rows 47-50 failed render and the desktop
+  runs job on row 47's tests, not on product code. The browser check read
+  keys before they had a value, and it restored each key with an external
+  PUT, which made the card's revision stale (its next Set was refused,
+  409, by design). The host scenario read originals with `config get`,
+  which refuses an optional key with no value. Both now read through the
+  API (a 404 is an unset key, refused alike by the CLI), reload the card
+  before each key, and check every key is restored. Carried up by
+  server-side merges (`POST /merges`, no force): row 48 `9013dd3`, row 49
+  `2b79e05`, row 50 `f17115c`; each merge's change against its first
+  parent is exactly `132`'s.
+
+**Parity-test audit (review findings).** F1: `desktop_setup.rs` compared
+a missing `settings()` field with a missing one (null equals null); fixed
+in `126`. F2: `desktop_identity.rs` compared a restriction without its
+content; hardened (row 50). F3: `desktop_setup.rs` init comparisons had no
+non-null guards; hardened (row 50). F4: `desktop_knowledge.rs` chunk
+counts had no number check; hardened (row 50). Rows 51-52 assert known
+values, required fields and their types.
+
+## Row 51 — D7: conversations
+
+Draft PR #145, `desktop/d7q-conversations`, head `9f4dbc5` (tree
+`f0df67b`), edit request `133`. Rename now edits the title in place
+(Enter saves it trimmed, Escape keeps the old one). It used
+`window.prompt`, which not every desktop WebView implements, so rename
+could do nothing in the app. **Create project…** still uses
+`window.prompt`; it is a D8 native item. Evidence: a conversation
+continues between the desktop and `lightagent chat --session` both ways,
+with the earlier turn sent to the model; search by message and by title;
+rename (an empty title refused); an attachment saved byte for byte,
+owner-only, under `attachments/<session>`; a file name that is not plain
+refused by the runtime and by the host itself (the e2e driver's fetch now
+passes raw bodies, as `api_fetch` does); Enter sends, Shift+Enter is a new
+line; New chat starts a fresh session in the same profile. Gates: check
+41611764860, desktop 41611764757, jev 41611764715, subagents 41611764652.
+
+## Row 52 — D7: the setup sections in Settings
+
+Draft PR #146, `desktop/d7r-setup-sections`, head `cc2829d` (tree
+`d802e1b`), edit requests `134` and `135`. `lightagent_core::WebMode`
+(`of`, `apply`) is the one web-mode operation for both setup variants and
+`PUT /settings`; Settings has a Web access selector with setup's four
+choices. `135` fixed a defect before CI: every Settings save carries the
+mode it read, and re-applying it would reset realtime knowledge set by
+hand. The mode now applies only as a change, and the backend test proves
+an unrelated save keeps `rag.realtime_enabled`. Gates: check 41613505978,
+desktop 41613505967, jev 41613506002, subagents 41613506030.
+
+Coverage after rows 41-52 and the inventory correction: **204 of 222**.
+
+## Inventory correction: test-only environment names (2026-11-03)
+
+Owner decision: an env row is reclassified only when a source audit
+confirms that no supported product path reads it. Audit at `12582a0` and
+`cc2829d`: every reference in crates, scripts, workflows, packaging and
+docs, plus indirect reads (`${env:NAME}` secret references take
+user-chosen names; `serve --key-env` reads the variable it is given; the
+only other runtime reads are `CI`, `GITHUB_ACTIONS` and the excluded
+evaluation names).
+
+| Row | References | Finding |
+|---|---|---|
+| `env.LIGHTAGENT_PROVIDER_KEY` | `crates/lightagent/src/lib.rs` (config_keys unit test), `tests/desktop_diagnostics.rs` | test only → not-applicable |
+| `env.LIGHTAGENT_QDRANT_URL` | `tests/platform_services.rs`, `check.yml`, `scripts/test-platform-integration.sh`, `docs/platform-integration.md` | test only → not-applicable |
+| `env.LIGHTAGENT_INFINITY_URL` | same as Qdrant | test only → not-applicable |
+| `env.LIGHTAGENT_OPEN_TERMINAL_URL` | ignored live test in `builtins/open_terminal.rs`, `check.yml`, `docs/platform-integration.md` | test only → not-applicable |
+| `env.LIGHTAGENT_OPEN_TERMINAL_TOKEN` | same, and a redaction probe in `tests/desktop_diagnostics.rs` | test only → not-applicable |
+| `env.LIGHTAGENT_API_KEY` | `packaging/systemd/lightagent.env.example` and `lightagent.service` (`serve --key-env LIGHTAGENT_API_KEY`), sandbox tests, `check.yml` | **product** (the packaged service) → stays applicable (remote mode, D8) |
+
+The denominator moves 227 → 222 as an inventory correction; nothing is
+counted for it. Each row keeps its id, with the audit as its reason.
+
+## Hosted-runner reliability, continued (2026-11-03), and the broker fix
+
+| Job | Cause | Action |
+|---|---|---|
+| `desktop shell (macos-x64)` 125825666277 (row 50) | `hdiutil: couldn't eject "disk2" - Resource busy`; the bundling retry matches only `create failed - Resource busy` | job rerun once (attempt 2 passed); widening the retry pattern is a follow-up |
+| `Tester broker (live)` 125800084898, 125800085405, 125801304410, 125825276049 (#140 attempt 2), 125825640433, 125825644829, 125825659185, 125825667194 | a child fixture's job waited 11-19 minutes for a hosted runner (for example run 41609058709: queued 09:11:57Z, started 09:28:06Z), past the broker's 600 s wait; every child, once it ran, passed or failed as intended | not rerun en masse; fixed in #147 |
+
+**#147** (`fix/broker-queue-wait`, base `master` `12582a0`, head `e0e3ab4`,
+owner-authorized): `actions.status` waits for a runner (`queue_wait`,
+default 600 s, at most 3600 s) and for the executing run (`max_wait`, at
+most 900 s) separately, under an overall cap. A run that has not completed
+is `still_queued` or `still_running`, never passed, and the report names
+the wait's outcome, the time queued and running, and the limits. A
+cancelled wait stops at once. The live checks allow the observed queue
+(30 minutes) and cancel a child they gave up on. Deterministic tests cover
+queued → running → passed, a queue that never yields a runner, an
+execution timeout, cancellation, an unexpected and a startup failure, no
+wait, and the overall cap. Its evidence covers #147's own head until the
+D10 candidate tree includes it.
+
 ## Artifacts and retention
 
 | Artifact | Run | Retention |
@@ -1780,6 +1907,26 @@ Coverage: the five `cli.sessions.*` rows and six `cli.workers.*` rows →
   backed up by the next sync.
 
 ## Next
+
+The owner's order of 2026-11-03 (sole owner `445d73de`):
+
+1. Rows 47-52 gates are green (check, desktop, jev evaluation; rows 51-52
+   subagents too). The rows 46-50 subagents parents failed on hosted
+   queueing only; #147 is the fix, validated on its own head.
+2. **Row 53 (next):** close the five evidence gaps found in the audit:
+   rotate `--expires-in` and `remote-credential list --profile` in the
+   browser, `init --profile`/`--base-url` asserted in the request, and
+   `LIGHTAGENT_HOME` asserted equal to the home shown (host and browser).
+3. Then the rest of D7: `slash.help`, `slash.reload`, `slash.onboard`,
+   `slash.onboard-remove`; `api.get.jev` and `api.post.jev.verify` on the
+   real backend; regenerate on the real backend in the browser;
+   `cli.chat.opt.profile`; `env.HERMES_HOME`; `env.LIGHTAGENT_CREDENTIAL_KEY`.
+4. D8: native WebView verification; host-side secret input for the two
+   `--secret-stdin` rows (no secret byte in the renderer; see
+   DESKTOP_ACCEPTANCE.md); remote mode with `LIGHTAGENT_API_KEY` held by
+   the host; the remaining native items (Create project…, R2-R5). Then D9
+   installers, and D10 parity, the candidate merge sequence on hosted
+   runners, and the review package.
 
 The owner's order of 2026-11-02 (fourth continuation, DESKTOP_CLAUDE_PROMPT.md §6):
 
