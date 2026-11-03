@@ -1,0 +1,330 @@
+=== base d5ed51fb277c2a6cea8a3fa766170c91334514ec
+=== message
+D7-5: sessions — one store for the CLI, the API and the desktop, proved; Delete asks first
+
+`lightagent sessions list|show|delete` and the API's session routes
+already share the active profile's SessionStore (row 10 put its writes
+under one lock). This slice proves it at every level and fixes one gap:
+
+- The Agent screen deleted a conversation as soon as Delete was chosen in
+  its menu. It now asks first (Confirm: delete <title> / Keep it), as
+  every other destructive action does.
+- Backend (desktop_sessions.rs, separate processes): the CLI's
+  `--json sessions list` is the API's list, `sessions show` is the API's
+  session; deleted by the CLI, the API answers 404; deleted over the API,
+  the CLI cannot show it.
+- Host (runs.py `sessions`): list and show through the host equal the
+  CLI's; a delete through the host is seen by the CLI.
+- Browser (e2e/sessions.mjs, real harness): a seeded conversation is
+  listed and opens with its message; Delete asks first, Keep it keeps it,
+  and Confirm deletes it from the server and the list.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace frontend/src/screens/Agent.tsx
+--- find
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+--- with
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+=== replace frontend/src/screens/Agent.tsx
+--- find
+          <MenuItem onClick={() => { setMenuOpen(false); onDelete(); }}><span className="session-menu__item session-menu__item--danger"><Trash2 size={17} /> Delete</span></MenuItem>
+        </Menu>
+      </div>
+--- with
+          <MenuItem onClick={() => { setMenuOpen(false); setConfirmDelete(true); }}><span className="session-menu__item session-menu__item--danger"><Trash2 size={17} /> Delete</span></MenuItem>
+        </Menu>
+      </div>
+      {confirmDelete && (
+        <div role="group" aria-label={`Delete ${label}?`} style={{ display: "flex", gap: 6, flexWrap: "wrap", padding: "4px 8px" }}>
+          <button type="button" className="btn btn--danger" onClick={() => { setConfirmDelete(false); onDelete(); }}>
+            {`Confirm: delete ${label}`}
+          </button>
+          <button type="button" className="btn" onClick={() => setConfirmDelete(false)}>Keep it</button>
+        </div>
+      )}
+=== write crates/lightagent/tests/desktop_sessions.rs
+//! Sessions through one store (D7-5): `lightagent sessions list|show|delete`
+//! and the desktop runtime's session routes act on the active profile's
+//! saved conversations alike. Every process here is separate.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::Value;
+
+const KEY: &str = "92a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081";
+const SESSIONS: &str = "/api/lightagent/v1/sessions";
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-sessions-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+/// One authenticated request: the status and the raw body.
+fn call(runtime: &Runtime, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, raw)
+}
+
+fn cli_ok(home: &Path, args: &[&str]) {
+    let output: Output = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent");
+    assert!(
+        output.status.success(),
+        "lightagent {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn parsed(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|error| panic!("not JSON ({error}): {raw}"))
+}
+
+fn cli_output(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .arg("--json")
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent")
+}
+
+fn cli_json(home: &Path, args: &[&str]) -> Value {
+    let output = cli_output(home, args);
+    assert!(
+        output.status.success(),
+        "lightagent {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("JSON output")
+}
+
+fn create(runtime: &Runtime) -> String {
+    let (status, raw) = call(runtime, "POST", SESSIONS, Some("{}"));
+    assert_eq!(status, 201, "{raw}");
+    parsed(&raw)["id"].as_str().expect("id").to_owned()
+}
+
+#[test]
+fn the_cli_and_the_api_keep_one_set_of_sessions() {
+    let home = scratch_home("one");
+    cli_ok(&home, &["config", "set", "extensions.enabled", "true"]);
+    cli_ok(&home, &["profile", "create", "work"]);
+    cli_ok(&home, &["profile", "use", "work"]);
+    let runtime = start(&home);
+    let first = create(&runtime);
+    let second = create(&runtime);
+
+    // The same list, and the same saved session.
+    let (status, raw) = call(&runtime, "GET", SESSIONS, None);
+    assert_eq!(status, 200, "{raw}");
+    let listed = parsed(&raw)["sessions"].clone();
+    assert_eq!(listed, cli_json(&home, &["sessions", "list"]));
+    assert_eq!(listed.as_array().map(Vec::len), Some(2), "{listed}");
+    let (status, raw) = call(&runtime, "GET", &format!("{SESSIONS}/{first}"), None);
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(parsed(&raw), cli_json(&home, &["sessions", "show", &first]));
+
+    // Deleted by the CLI: gone for the API.
+    cli_json(&home, &["sessions", "delete", &first]);
+    assert_eq!(
+        call(&runtime, "GET", &format!("{SESSIONS}/{first}"), None).0,
+        404
+    );
+
+    // Deleted over the API: the CLI cannot show it, and lists nothing.
+    let (status, raw) = call(&runtime, "DELETE", &format!("{SESSIONS}/{second}"), None);
+    assert!(status == 200 || status == 204, "{status}: {raw}");
+    assert!(!cli_output(&home, &["sessions", "show", &second]).status.success());
+    assert_eq!(
+        cli_json(&home, &["sessions", "list"]).as_array().map(Vec::len),
+        Some(0)
+    );
+}
+=== write e2e/sessions.mjs
+// Saved conversations against the real harness (D7-5): a seeded
+// conversation is listed and opens with its message; Delete asks first;
+// Keep it keeps it; Confirm deletes it from the server and the list.
+// crates/lightagent/tests/desktop_sessions.rs proves the API's sessions are
+// the CLI's.
+
+import { seededSession } from "./delivery.mjs";
+
+const TITLE = "Sessions probe conversation";
+
+export async function checkSessions(browser, base, outDir) {
+  const failures = [];
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  let id = null;
+  const exists = async () => (await fetch(`${base}/api/lightagent/v1/sessions/${id}`)).status === 200;
+  try {
+    id = await seededSession(base, TITLE);
+    const listed = (await (await fetch(`${base}/api/lightagent/v1/sessions`)).json()).sessions ?? [];
+    const label = listed.find((session) => session.id === id)?.title || TITLE;
+    await page.goto(`${base}/#/`);
+    const row = page.getByRole("button", { name: label, exact: true }).first();
+    await row.waitFor({ timeout: 15000 });
+    await row.click();
+    await page.getByText(TITLE, { exact: false }).first().waitFor({ timeout: 15000 });
+
+    await page.getByRole("button", { name: `More actions for ${label}` }).first().click();
+    await page.getByRole("menuitem", { name: /Delete/ }).click();
+    const confirm = page.getByRole("button", { name: `Confirm: delete ${label}` });
+    await confirm.waitFor({ timeout: 5000 });
+    await page.screenshot({ path: `${outDir}/sessions-confirm-delete.png` });
+    if (!(await exists())) failures.push("sessions: Delete removed the conversation before it was confirmed");
+    await page.getByRole("button", { name: "Keep it" }).click();
+    if (!(await exists())) failures.push("sessions: Keep it removed the conversation");
+
+    await page.getByRole("button", { name: `More actions for ${label}` }).first().click();
+    await page.getByRole("menuitem", { name: /Delete/ }).click();
+    await page.getByRole("button", { name: `Confirm: delete ${label}` }).click();
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline && (await exists())) await new Promise((resolve) => setTimeout(resolve, 150));
+    if (await exists()) failures.push("sessions: Confirm did not delete the conversation");
+    await page.getByRole("button", { name: label, exact: true }).waitFor({ state: "detached", timeout: 10000 })
+      .catch(() => failures.push("sessions: the deleted conversation stayed in the list"));
+    if (errors.length) failures.push(`sessions: page errors: ${errors.join("; ")}`);
+  } catch (err) {
+    failures.push(`sessions: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  } finally {
+    await page.close();
+    if (id) await fetch(`${base}/api/lightagent/v1/sessions/${id}`, { method: "DELETE" }).catch(() => {});
+  }
+  return failures;
+}
+=== replace e2e/render.mjs
+--- find
+import { checkKnowledge } from "./knowledge.mjs";
+--- with
+import { checkKnowledge } from "./knowledge.mjs";
+import { checkSessions } from "./sessions.mjs";
+=== replace e2e/render.mjs
+--- find
+  // Indexes documents (and clears them only when the index was empty).
+--- with
+  // Seeds, opens and deletes a conversation.
+  try {
+    failures.push(...(await checkSessions(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`sessions: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Indexes documents (and clears them only when the index was empty).
+=== replace desktop/e2e/runs.py
+--- find
+            ("knowledge", lambda: scenario_knowledge(host, cli)),
+--- with
+            ("knowledge", lambda: scenario_knowledge(host, cli)),
+            ("sessions", lambda: scenario_sessions(host, cli)),
+=== replace desktop/e2e/runs.py
+--- find
+def scenario_knowledge(host, cli):
+--- with
+def scenario_sessions(host, cli):
+    """D7 through the host transport: the session list and a saved session
+    through the host equal the CLI's; a delete through the host is seen by
+    the CLI."""
+    check = Checks("sessions")
+
+    def cli_json(*args):
+        return json.loads(harness.run_cli(cli, "--json", *args))
+
+    session = host.new_session()
+    status, listed = host.fetch("GET", f"{API}/sessions")
+    check.expect("the host lists what the CLI lists",
+                 status == 200 and (listed or {}).get("sessions") == cli_json("sessions", "list"), (status, listed))
+    status, shown = host.fetch("GET", f"{API}/sessions/{session}")
+    check.expect("a session through the host is what the CLI shows",
+                 status == 200 and shown == cli_json("sessions", "show", session), (status, shown))
+    status, _ = host.fetch("DELETE", f"{API}/sessions/{session}")
+    remaining = [s.get("id") for s in cli_json("sessions", "list")]
+    check.expect("deleted through the host, gone for the CLI",
+                 status in (200, 204) and session not in remaining, (status, remaining))
+    return check
+
+
+def scenario_knowledge(host, cli):
+=== end
