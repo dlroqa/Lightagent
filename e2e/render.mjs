@@ -15,6 +15,7 @@ import { checkExtensions } from "./extensions.mjs";
 import { checkMcp } from "./mcp.mjs";
 import { checkToolCatalog } from "./tools.mjs";
 import { checkSkillImport } from "./skills.mjs";
+import { checkMemory } from "./memory.mjs";
 
 const BASE = (process.env.PANEL_BASE ?? "http://127.0.0.1:8735").replace(/\/+$/, "");
 const OUT_DIR = process.env.OUT_DIR ?? "screens";
@@ -43,6 +44,7 @@ const ROUTES = [
   { name: "agent-tools", hash: "#/tools", agentBacked: true, mustContain: "datetime.now" },
   { name: "settings", hash: "#/settings", agentBacked: true, mustContain: "Agent runtime" },
   { name: "profiles", hash: "#/profiles", agentBacked: true, mustContain: "Saved profiles" },
+  { name: "memory", hash: "#/memory", agentBacked: true, mustContain: "Remember something" },
 ];
 
 /** Wait until `mustContain` shows, or a fallback sign does, or time runs out. */
@@ -380,6 +382,12 @@ async function main() {
     failures.push(...(await checkJevStates(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`jev states: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Adds and removes memories: after the routes above have rendered.
+  try {
+    failures.push(...(await checkMemory(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`memory: ${err instanceof Error ? err.message : String(err)}`);
   }
   // Installs and removes an extension: after the routes above have rendered.
   try {

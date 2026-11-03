@@ -475,6 +475,37 @@ def scenario_extensions(host, cli):
     return check
 
 
+def scenario_memory(host, cli):
+    """D7 through the host transport: a memory added through the host is
+    listed by the CLI; list, search and candidates through the host equal
+    the CLI's; a forget through the host is seen by the CLI."""
+    check = Checks("memory")
+
+    def cli_json(*args):
+        return json.loads(harness.run_cli(cli, "--json", *args))
+
+    status, added = host.fetch("POST", f"{API}/memories",
+                               {"text": "Host probe prefers tabs", "kind": "preference", "tags": ["host"]})
+    memory = (added or {}).get("id")
+    check.expect("added through the host", status == 200 and bool(memory), (status, added))
+    status, listed = host.fetch("GET", f"{API}/memories")
+    check.expect("the host lists what the CLI lists", status == 200 and listed == cli_json("memory", "list"),
+                 (status, listed))
+    status, hits = host.fetch("GET", f"{API}/memories/search?q=tabs&top_k=3")
+    check.expect("search through the host equals the CLI's",
+                 status == 200 and hits == cli_json("memory", "search", "tabs", "--top-k", "3"), (status, hits))
+    session = host.new_session()
+    status, found = host.fetch("GET", f"{API}/memories/candidates?session={session}")
+    check.expect("candidates through the host equal the CLI's",
+                 status == 200 and found == cli_json("memory", "candidates", session), (status, found))
+    status, gone = host.fetch("DELETE", f"{API}/memories/items/{memory}")
+    left = cli_json("memory", "list").get("memories", [])
+    check.expect("forgotten through the host, gone for the CLI",
+                 status == 200 and (gone or {}).get("removed") is True and all(m.get("id") != memory for m in left),
+                 (status, gone, left))
+    return check
+
+
 def scenario_skills(host, cli):
     """D6-6 (new scope) through the host transport: a skills folder imports
     inactive, the CLI sees the extension inactive, and it is removed."""
@@ -640,6 +671,7 @@ def main():
             ("mcp", lambda: scenario_mcp(host)),
             ("tools", lambda: scenario_tools(host, cli)),
             ("skills", lambda: scenario_skills(host, cli)),
+            ("memory", lambda: scenario_memory(host, cli)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]

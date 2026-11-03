@@ -1119,6 +1119,7 @@ export function Agent() {
               </div>
               <div className="menu__divider" />
               <MenuItem onClick={() => { setAccountOpen(false); navigate("/tools"); }}><span className="session-menu__item"><Wrench size={17} /> Tools</span></MenuItem>
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/memory"); }}><span className="session-menu__item"><BookOpen size={17} /> Memory</span></MenuItem>
               <MenuItem onClick={() => { setAccountOpen(false); navigate("/settings"); }}><span className="session-menu__item"><ShieldCheck size={17} /> Settings</span></MenuItem>
             </Menu>
           </div>

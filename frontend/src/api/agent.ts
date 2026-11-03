@@ -158,6 +158,17 @@ export interface RunView {
   stop_reason?: string | null;
 }
 
+/** One remembered fact, as `lightagent memory list --json` shows it. */
+export interface MemoryItem {
+  id: string;
+  kind: string;
+  tags?: string[];
+  created_at?: number;
+  updated_at?: number | null;
+  source?: { session_id: string; message_index: number } | null;
+  text: string;
+}
+
 export interface SessionSummary {
   id: string;
   profile: string;
@@ -606,6 +617,37 @@ export const agentApi = {
     }),
   removeMcpServer: (name: string) =>
     jsonRequest<McpState>(`/mcp/servers/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  /** `lightagent memory …` on the active profile, the same operations. */
+  memories: () => jsonRequest<{ memories: MemoryItem[] }>("/memories"),
+  addMemory: (text: string, kind: string | undefined, tags: string[]) =>
+    jsonRequest<{ id: string }>("/memories", {
+      method: "POST",
+      body: JSON.stringify({ text, kind, tags }),
+    }),
+  updateMemory: (id: string, text: string) =>
+    jsonRequest<{ updated: boolean }>(`/memories/items/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ text }),
+    }),
+  forgetMemory: (id: string) =>
+    jsonRequest<{ removed: boolean }>(`/memories/items/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  clearMemories: () => jsonRequest<{ cleared: boolean }>("/memories", { method: "DELETE" }),
+  searchMemories: (query: string, topK?: number) =>
+    jsonRequest<{ query: string; memories: MemoryItem[] }>(
+      topK
+        ? `/memories/search?q=${encodeURIComponent(query)}&top_k=${topK}`
+        : `/memories/search?q=${encodeURIComponent(query)}`,
+    ),
+  reflectMemories: (topic?: string) =>
+    jsonRequest<{ topic: string | null; knowledge: string }>(
+      topic ? `/memories/reflect?topic=${encodeURIComponent(topic)}` : "/memories/reflect",
+    ),
+  memoryCandidates: (session: string) =>
+    jsonRequest<{ session_id: string; candidates: { message: number; text: string }[] }>(
+      `/memories/candidates?session=${encodeURIComponent(session)}`,
+    ),
+  promoteMemory: (request: { session: string; message: number; text?: string; kind?: string; tags: string[] }) =>
+    jsonRequest<{ id: string }>("/memories/promote", { method: "POST", body: JSON.stringify(request) }),
   /** Import skills from a repository or folder (new scope); inactive unless `activate`. */
   importSkills: (request: {
     source: string;
