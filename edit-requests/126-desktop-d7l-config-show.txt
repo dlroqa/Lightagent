@@ -1,0 +1,34 @@
+=== base 7b15072af2f9143c3f65e8e9bef6aabb2a2ce89b
+=== message
+Row 46: `config show --json` prints the configuration itself
+
+desktop run 41593120506 (job 125774630961): the host `setup` scenario
+read `["config"]` from `lightagent --json config show`, which prints the
+configuration itself (only GET /config wraps it); it failed with
+KeyError. The backend test's `settings` made the same mistake, so it
+compared null with null and proved nothing. Both now read the
+configuration as printed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent/tests/desktop_setup.rs
+--- find
+fn settings(home: &Path) -> Value {
+    cli_json(home, &["config", "show"])["config"].clone()
+}
+--- with
+fn settings(home: &Path) -> Value {
+    let shown = cli_json(home, &["config", "show"]);
+    assert!(shown["inference"].is_object(), "{shown}");
+    shown
+}
+=== replace desktop/e2e/runs.py
+--- find
+        base_url = cli_json("config", "show")["config"]["inference"]["base_url"]
+--- with
+        base_url = cli_json("config", "show")["inference"]["base_url"]
+=== replace desktop/e2e/runs.py
+--- find
+                     and cli_json("config", "show")["config"]["inference"]["base_url"] == base_url,
+--- with
+                     and cli_json("config", "show")["inference"]["base_url"] == base_url,
+=== end
