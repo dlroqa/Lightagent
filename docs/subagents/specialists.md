@@ -137,7 +137,8 @@ enabled = true
 base_url = "https://api.github.com"
 api_key = { env = "LIGHTAGENT_GITHUB_TOKEN" }
 repository = "owner/name"
-max_wait_secs = 120
+queue_wait_secs = 600             # waiting for a hosted runner (at most 3600)
+max_wait_secs = 120               # waiting for an executing run (at most 900)
 [[platform.github_actions.workflows]]
 file = "ci.yml"
 refs = ["subagents/*"]

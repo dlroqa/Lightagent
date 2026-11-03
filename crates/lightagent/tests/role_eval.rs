@@ -493,6 +493,7 @@ async fn run_task(task: &Task, model: &str, factory: Arc<Factory>, root: &Path) 
             }],
             commit_refs: Vec::new(),
             poll_interval: Duration::from_millis(200),
+            queue_wait: Duration::from_secs(10),
             max_wait: Duration::from_secs(10),
             max_log_bytes: 4096,
         },
