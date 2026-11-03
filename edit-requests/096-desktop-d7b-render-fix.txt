@@ -1,0 +1,42 @@
+=== base d691c903b3020fcc3fb62a184ead636ab8c52e1f
+=== message
+D7-2: the memory render check scopes Search and promotes edited text
+
+check run 41559630729: "Search" also names the workspace rail's button,
+so the step now uses the Memory screen's; and the harness remembers
+durable statements automatically (memory.auto_capture), so the seeded
+message was already a memory and promoting the same text merged into it.
+The step promotes an edited text (the CLI's --text) and checks that new
+memory's source, kind and tag.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace e2e/memory.mjs
+--- find
+      await page.getByRole("button", { name: "Search", exact: true }).click();
+--- with
+      await page.getByTestId("memory-screen").getByRole("button", { name: "Search", exact: true }).click();
+=== replace e2e/memory.mjs
+--- find
+      await page.locator("#memory-promote-kind").fill("decision");
+      await page.locator("#memory-promote-tags").fill("probe");
+      await page.getByRole("button", { name: "Remember message 1" }).click();
+      const kept = async () => (await memoriesNow(base)).find((memory) => memory.source?.session_id === sessionId);
+--- with
+      await page.locator("#memory-promote-text").fill(KEPT);
+      await page.locator("#memory-promote-kind").fill("decision");
+      await page.locator("#memory-promote-tags").fill("probe");
+      await page.getByRole("button", { name: "Remember message 1" }).click();
+      const kept = async () => (await memoriesNow(base)).find((memory) => memory.text === KEPT);
+=== replace e2e/memory.mjs
+--- find
+      if (memory.kind !== "decision" || !memory.tags?.includes("probe") || memory.source.message_index !== 1) {
+--- with
+      if (memory.kind !== "decision" || !memory.tags?.includes("probe")
+        || memory.source?.session_id !== sessionId || memory.source?.message_index !== 1) {
+=== replace e2e/memory.mjs
+--- find
+const SEED = "Remember that I prefer short answers in render probes";
+--- with
+const SEED = "Remember that I prefer short answers in render probes";
+const KEPT = "Render probes keep answers short";
+=== end
