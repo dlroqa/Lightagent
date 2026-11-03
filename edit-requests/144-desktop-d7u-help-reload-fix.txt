@@ -1,0 +1,40 @@
+=== base 15bd4e58a02a05281d68da89816090e0793a08c2
+=== message
+Row 55: the commands list compiles; row 54's fix carried up
+
+- GET /commands named Vec<Value> with no Value in scope; it names
+  serde_json::Value, as the rest of the API crate does.
+- The API client's comment on commands quoted /help in backticks, which
+  the desktop contract check reads as a path the frontend calls; it names
+  the command without quotes. The check is unchanged.
+- Carries row 54's fix (940b1f5): the Guidance card's placeholder is
+  /path/to/onboarding.md, not a home-directory path, and the client's
+  /onboard comments are unquoted.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+    let commands: Vec<Value> = lightagent_core::commands::SLASH_COMMANDS
+--- with
+    let commands: Vec<serde_json::Value> = lightagent_core::commands::SLASH_COMMANDS
+=== replace frontend/src/api/agent.ts
+--- find
+  /** The terminal chat's slash commands, as its `/help` lists them. */
+--- with
+  /** The terminal chat's slash commands, as its /help lists them. */
+=== replace frontend/src/screens/ProfilesScreen.tsx
+--- find
+          placeholder="/home/me/notes/onboarding.md"
+--- with
+          placeholder="/path/to/onboarding.md"
+=== replace frontend/src/api/agent.ts
+--- find
+/** The profile's onboarding guidance (the chat's `/onboard`). */
+--- with
+/** The profile's onboarding guidance (the chat's /onboard command). */
+=== replace frontend/src/api/agent.ts
+--- find
+  /** `/onboard`: the guidance installed for the profile the runtime serves. */
+--- with
+  /** The chat's /onboard: the guidance installed for the profile the runtime serves. */
+=== end
