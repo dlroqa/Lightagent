@@ -540,10 +540,28 @@ CONFIG_SECTIONS = [
 def scenario_config_sections(host, cli):
     """D7 through the host transport: one key of every settable
     configuration section, written through the host, is what the CLI reads,
-    and the CLI's write is what the host reads. Every value is restored."""
+    and the CLI's write is what the host reads. An optional key with no value
+    is unset for both alike (the host's 404, the CLI's refusal). Every value
+    is restored, and a key that had none is cleared again."""
     check = Checks("config_sections")
     for key, by_host, by_cli in CONFIG_SECTIONS:
-        original = harness.run_cli(cli, "config", "get", key).strip()
+        before_status, before = host.fetch("GET", f"{API}/config/{key}")
+        if before_status == 404:
+            try:
+                harness.run_cli(cli, "config", "get", key)
+                refused = None
+            except RuntimeError as error:
+                refused = str(error)
+            check.expect(f"{key}: unset through the host and for the CLI alike",
+                         refused is not None and f"unknown or unreadable config key '{key}'" in refused,
+                         (before, refused))
+            original = ""
+        else:
+            original = (before or {}).get("value")
+            check.expect(f"{key}: readable through the host",
+                         before_status == 200 and isinstance(original, str), (before_status, before))
+            if not isinstance(original, str):
+                continue
         try:
             status, written = host.fetch("PUT", f"{API}/config/{key}", {"value": by_host})
             read = harness.run_cli(cli, "config", "get", key).strip()
@@ -554,6 +572,10 @@ def scenario_config_sections(host, cli):
                          (status, written, read, shown))
         finally:
             harness.run_cli(cli, "config", "set", key, original)
+        after_status, after = host.fetch("GET", f"{API}/config/{key}")
+        check.expect(f"{key}: restored",
+                     after_status == before_status and (after or {}).get("value") == (before or {}).get("value"),
+                     (before_status, before, after_status, after))
     return check
 
 
