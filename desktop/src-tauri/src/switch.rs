@@ -89,6 +89,8 @@ pub fn blocked_while_switching(operation: &str) -> bool {
             | "memory.forget"
             | "memory.clear"
             | "memory.promote"
+            | "knowledge.add"
+            | "knowledge.clear"
     )
 }
 
@@ -448,6 +450,8 @@ mod tests {
         assert!(blocked_while_switching("memory.add"));
         assert!(blocked_while_switching("memory.clear"));
         assert!(blocked_while_switching("memory.promote"));
+        assert!(blocked_while_switching("knowledge.add"));
+        assert!(blocked_while_switching("knowledge.clear"));
         for reading in [
             "extensions.list",
             "extensions.show",

@@ -408,6 +408,16 @@ pub trait RunFactory: Send + Sync + 'static {
         Err(crate::ops::OpError::unavailable())
     }
 
+    /// A knowledge (RAG) operation on the active profile's index, performed
+    /// by the embedder that owns it, answered with the JSON
+    /// `lightagent rag … --json` prints. The default refuses.
+    async fn rag(
+        &self,
+        _request: crate::ops::RagRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
     /// Tools currently visible to the factory's active target.
     async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
         let registry = lightagent_tools::ToolRegistry::builtin();
@@ -1269,6 +1279,14 @@ impl RunManager {
         request: crate::ops::ProfileRequest,
     ) -> Result<serde_json::Value, crate::ops::OpError> {
         self.factory.profiles(request).await
+    }
+
+    /// Perform a knowledge (RAG) operation through the factory.
+    pub async fn rag(
+        &self,
+        request: crate::ops::RagRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.rag(request).await
     }
 
     /// Perform a memory operation through the factory (see [`crate::ops`]).
