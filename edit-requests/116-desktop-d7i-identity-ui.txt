@@ -1,0 +1,888 @@
+=== base a0b82e81c94c3d2fc83f1ba8b6a39830781ba7c2
+=== message
+Row 43: D7-8 — the Identity screen over the shared identity operations
+
+The Identity screen (#/admin/identity, from the account menu) manages
+the home's identity store through the operations row 42 shares with
+`lightagent identity`:
+
+- the store's status (absent until the first change; multi-user mode is
+  not activated by any of this);
+- users: create, list, suspend (asks first);
+- credentials: issue for a user, optionally expiring and narrowed to
+  capabilities and profiles, to a new file named by an absolute path
+  (the CLI's --secret-file); rotate to a new file; revoke (asks first);
+  list, filtered by user. The secret is written to that file once by the
+  runtime and never reaches the screen;
+- ownership: assign an unowned profile to a user, reassign (asks first),
+  remove (asks first); owners and grants, filtered by profile; revoke a
+  granted capability (asks first);
+- the audit, the most recent N records.
+
+Every refusal is shown next to the action with the server's words, and
+the input is kept. Browser check e2e/identity.mjs, through every
+operation; it also checks that the secret is in neither the page nor
+browser storage, and that issuing to an existing file is refused and
+leaves it unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace frontend/src/api/agent.ts
+--- find
+export interface ApprovalRow {
+--- with
+/** `lightagent identity status`: the store's state and counts. Never a secret. */
+export interface IdentityStatus {
+  store: "absent" | "present";
+  schema_supported: number;
+  generation?: number;
+  principals?: { users: number; operators: number; suspended: number };
+  credentials?: { active: number; revoked: number; expired: number };
+  owned_profiles?: { recorded: number; effective: number };
+  multi_user: string;
+}
+
+export interface IdentityPrincipal {
+  id: string;
+  role: "user" | "operator";
+  status: "active" | "suspended";
+  created_unix: number;
+  updated_unix: number;
+  unrevoked_credentials: number;
+}
+
+/** A credential by key id. The secret and its verifier are never listed. */
+export interface IdentityCredential {
+  key_id: string;
+  principal: string;
+  role: string;
+  state: "active" | "revoked" | "expired";
+  created_unix: number;
+  expires_unix: number | null;
+  revoked_unix: number | null;
+  replaces: string | null;
+  restriction: { capabilities?: string[] | null; profiles?: string[] | null } | null;
+}
+
+export interface IdentityOwnership {
+  profile: string;
+  owner: string;
+  effective: boolean;
+  grants: { principal: string; capabilities: string[] }[];
+}
+
+export interface IdentityAuditRecord {
+  at_unix: number;
+  generation: number;
+  action: unknown;
+  principal: unknown;
+  key_id: unknown;
+  subject: unknown;
+  profile: unknown;
+  outcome: unknown;
+  denied: boolean;
+}
+
+/** An issued or rotated credential: its key id only; the secret went to the named file. */
+export interface IdentityIssued {
+  issued: string;
+  principal?: string;
+  replaces?: string;
+  expires_unix: number | null;
+  secret_delivered_to: string;
+}
+
+export interface ApprovalRow {
+=== replace frontend/src/api/agent.ts
+--- find
+  settings: () => jsonRequest<LightagentSettings>("/settings"),
+--- with
+  /** `lightagent identity …` as the local operator. A credential's secret goes to a new file, never to the UI. */
+  identityStatus: () => jsonRequest<IdentityStatus>("/identity"),
+  identityUsers: () => jsonRequest<{ principals: IdentityPrincipal[] }>("/identity/users"),
+  createIdentityUser: (id: string) =>
+    jsonRequest<{ created: string }>("/identity/users", { method: "POST", body: JSON.stringify({ id }) }),
+  suspendIdentityUser: (id: string) =>
+    jsonRequest<{ suspended: string }>(`/identity/users/${encodeURIComponent(id)}/suspend`, { method: "POST" }),
+  identityCredentials: (principal?: string) =>
+    jsonRequest<{ credentials: IdentityCredential[] }>(
+      principal ? `/identity/credentials?principal=${encodeURIComponent(principal)}` : "/identity/credentials",
+    ),
+  issueIdentityCredential: (request: {
+    principal: string;
+    expires_in?: number;
+    capabilities: string[];
+    profiles: string[];
+    secret_file: string;
+  }) => jsonRequest<IdentityIssued>("/identity/credentials", { method: "POST", body: JSON.stringify(request) }),
+  rotateIdentityCredential: (keyId: string, request: { expires_in?: number; secret_file: string }) =>
+    jsonRequest<IdentityIssued>(`/identity/credentials/${encodeURIComponent(keyId)}/rotate`, {
+      method: "POST",
+      body: JSON.stringify(request),
+    }),
+  revokeIdentityCredential: (keyId: string) =>
+    jsonRequest<{ revoked: string }>(`/identity/credentials/${encodeURIComponent(keyId)}/revoke`, { method: "POST" }),
+  assignIdentityOwner: (profile: string, principal: string) =>
+    jsonRequest<{ owner: string; assignment: string }>(`/identity/owners/${encodeURIComponent(profile)}`, {
+      method: "PUT",
+      body: JSON.stringify({ principal }),
+    }),
+  reassignIdentityOwner: (profile: string, principal: string) =>
+    jsonRequest<{ owner: string; assignment: string }>(`/identity/owners/${encodeURIComponent(profile)}/reassign`, {
+      method: "POST",
+      body: JSON.stringify({ principal }),
+    }),
+  removeIdentityOwner: (profile: string) =>
+    jsonRequest<{ owner: null }>(`/identity/owners/${encodeURIComponent(profile)}`, { method: "DELETE" }),
+  identityGrants: (profile?: string) =>
+    jsonRequest<{ profiles: IdentityOwnership[] }>(
+      profile ? `/identity/grants?profile=${encodeURIComponent(profile)}` : "/identity/grants",
+    ),
+  revokeIdentityGrant: (request: { profile: string; principal: string; capability: string }) =>
+    jsonRequest<{ revoked: string }>("/identity/grants/revoke", { method: "POST", body: JSON.stringify(request) }),
+  identityAudit: (limit: number) =>
+    jsonRequest<{ records: IdentityAuditRecord[] }>(`/identity/audit?limit=${limit}`),
+  settings: () => jsonRequest<LightagentSettings>("/settings"),
+=== write frontend/src/screens/IdentityScreen.tsx
+import { useEffect, useState } from "react";
+
+import {
+  agentApi,
+  type IdentityAuditRecord,
+  type IdentityCredential,
+  type IdentityOwnership,
+  type IdentityPrincipal,
+  type IdentityStatus,
+  type ProfileSummary,
+} from "../api/agent";
+import { Empty } from "../components/Bits";
+import { Card } from "../components/Card";
+import { TopBar } from "../components/Shell";
+
+/** What a user credential may be narrowed to; administer and provision stay the operator's. */
+const USER_CAPABILITIES = ["runs_read", "runs_write", "sessions_read", "sessions_write", "tools_read", "approvals_write"];
+const ALL_CAPABILITIES = [...USER_CAPABILITIES, "administer", "provision"];
+
+const errorStyle = { fontSize: 11.5, color: "var(--danger)", marginTop: 4 } as const;
+const rowStyle = { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" } as const;
+const listStyle = { margin: 0, paddingLeft: 0, listStyle: "none", display: "grid", gap: 10 } as const;
+
+function errorText(cause: unknown): string {
+  return (cause instanceof Error ? cause.message : String(cause)).replace(/^\d{3}:\s*/, "");
+}
+
+function when(unix: number | null | undefined): string {
+  return unix ? new Date(unix * 1000).toLocaleString() : "never";
+}
+
+function shown(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+/** A whole number of seconds, or nothing. */
+function seconds(raw: string): number | undefined {
+  const value = Number(raw);
+  return raw.trim() && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * The home's identity store, through the operations `lightagent identity`
+ * shares, as the local operator: status, users, credentials, ownership and
+ * grants, and the audit. A credential's secret is written by the runtime
+ * to a new file the operator names, once; it never reaches this screen.
+ */
+export function IdentityScreen() {
+  const [status, setStatus] = useState<IdentityStatus | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [users, setUsers] = useState<IdentityPrincipal[]>([]);
+  const [credentials, setCredentials] = useState<IdentityCredential[]>([]);
+  const [owners, setOwners] = useState<IdentityOwnership[]>([]);
+  const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
+  const [audit, setAudit] = useState<IdentityAuditRecord[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<{ area: string; text: string } | null>(null);
+  const [confirm, setConfirm] = useState<string | null>(null);
+
+  const [newUser, setNewUser] = useState("");
+  const [issuePrincipal, setIssuePrincipal] = useState("");
+  const [issueExpires, setIssueExpires] = useState("");
+  const [issueCapabilities, setIssueCapabilities] = useState<string[]>([]);
+  const [issueProfiles, setIssueProfiles] = useState("");
+  const [issueFile, setIssueFile] = useState("");
+  const [principalFilter, setPrincipalFilter] = useState("");
+  const [rotating, setRotating] = useState<string | null>(null);
+  const [rotateFile, setRotateFile] = useState("");
+  const [rotateExpires, setRotateExpires] = useState("");
+  const [ownerProfile, setOwnerProfile] = useState("");
+  const [ownerPrincipal, setOwnerPrincipal] = useState("");
+  const [reassignTo, setReassignTo] = useState<Record<string, string>>({});
+  const [grantsProfile, setGrantsProfile] = useState("");
+  const [grantProfile, setGrantProfile] = useState("");
+  const [grantPrincipal, setGrantPrincipal] = useState("");
+  const [grantCapability, setGrantCapability] = useState("runs_read");
+  const [auditLimit, setAuditLimit] = useState("50");
+
+  async function load(filter = principalFilter, profile = grantsProfile) {
+    try {
+      const [nextStatus, nextUsers, nextCredentials, nextOwners, catalog] = await Promise.all([
+        agentApi.identityStatus(),
+        agentApi.identityUsers(),
+        agentApi.identityCredentials(filter.trim() || undefined),
+        agentApi.identityGrants(profile || undefined),
+        agentApi.profiles(),
+      ]);
+      setStatus(nextStatus);
+      setUsers(nextUsers.principals);
+      setCredentials(nextCredentials.credentials);
+      setOwners(nextOwners.profiles);
+      setProfiles(catalog.profiles);
+      setLoadError(null);
+    } catch (cause) {
+      setLoadError(errorText(cause));
+    }
+  }
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  /** Run one change; its outcome is announced, and a refusal is shown in `area`. */
+  async function act(area: string, work: () => Promise<string>) {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    setConfirm(null);
+    try {
+      setMessage(await work());
+    } catch (cause) {
+      setError({ area, text: errorText(cause) });
+    } finally {
+      setBusy(false);
+      void load();
+    }
+  }
+
+  const refusal = (area: string) =>
+    error?.area === area ? <div role="alert" data-testid="identity-error" style={errorStyle}>{error.text}</div> : null;
+
+  /** A destructive action that asks first: Confirm or Keep it. */
+  const confirmable = (id: string, area: string, label: string, confirmLabel: string, run: () => Promise<string>, disabled = false) =>
+    confirm === id ? (
+      <>
+        <button type="button" className="btn btn--danger" disabled={busy} onClick={() => void act(area, run)}>{confirmLabel}</button>
+        <button type="button" className="btn" disabled={busy} onClick={() => setConfirm(null)}>Keep it</button>
+      </>
+    ) : (
+      <button type="button" className="btn" disabled={busy || disabled} onClick={() => setConfirm(id)}>{label}</button>
+    );
+
+  const activeUsers = users.filter((user) => user.role === "user" && user.status === "active");
+  const userOptions = (exclude?: string) => [
+    <option key="" value="">Choose a user</option>,
+    ...activeUsers
+      .filter((user) => user.id !== exclude)
+      .map((user) => <option key={user.id} value={user.id}>{user.id}</option>),
+  ];
+  const profileOptions = (none: string) => [
+    <option key="" value="">{none}</option>,
+    ...profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name || profile.id}</option>),
+  ];
+
+  return (
+    <>
+      <TopBar title="Identity" subtitle="Users, credentials and profile ownership for this home (operator only)" />
+      <div className="page" data-testid="identity-screen">
+        {message && <div className="notice notice--info" role="status" data-testid="identity-message">{message}</div>}
+        {loadError && (
+          <div className="notice notice--warn" role="alert">
+            The identity store is unavailable: {loadError}{" "}
+            <button type="button" className="btn" onClick={() => void load()}>Retry</button>
+          </div>
+        )}
+
+        <Card title="Identity store">
+          <p className="card__note">
+            Shared with the terminal CLI (lightagent identity). Only the local operator manages identity: the desktop app,
+            or this Web UI served on loopback without a key.
+          </p>
+          {!status && !loadError && <span className="muted">Loading…</span>}
+          {status && (
+            <div data-testid="identity-status">
+              {status.store === "absent" ? (
+                <div>No identity store yet. It is created by the first change below.</div>
+              ) : (
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  <li>Generation {status.generation}</li>
+                  <li>
+                    {status.principals?.users ?? 0} users, {status.principals?.operators ?? 0} operators,{" "}
+                    {status.principals?.suspended ?? 0} suspended
+                  </li>
+                  <li>
+                    Credentials: {status.credentials?.active ?? 0} active, {status.credentials?.revoked ?? 0} revoked,{" "}
+                    {status.credentials?.expired ?? 0} expired
+                  </li>
+                  <li>Owned profiles: {status.owned_profiles?.effective ?? 0} in effect of {status.owned_profiles?.recorded ?? 0} recorded</li>
+                </ul>
+              )}
+              {status.multi_user === "not_activated" && (
+                <div className="muted" style={{ marginTop: 6 }}>
+                  Multi-user mode is not active: lightagent serve does not read this store, so these records change no
+                  one&apos;s access yet.
+                </div>
+              )}
+            </div>
+          )}
+        </Card>
+
+        <Card title="Users">
+          <div style={{ ...rowStyle, alignItems: "flex-end" }}>
+            <div className="field" style={{ flex: "1 1 220px" }}>
+              <label className="field__label" htmlFor="identity-user-id">New user id (permanent)</label>
+              <input id="identity-user-id" className="input" value={newUser} spellCheck={false} disabled={busy}
+                onChange={(event) => setNewUser(event.target.value)} />
+            </div>
+            <button type="button" className="btn" disabled={busy || !newUser.trim()}
+              onClick={() => void act("users", async () => {
+                const created = await agentApi.createIdentityUser(newUser.trim());
+                setNewUser("");
+                return `Created user ${created.created}.`;
+              })}>Create user</button>
+          </div>
+          {refusal("users")}
+          {users.length === 0 ? (
+            <Empty title="No users" hint="Create one above." />
+          ) : (
+            <ul data-testid="identity-users" style={{ ...listStyle, marginTop: 12 }}>
+              {users.map((user) => (
+                <li key={user.id} data-testid={`user-${user.id}`} style={rowStyle}>
+                  <strong>{user.id}</strong>
+                  <span className="muted">
+                    {user.role} · {user.status} · {user.unrevoked_credentials} unrevoked credential
+                    {user.unrevoked_credentials === 1 ? "" : "s"} · since {when(user.created_unix)}
+                  </span>
+                  {user.role === "user" && user.status === "active" &&
+                    confirmable(`suspend:${user.id}`, "users", "Suspend…", `Confirm: suspend ${user.id}`, async () => {
+                      await agentApi.suspendIdentityUser(user.id);
+                      return `Suspended ${user.id}; every credential it held was revoked.`;
+                    })}
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+
+        <Card title="Issue a credential">
+          <p className="card__note">
+            The credential is written once to a new file only you can read, named by an absolute path; an existing file
+            is never overwritten. It is not shown here and cannot be recovered.
+          </p>
+          <div className="field">
+            <label className="field__label" htmlFor="identity-issue-principal">User</label>
+            <select id="identity-issue-principal" className="input" value={issuePrincipal} disabled={busy}
+              onChange={(event) => setIssuePrincipal(event.target.value)}>{userOptions()}</select>
+          </div>
+          <fieldset className="field" style={{ border: 0, padding: 0, margin: "8px 0" }}>
+            <legend className="field__label">Allow only (optional; none means what the user&apos;s ownership allows)</legend>
+            <div style={{ ...rowStyle, gap: 12 }}>
+              {USER_CAPABILITIES.map((capability) => (
+                <label key={capability} style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+                  <input type="checkbox" checked={issueCapabilities.includes(capability)} disabled={busy}
+                    onChange={(event) => setIssueCapabilities((current) => event.target.checked
+                      ? [...current, capability]
+                      : current.filter((item) => item !== capability))} />
+                  {capability}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+          <div style={rowStyle}>
+            <div className="field" style={{ flex: "1 1 200px" }}>
+              <label className="field__label" htmlFor="identity-issue-profiles">Only these profiles (optional, comma-separated)</label>
+              <input id="identity-issue-profiles" className="input" value={issueProfiles} spellCheck={false} disabled={busy}
+                onChange={(event) => setIssueProfiles(event.target.value)} />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="identity-issue-expires">Expires in seconds (optional)</label>
+              <input id="identity-issue-expires" className="input" type="number" min={1} value={issueExpires} disabled={busy}
+                style={{ maxWidth: 160 }} onChange={(event) => setIssueExpires(event.target.value)} />
+            </div>
+          </div>
+          <div className="field">
+            <label className="field__label" htmlFor="identity-issue-file">Write the credential to this new file (absolute path)</label>
+            <input id="identity-issue-file" className="input" value={issueFile} spellCheck={false} disabled={busy}
+              placeholder="/path/to/new-credential" onChange={(event) => setIssueFile(event.target.value)} />
+          </div>
+          {refusal("issue")}
+          <button type="button" className="btn" style={{ marginTop: 10 }} aria-busy={busy || undefined}
+            disabled={busy || !issuePrincipal || !issueFile.trim()}
+            onClick={() => void act("issue", async () => {
+              const issued = await agentApi.issueIdentityCredential({
+                principal: issuePrincipal,
+                expires_in: seconds(issueExpires),
+                capabilities: issueCapabilities,
+                profiles: issueProfiles.split(",").map((item) => item.trim()).filter(Boolean),
+                secret_file: issueFile.trim(),
+              });
+              setIssueFile("");
+              return `Issued ${issued.issued} for ${issued.principal ?? issuePrincipal}. The credential was written once to the file you named and is not shown here.`;
+            })}>Issue credential</button>
+        </Card>
+
+        <Card title="Credentials">
+          <div style={{ ...rowStyle, alignItems: "flex-end" }}>
+            <div className="field" style={{ flex: "1 1 200px" }}>
+              <label className="field__label" htmlFor="identity-credential-principal">Only this user (optional)</label>
+              <input id="identity-credential-principal" className="input" value={principalFilter} spellCheck={false}
+                onChange={(event) => setPrincipalFilter(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") void load(principalFilter); }} />
+            </div>
+            <button type="button" className="btn" onClick={() => void load(principalFilter)}>Filter</button>
+          </div>
+          {refusal("credentials")}
+          {credentials.length === 0 ? (
+            <Empty title="No credentials" hint="Issue one above." />
+          ) : (
+            <ul data-testid="identity-credentials" style={{ ...listStyle, marginTop: 12 }}>
+              {credentials.map((credential) => (
+                <li key={credential.key_id} data-testid={`credential-${credential.key_id}`}>
+                  <div style={rowStyle}>
+                    <code>{credential.key_id}</code>
+                    <span className="muted">
+                      {credential.principal} · {credential.state} · expires {when(credential.expires_unix)}
+                      {credential.replaces && ` · replaces ${credential.replaces}`}
+                      {credential.restriction?.capabilities && ` · only ${credential.restriction.capabilities.join(", ")}`}
+                      {credential.restriction?.profiles && ` · on ${credential.restriction.profiles.join(", ")}`}
+                    </span>
+                    {credential.state === "active" && (
+                      <>
+                        <button type="button" className="btn" disabled={busy}
+                          onClick={() => { setRotating(rotating === credential.key_id ? null : credential.key_id); setRotateFile(""); setRotateExpires(""); }}>
+                          Rotate…
+                        </button>
+                        {confirmable(`revoke:${credential.key_id}`, "credentials", "Revoke…", `Confirm: revoke ${credential.key_id}`, async () => {
+                          await agentApi.revokeIdentityCredential(credential.key_id);
+                          return `Revoked ${credential.key_id}.`;
+                        })}
+                      </>
+                    )}
+                  </div>
+                  {rotating === credential.key_id && (
+                    <div style={{ ...rowStyle, alignItems: "flex-end", marginTop: 8 }}>
+                      <div className="field" style={{ flex: "1 1 240px" }}>
+                        <label className="field__label" htmlFor="identity-rotate-file">Write the replacement to this new file (absolute path)</label>
+                        <input id="identity-rotate-file" className="input" value={rotateFile} spellCheck={false} disabled={busy}
+                          onChange={(event) => setRotateFile(event.target.value)} />
+                      </div>
+                      <div className="field">
+                        <label className="field__label" htmlFor="identity-rotate-expires">Expires in seconds (optional)</label>
+                        <input id="identity-rotate-expires" className="input" type="number" min={1} value={rotateExpires}
+                          disabled={busy} style={{ maxWidth: 160 }} onChange={(event) => setRotateExpires(event.target.value)} />
+                      </div>
+                      <button type="button" className="btn" disabled={busy || !rotateFile.trim()}
+                        onClick={() => void act("credentials", async () => {
+                          const issued = await agentApi.rotateIdentityCredential(credential.key_id, {
+                            expires_in: seconds(rotateExpires),
+                            secret_file: rotateFile.trim(),
+                          });
+                          setRotating(null);
+                          return `Issued ${issued.issued} to replace ${credential.key_id}; the old credential works until it is revoked.`;
+                        })}>{`Rotate ${credential.key_id}`}</button>
+                      <button type="button" className="btn" disabled={busy} onClick={() => setRotating(null)}>Cancel</button>
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+
+        <Card title="Profile ownership">
+          <div style={{ ...rowStyle, alignItems: "flex-end" }}>
+            <div className="field">
+              <label className="field__label" htmlFor="identity-owner-profile">Unowned profile</label>
+              <select id="identity-owner-profile" className="input" value={ownerProfile} disabled={busy}
+                onChange={(event) => setOwnerProfile(event.target.value)}>{profileOptions("Choose a profile")}</select>
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="identity-owner-principal">Owner</label>
+              <select id="identity-owner-principal" className="input" value={ownerPrincipal} disabled={busy}
+                onChange={(event) => setOwnerPrincipal(event.target.value)}>{userOptions()}</select>
+            </div>
+            <button type="button" className="btn" disabled={busy || !ownerProfile || !ownerPrincipal}
+              onClick={() => void act("owners", async () => {
+                const assigned = await agentApi.assignIdentityOwner(ownerProfile, ownerPrincipal);
+                return assigned.assignment === "unchanged"
+                  ? `${ownerPrincipal} already owns ${ownerProfile}.`
+                  : `${ownerPrincipal} now owns ${ownerProfile}.`;
+              })}>Assign owner</button>
+          </div>
+          <div className="field" style={{ marginTop: 12 }}>
+            <label className="field__label" htmlFor="identity-grants-profile">Show</label>
+            <select id="identity-grants-profile" className="input" value={grantsProfile} style={{ maxWidth: 260 }}
+              onChange={(event) => { setGrantsProfile(event.target.value); void load(principalFilter, event.target.value); }}>
+              {profileOptions("Every owned profile")}
+            </select>
+          </div>
+          {refusal("owners")}
+          {owners.length === 0 ? (
+            <Empty title="No owned profiles" hint="Every profile is the operator's until a user is assigned." />
+          ) : (
+            <ul data-testid="identity-owners" style={{ ...listStyle, marginTop: 12 }}>
+              {owners.map((owned) => {
+                const target = reassignTo[owned.profile] ?? "";
+                return (
+                  <li key={owned.profile} data-testid={`owner-${owned.profile}`}>
+                    <div style={rowStyle}>
+                      <strong>{owned.profile}</strong>
+                      <span className="muted">
+                        owned by {owned.owner}
+                        {!owned.effective && " (not in effect: the profile was deleted or replaced)"}
+                      </span>
+                    </div>
+                    {owned.grants.length > 0 && (
+                      <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                        {owned.grants.map((grant) => (
+                          <li key={grant.principal}>{grant.principal}: {grant.capabilities.join(", ")}</li>
+                        ))}
+                      </ul>
+                    )}
+                    <div style={{ ...rowStyle, marginTop: 6 }}>
+                      <label className="muted" htmlFor={`identity-reassign-${owned.profile}`}>Reassign to</label>
+                      <select id={`identity-reassign-${owned.profile}`} className="input" style={{ maxWidth: 220 }} value={target}
+                        disabled={busy} onChange={(event) => setReassignTo((current) => ({ ...current, [owned.profile]: event.target.value }))}>
+                        {userOptions(owned.owner)}
+                      </select>
+                      {confirmable(`reassign:${owned.profile}`, "owners", "Reassign…", `Confirm: reassign ${owned.profile} to ${target}`, async () => {
+                        await agentApi.reassignIdentityOwner(owned.profile, target);
+                        return `${owned.profile} moved to ${target}; ${owned.owner}'s runs on it stop.`;
+                      }, !target)}
+                      {confirmable(`remove:${owned.profile}`, "owners", "Remove owner…", `Confirm: remove the owner of ${owned.profile}`, async () => {
+                        await agentApi.removeIdentityOwner(owned.profile);
+                        return `${owned.profile} has no owner now; it is the operator's alone.`;
+                      })}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </Card>
+
+        <Card title="Revoke a grant">
+          <p className="card__note">Removes one capability a user was granted on a profile.</p>
+          <div style={{ ...rowStyle, alignItems: "flex-end" }}>
+            <div className="field">
+              <label className="field__label" htmlFor="identity-grant-profile">Profile</label>
+              <select id="identity-grant-profile" className="input" value={grantProfile} disabled={busy}
+                onChange={(event) => setGrantProfile(event.target.value)}>{profileOptions("Choose a profile")}</select>
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="identity-grant-principal">User</label>
+              <input id="identity-grant-principal" className="input" value={grantPrincipal} spellCheck={false} disabled={busy}
+                onChange={(event) => setGrantPrincipal(event.target.value)} />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="identity-grant-capability">Capability</label>
+              <select id="identity-grant-capability" className="input" value={grantCapability} disabled={busy}
+                onChange={(event) => setGrantCapability(event.target.value)}>
+                {ALL_CAPABILITIES.map((capability) => <option key={capability} value={capability}>{capability}</option>)}
+              </select>
+            </div>
+            {confirmable("grant", "grants", "Revoke grant…", `Confirm: revoke ${grantCapability}`, async () => {
+              await agentApi.revokeIdentityGrant({ profile: grantProfile, principal: grantPrincipal.trim(), capability: grantCapability });
+              return `Revoked ${grantCapability} for ${grantPrincipal.trim()} on ${grantProfile}.`;
+            }, !grantProfile || !grantPrincipal.trim())}
+          </div>
+          {refusal("grants")}
+        </Card>
+
+        <Card title="Audit">
+          <div style={{ ...rowStyle, alignItems: "flex-end" }}>
+            <div className="field">
+              <label className="field__label" htmlFor="identity-audit-limit">Most recent records</label>
+              <input id="identity-audit-limit" className="input" type="number" min={1} value={auditLimit} style={{ maxWidth: 120 }}
+                onChange={(event) => setAuditLimit(event.target.value)} />
+            </div>
+            <button type="button" className="btn" disabled={busy}
+              onClick={() => void agentApi.identityAudit(seconds(auditLimit) ?? 50)
+                .then((result) => { setAudit(result.records); setError(null); })
+                .catch((cause) => setError({ area: "audit", text: errorText(cause) }))}>Show audit</button>
+          </div>
+          {refusal("audit")}
+          {audit && (audit.length === 0 ? <span className="muted">No audit records.</span> : (
+            <div style={{ overflowX: "auto", marginTop: 10 }}>
+              <table data-testid="identity-audit" style={{ borderCollapse: "collapse", fontSize: 12.5, width: "100%" }}>
+                <thead>
+                  <tr>
+                    {["When", "Action", "Principal", "Key", "Subject", "Profile", "Outcome"].map((head) => (
+                      <th key={head} scope="col" style={{ textAlign: "left", padding: "4px 8px" }}>{head}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {audit.map((record, index) => (
+                    <tr key={`${record.generation}-${index}`}>
+                      <td style={{ padding: "4px 8px" }}>{when(record.at_unix)}</td>
+                      <td style={{ padding: "4px 8px" }}>{shown(record.action)}</td>
+                      <td style={{ padding: "4px 8px" }}>{shown(record.principal)}</td>
+                      <td style={{ padding: "4px 8px" }}>{shown(record.key_id)}</td>
+                      <td style={{ padding: "4px 8px" }}>{shown(record.subject)}</td>
+                      <td style={{ padding: "4px 8px" }}>{shown(record.profile)}</td>
+                      <td style={{ padding: "4px 8px" }}>{record.denied ? `denied: ${shown(record.outcome)}` : shown(record.outcome)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ))}
+        </Card>
+      </div>
+    </>
+  );
+}
+=== replace frontend/src/App.tsx
+--- find
+import { KnowledgeScreen } from "./screens/KnowledgeScreen";
+--- with
+import { IdentityScreen } from "./screens/IdentityScreen";
+import { KnowledgeScreen } from "./screens/KnowledgeScreen";
+=== replace frontend/src/App.tsx
+--- find
+        <Route path="knowledge" element={<KnowledgeScreen />} />
+--- with
+        <Route path="knowledge" element={<KnowledgeScreen />} />
+        <Route path="admin/identity" element={<IdentityScreen />} />
+=== replace frontend/src/components/Shell.tsx
+--- find
+import { ArrowLeft, BookOpen, FileText, Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Search, Settings, SquarePen, Users, Wrench } from "lucide-react";
+--- with
+import { ArrowLeft, BookOpen, FileText, KeyRound, Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Search, Settings, SquarePen, Users, Wrench } from "lucide-react";
+=== replace frontend/src/components/Shell.tsx
+--- find
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/knowledge"); }}><span className="session-menu__item"><FileText size={17} /> Knowledge</span></MenuItem>
+--- with
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/knowledge"); }}><span className="session-menu__item"><FileText size={17} /> Knowledge</span></MenuItem>
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/admin/identity"); }}><span className="session-menu__item"><KeyRound size={17} /> Identity</span></MenuItem>
+=== replace frontend/src/screens/Agent.tsx
+--- find
+import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, Clock, CornerDownLeft, Cpu, FilePenLine, FileText, Folder, Globe, MessageCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, SquarePen, Terminal, Trash2, Wrench, X } from "lucide-react";
+--- with
+import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, Clock, CornerDownLeft, Cpu, FilePenLine, FileText, Folder, Globe, KeyRound, MessageCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, SquarePen, Terminal, Trash2, Wrench, X } from "lucide-react";
+=== replace frontend/src/screens/Agent.tsx
+--- find
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/knowledge"); }}><span className="session-menu__item"><FileText size={17} /> Knowledge</span></MenuItem>
+--- with
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/knowledge"); }}><span className="session-menu__item"><FileText size={17} /> Knowledge</span></MenuItem>
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/admin/identity"); }}><span className="session-menu__item"><KeyRound size={17} /> Identity</span></MenuItem>
+=== write e2e/identity.mjs
+// The Identity screen against the real harness (D7-8): a user is created;
+// a credential is issued to a new file (its secret is in neither the page
+// nor browser storage; an existing file is refused and left unchanged),
+// listed for its user, rotated and revoked (Revoke asks first); a profile
+// is assigned, reassigned (asks first) and freed; a grant is revoked; a
+// user is suspended (asks first); the audit shows the records asked for.
+// crates/lightagent/tests/desktop_identity.rs proves the API's store is
+// the CLI's, and desktop/e2e/runs.py `identity` covers the host.
+
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const API = "/api/lightagent/v1/identity";
+
+async function get(base, path) {
+  return (await fetch(`${base}${path}`)).json();
+}
+
+async function until(probe, timeout = 15000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (await probe()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  return Boolean(await probe());
+}
+
+export async function checkIdentity(browser, base, outDir) {
+  const failures = [];
+  const dir = await mkdtemp(join(tmpdir(), "lightagent-render-identity-"));
+  const page = await browser.newPage({ viewport: { width: 1280, height: 2200 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const screen = page.getByTestId("identity-screen");
+  const announced = (text) => page.getByTestId("identity-message").filter({ hasText: text }).waitFor({ timeout: 10000 });
+  const step = async (name, body) => {
+    try {
+      await body();
+    } catch (err) {
+      failures.push(`identity: ${name}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+      await page.screenshot({ path: `${outDir}/identity-failed-${name.replace(/\W+/g, "-")}.png`, fullPage: true }).catch(() => {});
+    }
+  };
+  const secrets = [];
+  const noSecretShown = async (where) => {
+    const seen = await page.evaluate(() => {
+      const stored = (storage) => Object.keys(storage).map((key) => `${key}=${storage.getItem(key)}`).join("\n");
+      return `${document.documentElement.outerHTML}\n${stored(localStorage)}\n${stored(sessionStorage)}`;
+    });
+    for (const secret of secrets) {
+      if (seen.includes(secret)) throw new Error(`a credential's secret is in the page or browser storage (${where})`);
+    }
+  };
+  let keyId = "";
+  let active = "";
+  try {
+    active = (await get(base, "/api/lightagent/v1/profiles")).active_profile;
+    await page.goto(`${base}/#/admin/identity`);
+    await screen.waitFor({ timeout: 15000 });
+    await page.getByTestId("identity-status").waitFor({ timeout: 15000 });
+
+    await step("create users", async () => {
+      for (const id of ["render-alice", "render-bob"]) {
+        await page.locator("#identity-user-id").fill(id);
+        await screen.getByRole("button", { name: "Create user" }).click();
+        await announced(`Created user ${id}.`);
+        await page.getByTestId(`user-${id}`).waitFor({ timeout: 10000 });
+      }
+    });
+
+    await step("issue a credential to a new file", async () => {
+      const file = join(dir, "alice.key");
+      await page.locator("#identity-issue-principal").selectOption("render-alice");
+      await screen.getByLabel("runs_read", { exact: true }).check();
+      await page.locator("#identity-issue-expires").fill("600");
+      await page.locator("#identity-issue-file").fill(file);
+      await screen.getByRole("button", { name: "Issue credential" }).click();
+      await announced("Issued ");
+      const text = await page.getByTestId("identity-message").innerText();
+      keyId = /Issued ([0-9a-f]{16})/.exec(text)?.[1] ?? "";
+      if (!keyId) throw new Error(`no key id in "${text}"`);
+      const token = (await readFile(file, "utf8")).trim();
+      if (!token.startsWith(`la_${keyId}_`)) throw new Error("the file does not hold the issued credential");
+      secrets.push(token.split("_").pop());
+      await noSecretShown("after issue");
+      await page.screenshot({ path: `${outDir}/identity-issued.png`, fullPage: true });
+    });
+
+    await step("an existing file is refused and left unchanged", async () => {
+      const file = join(dir, "alice.key");
+      const before = await readFile(file, "utf8");
+      const count = (await get(base, `${API}/credentials`)).credentials.length;
+      await page.locator("#identity-issue-principal").selectOption("render-alice");
+      await page.locator("#identity-issue-file").fill(file);
+      await screen.getByRole("button", { name: "Issue credential" }).click();
+      await page.getByTestId("identity-error").filter({ hasText: "could not create the secret file" }).waitFor({ timeout: 10000 });
+      if ((await readFile(file, "utf8")) !== before) throw new Error("the existing file was changed");
+      if ((await get(base, `${API}/credentials`)).credentials.length !== count) throw new Error("a credential was issued anyway");
+      if ((await page.locator("#identity-issue-file").inputValue()) !== file) throw new Error("the input was not kept");
+    });
+
+    await step("list a user's credentials, rotate and revoke", async () => {
+      await page.locator("#identity-credential-principal").fill("render-alice");
+      await screen.getByRole("button", { name: "Filter" }).click();
+      const row = page.getByTestId(`credential-${keyId}`);
+      await row.waitFor({ timeout: 10000 });
+      const rotated = join(dir, "alice-rotated.key");
+      await row.getByRole("button", { name: "Rotate…" }).click();
+      await page.locator("#identity-rotate-file").fill(rotated);
+      await row.getByRole("button", { name: `Rotate ${keyId}` }).click();
+      await announced(`to replace ${keyId}`);
+      const token = (await readFile(rotated, "utf8")).trim();
+      secrets.push(token.split("_").pop());
+      await row.getByRole("button", { name: "Revoke…" }).click();
+      await screen.getByRole("button", { name: "Keep it" }).click();
+      const state = async () =>
+        (await get(base, `${API}/credentials?principal=render-alice`)).credentials.find((c) => c.key_id === keyId)?.state;
+      if ((await state()) !== "active") throw new Error("Keep it revoked the credential");
+      await row.getByRole("button", { name: "Revoke…" }).click();
+      await row.getByRole("button", { name: `Confirm: revoke ${keyId}` }).click();
+      await announced(`Revoked ${keyId}.`);
+      if (!(await until(async () => (await state()) === "revoked"))) throw new Error("Confirm did not revoke");
+      await noSecretShown("after rotate and revoke");
+    });
+
+    await step("assign, reassign and free a profile", async () => {
+      const owner = async () => (await get(base, `${API}/grants?profile=${active}`)).profiles[0]?.owner;
+      await page.locator("#identity-owner-profile").selectOption(active);
+      await page.locator("#identity-owner-principal").selectOption("render-alice");
+      await screen.getByRole("button", { name: "Assign owner" }).click();
+      await announced(`render-alice now owns ${active}.`);
+      if ((await owner()) !== "render-alice") throw new Error("the owner was not assigned");
+      const row = page.getByTestId(`owner-${active}`);
+      await row.waitFor({ timeout: 10000 });
+      await page.locator(`#identity-reassign-${active}`).selectOption("render-bob");
+      await row.getByRole("button", { name: "Reassign…" }).click();
+      await row.getByRole("button", { name: `Confirm: reassign ${active} to render-bob` }).click();
+      await announced(`${active} moved to render-bob`);
+      if ((await owner()) !== "render-bob") throw new Error("the profile was not reassigned");
+      await page.screenshot({ path: `${outDir}/identity-owned.png`, fullPage: true });
+      await row.getByRole("button", { name: "Remove owner…" }).click();
+      await row.getByRole("button", { name: `Confirm: remove the owner of ${active}` }).click();
+      await announced(`${active} has no owner now`);
+      if ((await get(base, `${API}/grants?profile=${active}`)).profiles.length !== 0) throw new Error("the owner was not removed");
+    });
+
+    await step("revoke a grant", async () => {
+      await page.locator("#identity-grant-profile").selectOption(active);
+      await page.locator("#identity-grant-principal").fill("render-bob");
+      await page.locator("#identity-grant-capability").selectOption("sessions_read");
+      await screen.getByRole("button", { name: "Revoke grant…" }).click();
+      await screen.getByRole("button", { name: "Confirm: revoke sessions_read" }).click();
+      await announced(`Revoked sessions_read for render-bob on ${active}.`);
+    });
+
+    await step("suspend a user", async () => {
+      const row = page.getByTestId("user-render-alice");
+      await row.getByRole("button", { name: "Suspend…" }).click();
+      await row.getByRole("button", { name: "Confirm: suspend render-alice" }).click();
+      await announced("Suspended render-alice");
+      const alice = (await get(base, `${API}/users`)).principals.find((p) => p.id === "render-alice");
+      if (alice?.status !== "suspended" || alice?.unrevoked_credentials !== 0) {
+        throw new Error(`render-alice is ${JSON.stringify(alice)}`);
+      }
+    });
+
+    await step("the audit shows the records asked for", async () => {
+      await page.locator("#identity-audit-limit").fill("3");
+      await screen.getByRole("button", { name: "Show audit" }).click();
+      const rows = page.getByTestId("identity-audit").locator("tbody tr");
+      if (!(await until(async () => (await rows.count()) === 3))) throw new Error(`${await rows.count()} audit rows`);
+      await noSecretShown("with the audit");
+      await page.screenshot({ path: `${outDir}/identity-audit.png`, fullPage: true });
+    });
+
+    if (errors.length) failures.push(`identity: page errors: ${errors.join("; ")}`);
+  } catch (err) {
+    failures.push(`identity: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  } finally {
+    await page.close();
+    if (active) await fetch(`${base}${API}/owners/${active}`, { method: "DELETE" }).catch(() => {});
+    await rm(dir, { recursive: true, force: true });
+  }
+  return failures;
+}
+=== replace e2e/render.mjs
+--- find
+import { checkWorkers } from "./workers.mjs";
+--- with
+import { checkWorkers } from "./workers.mjs";
+import { checkIdentity } from "./identity.mjs";
+=== replace e2e/render.mjs
+--- find
+  { name: "knowledge", hash: "#/knowledge", agentBacked: true, mustContain: "Add documents" },
+--- with
+  { name: "knowledge", hash: "#/knowledge", agentBacked: true, mustContain: "Add documents" },
+  { name: "identity", hash: "#/admin/identity", agentBacked: true, mustContain: "Identity store" },
+=== replace e2e/render.mjs
+--- find
+  // Assigns and revokes a specialist role.
+--- with
+  // Creates users, issues, rotates and revokes credentials, owns a profile.
+  try {
+    failures.push(...(await checkIdentity(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`identity: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  }
+  // Assigns and revokes a specialist role.
+=== end
