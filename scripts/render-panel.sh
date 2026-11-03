@@ -66,8 +66,8 @@ LIGHTAGENT_CREDENTIAL_KEY_FILE="$RENDER_PREVIOUS_CREDENTIAL_KEY" ./target/debug/
   remote-credential add default --service mcp:render-seed --destination https://seed.render.invalid \
   --secret-file "$work_dir/previous.secret" >/dev/null
 rm -f -- "$work_dir/previous.secret"
+./target/debug/lightagent remote-credential keygen "$work_dir/credential.key" >/dev/null
 export LIGHTAGENT_CREDENTIAL_KEY_FILE="$work_dir/credential.key"
-./target/debug/lightagent remote-credential keygen "$LIGHTAGENT_CREDENTIAL_KEY_FILE" >/dev/null
 
 echo "== start standalone Lightagent (port $AGENT_PORT) =="
 ./target/debug/lightagent serve --host 127.0.0.1 --port "$AGENT_PORT" \

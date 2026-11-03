@@ -416,11 +416,15 @@ pub(crate) fn perform(home: &Path, request: RemoteCredentialRequest) -> Result<V
             previous_key_file: absolute(previous_key_file, "the previous key file")?,
         },
     };
-    let key = MasterKey::from_environment(home).map_err(|error| {
-        invalid(format!(
-            "the configured credential key is unusable: {error}"
-        ))
-    })?;
+    // A new key needs no configured one, even an unusable one.
+    let key = match &action {
+        RemoteCredentialAction::Keygen { .. } => None,
+        _ => MasterKey::from_environment(home).map_err(|error| {
+            invalid(format!(
+                "the configured credential key is unusable: {error}"
+            ))
+        })?,
+    };
     let secret = match &action {
         RemoteCredentialAction::Add { secret, .. }
         | RemoteCredentialAction::Rotate { secret, .. } => Some(secret.read().map_err(invalid)?),
@@ -433,7 +437,11 @@ pub(crate) fn perform(home: &Path, request: RemoteCredentialRequest) -> Result<V
 pub(crate) fn run(action: RemoteCredentialAction, json_output: bool) -> Result<(), String> {
     let paths = LightagentPaths::resolve().map_err(|error| error.to_string())?;
     let home = paths.root();
-    let key = MasterKey::from_environment(home).map_err(|error| error.to_string())?;
+    // A new key needs no configured one, even an unusable one.
+    let key = match &action {
+        RemoteCredentialAction::Keygen { .. } => None,
+        _ => MasterKey::from_environment(home).map_err(|error| error.to_string())?,
+    };
     let secret = match &action {
         RemoteCredentialAction::Add { secret, .. }
         | RemoteCredentialAction::Rotate { secret, .. } => Some(secret.read()?),
