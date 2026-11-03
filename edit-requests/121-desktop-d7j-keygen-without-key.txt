@@ -1,0 +1,83 @@
+=== base 0db83a1072514d6a0ea5f297d794085ea0fccb46
+=== message
+Row 44: a new credential key needs no configured one
+
+Found by the render harness (check run 41591038080, job 125767579488):
+`remote-credential keygen <file>` loaded the configured key before doing
+anything, so with LIGHTAGENT_CREDENTIAL_KEY_FILE already naming the file
+to create it failed ("credential storage is unavailable (NotFound)").
+The same held for any missing or unusable configured key, which is when
+a new key is needed; and the API path had the same order.
+
+- keygen (CLI and API) no longer loads the configured key; every other
+  command still fails closed on an unusable one.
+- render-panel.sh and runs.py create the key file before naming it.
+- desktop_remote_credentials.rs: with an unusable configured key, keygen
+  over the API and by the CLI still create a key file, and the vault
+  stays refused.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent/src/remote_credentials.rs
+--- find
+    let key = MasterKey::from_environment(home).map_err(|error| {
+        invalid(format!(
+            "the configured credential key is unusable: {error}"
+        ))
+    })?;
+--- with
+    // A new key needs no configured one, even an unusable one.
+    let key = match &action {
+        RemoteCredentialAction::Keygen { .. } => None,
+        _ => MasterKey::from_environment(home).map_err(|error| {
+            invalid(format!(
+                "the configured credential key is unusable: {error}"
+            ))
+        })?,
+    };
+=== replace crates/lightagent/src/remote_credentials.rs
+--- find
+    let key = MasterKey::from_environment(home).map_err(|error| error.to_string())?;
+--- with
+    // A new key needs no configured one, even an unusable one.
+    let key = match &action {
+        RemoteCredentialAction::Keygen { .. } => None,
+        _ => MasterKey::from_environment(home).map_err(|error| error.to_string())?,
+    };
+=== replace crates/lightagent/tests/desktop_remote_credentials.rs
+--- find
+        "the CLI refuses as well"
+    );
+    drop(runtime);
+--- with
+        "the CLI refuses as well"
+    );
+    // A new key is still made, by the API and by the CLI; the vault stays
+    // refused until the configuration names a usable key.
+    let (status, raw) = call(
+        &runtime,
+        "POST",
+        &format!("{CREDENTIALS}/keys"),
+        Some(&json!({"path": outside.join("new-by-api.key")}).to_string()),
+    );
+    assert_eq!(status, 200, "{raw}");
+    let by_cli = outside.join("new-by-cli.key");
+    cli_ok(&home, KeyEnv::File(&missing), &["remote-credential", "keygen", arg(&by_cli)]);
+    assert!(by_cli.is_file());
+    let (status, _) = call(&runtime, "GET", &format!("{CREDENTIALS}/vault"), None);
+    assert_eq!(status, 400);
+    drop(runtime);
+=== replace scripts/render-panel.sh
+--- find
+export LIGHTAGENT_CREDENTIAL_KEY_FILE="$work_dir/credential.key"
+./target/debug/lightagent remote-credential keygen "$LIGHTAGENT_CREDENTIAL_KEY_FILE" >/dev/null
+--- with
+./target/debug/lightagent remote-credential keygen "$work_dir/credential.key" >/dev/null
+export LIGHTAGENT_CREDENTIAL_KEY_FILE="$work_dir/credential.key"
+=== replace desktop/e2e/runs.py
+--- find
+    os.environ["LIGHTAGENT_CREDENTIAL_KEY_FILE"] = os.path.join(key_dir, "credential.key")
+    harness.run_cli(cli, "remote-credential", "keygen", os.environ["LIGHTAGENT_CREDENTIAL_KEY_FILE"])
+--- with
+    harness.run_cli(cli, "remote-credential", "keygen", os.path.join(key_dir, "credential.key"))
+    os.environ["LIGHTAGENT_CREDENTIAL_KEY_FILE"] = os.path.join(key_dir, "credential.key")
+=== end
