@@ -174,6 +174,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/lightagent/v1/identity/audit", get(identity_audit))
         .route("/api/lightagent/v1/setup/init", post(setup_init))
         .route("/api/lightagent/v1/import/hermes", post(import_hermes))
+        .route("/api/lightagent/v1/update/check", get(update_check))
         .route(
             "/api/lightagent/v1/diagnostics/doctor",
             get(diagnostics_doctor),
@@ -2942,6 +2943,18 @@ async fn import_hermes(
         force: body.force,
     };
     setup_operation(&state, &headers, request).await
+}
+
+/// `lightagent update --check`: read-only, it installs nothing. Operator
+/// only. A failed check answers 503 with its reason.
+async fn update_check(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    match state.manager.update_check().await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
 }
 
 /// An import of skills from a repository or folder (new scope).

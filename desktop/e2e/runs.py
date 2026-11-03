@@ -38,9 +38,11 @@ runtime), not browser or native WebView evidence. Writes runs.json; exits
 non-zero when any expectation fails.
 """
 
+import http.server
 import json
 import os
 import sys
+import threading
 import time
 
 import harness
@@ -1095,6 +1097,46 @@ def scenario_mcp(host):
     return check
 
 
+class _Releases(http.server.BaseHTTPRequestHandler):
+    """A controlled release API on loopback for `update --check`: it always
+    names v99.0.0 and records every path requested."""
+    seen = []
+
+    def do_GET(self):
+        _Releases.seen.append(self.path)
+        body = json.dumps({"tag_name": "v99.0.0",
+                           "html_url": "https://github.com/dlroqa/Lightagent/releases/tag/v99.0.0",
+                           "assets": []}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+def scenario_update_check(host, cli):
+    """D7 through the host transport, against the controlled release API:
+    the runtime's check reports the release the CLI's check reports, only
+    the release metadata is requested, and nothing is installed."""
+    check = Checks("update_check")
+    before = len(_Releases.seen)
+    by_cli = json.loads(harness.run_cli(cli, "--json", "update", "--check"))
+    status, by_host = host.fetch("GET", f"{API}/update/check")
+    fields = ("latest", "update_available", "release")
+    check.expect("the check through the host reports the CLI's release",
+                 status == 200 and all((by_host or {}).get(name) == by_cli.get(name) for name in fields)
+                 and by_cli.get("latest") == "99.0.0" and by_cli.get("update_available") is True,
+                 (status, by_host, by_cli))
+    paths = _Releases.seen[before:]
+    check.expect("only the release metadata was requested",
+                 len(paths) == 2 and all(path == "/repos/dlroqa/Lightagent/releases/latest" for path in paths),
+                 paths)
+    return check
+
+
 def main():
     out = os.path.abspath(sys.argv[1])
     cli = sys.argv[2]
@@ -1111,6 +1153,11 @@ def main():
     key_dir = tempfile.mkdtemp(prefix="lightagent-e2e-credential-key-")
     harness.run_cli(cli, "remote-credential", "keygen", os.path.join(key_dir, "credential.key"))
     os.environ["LIGHTAGENT_CREDENTIAL_KEY_FILE"] = os.path.join(key_dir, "credential.key")
+    # A controlled release API for `update --check`, inherited like the key.
+    releases = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Releases)
+    threading.Thread(target=releases.serve_forever, daemon=True).start()
+    os.environ["LIGHTAGENT_TEST_RELEASE_API"] = (
+        f"http://127.0.0.1:{releases.server_address[1]}/repos/dlroqa/Lightagent/releases/latest")
     env = dict(os.environ, LIGHTAGENT_DESKTOP_E2E_DRIVER="1", LIGHTAGENT_DESKTOP_E2E_REPORT=report)
     host = harness.Host(command, env, os.path.join(out, "driver-runs.log"))
     results, failures = {}, []
@@ -1140,6 +1187,7 @@ def main():
             ("diagnostics", lambda: scenario_diagnostics(host, cli)),
             ("setup", lambda: scenario_setup(host, cli)),
             ("config_sections", lambda: scenario_config_sections(host, cli)),
+            ("update_check", lambda: scenario_update_check(host, cli)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]
