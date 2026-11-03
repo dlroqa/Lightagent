@@ -52,8 +52,17 @@ export async function checkSessions(browser, base, outDir) {
         await item.getByRole("button", { name: "Keep it" }).click({ timeout: 10000 });
         if (!(await exists())) throw new Error("Keep it removed the conversation");
       });
-      await step("confirm deletes it", async () => {
-        await openDelete();
+      const more = item.getByRole("button", { name: `More actions for ${label}` });
+      const opened = await step("the menu opens again", async () => {
+        if (await more.isDisabled()) throw new Error("More actions is disabled");
+        await more.click({ timeout: 10000 });
+        await page.getByRole("menu", { name: `Actions for ${label}` }).waitFor({ timeout: 5000 });
+      });
+      const chosen = opened && await step("Delete is chosen again", async () => {
+        await page.getByRole("menu", { name: `Actions for ${label}` }).getByRole("menuitem", { name: /Delete/ }).click({ timeout: 10000 });
+        await item.getByRole("button", { name: `Confirm: delete ${label}` }).waitFor({ timeout: 5000 });
+      });
+      if (chosen) await step("confirm deletes it", async () => {
         await item.getByRole("button", { name: `Confirm: delete ${label}` }).click({ timeout: 10000 });
         const deadline = Date.now() + 15000;
         while (Date.now() < deadline && (await exists())) await new Promise((resolve) => setTimeout(resolve, 150));
