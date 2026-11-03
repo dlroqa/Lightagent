@@ -1,0 +1,18 @@
+=== base 962fb2d2594d3332b9ef004b22f5ec12fabdf3b5
+=== message
+Row 56c: a prompt the sidebar shows in full
+
+The check opens its conversation by its title in the sidebar, which
+shortens long titles ("Which rivers run throug…"), so an exact match
+never found it (render run 41643664571: the seed run reached the stub
+and was saved; the click timed out). The prompt is now a short probe
+title, as the other browser checks use.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace e2e/regenerate.mjs
+--- find
+const PROMPT = "Which rivers run through Lyon?";
+--- with
+// Short enough that the sidebar shows it in full, so it can be clicked by its exact text.
+const PROMPT = "regenerate probe";
+=== end
