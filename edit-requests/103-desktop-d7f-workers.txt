@@ -1,0 +1,901 @@
+=== base 06965514305d3d5c271e5f5a9317ab8b7ae29a62
+=== message
+D7-6: worker assignments through one shared operation; the Specialists card assigns and revokes
+
+`lightagent workers assign|revoke` changed a profile's specialist
+assignments only from the CLI; the API could show readiness but not
+change it.
+
+- crate lightagent worker_assignment: assign (a profile, or the built-in
+  worker) and revoke, for the active profile or a named one, with the
+  CLI's checks (a profile is not its own worker; the worker profile must
+  exist and share the owner). The CLI prints its result as before (text
+  and --json), and RunFactory::workers_change answers the API with the
+  same JSON.
+- API (operator): PUT /workers/{role} {worker?, profile?}, DELETE
+  /workers/{role} (`profile`); GET /workers takes `profile` in the
+  contract too. The host refuses assign and revoke during a profile
+  switch. Two backend inventory rows (not counted).
+- The Specialists card on the Tools screen: whose workers (when there is
+  more than one profile), and per role "Assign to" (the built-in worker or
+  another profile) with Assign and Revoke.
+- Evidence: backend desktop_workers.rs (API = CLI status before and after
+  each change, both directions; built-in and profile targets; --profile;
+  invalid role, self and unknown worker refused); host runs.py `workers`;
+  browser e2e/workers.mjs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-api/src/ops.rs
+--- find
+/// A stable error category, for the UI to act on without parsing messages.
+--- with
+/// One worker-assignment change (`lightagent workers assign|revoke`), for
+/// the active profile or the one named.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkerRequest {
+    /// Assign `role` to the profile `worker`, or to the built-in worker.
+    Assign {
+        role: String,
+        worker: Option<String>,
+        profile: Option<String>,
+    },
+    Revoke {
+        role: String,
+        profile: Option<String>,
+    },
+}
+
+/// A stable error category, for the UI to act on without parsing messages.
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    /// Tools currently visible to the factory's active target.
+    async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
+--- with
+    /// A worker-assignment change, performed by the embedder that owns the
+    /// profiles, answered with the JSON `lightagent workers … --json`
+    /// prints. The default refuses.
+    async fn workers_change(
+        &self,
+        _request: crate::ops::WorkerRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
+    /// Tools currently visible to the factory's active target.
+    async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    /// Perform a knowledge (RAG) operation through the factory.
+--- with
+    /// Perform a worker-assignment change through the factory.
+    pub async fn workers_change(
+        &self,
+        request: crate::ops::WorkerRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.workers_change(request).await
+    }
+
+    /// Perform a knowledge (RAG) operation through the factory.
+=== replace crates/lightagent/src/serve.rs
+--- find
+    async fn rag(
+--- with
+    async fn workers_change(
+        &self,
+        request: lightagent_api::ops::WorkerRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        use lightagent_api::ops::{OpCategory, OpError};
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let config = ConfigStore::at(&paths)
+            .load()
+            .map_err(|error| OpError::new(OpCategory::Internal, error.to_string()))?;
+        crate::worker_assignment(&self.root, &config, request)
+            .map_err(|error| OpError::new(OpCategory::Invalid, error))
+    }
+
+    async fn rag(
+=== replace crates/lightagent/src/lib.rs
+--- find
+fn worker_role(raw: &str) -> Result<lightagent_core::WorkerRole, String> {
+    lightagent_core::WorkerRole::parse(raw)
+        .ok_or_else(|| format!("unknown role {raw:?}: use researcher, coder, reviewer or tester"))
+}
+--- with
+fn worker_role(raw: &str) -> Result<lightagent_core::WorkerRole, String> {
+    lightagent_core::WorkerRole::parse(raw)
+        .ok_or_else(|| format!("unknown role {raw:?}: use researcher, coder, reviewer or tester"))
+}
+
+/// `lightagent workers assign|revoke`, shared with the HTTP API
+/// (`RunFactory::workers_change`): the JSON the CLI prints for `--json`.
+pub(crate) fn worker_assignment(
+    root: &std::path::Path,
+    config: &Config,
+    request: lightagent_api::ops::WorkerRequest,
+) -> Result<serde_json::Value, String> {
+    let profiles = ProfileStore::new(root);
+    match request {
+        lightagent_api::ops::WorkerRequest::Assign {
+            role,
+            worker,
+            profile,
+        } => {
+            let lead = chat::resolve_profile(&profiles, config, profile)?;
+            let role = worker_role(&role)?;
+            let target = match worker {
+                Some(id) => lightagent_core::AssignmentTarget::Profile {
+                    profile: ProfileId::new(&id).map_err(|error| error.to_string())?,
+                },
+                None => lightagent_core::AssignmentTarget::Builtin,
+            };
+            let assignment = workers::assign(root, &lead.id, role, target)?;
+            serde_json::to_value(&assignment).map_err(|error| error.to_string())
+        }
+        lightagent_api::ops::WorkerRequest::Revoke { role, profile } => {
+            let lead = chat::resolve_profile(&profiles, config, profile)?;
+            let role = worker_role(&role)?;
+            let dir = profiles.handle(&lead.id).dir().to_path_buf();
+            let removed = lightagent_core::WorkerAssignments::new(lead.id.clone(), &dir)
+                .revoke(role)
+                .map_err(|error| error.to_string())?;
+            Ok(serde_json::json!({ "role": role, "revoked": removed }))
+        }
+    }
+}
+=== replace crates/lightagent/src/lib.rs
+--- find
+        WorkersAction::Assign {
+            role,
+            worker,
+            builtin: _,
+            profile,
+        } => {
+            let lead = chat::resolve_profile(&profiles, &config, profile)?;
+            let role = worker_role(&role)?;
+            let target = match worker {
+                Some(id) => lightagent_core::AssignmentTarget::Profile {
+                    profile: ProfileId::new(&id).map_err(|error| error.to_string())?,
+                },
+                None => lightagent_core::AssignmentTarget::Builtin,
+            };
+            let assignment = workers::assign(paths.root(), &lead.id, role, target)?;
+            if json {
+                let value = serde_json::to_value(&assignment).map_err(|error| error.to_string())?;
+                println!("{value}");
+            } else {
+                println!(
+                    "Assigned {} for {} ({}).",
+                    role.as_str(),
+                    lead.id.as_str(),
+                    assignment.id
+                );
+            }
+            Ok(())
+        }
+        WorkersAction::Revoke { role, profile } => {
+            let lead = chat::resolve_profile(&profiles, &config, profile)?;
+            let role = worker_role(&role)?;
+            let dir = profiles.handle(&lead.id).dir().to_path_buf();
+            let removed = lightagent_core::WorkerAssignments::new(lead.id.clone(), &dir)
+                .revoke(role)
+                .map_err(|error| error.to_string())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "role": role, "revoked": removed })
+                );
+            } else if removed {
+                println!(
+                    "Revoked the {} assignment of {}.",
+                    role.as_str(),
+                    lead.id.as_str()
+                );
+            } else {
+                println!("{} had no {} assignment.", lead.id.as_str(), role.as_str());
+            }
+            Ok(())
+        }
+    }
+--- with
+        WorkersAction::Assign {
+            role,
+            worker,
+            builtin: _,
+            profile,
+        } => {
+            let lead = chat::resolve_profile(&profiles, &config, profile)?;
+            let role_name = worker_role(&role)?.as_str();
+            let request = lightagent_api::ops::WorkerRequest::Assign {
+                role,
+                worker,
+                profile: Some(lead.id.as_str().to_owned()),
+            };
+            let value = worker_assignment(paths.root(), &config, request)?;
+            if json {
+                println!("{value}");
+            } else {
+                println!(
+                    "Assigned {} for {} ({}).",
+                    role_name,
+                    lead.id.as_str(),
+                    value["id"].as_str().unwrap_or_default()
+                );
+            }
+            Ok(())
+        }
+        WorkersAction::Revoke { role, profile } => {
+            let lead = chat::resolve_profile(&profiles, &config, profile)?;
+            let role_name = worker_role(&role)?.as_str();
+            let request = lightagent_api::ops::WorkerRequest::Revoke {
+                role,
+                profile: Some(lead.id.as_str().to_owned()),
+            };
+            let value = worker_assignment(paths.root(), &config, request)?;
+            if json {
+                println!("{value}");
+            } else if value["revoked"] == true {
+                println!(
+                    "Revoked the {} assignment of {}.",
+                    role_name,
+                    lead.id.as_str()
+                );
+            } else {
+                println!("{} had no {} assignment.", lead.id.as_str(), role_name);
+            }
+            Ok(())
+        }
+    }
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+        .route("/api/lightagent/v1/workers", get(list_workers))
+--- with
+        .route("/api/lightagent/v1/workers", get(list_workers))
+        .route(
+            "/api/lightagent/v1/workers/{role}",
+            axum::routing::put(assign_worker).delete(revoke_worker),
+        )
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+async fn list_workers(
+--- with
+#[derive(Deserialize)]
+struct AssignWorkerBody {
+    #[serde(default)]
+    worker: Option<String>,
+    #[serde(default)]
+    profile: Option<String>,
+}
+
+/// `lightagent workers assign <role>`: to the profile `worker`, or the
+/// built-in worker; for the active profile or the one named. Operator only.
+async fn assign_worker(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(role): Path<String>,
+    Json(body): Json<AssignWorkerBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let request = ops::WorkerRequest::Assign {
+        role,
+        worker: body.worker,
+        profile: body.profile,
+    };
+    match state.manager.workers_change(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+/// `lightagent workers revoke <role>`. Operator only.
+async fn revoke_worker(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(role): Path<String>,
+    Query(query): Query<ProfileQuery>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let request = ops::WorkerRequest::Revoke {
+        role,
+        profile: query.profile,
+    };
+    match state.manager.workers_change(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn list_workers(
+=== replace docs/desktop/contract/operations.json
+--- find
+   "id": "workers.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/workers"
+  },
+--- with
+   "id": "workers.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/workers",
+   "query": [
+    "profile"
+   ]
+  },
+  {
+   "id": "workers.assign",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/workers/{role}"
+  },
+  {
+   "id": "workers.revoke",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/workers/{role}",
+   "query": [
+    "profile"
+   ]
+  },
+=== replace desktop/src-tauri/src/switch.rs
+--- find
+            | "knowledge.clear"
+--- with
+            | "knowledge.clear"
+            | "workers.assign"
+            | "workers.revoke"
+=== replace desktop/src-tauri/src/switch.rs
+--- find
+        assert!(blocked_while_switching("knowledge.clear"));
+--- with
+        assert!(blocked_while_switching("knowledge.clear"));
+        assert!(blocked_while_switching("workers.assign"));
+        assert!(blocked_while_switching("workers.revoke"));
+=== replace frontend/src/api/agent.ts
+--- find
+  workers: () => jsonRequest<{ workers: WorkerReadiness[] }>("/workers"),
+--- with
+  workers: () => jsonRequest<{ workers: WorkerReadiness[] }>("/workers"),
+  /** `lightagent workers status|assign|revoke`, for the active profile or the one named. */
+  workersFor: (profile?: string) =>
+    jsonRequest<{ workers: WorkerReadiness[] }>(
+      profile ? `/workers?profile=${encodeURIComponent(profile)}` : "/workers",
+    ),
+  assignWorker: (role: string, worker: string | null, profile?: string) =>
+    jsonRequest<Record<string, unknown>>(`/workers/${encodeURIComponent(role)}`, {
+      method: "PUT",
+      body: JSON.stringify({ worker, profile }),
+    }),
+  revokeWorker: (role: string, profile?: string) =>
+    jsonRequest<{ role: string; revoked: boolean }>(
+      profile
+        ? `/workers/${encodeURIComponent(role)}?profile=${encodeURIComponent(profile)}`
+        : `/workers/${encodeURIComponent(role)}`,
+      { method: "DELETE" },
+    ),
+=== replace frontend/src/screens/AgentTools.tsx
+--- find
+import { agentApi, type SkillInfo, type ToolInfo, type WorkerReadiness } from "../api/agent";
+--- with
+import { agentApi, type ProfileSummary, type SkillInfo, type ToolInfo, type WorkerReadiness } from "../api/agent";
+=== replace frontend/src/screens/AgentTools.tsx
+--- find
+function Specialists() {
+  const [workers, setWorkers] = useState<WorkerReadiness[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    agentApi
+      .workers()
+      .then((response) => live && setWorkers(response.workers))
+      .catch((cause) => live && setError(cause instanceof Error ? cause.message : String(cause)));
+    return () => {
+      live = false;
+    };
+  }, []);
+  if (error) return <p className="muted">Specialist readiness is unavailable: {error}</p>;
+  if (!workers) return <span className="muted">Loading specialists…</span>;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {workers.map((worker) => {
+        const state = READINESS[worker.state] ?? { label: worker.state, tone: "neutral" as Tone };
+        return (
+          <div key={worker.role} style={{ padding: "10px 12px", border: "1px solid var(--border, #2a2a2a)", borderRadius: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <strong style={{ minWidth: 90, textTransform: "capitalize" }}>{worker.role}</strong>
+              <Pill tone={state.tone}>{state.label}</Pill>
+              <span className="muted" style={{ fontSize: 13 }}>
+                {worker.worker}
+                {worker.model && ` · ${worker.model}`}
+                {worker.skill && ` · ${worker.skill}`}
+              </span>
+            </div>
+            {worker.reasons.length > 0 && (
+              <p className="muted" style={{ margin: "6px 0 0", fontSize: 12.5 }}>
+                {worker.reasons.join(", ").replaceAll("_", " ")}
+              </p>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+--- with
+function causeText(cause: unknown): string {
+  return (cause instanceof Error ? cause.message : String(cause)).replace(/^\d{3}:\s*/, "");
+}
+
+/**
+ * Each specialist role's readiness, and its assignment, through the
+ * operations `lightagent workers` shares: whose workers (when there is more
+ * than one profile), and per role Assign (the built-in worker or another
+ * profile) and Revoke.
+ */
+function Specialists() {
+  const [workers, setWorkers] = useState<WorkerReadiness[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
+  const [lead, setLead] = useState("");
+  const [targets, setTargets] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function load(profile: string) {
+    try {
+      setWorkers((await agentApi.workersFor(profile || undefined)).workers);
+      setError(null);
+    } catch (cause) {
+      setError(causeText(cause));
+    }
+  }
+
+  useEffect(() => {
+    agentApi
+      .profiles()
+      .then((catalog) => {
+        setProfiles(catalog.profiles);
+        setLead(catalog.active_profile);
+        void load(catalog.active_profile);
+      })
+      .catch(() => void load(""));
+  }, []);
+
+  async function change(action: () => Promise<string>) {
+    setBusy(true);
+    setMessage(null);
+    try {
+      setMessage(await action());
+    } catch (cause) {
+      setMessage(causeText(cause));
+    } finally {
+      setBusy(false);
+      void load(lead);
+    }
+  }
+
+  if (error) return <p className="muted">Specialist readiness is unavailable: {error}</p>;
+  if (!workers) return <span className="muted">Loading specialists…</span>;
+  return (
+    <div data-testid="specialists" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {profiles.length > 1 && (
+        <div className="field">
+          <label className="field__label" htmlFor="workers-lead">Workers of</label>
+          <select id="workers-lead" className="input" value={lead} disabled={busy}
+            onChange={(event) => { setLead(event.target.value); setWorkers(null); void load(event.target.value); }}>
+            {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name || profile.id}</option>)}
+          </select>
+        </div>
+      )}
+      {message && <div className="notice notice--info" role="status">{message}</div>}
+      {workers.map((worker) => {
+        const state = READINESS[worker.state] ?? { label: worker.state, tone: "neutral" as Tone };
+        const choice = targets[worker.role] ?? "builtin";
+        return (
+          <div key={worker.role} data-testid={`worker-${worker.role}`}
+            style={{ padding: "10px 12px", border: "1px solid var(--border, #2a2a2a)", borderRadius: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <strong style={{ minWidth: 90, textTransform: "capitalize" }}>{worker.role}</strong>
+              <Pill tone={state.tone}>{state.label}</Pill>
+              <span className="muted" style={{ fontSize: 13 }}>
+                {worker.worker}
+                {worker.model && ` · ${worker.model}`}
+                {worker.skill && ` · ${worker.skill}`}
+              </span>
+            </div>
+            {worker.reasons.length > 0 && (
+              <p className="muted" style={{ margin: "6px 0 0", fontSize: 12.5 }}>
+                {worker.reasons.join(", ").replaceAll("_", " ")}
+              </p>
+            )}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
+              <label className="muted" htmlFor={`worker-target-${worker.role}`}>Assign to</label>
+              <select id={`worker-target-${worker.role}`} className="input" style={{ maxWidth: 220 }} value={choice}
+                disabled={busy} onChange={(event) => setTargets((current) => ({ ...current, [worker.role]: event.target.value }))}>
+                <option value="builtin">Built-in worker</option>
+                {profiles.filter((profile) => profile.id !== lead).map((profile) => (
+                  <option key={profile.id} value={profile.id}>{`Profile ${profile.name || profile.id}`}</option>
+                ))}
+              </select>
+              <button type="button" className="btn" disabled={busy} aria-label={`Assign ${worker.role}`}
+                onClick={() => void change(async () => {
+                  await agentApi.assignWorker(worker.role, choice === "builtin" ? null : choice, lead || undefined);
+                  return `Assigned ${worker.role} to ${choice === "builtin" ? "the built-in worker" : `profile ${choice}`}.`;
+                })}>
+                Assign
+              </button>
+              <button type="button" className="btn" disabled={busy} aria-label={`Revoke ${worker.role}`}
+                onClick={() => void change(async () => {
+                  const result = await agentApi.revokeWorker(worker.role, lead || undefined);
+                  return result.revoked ? `Revoked the ${worker.role} assignment.` : `There was no ${worker.role} assignment.`;
+                })}>
+                Revoke
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  {
+   "id": "api.get.sessions",
+--- with
+  {
+   "id": "api.put.workers.role",
+   "kind": "api",
+   "surface": "PUT /api/lightagent/v1/workers/{role}",
+   "source": "crates/lightagent-api/src/lib.rs:85",
+   "behavior": "Assign a specialist role to a profile or the built-in worker (D7-6)",
+   "tree_key": null,
+   "tokens": [
+    "PUT /api/lightagent/v1/workers/{role}"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.workers.assign)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: crate lightagent worker_assignment via RunFactory::workers_change",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.delete.workers.role",
+   "kind": "api",
+   "surface": "DELETE /api/lightagent/v1/workers/{role}",
+   "source": "crates/lightagent-api/src/lib.rs:85",
+   "behavior": "Revoke a specialist role's assignment (D7-6)",
+   "tree_key": null,
+   "tokens": [
+    "DELETE /api/lightagent/v1/workers/{role}"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.workers.revoke)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: crate lightagent worker_assignment via RunFactory::workers_change",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.sessions",
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.get.knowledge.search` | `GET /api/lightagent/v1/knowledge/search` | applicable | no | (backend reuse) | shared: rag::perform via RunFactory::rag | not-started | `crates/lightagent-api/src/lib.rs:145` |
+--- with
+| `api.get.knowledge.search` | `GET /api/lightagent/v1/knowledge/search` | applicable | no | (backend reuse) | shared: rag::perform via RunFactory::rag | not-started | `crates/lightagent-api/src/lib.rs:145` |
+| `api.put.workers.role` | `PUT /api/lightagent/v1/workers/{role}` | applicable | no | (backend reuse) | shared: worker_assignment via RunFactory::workers_change | not-started | `crates/lightagent-api/src/lib.rs:85` |
+| `api.delete.workers.role` | `DELETE /api/lightagent/v1/workers/{role}` | applicable | no | (backend reuse) | shared: worker_assignment via RunFactory::workers_change | not-started | `crates/lightagent-api/src/lib.rs:85` |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Total rows: 359
+--- with
+- Total rows: 361
+=== write crates/lightagent/tests/desktop_workers.rs
+//! Worker assignments through one shared operation (D7-6):
+//! `lightagent workers status|assign|revoke` and the desktop runtime's API
+//! change and report the same assignments. Every process here is separate.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::Value;
+
+const KEY: &str = "92a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081";
+const WORKERS: &str = "/api/lightagent/v1/workers";
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-workers-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+/// One authenticated request: the status and the raw body.
+fn call(runtime: &Runtime, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, raw)
+}
+
+fn cli_ok(home: &Path, args: &[&str]) {
+    let output: Output = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent");
+    assert!(
+        output.status.success(),
+        "lightagent {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn parsed(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|error| panic!("not JSON ({error}): {raw}"))
+}
+
+fn cli_json(home: &Path, args: &[&str]) -> Value {
+    let mut all = vec!["--json"];
+    all.extend_from_slice(args);
+    let output: Output = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(&all)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent");
+    assert!(
+        output.status.success(),
+        "lightagent {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("JSON output")
+}
+
+/// The API's readiness for `profile` (the active one when `None`).
+fn api_status(runtime: &Runtime, profile: Option<&str>) -> Value {
+    let path = match profile {
+        Some(profile) => format!("{WORKERS}?profile={profile}"),
+        None => WORKERS.to_owned(),
+    };
+    let (status, raw) = call(runtime, "GET", &path, None);
+    assert_eq!(status, 200, "{raw}");
+    parsed(&raw)["workers"].clone()
+}
+
+#[test]
+fn the_cli_and_the_api_keep_one_set_of_assignments() {
+    let home = scratch_home("one");
+    cli_ok(&home, &["config", "set", "extensions.enabled", "true"]);
+    cli_ok(&home, &["profile", "create", "work"]);
+    cli_ok(&home, &["profile", "create", "helper"]);
+    cli_ok(&home, &["profile", "use", "work"]);
+    let runtime = start(&home);
+    assert_eq!(api_status(&runtime, None), cli_json(&home, &["workers", "status"]));
+
+    // Assigned over the API to a profile: the CLI reports the same.
+    let (status, raw) = call(
+        &runtime,
+        "PUT",
+        &format!("{WORKERS}/coder"),
+        Some(r#"{"worker":"helper"}"#),
+    );
+    assert_eq!(status, 200, "{raw}");
+    assert!(parsed(&raw)["id"].is_string(), "{raw}");
+    let after = api_status(&runtime, None);
+    assert_eq!(after, cli_json(&home, &["workers", "status"]));
+    assert!(after.to_string().contains("helper"), "{after}");
+
+    // Revoked by the CLI: the API reports the same.
+    let revoked = cli_json(&home, &["workers", "revoke", "coder"]);
+    assert_eq!(revoked["revoked"], true, "{revoked}");
+    assert_eq!(api_status(&runtime, None), cli_json(&home, &["workers", "status"]));
+
+    // The built-in worker over the API; revoked over the API, then nothing left.
+    let (status, raw) = call(&runtime, "PUT", &format!("{WORKERS}/reviewer"), Some("{}"));
+    assert_eq!(status, 200, "{raw}");
+    let (status, raw) = call(&runtime, "DELETE", &format!("{WORKERS}/reviewer"), None);
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(parsed(&raw)["revoked"], true, "{raw}");
+    let (_, raw) = call(&runtime, "DELETE", &format!("{WORKERS}/reviewer"), None);
+    assert_eq!(parsed(&raw)["revoked"], false, "{raw}");
+
+    // Another profile's workers, named.
+    let body = r#"{"worker":"work","profile":"helper"}"#;
+    let (status, raw) = call(&runtime, "PUT", &format!("{WORKERS}/tester"), Some(body));
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(
+        api_status(&runtime, Some("helper")),
+        cli_json(&home, &["workers", "status", "--profile", "helper"])
+    );
+    let (status, raw) = call(
+        &runtime,
+        "DELETE",
+        &format!("{WORKERS}/tester?profile=helper"),
+        None,
+    );
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(parsed(&raw)["revoked"], true, "{raw}");
+
+    // Refused as the CLI refuses them.
+    for (role, body) in [
+        ("wizard", "{}"),
+        ("coder", r#"{"worker":"work"}"#),
+        ("coder", r#"{"worker":"nobody"}"#),
+    ] {
+        let (status, raw) = call(&runtime, "PUT", &format!("{WORKERS}/{role}"), Some(body));
+        assert_eq!(status, 400, "{role} {body}: {raw}");
+    }
+}
+=== write e2e/workers.mjs
+// The Specialists card against the real harness (D7-6): a role is
+// assigned to the built-in worker, and revoking it reports that there was
+// an assignment, then that there is none. crates/lightagent/tests/
+// desktop_workers.rs proves the API's assignments are the CLI's.
+
+export async function checkWorkers(browser, base, outDir) {
+  const failures = [];
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1500 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  try {
+    await page.goto(`${base}/#/tools`);
+    const card = page.getByTestId("specialists");
+    await card.waitFor({ timeout: 15000 });
+    const row = page.getByTestId("worker-coder");
+    await row.waitFor({ timeout: 10000 });
+    await row.getByRole("combobox").selectOption("builtin");
+    await row.getByRole("button", { name: "Assign coder" }).click();
+    await card.getByRole("status").filter({ hasText: "Assigned coder to the built-in worker." }).waitFor({ timeout: 10000 });
+    await page.screenshot({ path: `${outDir}/workers-assigned.png`, fullPage: true });
+    await row.getByRole("button", { name: "Revoke coder" }).click();
+    await card.getByRole("status").filter({ hasText: "Revoked the coder assignment." }).waitFor({ timeout: 10000 });
+    await row.getByRole("button", { name: "Revoke coder" }).click();
+    await card.getByRole("status").filter({ hasText: "There was no coder assignment." }).waitFor({ timeout: 10000 });
+    if (errors.length) failures.push(`workers: page errors: ${errors.join("; ")}`);
+  } catch (err) {
+    failures.push(`workers: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+    await page.screenshot({ path: `${outDir}/workers-failed.png` }).catch(() => {});
+  } finally {
+    await page.close();
+    await fetch(`${base}/api/lightagent/v1/workers/coder`, { method: "DELETE" }).catch(() => {});
+  }
+  return failures;
+}
+=== replace e2e/render.mjs
+--- find
+import { checkSessions } from "./sessions.mjs";
+--- with
+import { checkSessions } from "./sessions.mjs";
+import { checkWorkers } from "./workers.mjs";
+=== replace e2e/render.mjs
+--- find
+  // Seeds, opens and deletes a conversation.
+--- with
+  // Assigns and revokes a specialist role.
+  try {
+    failures.push(...(await checkWorkers(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`workers: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Seeds, opens and deletes a conversation.
+=== replace desktop/e2e/runs.py
+--- find
+            ("sessions", lambda: scenario_sessions(host, cli)),
+--- with
+            ("sessions", lambda: scenario_sessions(host, cli)),
+            ("workers", lambda: scenario_workers(host, cli)),
+=== replace desktop/e2e/runs.py
+--- find
+def scenario_sessions(host, cli):
+--- with
+def scenario_workers(host, cli):
+    """D7 through the host transport: a role assigned and revoked through the
+    host; readiness through the host equals the CLI's before and after."""
+    check = Checks("workers")
+
+    def cli_status():
+        return json.loads(harness.run_cli(cli, "--json", "workers", "status"))
+
+    status, listed = host.fetch("GET", f"{API}/workers")
+    check.expect("readiness through the host equals the CLI's",
+                 status == 200 and (listed or {}).get("workers") == cli_status(), (status, listed))
+    status, assigned = host.fetch("PUT", f"{API}/workers/reviewer", {})
+    _, listed = host.fetch("GET", f"{API}/workers")
+    check.expect("assigned through the host, as the CLI reports it",
+                 status == 200 and isinstance((assigned or {}).get("id"), str)
+                 and (listed or {}).get("workers") == cli_status(), (status, assigned))
+    status, revoked = host.fetch("DELETE", f"{API}/workers/reviewer")
+    check.expect("revoked through the host",
+                 status == 200 and (revoked or {}).get("revoked") is True, (status, revoked))
+    return check
+
+
+def scenario_sessions(host, cli):
+=== end
