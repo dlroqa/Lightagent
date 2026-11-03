@@ -35,6 +35,7 @@ export async function checkSetup(browser, base, outDir) {
   try {
     const before = await get(base, "/profiles");
     const endpoint = (await get(base, "/config")).config.inference.base_url;
+    const originalModel = (await get(base, "/config")).config.inference.model;
     await page.goto(`${base}/#/setup`);
     await screen.waitFor({ timeout: 15000 });
     await page.locator("#setup-profile").and(page.locator(`[value="${before.active_profile}"]`)).waitFor({ timeout: 10000 });
@@ -46,6 +47,7 @@ export async function checkSetup(browser, base, outDir) {
     });
 
     await step("reconfigure asks first and keeps the profile and endpoint", async () => {
+      await page.locator("#setup-model").fill("render-init-model");
       await screen.getByRole("button", { name: "Reconfigure…" }).click();
       await screen.getByRole("button", { name: "Keep it" }).click();
       await screen.getByRole("button", { name: "Reconfigure…" }).click();
@@ -53,6 +55,13 @@ export async function checkSetup(browser, base, outDir) {
       await page.getByTestId("setup-message").filter({ hasText: `active profile ${before.active_profile}` }).waitFor({ timeout: 10000 });
       if ((await get(base, "/profiles")).active_profile !== before.active_profile) throw new Error("the active profile changed");
       if ((await get(base, "/config")).config.inference.base_url !== endpoint) throw new Error("the endpoint changed");
+      const model = (await get(base, "/config")).config.inference.model;
+      await fetch(`${base}${API}/config/inference.model`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value: originalModel ?? "" }),
+      });
+      if (model !== "render-init-model") throw new Error(`the model is ${JSON.stringify(model)}`);
     });
 
     await step("preview and import from a Hermes home", async () => {
@@ -70,6 +79,10 @@ export async function checkSetup(browser, base, outDir) {
       if (!(await get(base, "/profiles")).profiles.some((p) => p.id === "render-hermes")) throw new Error("not imported");
       await screen.getByRole("button", { name: "Import", exact: true }).click();
       await result.getByText("Skipped (already here): profile render-hermes", { exact: false }).waitFor({ timeout: 10000 });
+      await page.locator("#setup-hermes-force").check();
+      await screen.getByRole("button", { name: "Import…" }).click();
+      await screen.getByRole("button", { name: "Confirm: import and replace" }).click();
+      await result.getByText("Imported 1 profile(s)", { exact: false }).waitFor({ timeout: 10000 });
       await page.screenshot({ path: `${outDir}/setup-imported.png`, fullPage: true });
     });
 

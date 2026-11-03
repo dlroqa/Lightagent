@@ -597,13 +597,19 @@ def scenario_setup(host, cli):
         base_url = cli_json("config", "show")["inference"]["base_url"]
         status, refused = host.fetch("POST", f"{API}/setup/init", {})
         check.expect("init on an initialised home is refused", status == 409, (status, refused))
-        status, report = host.fetch("POST", f"{API}/setup/init",
-                                    {"force": True, "profile": active, "base_url": base_url})
-        check.expect("a forced init through the host keeps the profile and the endpoint",
-                     status == 200 and (report or {}).get("active_profile") == active
-                     and cli_json("profile", "list").get("active") == active
-                     and cli_json("config", "show")["inference"]["base_url"] == base_url,
-                     (status, report))
+        original_model = harness.run_cli(cli, "config", "get", "inference.model").strip()
+        try:
+            status, report = host.fetch("POST", f"{API}/setup/init",
+                                        {"force": True, "profile": active, "base_url": base_url,
+                                         "model": "e2e-init-model"})
+            check.expect("a forced init through the host keeps the profile and the endpoint and sets the model",
+                         status == 200 and (report or {}).get("active_profile") == active
+                         and cli_json("profile", "list").get("active") == active
+                         and cli_json("config", "show")["inference"]["base_url"] == base_url
+                         and harness.run_cli(cli, "config", "get", "inference.model").strip() == "e2e-init-model",
+                         (status, report))
+        finally:
+            harness.run_cli(cli, "config", "set", "inference.model", original_model)
         profile_dir = os.path.join(work, "profiles", "e2e-hermes")
         os.makedirs(profile_dir)
         with open(os.path.join(profile_dir, "SOUL.md"), "w", encoding="utf-8") as handle:
@@ -614,6 +620,10 @@ def scenario_setup(host, cli):
                      and dry == cli_json("import", "hermes", "--from", work, "--dry-run")
                      and "e2e-hermes" not in json.dumps(cli_json("profile", "list")), (status, dry))
         status, applied = host.fetch("POST", f"{API}/import/hermes", {"from": work})
+        status, forced = host.fetch("POST", f"{API}/import/hermes", {"from": work, "force": True})
+        check.expect("a forced import through the host imports what exists again",
+                     status == 200 and (forced or {}).get("profiles") == ["e2e-hermes"]
+                     and (forced or {}).get("skipped") == [], (status, forced))
         check.expect("imported through the host, seen by the CLI",
                      status == 200 and (applied or {}).get("profiles") == ["e2e-hermes"]
                      and "You came from Hermes." in harness.run_cli(cli, "profile", "show", "e2e-hermes"),
@@ -699,6 +709,35 @@ def scenario_remote_credentials(host, cli):
         states = [g.get("state") for g in cli_json("remote-credential", "list").get("credentials", [])]
         check.expect("revoked through the host, revoked for the CLI",
                      status == 200 and states == ["revoked"], (status, revoked, states))
+        new_key = os.path.join(work, "e2e-new.key")
+        status, made = host.fetch("POST", f"{API}/remote-credentials/keys", {"path": new_key})
+        check.expect("a key file made through the host",
+                     status == 200 and (made or {}).get("key_file") == "created" and os.path.isfile(new_key),
+                     (status, made))
+        limited_file = os.path.join(work, "host-limited.secret")
+        with open(limited_file, "w", encoding="utf-8") as handle:
+            handle.write("e2e-host-secret-limited-5f6a7b\n")
+        status, limited = host.fetch("POST", f"{API}/remote-credentials", dict(
+            body, operations=["search"], expires_in=600, max_requests_per_run=4, secret_file=limited_file))
+        limited_id = (limited or {}).get("added")
+        row = next((g for g in cli_json("remote-credential", "list").get("credentials", [])
+                    if g.get("id") == limited_id), {})
+        check.expect("operations, an expiry and a request budget through the host, as the CLI lists them",
+                     status == 200 and row.get("operations") == ["search"] and row.get("max_requests_per_run") == 4
+                     and isinstance(row.get("expires_unix"), int), (status, limited, row))
+        host.fetch("POST", f"{API}/remote-credentials/{limited_id}/revoke")
+        configured = os.environ["LIGHTAGENT_CREDENTIAL_KEY_FILE"]
+        os.environ["LIGHTAGENT_CREDENTIAL_KEY_FILE"] = new_key
+        try:
+            harness.run_cli(cli, "remote-credential", "add", active, "--service", "mcp:e2e-rekey",
+                            "--destination", "https://rekey.e2e.invalid", "--secret-file", limited_file)
+        finally:
+            os.environ["LIGHTAGENT_CREDENTIAL_KEY_FILE"] = configured
+        status, resealed = host.fetch("POST", f"{API}/remote-credentials/rekey", {"previous_key_file": new_key})
+        _, vault = host.fetch("GET", f"{API}/remote-credentials/vault")
+        check.expect("re-sealed through the host from the previous key",
+                     status == 200 and (resealed or {}).get("resealed") == 1
+                     and (vault or {}).get("unopenable_with_configured_key") == 0, (status, resealed, vault))
         status, audit = host.fetch("GET", f"{API}/remote-credentials/audit?limit=3")
         check.expect("the audit through the host equals the CLI's, and holds no secret",
                      status == 200 and audit == cli_json("remote-credential", "audit", "--limit", "3")
@@ -758,16 +797,54 @@ def scenario_identity(host, cli):
                      status == 200 and states == ["revoked"], (status, revoked, states))
         _, catalog = host.fetch("GET", f"{API}/profiles")
         active = (catalog or {}).get("active_profile")
+        profiled_file = os.path.join(work, "e2e-alice-profiled.key")
+        status, profiled = host.fetch("POST", f"{API}/identity/credentials",
+                                      {"principal": "e2e-alice", "profiles": [active], "secret_file": profiled_file})
+        profiled_id = (profiled or {}).get("issued")
+        listed = cli_json("identity", "credential", "list", "--principal", "e2e-alice").get("credentials", [])
+        row = next((c for c in listed if c.get("key_id") == profiled_id), {})
+        check.expect("issued through the host for one profile only, as the CLI lists it",
+                     status == 200 and ((row.get("restriction") or {}).get("profiles")) == [active],
+                     (status, profiled, row))
+        rotated_file = os.path.join(work, "e2e-alice-rotated.key")
+        status, rotated = host.fetch("POST", f"{API}/identity/credentials/{profiled_id}/rotate",
+                                     {"expires_in": 300, "secret_file": rotated_file})
+        listed = cli_json("identity", "credential", "list", "--principal", "e2e-alice").get("credentials", [])
+        replacement = next((c for c in listed if c.get("key_id") == (rotated or {}).get("issued")), {})
+        check.expect("rotated through the host to a new file, the replacement listed by the CLI",
+                     status == 200 and (rotated or {}).get("replaces") == profiled_id and os.path.isfile(rotated_file)
+                     and replacement.get("replaces") == profiled_id and isinstance(replacement.get("expires_unix"), int),
+                     (status, rotated, replacement))
+        _, catalog = host.fetch("GET", f"{API}/profiles")
+        active = (catalog or {}).get("active_profile")
         status, owned = host.fetch("PUT", f"{API}/identity/owners/{active}", {"principal": "e2e-alice"})
         _, grants = host.fetch("GET", f"{API}/identity/grants?profile={active}")
         check.expect("ownership through the host equals the CLI's",
                      status == 200 and (owned or {}).get("owner") == "e2e-alice"
                      and grants == cli_json("identity", "grants", "list", "--profile", active),
                      (status, owned, grants))
+        host.fetch("POST", f"{API}/identity/users", {"id": "e2e-bob"})
+        status, moved = host.fetch("POST", f"{API}/identity/owners/{active}/reassign", {"principal": "e2e-bob"})
+        grants = cli_json("identity", "grants", "list", "--profile", active)
+        check.expect("reassigned through the host, as the CLI lists it",
+                     status == 200 and (moved or {}).get("owner") == "e2e-bob"
+                     and [p.get("owner") for p in grants.get("profiles", [])] == ["e2e-bob"], (status, moved, grants))
+        status, revoked_grant = host.fetch("POST", f"{API}/identity/grants/revoke",
+                                           {"profile": active, "principal": "e2e-alice", "capability": "sessions_read"})
+        recent = json.dumps(cli_json("identity", "audit", "--limit", "1")).lower()
+        check.expect("a grant revoked through the host, recorded for the CLI",
+                     status == 200 and (revoked_grant or {}).get("revoked") == "sessions_read" and "grant" in recent,
+                     (status, revoked_grant, recent))
         status, removed = host.fetch("DELETE", f"{API}/identity/owners/{active}")
         check.expect("ownership removed through the host",
                      status == 200 and cli_json("identity", "grants", "list", "--profile", active).get("profiles") == [],
                      (status, removed))
+        status, suspended = host.fetch("POST", f"{API}/identity/users/e2e-alice/suspend")
+        alice = next((p for p in cli_json("identity", "user", "list").get("principals", [])
+                      if p.get("id") == "e2e-alice"), {})
+        check.expect("suspended through the host, suspended for the CLI with no credential left",
+                     status == 200 and alice.get("status") == "suspended" and alice.get("unrevoked_credentials") == 0,
+                     (status, suspended, alice))
         status, audit = host.fetch("GET", f"{API}/identity/audit?limit=4")
         check.expect("the audit through the host equals the CLI's, and holds no secret",
                      status == 200 and audit == cli_json("identity", "audit", "--limit", "4")

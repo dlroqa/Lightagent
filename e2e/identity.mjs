@@ -74,6 +74,7 @@ export async function checkIdentity(browser, base, outDir) {
       await page.locator("#identity-issue-principal").selectOption("render-alice");
       await screen.getByLabel("runs_read", { exact: true }).check();
       await page.locator("#identity-issue-expires").fill("600");
+      await page.locator("#identity-issue-profiles").fill(active);
       await page.locator("#identity-issue-file").fill(file);
       await screen.getByRole("button", { name: "Issue credential" }).click();
       await announced("Issued ");
@@ -82,6 +83,10 @@ export async function checkIdentity(browser, base, outDir) {
       if (!keyId) throw new Error(`no key id in "${text}"`);
       const token = (await readFile(file, "utf8")).trim();
       if (!token.startsWith(`la_${keyId}_`)) throw new Error("the file does not hold the issued credential");
+      const issuedRow = (await get(base, `${API}/credentials`)).credentials.find((c) => c.key_id === keyId);
+      if (JSON.stringify(issuedRow?.restriction?.profiles) !== JSON.stringify([active])) {
+        throw new Error(`the credential's restriction is ${JSON.stringify(issuedRow?.restriction)}`);
+      }
       secrets.push(token.split("_").pop());
       await noSecretShown("after issue");
       await page.screenshot({ path: `${outDir}/identity-issued.png`, fullPage: true });
@@ -133,6 +138,12 @@ export async function checkIdentity(browser, base, outDir) {
       if ((await owner()) !== "render-alice") throw new Error("the owner was not assigned");
       const row = page.getByTestId(`owner-${active}`);
       await row.waitFor({ timeout: 10000 });
+      // The grants list by profile (`identity grants list --profile`).
+      await page.locator("#identity-grants-profile").selectOption(active);
+      await row.waitFor({ timeout: 10000 });
+      if ((await page.getByTestId("identity-owners").locator("li[data-testid^='owner-']").count()) !== 1) {
+        throw new Error("the grants list by profile shows another profile");
+      }
       await page.locator(`#identity-reassign-${active}`).selectOption("render-bob");
       await row.getByRole("button", { name: "Reassign…" }).click();
       await row.getByRole("button", { name: `Confirm: reassign ${active} to render-bob` }).click();
