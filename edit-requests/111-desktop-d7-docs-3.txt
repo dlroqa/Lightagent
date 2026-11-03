@@ -1,0 +1,662 @@
+=== base 627e899f67a582802dfba2c823b5bdd272bd471a
+=== message
+Desktop docs: rows 38-40 (sessions, workers, the switch race), 110 of 227
+
+- PROGRESS: row 38 (sessions proved across CLI, API and desktop; Delete
+  asks first; `sessions delete --json`), row 39 (worker assignments
+  through one shared operation, the Specialists controls), row 40 (the
+  switch rejection race, found by the host run, fixed); every failure and
+  fix; Next.
+- MERGE_ORDER: rows 38-40; the switch race window (rows 21-39) as a D10
+  decision beside providers.remove.
+- Inventory and parity: the five `cli.sessions.*` rows and six
+  `cli.workers.*` rows (status, assign with role and the built-in worker,
+  revoke with role) implemented with backend, host and browser evidence:
+  99 → 110 of 227. `--worker` and the three `--profile` options have UI
+  controls and backend tests but no host or browser test yet.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.sessions.list",
+   "kind": "command",
+   "surface": "lightagent sessions list",
+   "source": "crates/lightagent/src/lib.rs:379",
+   "behavior": "List saved sessions newest first",
+   "tree_key": "cmd lightagent sessions list",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: sidebar",
+   "backend": "api: GET /sessions",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.sessions.list",
+   "kind": "command",
+   "surface": "lightagent sessions list",
+   "source": "crates/lightagent/src/lib.rs:379",
+   "behavior": "List saved sessions newest first",
+   "tree_key": "cmd lightagent sessions list",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: sidebar",
+   "backend": "api: GET /sessions",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_sessions.rs (CLI and API alike); host: desktop/e2e/runs.py sessions (list, show, delete through the host, matched with the CLI); browser: e2e/sessions.mjs (listed, opened, delete asks first, Keep it, Confirm; real harness); native WebView: D8",
+   "tested_sha": "c0b5ed32dba60587aa4656d16ec1f6c53b9dc1d0",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984591, https://github.com/dlroqa/Lightagent/actions/runs/41572984624, https://github.com/dlroqa/Lightagent/actions/runs/41572984660, https://github.com/dlroqa/Lightagent/actions/runs/41572984678"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.sessions.list` | `lightagent sessions list` | applicable | yes | Conversations: sidebar | api: GET /sessions | not-started | `crates/lightagent/src/lib.rs:379` |
+--- with
+| `cli.sessions.list` | `lightagent sessions list` | applicable | yes | Conversations: sidebar | api: GET /sessions | implemented | `crates/lightagent/src/lib.rs:379` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.sessions.show",
+   "kind": "command",
+   "surface": "lightagent sessions show",
+   "source": "crates/lightagent/src/lib.rs:381",
+   "behavior": "Transcript and run history",
+   "tree_key": "cmd lightagent sessions show",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: open session",
+   "backend": "api: GET /sessions/{id}",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.sessions.show",
+   "kind": "command",
+   "surface": "lightagent sessions show",
+   "source": "crates/lightagent/src/lib.rs:381",
+   "behavior": "Transcript and run history",
+   "tree_key": "cmd lightagent sessions show",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: open session",
+   "backend": "api: GET /sessions/{id}",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_sessions.rs (CLI and API alike); host: desktop/e2e/runs.py sessions (list, show, delete through the host, matched with the CLI); browser: e2e/sessions.mjs (listed, opened, delete asks first, Keep it, Confirm; real harness); native WebView: D8",
+   "tested_sha": "c0b5ed32dba60587aa4656d16ec1f6c53b9dc1d0",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984591, https://github.com/dlroqa/Lightagent/actions/runs/41572984624, https://github.com/dlroqa/Lightagent/actions/runs/41572984660, https://github.com/dlroqa/Lightagent/actions/runs/41572984678"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.sessions.show` | `lightagent sessions show` | applicable | yes | Conversations: open session | api: GET /sessions/{id} | not-started | `crates/lightagent/src/lib.rs:381` |
+--- with
+| `cli.sessions.show` | `lightagent sessions show` | applicable | yes | Conversations: open session | api: GET /sessions/{id} | implemented | `crates/lightagent/src/lib.rs:381` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.sessions.show.arg.id",
+   "kind": "argument",
+   "surface": "lightagent sessions show <id>",
+   "source": "crates/lightagent/src/lib.rs:381",
+   "behavior": "Session id",
+   "tree_key": "arg lightagent sessions show <id>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: open session — input 'id'",
+   "backend": "api: GET /sessions/{id}",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.sessions.show.arg.id",
+   "kind": "argument",
+   "surface": "lightagent sessions show <id>",
+   "source": "crates/lightagent/src/lib.rs:381",
+   "behavior": "Session id",
+   "tree_key": "arg lightagent sessions show <id>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: open session — input 'id'",
+   "backend": "api: GET /sessions/{id}",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_sessions.rs (CLI and API alike); host: desktop/e2e/runs.py sessions (list, show, delete through the host, matched with the CLI); browser: e2e/sessions.mjs (listed, opened, delete asks first, Keep it, Confirm; real harness); native WebView: D8",
+   "tested_sha": "c0b5ed32dba60587aa4656d16ec1f6c53b9dc1d0",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984591, https://github.com/dlroqa/Lightagent/actions/runs/41572984624, https://github.com/dlroqa/Lightagent/actions/runs/41572984660, https://github.com/dlroqa/Lightagent/actions/runs/41572984678"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.sessions.show.arg.id` | `lightagent sessions show <id>` | applicable | yes | Conversations: open session — input 'id' | api: GET /sessions/{id} | not-started | `crates/lightagent/src/lib.rs:381` |
+--- with
+| `cli.sessions.show.arg.id` | `lightagent sessions show <id>` | applicable | yes | Conversations: open session — input 'id' | api: GET /sessions/{id} | implemented | `crates/lightagent/src/lib.rs:381` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.sessions.delete",
+   "kind": "command",
+   "surface": "lightagent sessions delete",
+   "source": "crates/lightagent/src/lib.rs:383",
+   "behavior": "Delete one session",
+   "tree_key": "cmd lightagent sessions delete",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: delete (confirm)",
+   "backend": "api: DELETE /sessions/{id}",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.sessions.delete",
+   "kind": "command",
+   "surface": "lightagent sessions delete",
+   "source": "crates/lightagent/src/lib.rs:383",
+   "behavior": "Delete one session",
+   "tree_key": "cmd lightagent sessions delete",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: delete (confirm)",
+   "backend": "api: DELETE /sessions/{id}",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_sessions.rs (CLI and API alike); host: desktop/e2e/runs.py sessions (list, show, delete through the host, matched with the CLI); browser: e2e/sessions.mjs (listed, opened, delete asks first, Keep it, Confirm; real harness); native WebView: D8",
+   "tested_sha": "c0b5ed32dba60587aa4656d16ec1f6c53b9dc1d0",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984591, https://github.com/dlroqa/Lightagent/actions/runs/41572984624, https://github.com/dlroqa/Lightagent/actions/runs/41572984660, https://github.com/dlroqa/Lightagent/actions/runs/41572984678"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.sessions.delete` | `lightagent sessions delete` | applicable | yes | Conversations: delete (confirm) | api: DELETE /sessions/{id} | not-started | `crates/lightagent/src/lib.rs:383` |
+--- with
+| `cli.sessions.delete` | `lightagent sessions delete` | applicable | yes | Conversations: delete (confirm) | api: DELETE /sessions/{id} | implemented | `crates/lightagent/src/lib.rs:383` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.sessions.delete.arg.id",
+   "kind": "argument",
+   "surface": "lightagent sessions delete <id>",
+   "source": "crates/lightagent/src/lib.rs:383",
+   "behavior": "Session id",
+   "tree_key": "arg lightagent sessions delete <id>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: delete (confirm) — input 'id'",
+   "backend": "api: DELETE /sessions/{id}",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.sessions.delete.arg.id",
+   "kind": "argument",
+   "surface": "lightagent sessions delete <id>",
+   "source": "crates/lightagent/src/lib.rs:383",
+   "behavior": "Session id",
+   "tree_key": "arg lightagent sessions delete <id>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: delete (confirm) — input 'id'",
+   "backend": "api: DELETE /sessions/{id}",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_sessions.rs (CLI and API alike); host: desktop/e2e/runs.py sessions (list, show, delete through the host, matched with the CLI); browser: e2e/sessions.mjs (listed, opened, delete asks first, Keep it, Confirm; real harness); native WebView: D8",
+   "tested_sha": "c0b5ed32dba60587aa4656d16ec1f6c53b9dc1d0",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984591, https://github.com/dlroqa/Lightagent/actions/runs/41572984624, https://github.com/dlroqa/Lightagent/actions/runs/41572984660, https://github.com/dlroqa/Lightagent/actions/runs/41572984678"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.sessions.delete.arg.id` | `lightagent sessions delete <id>` | applicable | yes | Conversations: delete (confirm) — input 'id' | api: DELETE /sessions/{id} | not-started | `crates/lightagent/src/lib.rs:383` |
+--- with
+| `cli.sessions.delete.arg.id` | `lightagent sessions delete <id>` | applicable | yes | Conversations: delete (confirm) — input 'id' | api: DELETE /sessions/{id} | implemented | `crates/lightagent/src/lib.rs:383` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.workers.status",
+   "kind": "command",
+   "surface": "lightagent workers status",
+   "source": "crates/lightagent/src/lib.rs:217",
+   "behavior": "Each role's readiness",
+   "tree_key": "cmd lightagent workers status",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Runs/Agents: roles",
+   "backend": "api: GET /workers",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.workers.status",
+   "kind": "command",
+   "surface": "lightagent workers status",
+   "source": "crates/lightagent/src/lib.rs:217",
+   "behavior": "Each role's readiness",
+   "tree_key": "cmd lightagent workers status",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Runs/Agents: roles",
+   "backend": "api: GET /workers",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_workers.rs (CLI and API alike, both directions); host: desktop/e2e/runs.py workers (status, assign built-in, revoke through the host, matched with the CLI); browser: e2e/workers.mjs (assign built-in and revoke; real harness); native WebView: D8",
+   "tested_sha": "4afe90708243838d7174d898408cefd93f892bbf",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984218, https://github.com/dlroqa/Lightagent/actions/runs/41572984227, https://github.com/dlroqa/Lightagent/actions/runs/41572984266, https://github.com/dlroqa/Lightagent/actions/runs/41572984319"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.workers.status` | `lightagent workers status` | applicable | yes | Runs/Agents: roles | api: GET /workers | not-started | `crates/lightagent/src/lib.rs:217` |
+--- with
+| `cli.workers.status` | `lightagent workers status` | applicable | yes | Runs/Agents: roles | api: GET /workers | implemented | `crates/lightagent/src/lib.rs:217` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.workers.assign",
+   "kind": "command",
+   "surface": "lightagent workers assign",
+   "source": "crates/lightagent/src/lib.rs:223",
+   "behavior": "Assign a role to the built-in worker or a worker profile",
+   "tree_key": "cmd lightagent workers assign",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Runs/Agents: assign role",
+   "backend": "extract: workers_cmd(Assign)",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.workers.assign",
+   "kind": "command",
+   "surface": "lightagent workers assign",
+   "source": "crates/lightagent/src/lib.rs:223",
+   "behavior": "Assign a role to the built-in worker or a worker profile",
+   "tree_key": "cmd lightagent workers assign",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Runs/Agents: assign role",
+   "backend": "extract: workers_cmd(Assign)",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_workers.rs (CLI and API alike, both directions); host: desktop/e2e/runs.py workers (status, assign built-in, revoke through the host, matched with the CLI); browser: e2e/workers.mjs (assign built-in and revoke; real harness); native WebView: D8",
+   "tested_sha": "4afe90708243838d7174d898408cefd93f892bbf",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984218, https://github.com/dlroqa/Lightagent/actions/runs/41572984227, https://github.com/dlroqa/Lightagent/actions/runs/41572984266, https://github.com/dlroqa/Lightagent/actions/runs/41572984319"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.workers.assign` | `lightagent workers assign` | applicable | yes | Runs/Agents: assign role | extract: workers_cmd(Assign) | not-started | `crates/lightagent/src/lib.rs:223` |
+--- with
+| `cli.workers.assign` | `lightagent workers assign` | applicable | yes | Runs/Agents: assign role | extract: workers_cmd(Assign) | implemented | `crates/lightagent/src/lib.rs:223` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.workers.assign.arg.role",
+   "kind": "argument",
+   "surface": "lightagent workers assign <role>",
+   "source": "crates/lightagent/src/lib.rs:223",
+   "behavior": "researcher|coder|reviewer|tester",
+   "tree_key": "arg lightagent workers assign <role>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Runs/Agents: assign role — input 'role'",
+   "backend": "extract: workers_cmd(Assign)",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.workers.assign.arg.role",
+   "kind": "argument",
+   "surface": "lightagent workers assign <role>",
+   "source": "crates/lightagent/src/lib.rs:223",
+   "behavior": "researcher|coder|reviewer|tester",
+   "tree_key": "arg lightagent workers assign <role>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Runs/Agents: assign role — input 'role'",
+   "backend": "extract: workers_cmd(Assign)",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_workers.rs (CLI and API alike, both directions); host: desktop/e2e/runs.py workers (status, assign built-in, revoke through the host, matched with the CLI); browser: e2e/workers.mjs (assign built-in and revoke; real harness); native WebView: D8",
+   "tested_sha": "4afe90708243838d7174d898408cefd93f892bbf",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984218, https://github.com/dlroqa/Lightagent/actions/runs/41572984227, https://github.com/dlroqa/Lightagent/actions/runs/41572984266, https://github.com/dlroqa/Lightagent/actions/runs/41572984319"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.workers.assign.arg.role` | `lightagent workers assign <role>` | applicable | yes | Runs/Agents: assign role — input 'role' | extract: workers_cmd(Assign) | not-started | `crates/lightagent/src/lib.rs:223` |
+--- with
+| `cli.workers.assign.arg.role` | `lightagent workers assign <role>` | applicable | yes | Runs/Agents: assign role — input 'role' | extract: workers_cmd(Assign) | implemented | `crates/lightagent/src/lib.rs:223` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.workers.assign.opt.builtin",
+   "kind": "option",
+   "surface": "lightagent workers assign --builtin",
+   "source": "crates/lightagent/src/lib.rs:223",
+   "behavior": "Pin the built-in worker",
+   "tree_key": "arg lightagent workers assign --builtin",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Runs/Agents: assign role — input 'builtin'",
+   "backend": "extract: workers_cmd(Assign)",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.workers.assign.opt.builtin",
+   "kind": "option",
+   "surface": "lightagent workers assign --builtin",
+   "source": "crates/lightagent/src/lib.rs:223",
+   "behavior": "Pin the built-in worker",
+   "tree_key": "arg lightagent workers assign --builtin",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Runs/Agents: assign role — input 'builtin'",
+   "backend": "extract: workers_cmd(Assign)",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_workers.rs (CLI and API alike, both directions); host: desktop/e2e/runs.py workers (status, assign built-in, revoke through the host, matched with the CLI); browser: e2e/workers.mjs (assign built-in and revoke; real harness); native WebView: D8",
+   "tested_sha": "4afe90708243838d7174d898408cefd93f892bbf",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984218, https://github.com/dlroqa/Lightagent/actions/runs/41572984227, https://github.com/dlroqa/Lightagent/actions/runs/41572984266, https://github.com/dlroqa/Lightagent/actions/runs/41572984319"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.workers.assign.opt.builtin` | `lightagent workers assign --builtin` | applicable | yes | Runs/Agents: assign role — input 'builtin' | extract: workers_cmd(Assign) | not-started | `crates/lightagent/src/lib.rs:223` |
+--- with
+| `cli.workers.assign.opt.builtin` | `lightagent workers assign --builtin` | applicable | yes | Runs/Agents: assign role — input 'builtin' | extract: workers_cmd(Assign) | implemented | `crates/lightagent/src/lib.rs:223` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.workers.revoke",
+   "kind": "command",
+   "surface": "lightagent workers revoke",
+   "source": "crates/lightagent/src/lib.rs:237",
+   "behavior": "Remove a role assignment",
+   "tree_key": "cmd lightagent workers revoke",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Runs/Agents: revoke role",
+   "backend": "extract: workers_cmd(Revoke)",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.workers.revoke",
+   "kind": "command",
+   "surface": "lightagent workers revoke",
+   "source": "crates/lightagent/src/lib.rs:237",
+   "behavior": "Remove a role assignment",
+   "tree_key": "cmd lightagent workers revoke",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Runs/Agents: revoke role",
+   "backend": "extract: workers_cmd(Revoke)",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_workers.rs (CLI and API alike, both directions); host: desktop/e2e/runs.py workers (status, assign built-in, revoke through the host, matched with the CLI); browser: e2e/workers.mjs (assign built-in and revoke; real harness); native WebView: D8",
+   "tested_sha": "4afe90708243838d7174d898408cefd93f892bbf",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984218, https://github.com/dlroqa/Lightagent/actions/runs/41572984227, https://github.com/dlroqa/Lightagent/actions/runs/41572984266, https://github.com/dlroqa/Lightagent/actions/runs/41572984319"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.workers.revoke` | `lightagent workers revoke` | applicable | yes | Runs/Agents: revoke role | extract: workers_cmd(Revoke) | not-started | `crates/lightagent/src/lib.rs:237` |
+--- with
+| `cli.workers.revoke` | `lightagent workers revoke` | applicable | yes | Runs/Agents: revoke role | extract: workers_cmd(Revoke) | implemented | `crates/lightagent/src/lib.rs:237` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.workers.revoke.arg.role",
+   "kind": "argument",
+   "surface": "lightagent workers revoke <role>",
+   "source": "crates/lightagent/src/lib.rs:237",
+   "behavior": "Role",
+   "tree_key": "arg lightagent workers revoke <role>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Runs/Agents: revoke role — input 'role'",
+   "backend": "extract: workers_cmd(Revoke)",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.workers.revoke.arg.role",
+   "kind": "argument",
+   "surface": "lightagent workers revoke <role>",
+   "source": "crates/lightagent/src/lib.rs:237",
+   "behavior": "Role",
+   "tree_key": "arg lightagent workers revoke <role>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Runs/Agents: revoke role — input 'role'",
+   "backend": "extract: workers_cmd(Revoke)",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_workers.rs (CLI and API alike, both directions); host: desktop/e2e/runs.py workers (status, assign built-in, revoke through the host, matched with the CLI); browser: e2e/workers.mjs (assign built-in and revoke; real harness); native WebView: D8",
+   "tested_sha": "4afe90708243838d7174d898408cefd93f892bbf",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41572984218, https://github.com/dlroqa/Lightagent/actions/runs/41572984227, https://github.com/dlroqa/Lightagent/actions/runs/41572984266, https://github.com/dlroqa/Lightagent/actions/runs/41572984319"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.workers.revoke.arg.role` | `lightagent workers revoke <role>` | applicable | yes | Runs/Agents: revoke role — input 'role' | extract: workers_cmd(Revoke) | not-started | `crates/lightagent/src/lib.rs:237` |
+--- with
+| `cli.workers.revoke.arg.role` | `lightagent workers revoke <role>` | applicable | yes | Runs/Agents: revoke role — input 'role' | extract: workers_cmd(Revoke) | implemented | `crates/lightagent/src/lib.rs:237` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "parity_implemented": 99,
+--- with
+  "parity_implemented": 110,
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Implemented: 99 of 227
+--- with
+- Implemented: 110 of 227
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Total rows: 361
+--- with
+- D7 note (2026-11-03, rows 38-39): the five `cli.sessions.*` rows (`c0b5ed3`) and `cli.workers.status`, `assign` (+`role`, `--builtin`) and `revoke` (+`role`) (`4afe907`) are implemented with backend (`desktop_sessions.rs`, `desktop_workers.rs`), host (`runs.py sessions`, `workers`) and browser (`e2e/sessions.mjs`, `e2e/workers.mjs`) evidence; native WebView is D8. `cli.workers.assign.opt.worker`, `assign.opt.profile`, `status.opt.profile` and `revoke.opt.profile` have UI controls and backend tests but no host or browser test yet. `lightagent sessions delete --json` now prints JSON (it printed text)
+- Total rows: 361
+=== replace docs/desktop/DESKTOP_MERGE_ORDER.md
+--- find
+| 38+ | D7 continues (sessions, workers, identity and remote credentials, init/import/chat, the remaining slash, setup, env and config rows, the diagnostics bundle and its redaction), then D8-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+--- with
+| 38 | D7-5 sessions proved across CLI, API and desktop; Delete asks first; `sessions delete --json` | https://github.com/dlroqa/Lightagent/pull/132 | `desktop/d7e-sessions` | `desktop/d7d-knowledge-ui` (`d5ed51f`) | `c0b5ed3` | `c0b5ed3` |
+| 39 | D7-6 worker assignments through one shared operation; Specialists assign and revoke | https://github.com/dlroqa/Lightagent/pull/133 | `desktop/d7f-workers` | `desktop/d7e-sessions` (via merge commit `4afe907`) | `4afe907` | `4afe907` |
+| 40 | A profile switch's rejections are applied before its runs are cancelled (D5 race) | https://github.com/dlroqa/Lightagent/pull/134 | `desktop/d5d-switch-rejections` | `desktop/d7f-workers` (via merge commit `627e899`) | `627e899` | `627e899` |
+| 41+ | D7 continues (identity and remote credentials, init/import/chat, the remaining slash, setup, env and config rows, the remaining workers and rag options, the diagnostics bundle and its redaction), then D8-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+
+**D10 decision carried:** rows 21-39 carry the switch rejection race
+(fixed at row 40): with a pending approval, a switch that stops runs may
+cancel the run before it applies the rejection, so no explicit rejection
+is recorded. Backport row 40's change to row 21 (#115) and merge it
+forward before approval, or accept the window.
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+## Artifacts and retention
+--- with
+## Row 38 — D7-5: sessions across CLI, API and desktop; Delete asks first
+
+- `lightagent sessions list|show|delete` and the API's session routes
+  already shared the active profile's `SessionStore` (row 10's lock).
+  Proved at every level: backend `desktop_sessions.rs`, host `runs.py
+  sessions`, browser `e2e/sessions.mjs`.
+- Fixed: the Agent screen deleted a conversation as soon as Delete was
+  chosen; it now asks first (Confirm / Keep it). `sessions delete`
+  ignored `--json`; it prints `{"id", "deleted"}` now.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-03 | `102`; draft PR #132 | `0696551` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41567060355 |
+| 2026-11-03 | `check` **failure**: `sessions delete --json` printed text; `104` → `c481a69` | `c481a69` | https://github.com/dlroqa/Lightagent/actions/runs/41567158114 |
+| 2026-11-03 | host **failure**, switch.py `pending` (the race, row 40); the same job rerun **passed** on unchanged code (intermittent; attempt 1 kept) | `c481a69` | https://github.com/dlroqa/Lightagent/actions/runs/41567976364 (job 125694325184) |
+| 2026-11-03 | render **failure** in the sessions check, narrowed step by step (`107`/`108` named steps; `109`/`110`): the row's actions show on hover or focus (keyboard users reach them by Tab) and take no pointer events while hidden; after "Keep it" the pointer was below the row. The check now hovers the row first → `c0b5ed3` | `c0b5ed3` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41572147184 |
+| 2026-11-03 | `check`, `desktop`, `jev evaluation`, `subagents`: **success**, 24 of 24 | `c0b5ed3` | https://github.com/dlroqa/Lightagent/actions/runs/41572984591, https://github.com/dlroqa/Lightagent/actions/runs/41572984624, https://github.com/dlroqa/Lightagent/actions/runs/41572984660, https://github.com/dlroqa/Lightagent/actions/runs/41572984678 |
+
+## Row 39 — D7-6: worker assignments through one shared operation
+
+- `worker_assignment` (crate `lightagent`): assign (a profile or the
+  built-in worker) and revoke, for the active or a named profile, with the
+  CLI's checks; the CLI prints as before and `RunFactory::workers_change`
+  answers the API with the same JSON. API: `PUT|DELETE /workers/{role}`;
+  `GET /workers` takes `profile` in the contract. The Specialists card:
+  whose workers, and per role Assign to (built-in or a profile) / Revoke.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-03 | `103`; draft PR #133; row 38's fixes merged in server-side | `85df9f7` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41567463900 |
+| 2026-11-03 | `check` **failure**: the test expected the profile name in readiness, which reports `assigned:<assignment id>` (API and CLI agreed); `106` fixed the assertion | `b9944df` | https://github.com/dlroqa/Lightagent/actions/runs/41567977741 |
+| 2026-11-03 | `check`, `desktop`, `jev evaluation`, `subagents`: **success**, 24 of 24 | `4afe907` | https://github.com/dlroqa/Lightagent/actions/runs/41572984218, https://github.com/dlroqa/Lightagent/actions/runs/41572984227, https://github.com/dlroqa/Lightagent/actions/runs/41572984266, https://github.com/dlroqa/Lightagent/actions/runs/41572984319 |
+
+## Row 40 — the profile switch's rejections before its cancels (D5 race)
+
+- Found by the host run of row 38: `stop_runs` (row 21) rejected each
+  pending approval and then cancelled every run at once. The run waits on
+  a `tokio::select!` (not biased) over the decision and the cancel token;
+  when both were ready the cancel could win, and the run ended
+  `Cancelled` with no rejection recorded. The D5 acceptance item "a
+  profile switch with a pending approval records an explicit rejection"
+  was therefore not guaranteed.
+- Fix: after rejecting, the host waits (within its drain timeout) until
+  each rejected run has left `awaiting_approval`, then cancels. Evidence:
+  the host `switch.py pending` scenario.
+- D10 decision: rows 21-39 carry the race (see MERGE_ORDER).
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-03 | `105`; draft PR #134 | `bb8241e` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41568476519 |
+| 2026-11-03 | `check`, `desktop`, `jev evaluation`, `subagents`: **success**, 24 of 24 | `627e899` | https://github.com/dlroqa/Lightagent/actions/runs/41572990604, https://github.com/dlroqa/Lightagent/actions/runs/41572990675, https://github.com/dlroqa/Lightagent/actions/runs/41572990742, https://github.com/dlroqa/Lightagent/actions/runs/41572990743 |
+
+Coverage: the five `cli.sessions.*` rows and six `cli.workers.*` rows →
+**110 of 227**.
+
+## Artifacts and retention
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+9. **Next in D7:** sessions, workers, identity and remote credentials,
+   init, import and chat, the remaining slash, setup, env and config rows,
+   `cli.rag.add.opt.source` evidence, and the diagnostics bundle with its
+   redaction checks. Then D8-D10 in dependency order. D8 keeps the native
+   WebView checks (Settings, profile switching, close with active runs,
+   run controls, response actions R2-R5, Extensions, MCP, the tool
+   catalog, skill import, Memory and Knowledge). Before merge approval
+   (D10): the `providers.remove` window decision, then the exact
+   candidate merge sequence simulated on hosted runners and every
+   candidate tree validated.
+--- with
+9. Rows 38-40 (sessions, workers, the switch race) are done, at 110 of
+   227.
+10. **Next in D7:** identity and remote credentials, init, import and
+   chat, the remaining slash, setup, env and config rows, the remaining
+   workers and rag options, and the diagnostics bundle with its redaction
+   checks. Then D8-D10 in dependency order. D8 keeps the native WebView
+   checks (Settings, profile switching, close with active runs, run
+   controls, response actions R2-R5, Extensions, MCP, the tool catalog,
+   skill import, Memory, Knowledge, sessions and workers). Before merge
+   approval (D10): the `providers.remove` and switch-race window
+   decisions, then the exact candidate merge sequence simulated on hosted
+   runners and every candidate tree validated.
+=== end
