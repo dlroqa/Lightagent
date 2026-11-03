@@ -159,6 +159,20 @@ export interface RunView {
 }
 
 /** One remembered fact, as `lightagent memory list --json` shows it. */
+/** What `lightagent rag add --json` reports. */
+export interface KnowledgeAdded {
+  indexed: { source: string; chunks: number }[];
+  total_chunks: number;
+  skipped: { path: string; reason: string }[];
+  notes: string[];
+}
+
+export interface KnowledgeHit {
+  source: string;
+  score: number;
+  text: string;
+}
+
 export interface MemoryItem {
   id: string;
   kind: string;
@@ -617,6 +631,18 @@ export const agentApi = {
     }),
   removeMcpServer: (name: string) =>
     jsonRequest<McpState>(`/mcp/servers/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  /** `lightagent rag …` on the active profile's index, the same operations. */
+  knowledge: () =>
+    jsonRequest<{ sources: { source: string; chunks: number }[]; total_chunks: number }>("/knowledge"),
+  addKnowledge: (path: string, source?: string) =>
+    jsonRequest<KnowledgeAdded>("/knowledge", { method: "POST", body: JSON.stringify({ path, source }) }),
+  clearKnowledge: () => jsonRequest<{ cleared: boolean }>("/knowledge", { method: "DELETE" }),
+  searchKnowledge: (query: string, topK?: number) =>
+    jsonRequest<{ query: string; hits: KnowledgeHit[] }>(
+      topK
+        ? `/knowledge/search?q=${encodeURIComponent(query)}&top_k=${topK}`
+        : `/knowledge/search?q=${encodeURIComponent(query)}`,
+    ),
   /** `lightagent memory …` on the active profile, the same operations. */
   memories: () => jsonRequest<{ memories: MemoryItem[] }>("/memories"),
   addMemory: (text: string, kind: string | undefined, tags: string[]) =>
