@@ -691,7 +691,7 @@ export interface ConfigValue {
   revision: string;
 }
 
-/** The profile's onboarding guidance (the chat's `/onboard`). */
+/** The profile's onboarding guidance (the chat's /onboard command). */
 export interface Onboarding {
   installed: boolean;
   text: string | null;
@@ -923,7 +923,7 @@ export const agentApi = {
     }),
   config: () => jsonRequest<ConfigView>("/config"),
   configKey: (key: string) => jsonRequest<ConfigValue>(`/config/${encodeURIComponent(key)}`),
-  /** `/onboard`: the guidance installed for the profile the runtime serves. */
+  /** The chat's /onboard: the guidance installed for the profile the runtime serves. */
   onboarding: () => jsonRequest<Onboarding>("/onboarding"),
   /** `/onboard <file.md>`: install or replace it from a Markdown file on this machine. */
   setOnboarding: (path: string) =>

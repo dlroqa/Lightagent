@@ -401,7 +401,7 @@ function GuidanceCard({ active }: { active: string | null }) {
           autoComplete="off"
           spellCheck={false}
           aria-describedby={ids.hint}
-          placeholder="/home/me/notes/onboarding.md"
+          placeholder="/path/to/onboarding.md"
           onChange={(event) => setPath(event.target.value)}
         />
         <p id={ids.hint} className="card__note">
