@@ -750,6 +750,9 @@ async fn status(
     let policy = &actions.policy;
     let begun = Instant::now();
     let mut running_since: Option<Instant> = None;
+    // Times are as observed at each poll: queue time counts only when a read
+    // saw the run waiting for a runner.
+    let mut seen_queued = false;
     let mut run = read_run(actions, run_id).await?;
     let completed = |run: &Value| run.get("status").and_then(Value::as_str) == Some("completed");
     let queued = |run: &Value| {
@@ -761,6 +764,7 @@ async fn status(
         if completed(&run) {
             break "completed";
         }
+        seen_queued |= queued(&run);
         let now = Instant::now();
         if running_since.is_none() && !queued(&run) {
             running_since = Some(now);
@@ -798,7 +802,11 @@ async fn status(
         (false, _) => "still_running",
     };
     let millis = |duration: Duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
-    let queued_for = running_since.unwrap_or(ended).duration_since(begun);
+    let queued_for = if seen_queued {
+        running_since.unwrap_or(ended).duration_since(begun)
+    } else {
+        Duration::ZERO
+    };
     let running_for = running_since
         .map(|since| ended.duration_since(since))
         .unwrap_or_default();

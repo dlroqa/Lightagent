@@ -434,6 +434,18 @@ async fn without_a_wait_or_past_the_overall_cap_a_run_is_not_passed() {
     assert_eq!(capped["wait"]["limits_ms"]["overall"], 1000, "{capped}");
 }
 
+#[tokio::test]
+async fn a_run_completed_before_the_first_read_was_never_seen_queued() {
+    let github = github().await;
+    staged(&github, 508, &[("completed", Some("success"))]);
+    let ctx = waiting(&github, Duration::from_secs(5), Duration::from_secs(5));
+    let status = wait_for(&ctx, 508, 30).await;
+    assert_eq!(status["verdict"], "passed", "{status}");
+    assert_eq!(status["wait"]["outcome"], "completed", "{status}");
+    assert_eq!(status["wait"]["queued_ms"], 0, "{status}");
+    assert_eq!(status["wait"]["running_ms"], 0, "{status}");
+}
+
 /// In a live check, a run the wait gave up on is cancelled so it does not
 /// hold a runner after the check has failed; its wait is printed.
 async fn cancel_unfinished(ctx: &ToolCtx, status: &Value) {
