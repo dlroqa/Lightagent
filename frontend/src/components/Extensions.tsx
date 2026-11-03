@@ -206,6 +206,23 @@ export function ExtensionsCard() {
             <button type="button" className="btn" onClick={() => void load()}>Retry</button>
           </div>
         )}
+        {listing && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", margin: "4px 0 8px" }}>
+            <strong>Extensions</strong>
+            <Pill tone={listing.enabled ? "ok" : "neutral"}>
+              {listing.enabled ? "On for every profile" : "Off for every profile"}
+            </Pill>
+            <button type="button" className="btn" disabled={busy}
+              onClick={() => void act(async () => {
+                await agentApi.setConfigKey("extensions.enabled", listing.enabled ? "false" : "true");
+                return listing.enabled
+                  ? "Extensions are off: none adds skills, instructions or MCP servers to new runs. Each keeps its own enabled state."
+                  : "Extensions are on: the active ones add their skills, instructions and MCP servers to new runs (MCP servers still need MCP on).";
+              })}>
+              {listing.enabled ? "Turn extensions off" : "Turn extensions on"}
+            </button>
+          </div>
+        )}
         {listing && !listing.enabled && (
           <div className="notice notice--warn" role="status">
             Extensions are off for every profile (extensions.enabled), so none of them is used.

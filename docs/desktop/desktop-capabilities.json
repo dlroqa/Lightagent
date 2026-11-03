@@ -117,7 +117,7 @@
    "not-applicable": 29
   },
   "parity_denominator": 227,
-  "parity_implemented": 64,
+  "parity_implemented": 62,
   "pending_decision_rows": 0,
   "not_counted_duplicates": 26
  },
@@ -4789,10 +4789,10 @@
    "backend": "api: GET /skills",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "implemented",
-   "verification": "backend: crates/lightagent/tests/desktop_tools.rs (skills as a run loads them, with source); browser: e2e/tools.mjs (source and version shown); host: desktop/e2e/runs.py skills; native WebView: D8",
-   "tested_sha": "62e87e6307a1746ce2d20e0c20530f6726aac400",
-   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41506198528, https://github.com/dlroqa/Lightagent/actions/runs/41506198503"
+   "desktop_status": "not-started",
+   "verification": "pending: host GET /skills scenario (row 32); backend desktop_tools.rs and browser e2e/tools.mjs passed at 62e87e6",
+   "tested_sha": null,
+   "actions_evidence": null
   },
   {
    "id": "slash.reload",
@@ -5851,10 +5851,10 @@
    "backend": "api: GET /skills",
    "permission": "local-operator",
    "data_scope": "home|profile",
-   "desktop_status": "implemented",
-   "verification": "backend: crates/lightagent/tests/desktop_tools.rs (skills as a run loads them, with source); browser: e2e/tools.mjs (source and version shown); host: desktop/e2e/runs.py skills; native WebView: D8",
-   "tested_sha": "62e87e6307a1746ce2d20e0c20530f6726aac400",
-   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41506198528, https://github.com/dlroqa/Lightagent/actions/runs/41506198503"
+   "desktop_status": "not-started",
+   "verification": "pending: host GET /skills scenario (row 32); backend desktop_tools.rs and browser e2e/tools.mjs passed at 62e87e6",
+   "tested_sha": null,
+   "actions_evidence": null
   },
   {
    "id": "config.inference",

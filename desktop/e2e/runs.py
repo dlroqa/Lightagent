@@ -458,6 +458,14 @@ def scenario_extensions(host, cli):
                      (status, toggled, by_cli))
         status, refused = host.fetch("POST", f"{API}/extensions", {"source": "relative/folder"})
         check.expect("a relative source is refused", status == 400, (status, refused))
+        status, off = host.fetch("PUT", f"{API}/config/extensions.enabled", {"value": "false"})
+        by_cli = json.loads(harness.run_cli(cli, "--json", "extensions", "list"))
+        check.expect("the master switch turned off through the host is off for the CLI",
+                     status == 200 and by_cli.get("enabled") is False, (status, off, by_cli))
+        harness.run_cli(cli, "config", "set", "extensions.enabled", "true")
+        status, listed = host.fetch("GET", f"{API}/extensions")
+        check.expect("turned on by the CLI, on through the host",
+                     status == 200 and (listed or {}).get("enabled") is True, (status, listed))
         status, removed = host.fetch("DELETE", f"{API}/extensions/host-probe?scope=global")
         left = cli_list().get("extensions")
         check.expect("uninstalled through the host, gone for the CLI", status == 200 and left == [],
@@ -475,6 +483,7 @@ def scenario_skills(host, cli):
 
     check = Checks("skills")
     work = tempfile.mkdtemp(prefix="lightagent-e2e-skills-")
+    created = []
     try:
         skill = os.path.join(work, "host-pack", "skills", "host-skill")
         os.makedirs(skill)
@@ -488,10 +497,31 @@ def scenario_skills(host, cli):
         listed = json.loads(harness.run_cli(cli, "--json", "extensions", "list")).get("extensions", [])
         check.expect("the CLI sees it inactive",
                      [(e.get("name"), e.get("active")) for e in listed] == [("host-pack", False)], listed)
+        # GET /skills through the host: each skill with its scope and source.
+        home = os.environ["LIGHTAGENT_HOME"]
+        active = json.loads(harness.run_cli(cli, "profile", "list", "--json")).get("active") or "default"
+        for root, name in ((os.path.join(home, "skills"), "host-global"),
+                           (os.path.join(home, "profiles", active, "skills"), "host-profile")):
+            os.makedirs(os.path.join(root, name), exist_ok=True)
+            created.append(os.path.join(root, name))
+            with open(os.path.join(root, name, "SKILL.md"), "w", encoding="utf-8") as handle:
+                handle.write(f"---\nname: {name}\ndescription: Host\n---\nDo it.\n")
+        status, _ = host.fetch("PUT", f"{API}/extensions/host-pack/enabled", {"enabled": True})
+        status, skills = host.fetch("GET", f"{API}/skills")
+        by_name = {s.get("name"): s for s in (skills or {}).get("skills", [])}
+        check.expect("GET /skills through the host lists each skill with its scope and source",
+                     status == 200
+                     and by_name.get("host-global", {}).get("source") == {"scope": "global"}
+                     and by_name.get("host-profile", {}).get("source") == {"scope": "profile"}
+                     and by_name.get("host-skill", {}).get("source") == {"scope": "extension", "extension": "host-pack"}
+                     and all(isinstance(s.get("description"), str) for s in by_name.values()),
+                     (status, skills))
         status, _ = host.fetch("DELETE", f"{API}/extensions/host-pack")
         check.expect("removed through the host", status == 200, status)
     finally:
         shutil.rmtree(work, ignore_errors=True)
+        for path in created:
+            shutil.rmtree(path, ignore_errors=True)
     return check
 
 
@@ -562,6 +592,17 @@ def scenario_mcp(host):
         check.expect("its process is gone after the check", pid is not None and gone(pid), pid)
         status, view = host.fetch("GET", f"{API}/mcp")
         check.expect("a check does not turn MCP on", ((view or {}).get("mcp") or {}).get("enabled") is False, view)
+        fields = {"transport": "http", "name": "hostauth", "url": "https://mcp.example.invalid/mcp",
+                  "auth": {"kind": "env", "var": "HOST_MCP_TOKEN"},
+                  "untrusted_profiles": ["research"], "credential_profiles": ["research"]}
+        status, _ = host.fetch("POST", f"{API}/mcp/servers", {"server": fields})
+        _, view = host.fetch("GET", f"{API}/mcp")
+        saved = next((s for s in ((view or {}).get("mcp") or {}).get("servers", []) if s.get("name") == "hostauth"), {})
+        check.expect("auth and profile fields saved through the host and shown by name",
+                     status == 201 and saved.get("auth") == {"kind": "env", "var": "HOST_MCP_TOKEN"}
+                     and saved.get("untrusted_profiles") == ["research"]
+                     and saved.get("credential_profiles") == ["research"], (status, saved))
+        host.fetch("DELETE", f"{API}/mcp/servers/hostauth")
         status, _ = host.fetch("DELETE", f"{API}/mcp/servers/hostprobe")
         check.expect("removed through the host", status == 200, status)
     finally:

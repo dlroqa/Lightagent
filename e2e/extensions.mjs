@@ -106,6 +106,19 @@ export async function checkExtensions(browser, base, outDir) {
       if (!(await until(async () => (await installed(base))?.active === true))) throw new Error("Enable did not reach the server");
     });
 
+    await step("the master switch turns every extension off and on", async () => {
+      await card.getByRole("button", { name: "Turn extensions off" }).click();
+      if (!(await until(async () => (await api(base, "/extensions")).body.enabled === false))) {
+        throw new Error("Turn extensions off did not reach the server");
+      }
+      await card.getByText("Off for every profile", { exact: true }).waitFor({ timeout: 10000 });
+      if ((await installed(base))?.active !== false) throw new Error("an extension stayed active with the switch off");
+      await card.getByRole("button", { name: "Turn extensions on" }).click();
+      if (!(await until(async () => (await api(base, "/extensions")).body.enabled === true))) {
+        throw new Error("Turn extensions on did not reach the server");
+      }
+    });
+
     await step("uninstall asks first", async () => {
       await row.getByRole("button", { name: `Uninstall ${NAME}` }).click();
       await row.getByRole("button", { name: `Keep ${NAME}` }).click();
@@ -121,6 +134,11 @@ export async function checkExtensions(browser, base, outDir) {
   } finally {
     await page.close();
     // Leave the harness as it was, even after a failed step.
+    await fetch(`${base}/api/lightagent/v1/config/extensions.enabled`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: "true" }),
+    }).catch(() => {});
     if (await installed(base).catch(() => null)) {
       await fetch(`${base}/api/lightagent/v1/extensions/${NAME}`, { method: "DELETE" }).catch(() => {});
     }

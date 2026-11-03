@@ -14,6 +14,7 @@ import { join } from "node:path";
 
 const STDIO = "render-probe-stdio";
 const HTTP = "render-probe-http";
+const AUTH = "render-probe-auth";
 const ENV_SECRET = "render-mcp-env-6a1d-not-a-real-value";
 const HEADER_SECRET = "render-mcp-header-2f9b-not-a-real-value";
 
@@ -72,6 +73,7 @@ export async function checkMcp(browser, base, outDir) {
   const card = page.getByTestId("mcp-card");
   const stdioRow = page.getByTestId(`mcp-${STDIO}`);
   const httpRow = page.getByTestId(`mcp-${HTTP}`);
+  const authRow = page.getByTestId(`mcp-${AUTH}`);
   const leaks = async () => {
     const everything = await page.evaluate(() =>
       document.documentElement.outerHTML + JSON.stringify(localStorage) + JSON.stringify(sessionStorage));
@@ -138,6 +140,37 @@ export async function checkMcp(browser, base, outDir) {
       if (leaked.length) throw new Error(`the page holds ${leaked.join(", ")}`);
     });
 
+    await step("auth and profile fields are saved and shown by name", async () => {
+      await card.getByRole("radio", { name: "HTTP endpoint" }).check();
+      await page.locator("#mcp-name").fill(AUTH);
+      await page.locator("#mcp-url").fill("https://mcp.example.invalid/mcp");
+      await page.locator("#mcp-auth").fill("RENDER_MCP_TOKEN");
+      await page.locator("#mcp-untrusted").fill("research");
+      await page.locator("#mcp-credential").fill("research, billing");
+      await card.getByRole("button", { name: "Add server" }).click();
+      await authRow.waitFor({ timeout: 10000 });
+      const saved = (await mcpNow(base)).mcp.servers.find((server) => server.name === AUTH);
+      if (JSON.stringify(saved?.auth) !== JSON.stringify({ kind: "env", var: "RENDER_MCP_TOKEN" })) {
+        throw new Error(`auth saved as ${JSON.stringify(saved?.auth)}`);
+      }
+      if (JSON.stringify(saved?.untrusted_profiles) !== '["research"]') {
+        throw new Error(`other profiles saved as ${JSON.stringify(saved?.untrusted_profiles)}`);
+      }
+      if (JSON.stringify(saved?.credential_profiles) !== '["research","billing"]') {
+        throw new Error(`credential profiles saved as ${JSON.stringify(saved?.credential_profiles)}`);
+      }
+      const text = await authRow.innerText();
+      for (const expected of ["environment variable RENDER_MCP_TOKEN", "other profiles allowed: research", "credentials for: research, billing"]) {
+        if (!text.includes(expected)) throw new Error(`the row does not show "${expected}"`);
+      }
+      await page.screenshot({ path: `${outDir}/mcp-auth-fields.png` });
+      await authRow.getByRole("button", { name: `Remove ${AUTH}` }).click();
+      await authRow.getByRole("button", { name: `Confirm: remove ${AUTH}` }).click();
+      if (!(await until(async () => !(await mcpNow(base)).mcp.servers.some((server) => server.name === AUTH)))) {
+        throw new Error(`Confirm did not remove ${AUTH}`);
+      }
+    });
+
     await step("removal asks first", async () => {
       for (const [name, row] of [[STDIO, stdioRow], [HTTP, httpRow]]) {
         await row.getByRole("button", { name: `Remove ${name}` }).click();
@@ -167,7 +200,7 @@ export async function checkMcp(browser, base, outDir) {
   } finally {
     await page.close();
     // Leave the harness as it was, even after a failed step.
-    for (const name of [STDIO, HTTP]) {
+    for (const name of [STDIO, HTTP, AUTH]) {
       await fetch(`${base}/api/lightagent/v1/mcp/servers/${name}`, { method: "DELETE" }).catch(() => {});
     }
     await fetch(`${base}/api/lightagent/v1/mcp`, {

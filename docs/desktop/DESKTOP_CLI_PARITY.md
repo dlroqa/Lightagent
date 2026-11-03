@@ -5,11 +5,11 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 ## Coverage
 
 - Denominator: 227
-- Implemented: 64 of 227
+- Implemented: 62 of 227
 - Pending D1 decision rows: 0
 - D5a note (2026-11-02, rows 21-24): `slash.approve`, `slash.reject`, `slash.stop`, `slash.continue` and `key.steer` are implemented at `e164dde`: browser UI e2e (e2e/runs.mjs), host-level (desktop/e2e/runs.py, switch.py) and backend (desktop_continue.rs) evidence; native WebView interaction is D8 and not claimed. #98's regenerate (`api.post.sessions.id.regenerate`) has host-level R1 evidence and stays not counted until its browser and native checks (R1 is met at host level; R2-R5 are D8)
 - D6 note (2026-11-02, rows 26-27): the 13 `cli.extensions.*` rows, the 5 `extension.manifest.*` rows and `extension.roots` are implemented at `c89c989` through `lightagent_extensions::manage`: backend (crates/lightagent/tests/desktop_extensions.rs, CLI and API alike), host-level (desktop/e2e/runs.py `extensions`) and browser UI (e2e/extensions.mjs) evidence; native WebView interaction is D8 and not claimed. `config.extensions` waits for a master-switch control (row 28); the five `api.*.extensions*` rows are backend rows and not counted
-- D6 note (2026-11-02, rows 28-31): `mcp.server.stdio` (+`command`, `args`, `env`), `mcp.server.http` (+`url`, `headers`), `config.mcp`, `cli.tools.list`, `slash.skills` and `skills.roots` are implemented at `62e87e6` with backend, host and browser evidence; native WebView is D8. `mcp.server.http.auth`, `mcp.server.http.untrusted_profiles` and `mcp.server.http.credential_profiles` are supported by the shared operation and the MCP card's form but not yet exercised by a browser check, so they are not counted. Difference recorded: `lightagent extensions install` turns MCP on for a bundle with MCP servers (and says so); the API and desktop do only when asked, and the desktop's MCP switch asks for confirmation. Skill import (`api.post.skills.imports`) is new scope beyond the CLI and never counted
+- D6 note (2026-11-02, rows 28-31): `mcp.server.stdio` (+`command`, `args`, `env`), `mcp.server.http` (+`url`, `headers`), `config.mcp`, `cli.tools.list` are implemented at `62e87e6` with backend, host and browser evidence; native WebView is D8. `mcp.server.http.auth`, `mcp.server.http.untrusted_profiles` and `mcp.server.http.credential_profiles` are supported by the shared operation and the MCP card's form but not yet exercised by a browser check, so they are not counted. Difference recorded: `lightagent extensions install` turns MCP on for a bundle with MCP servers (and says so); the API and desktop do only when asked, and the desktop's MCP switch asks for confirmation. Skill import (`api.post.skills.imports`) is new scope beyond the CLI and never counted Correction (row 32): `slash.skills` and `skills.roots` were counted at `5c98b3e` without host evidence (runs.py `skills` never called GET /skills); they are not-started again until the row 32 host scenario passes.
 - Total rows: 346
 
 | Kind | Rows |
@@ -336,7 +336,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 |---|---|---|---|---|---|---|---|
 | `slash.help` | `/help` | applicable | yes | Command palette: help | static | not-started | `crates/lightagent/src/slash.rs:56` |
 | `slash.tools` | `/tools` | applicable | dup→`cli.tools.list` |  |  | not-started | `crates/lightagent/src/slash.rs:57` |
-| `slash.skills` | `/skills` | applicable | yes | Skills | api: GET /skills | implemented | `crates/lightagent/src/slash.rs:58` |
+| `slash.skills` | `/skills` | applicable | yes | Skills | api: GET /skills | not-started | `crates/lightagent/src/slash.rs:58` |
 | `slash.reload` | `/reload` | applicable | yes | Tools/MCP/Extensions: reload | extract: chat.rs reload path | not-started | `crates/lightagent/src/slash.rs:59` |
 | `slash.extensions` | `/extensions` | applicable | dup→`cli.extensions.list` |  |  | not-started | `crates/lightagent/src/slash.rs:60` |
 | `slash.extensions-install` | `/extensions install` | applicable | dup→`cli.extensions.install` |  |  | not-started | `crates/lightagent/src/slash.rs:63` |
@@ -405,7 +405,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 
 | ID | Surface | Applicability | Counts | UI path | Backend | Status | Source |
 |---|---|---|---|---|---|---|---|
-| `skills.roots` | `<home>/skills and <profile>/skills (SKILL.md)` | applicable | yes | Skills: list with scope and source | api: GET /skills | implemented | `crates/lightagent-core/src/skills.rs:204` |
+| `skills.roots` | `<home>/skills and <profile>/skills (SKILL.md)` | applicable | yes | Skills: list with scope and source | api: GET /skills | not-started | `crates/lightagent-core/src/skills.rs:204` |
 
 ## config
 
