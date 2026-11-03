@@ -520,6 +520,33 @@ def scenario_workers(host, cli):
     return check
 
 
+def scenario_diagnostics(host, cli):
+    """D7 through the host transport: doctor and architecture equal the
+    CLI's; the bundle has exactly the allowlisted sections and holds no
+    path of the home and none of the secrets the earlier scenarios used."""
+    check = Checks("diagnostics")
+
+    def cli_json(*args):
+        return json.loads(harness.run_cli(cli, "--json", *args))
+
+    status, doctor = host.fetch("GET", f"{API}/diagnostics/doctor")
+    check.expect("doctor through the host equals the CLI's",
+                 status == 200 and doctor == cli_json("doctor"), (status, doctor))
+    status, architecture = host.fetch("GET", f"{API}/diagnostics/architecture")
+    check.expect("architecture through the host equals the CLI's",
+                 status == 200 and architecture == cli_json("architecture"), (status, architecture))
+    status, bundle = host.fetch("GET", f"{API}/diagnostics/bundle")
+    sections = sorted((bundle or {}).keys()) if isinstance(bundle, dict) else []
+    expected = sorted(["schema", "about", "included", "excluded", "lightagent", "doctor",
+                       "architecture", "settings", "counts", "stores"])
+    raw = json.dumps(bundle)
+    forbidden = [os.environ["LIGHTAGENT_HOME"], "e2e-host-secret", "e2e-alice", "docs.e2e.invalid"]
+    leaked = [text for text in forbidden if text in raw]
+    check.expect("the bundle has the allowlisted sections and none of the earlier secrets or paths",
+                 status == 200 and sections == expected and not leaked, (status, sections, leaked))
+    return check
+
+
 def scenario_remote_credentials(host, cli):
     """D7 through the host transport: the vault's status (with its key's
     source), a grant added from a secret file (its secret never in an
@@ -952,6 +979,7 @@ def main():
             ("workers", lambda: scenario_workers(host, cli)),
             ("identity", lambda: scenario_identity(host, cli)),
             ("remote_credentials", lambda: scenario_remote_credentials(host, cli)),
+            ("diagnostics", lambda: scenario_diagnostics(host, cli)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]

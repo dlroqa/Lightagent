@@ -20,6 +20,7 @@ import { checkKnowledge } from "./knowledge.mjs";
 import { checkSessions } from "./sessions.mjs";
 import { checkWorkers } from "./workers.mjs";
 import { checkIdentity } from "./identity.mjs";
+import { checkDiagnostics } from "./diagnostics.mjs";
 import { checkRemoteCredentials } from "./credentials.mjs";
 
 const BASE = (process.env.PANEL_BASE ?? "http://127.0.0.1:8735").replace(/\/+$/, "");
@@ -52,6 +53,7 @@ const ROUTES = [
   { name: "memory", hash: "#/memory", agentBacked: true, mustContain: "Remember something" },
   { name: "knowledge", hash: "#/knowledge", agentBacked: true, mustContain: "Add documents" },
   { name: "identity", hash: "#/admin/identity", agentBacked: true, mustContain: "Identity store" },
+  { name: "diagnostics", hash: "#/diagnostics", agentBacked: true, mustContain: "Diagnostics bundle" },
   { name: "credentials", hash: "#/admin/credentials", agentBacked: true, mustContain: "Master key" },
 ];
 
@@ -402,6 +404,12 @@ async function main() {
     failures.push(...(await checkIdentity(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`identity: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  }
+  // Prepares and saves the diagnostics bundle, after identity and credentials exist.
+  try {
+    failures.push(...(await checkDiagnostics(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`diagnostics: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
   }
   // Assigns and revokes a specialist role.
   try {

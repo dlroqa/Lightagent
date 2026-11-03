@@ -7129,6 +7129,78 @@
    "actions_evidence": null
   },
   {
+   "id": "api.get.diagnostics.doctor",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/diagnostics/doctor",
+   "source": "crates/lightagent-api/src/lib.rs:177",
+   "behavior": "The report `lightagent doctor --json` prints (D7-10)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/diagnostics/doctor"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.doctor)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: doctor_report via RunFactory::diagnostics",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.diagnostics.architecture",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/diagnostics/architecture",
+   "source": "crates/lightagent-api/src/lib.rs:177",
+   "behavior": "The report `lightagent architecture --json` prints (D7-10)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/diagnostics/architecture"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.architecture)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: architecture_report via RunFactory::diagnostics",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.diagnostics.bundle",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/diagnostics/bundle",
+   "source": "crates/lightagent-api/src/lib.rs:177",
+   "behavior": "The diagnostics bundle: allowlisted fields only, returned to the caller, never uploaded (D7-10)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/diagnostics/bundle"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "New scope (the D7 diagnostics bundle the build plan requires); no CLI capability, so it is never counted toward parity",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "Settings/Diagnostics: diagnostics bundle (prepare, review, save)",
+   "backend": "crate lightagent diagnostics::bundle via RunFactory::diagnostics",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
    "id": "api.get.remote-credentials.vault",
    "kind": "api",
    "surface": "GET /api/lightagent/v1/remote-credentials/vault",

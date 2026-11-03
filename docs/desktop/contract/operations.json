@@ -141,6 +141,21 @@
    "path": "/api/lightagent/v1/skills/imports"
   },
   {
+   "id": "diagnostics.doctor",
+   "method": "GET",
+   "path": "/api/lightagent/v1/diagnostics/doctor"
+  },
+  {
+   "id": "diagnostics.architecture",
+   "method": "GET",
+   "path": "/api/lightagent/v1/diagnostics/architecture"
+  },
+  {
+   "id": "diagnostics.bundle",
+   "method": "GET",
+   "path": "/api/lightagent/v1/diagnostics/bundle"
+  },
+  {
    "id": "remote_credentials.status",
    "method": "GET",
    "path": "/api/lightagent/v1/remote-credentials/vault"

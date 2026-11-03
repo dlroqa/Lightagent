@@ -14,6 +14,7 @@ mod acp;
 mod banner;
 mod chat;
 mod coordinator;
+mod diagnostics;
 mod extensions;
 mod generation;
 mod identity_admin;
@@ -676,6 +677,54 @@ fn subagent_role_instruction(role: &str) -> &'static str {
 }
 
 /// Print the deployment topology without contacting optional endpoints.
+/// `lightagent doctor --json`, shared with the API. `banner` is whether the
+/// caller shows the banner (the CLI: whether its stderr is a terminal).
+pub(crate) fn doctor_report(
+    paths: &LightagentPaths,
+    banner: bool,
+) -> Result<serde_json::Value, String> {
+    let config = load_config(paths)?;
+    let store = ProfileStore::new(paths.root());
+    let active = active_profile_id(&store)?;
+    let profiles = store.list().map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({
+        "version": VERSION,
+        "home": paths.root().display().to_string(),
+        "home_exists": paths.root().exists(),
+        "config_file": paths.config_file().display().to_string(),
+        "provider": config.inference.provider,
+        "base_url": config.inference.base_url,
+        "active_profile": active.as_ref().map(|id| id.as_str().to_string()),
+        "profiles": profiles.iter().map(|id| id.as_str().to_string()).collect::<Vec<_>>(),
+        "tools": ToolRegistry::builtin().names().len(),
+        "banner": banner,
+    }))
+}
+
+/// `lightagent architecture --json`, shared with the API.
+pub(crate) fn architecture_report(config: &Config) -> serde_json::Value {
+    let component = |endpoint: &lightagent_core::PlatformEndpointConfig| {
+        if endpoint.enabled {
+            format!(
+                "configured @ {}",
+                endpoint.base_url.as_deref().unwrap_or("(invalid)")
+            )
+        } else {
+            "not configured".to_owned()
+        }
+    };
+    serde_json::json!({
+        "harness": "Lightagent CLI/API and browser UI",
+        "web_ui": "served by `lightagent serve --web-root`",
+        "jev": component(&config.platform.jev.endpoint),
+        "qdrant": component(&config.platform.qdrant.endpoint),
+        "infinity": component(&config.platform.infinity.endpoint),
+        "searxng": if config.web.enabled { config.web.search.endpoint.clone() } else { None },
+        "open_terminal": component(&config.platform.open_terminal.endpoint),
+        "lightweight": config.inference.base_url,
+    })
+}
+
 fn architecture(json: bool) -> Result<(), String> {
     let paths = paths()?;
     let config = load_config(&paths)?;
@@ -691,17 +740,7 @@ fn architecture(json: bool) -> Result<(), String> {
     };
 
     if json {
-        let value = serde_json::json!({
-            "harness": "Lightagent CLI/API and browser UI",
-            "web_ui": "served by `lightagent serve --web-root`",
-            "jev": component(&config.platform.jev.endpoint),
-            "qdrant": component(&config.platform.qdrant.endpoint),
-            "infinity": component(&config.platform.infinity.endpoint),
-            "searxng": if config.web.enabled { config.web.search.endpoint.clone() } else { None },
-            "open_terminal": component(&config.platform.open_terminal.endpoint),
-            "lightweight": config.inference.base_url,
-        });
-        println!("{value:#}");
+        println!("{:#}", architecture_report(&config));
         return Ok(());
     }
 
@@ -747,19 +786,10 @@ async fn doctor(json: bool) -> Result<(), String> {
     let home_exists = paths.root().exists();
 
     if json {
-        let value = serde_json::json!({
-            "version": VERSION,
-            "home": paths.root().display().to_string(),
-            "home_exists": home_exists,
-            "config_file": paths.config_file().display().to_string(),
-            "provider": config.inference.provider,
-            "base_url": config.inference.base_url,
-            "active_profile": active.as_ref().map(|id| id.as_str().to_string()),
-            "profiles": profiles.iter().map(|id| id.as_str().to_string()).collect::<Vec<_>>(),
-            "tools": tool_count,
-            "banner": std::io::stderr().is_terminal(),
-        });
-        println!("{value:#}");
+        println!(
+            "{:#}",
+            doctor_report(&paths, std::io::stderr().is_terminal())?
+        );
         return Ok(());
     }
 
