@@ -84,6 +84,8 @@ pub fn blocked_while_switching(operation: &str) -> bool {
             | "extensions.install"
             | "extensions.uninstall"
             | "extensions.set_enabled"
+            | "setup.init"
+            | "import.hermes"
             | "memory.add"
             | "memory.update"
             | "memory.forget"
@@ -477,6 +479,8 @@ mod tests {
         assert!(blocked_while_switching("extensions.uninstall"));
         assert!(blocked_while_switching("extensions.set_enabled"));
         assert!(blocked_while_switching("memory.add"));
+        assert!(blocked_while_switching("setup.init"));
+        assert!(blocked_while_switching("import.hermes"));
         assert!(blocked_while_switching("memory.clear"));
         assert!(blocked_while_switching("memory.promote"));
         assert!(blocked_while_switching("knowledge.add"));

@@ -24,8 +24,15 @@ pub struct ImportReport {
     pub errors: Vec<String>,
 }
 
-/// The CLI entry: resolve the homes and run the import.
-pub fn hermes(from: Option<PathBuf>, dry_run: bool, force: bool, json: bool) -> Result<(), String> {
+/// The import into the home at `root`, shared by the CLI and the API: the
+/// report `--json` prints. The Hermes home is `from`, else `HERMES_HOME`,
+/// else `~/.hermes`.
+pub(crate) fn hermes_report(
+    root: &Path,
+    from: Option<PathBuf>,
+    dry_run: bool,
+    force: bool,
+) -> Result<serde_json::Value, String> {
     let hermes_home = from
         .or_else(|| std::env::var_os("HERMES_HOME").map(PathBuf::from))
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".hermes")))
@@ -36,29 +43,52 @@ pub fn hermes(from: Option<PathBuf>, dry_run: bool, force: bool, json: bool) -> 
             hermes_home.display()
         ));
     }
-    let paths = LightagentPaths::resolve().map_err(|error| error.to_string())?;
+    let paths = LightagentPaths::rooted_at(root);
     let store = ProfileStore::new(paths.root());
     let report = run_import(&hermes_home, &store, &paths.skills_dir(), dry_run, force);
+    Ok(serde_json::json!({
+        "dry_run": dry_run,
+        "hermes_home": hermes_home.display().to_string(),
+        "profiles": report.profiles,
+        "skills": report.skills,
+        "skipped": report.skipped,
+        "errors": report.errors,
+    }))
+}
 
+/// The CLI entry: resolve the homes and run the import.
+pub fn hermes(from: Option<PathBuf>, dry_run: bool, force: bool, json: bool) -> Result<(), String> {
+    let paths = LightagentPaths::resolve().map_err(|error| error.to_string())?;
+    let value = hermes_report(paths.root(), from, dry_run, force)?;
     if json {
-        let value = serde_json::json!({
-            "dry_run": dry_run,
-            "hermes_home": hermes_home.display().to_string(),
-            "profiles": report.profiles,
-            "skills": report.skills,
-            "skipped": report.skipped,
-            "errors": report.errors,
-        });
         println!("{value:#}");
         return Ok(());
     }
+    let list = |field: &str| -> Vec<String> {
+        value[field]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let report = ImportReport {
+        profiles: list("profiles"),
+        skills: list("skills"),
+        skipped: list("skipped"),
+        errors: list("errors"),
+    };
+    let hermes_home = value["hermes_home"].as_str().unwrap_or_default().to_owned();
 
     let verb = if dry_run { "would import" } else { "imported" };
     println!(
         "{verb} {} profile(s) and {} skill(s) from {}",
         report.profiles.len(),
         report.skills.len(),
-        hermes_home.display()
+        hermes_home
     );
     if !report.profiles.is_empty() {
         println!("  profiles: {}", report.profiles.join(", "));

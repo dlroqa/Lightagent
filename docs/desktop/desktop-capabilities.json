@@ -7129,6 +7129,54 @@
    "actions_evidence": null
   },
   {
+   "id": "api.post.setup.init",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/setup/init",
+   "source": "crates/lightagent-api/src/lib.rs:177",
+   "behavior": "Initialise or reconfigure the home, as `lightagent init` (D7-11)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/setup/init"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.init)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: init_report via RunFactory::setup",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.post.import.hermes",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/import/hermes",
+   "source": "crates/lightagent-api/src/lib.rs:177",
+   "behavior": "Import profiles and skills from a Hermes home, as `lightagent import hermes` (D7-11)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/import/hermes"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.import.hermes)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: import::hermes_report via RunFactory::setup",
+   "permission": "local-operator",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
    "id": "api.get.diagnostics.doctor",
    "kind": "api",
    "surface": "GET /api/lightagent/v1/diagnostics/doctor",

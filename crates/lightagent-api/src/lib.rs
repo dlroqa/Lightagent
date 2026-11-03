@@ -172,6 +172,8 @@ pub fn router(state: AppState) -> Router {
             post(revoke_identity_grant),
         )
         .route("/api/lightagent/v1/identity/audit", get(identity_audit))
+        .route("/api/lightagent/v1/setup/init", post(setup_init))
+        .route("/api/lightagent/v1/import/hermes", post(import_hermes))
         .route(
             "/api/lightagent/v1/diagnostics/doctor",
             get(diagnostics_doctor),
@@ -2873,6 +2875,73 @@ async fn diagnostics_bundle(
     admitted: FromDesktop,
 ) -> Response {
     diagnostics_operation(&state, &headers, admitted, ops::DiagnosticsRequest::Bundle).await
+}
+
+/// A setup command through the embedder (see [`ops::SetupRequest`]).
+/// Operator only: it changes the configuration and the profile store.
+async fn setup_operation(
+    state: &AppState,
+    headers: &HeaderMap,
+    request: ops::SetupRequest,
+) -> Response {
+    if let Some(rejection) = deny(state, headers, Scope::Admin) {
+        return rejection;
+    }
+    match state.manager.setup(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct InitBody {
+    #[serde(default)]
+    force: bool,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// `lightagent init`.
+async fn setup_init(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<InitBody>,
+) -> Response {
+    let request = ops::SetupRequest::Init {
+        force: body.force,
+        profile: body.profile,
+        base_url: body.base_url,
+        model: body.model,
+    };
+    setup_operation(&state, &headers, request).await
+}
+
+#[derive(Deserialize)]
+struct ImportHermesBody {
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default)]
+    force: bool,
+}
+
+/// `lightagent import hermes`.
+async fn import_hermes(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ImportHermesBody>,
+) -> Response {
+    let request = ops::SetupRequest::ImportHermes {
+        from: body.from,
+        dry_run: body.dry_run,
+        force: body.force,
+    };
+    setup_operation(&state, &headers, request).await
 }
 
 /// An import of skills from a repository or folder (new scope).

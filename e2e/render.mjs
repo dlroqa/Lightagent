@@ -20,6 +20,7 @@ import { checkKnowledge } from "./knowledge.mjs";
 import { checkSessions } from "./sessions.mjs";
 import { checkWorkers } from "./workers.mjs";
 import { checkIdentity } from "./identity.mjs";
+import { checkSetup } from "./setup.mjs";
 import { checkDiagnostics } from "./diagnostics.mjs";
 import { checkRemoteCredentials } from "./credentials.mjs";
 
@@ -54,6 +55,7 @@ const ROUTES = [
   { name: "knowledge", hash: "#/knowledge", agentBacked: true, mustContain: "Add documents" },
   { name: "identity", hash: "#/admin/identity", agentBacked: true, mustContain: "Identity store" },
   { name: "diagnostics", hash: "#/diagnostics", agentBacked: true, mustContain: "Diagnostics bundle" },
+  { name: "setup", hash: "#/setup", agentBacked: true, mustContain: "Import from Hermes" },
   { name: "credentials", hash: "#/admin/credentials", agentBacked: true, mustContain: "Master key" },
 ];
 
@@ -458,6 +460,12 @@ async function main() {
     failures.push(...(await checkMcp(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`mcp: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Reconfigures with the current settings and imports a Hermes profile (deleted after).
+  try {
+    failures.push(...(await checkSetup(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`setup: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
   }
   // Changes the profile store: after the routes above have rendered.
   try {

@@ -197,6 +197,22 @@ pub enum DiagnosticsRequest {
     Bundle,
 }
 
+/// `lightagent init` or `lightagent import hermes`: set the home up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SetupRequest {
+    Init {
+        force: bool,
+        profile: Option<String>,
+        base_url: Option<String>,
+        model: Option<String>,
+    },
+    ImportHermes {
+        from: Option<String>,
+        dry_run: bool,
+        force: bool,
+    },
+}
+
 /// A stable error category, for the UI to act on without parsing messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpCategory {
