@@ -1444,6 +1444,112 @@ def scenario_update_check(host, cli):
     return check
 
 
+class _Jev(http.server.BaseHTTPRequestHandler):
+    """A deterministic stand-in for TypeSafe's SystemOne endpoint on
+    loopback (stub evidence, not live Jev): the path's first segment picks
+    the answer, TypeSafe's envelope or what a broken service sends, and
+    every request is recorded before it is answered."""
+    seen = []
+
+    def do_POST(self):
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            body = None
+        _Jev.seen.append({"path": self.path, "authorization": self.headers.get("Authorization"), "body": body})
+        mode = self.path.lstrip("/").split("/", 1)[0]
+        questions = (body or {}).get("questions") or {}
+
+        def envelope(answers):
+            return {"model": "jev-1.13.0", "answers": answers, "usage": {"input_tokens": 12, "output_tokens": 2}}
+
+        status, reply = {
+            "ok": (200, envelope({name: {"type": "noul", "noul": 0.9} for name in questions})),
+            "auth": (401, {"error": "invalid API key"}),
+            "busy": (503, {"error": "unavailable"}),
+            "unanswered": (200, envelope({})),
+        }.get(mode, (404, {}))
+        data = json.dumps(reply).encode()
+        if mode == "text":
+            status, data = 200, b"this is not JSON"
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+def scenario_jev(host):
+    """D7 through the host transport, against a local SystemOne stub (stub
+    evidence, not live Jev): the connection check reports a success, a
+    rejected key, a failing status, an unavailable service and malformed
+    answers, with one request per check carrying the configured key and one
+    synthetic question; the status reports each check while its settings
+    are in force and holds no key. The settings are put back."""
+    import socket
+
+    check = Checks("jev")
+    stub = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Jev)
+    threading.Thread(target=stub.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{stub.server_address[1]}"
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    closed = f"http://127.0.0.1:{probe.getsockname()[1]}"
+    probe.close()
+    placeholder = f"e2e-jev-placeholder-{os.getpid()}"
+    _, original = host.fetch("GET", f"{API}/settings")
+
+    def configure(base_url, **extra):
+        _, settings = host.fetch("GET", f"{API}/settings")
+        settings["jev"] = dict(settings["jev"], base_url=base_url, **extra)
+        return host.fetch("PUT", f"{API}/settings", settings)
+
+    def verify():
+        before = len(_Jev.seen)
+        status, checked = host.fetch("POST", f"{API}/jev/verify", {})
+        _, shown = host.fetch("GET", f"{API}/jev")
+        return status, checked or {}, shown or {}, _Jev.seen[before:]
+
+    try:
+        status, saved = configure(f"{url}/ok", api_key=placeholder, timeout_secs=5)
+        check.expect("the Jev settings are saved through the host", status == 200, (status, saved))
+        status, checked, shown, seen = verify()
+        check.expect("a check against the stub verifies, with its model",
+                     status == 200 and checked.get("ok") is True and checked.get("model_version") == "jev-1.13.0"
+                     and checked.get("error") is None, (status, checked))
+        body = (seen[0]["body"] or {}) if len(seen) == 1 else {}
+        check.expect("one request: POST /v1/systemone with the key and one synthetic question",
+                     len(seen) == 1 and seen[0]["path"] == "/ok/v1/systemone"
+                     and seen[0]["authorization"] == f"Bearer {placeholder}"
+                     and list((body.get("questions") or {}).keys()) == ["reachable"]
+                     and "Lightagent connection check." in json.dumps(body), seen)
+        check.expect("the status reports that check, configured, and neither answer holds the key",
+                     shown.get("verification") == checked and shown.get("configured") is True
+                     and placeholder not in json.dumps(shown) and placeholder not in json.dumps(checked), shown)
+        for label, base_url, error, requests in (
+            ("rejected key", f"{url}/auth", "unauthorized", 1),
+            ("failing status", f"{url}/busy", "status", 1),
+            ("unavailable service", closed, "connect", 0),
+            ("not JSON", f"{url}/text", "malformed", 1),
+            ("unanswered", f"{url}/unanswered", "malformed", 1),
+        ):
+            configure(base_url)
+            status, checked, shown, seen = verify()
+            check.expect(f"{label}: {error}, from the check and the status",
+                         status == 200 and checked.get("ok") is False and checked.get("error") == error
+                         and len(seen) == requests and shown.get("verification") == checked,
+                         (status, checked, len(seen)))
+    finally:
+        if isinstance(original, dict):
+            host.fetch("PUT", f"{API}/settings", original)
+        stub.shutdown()
+    return check
+
+
 def main():
     out = os.path.abspath(sys.argv[1])
     cli = sys.argv[2]
@@ -1501,6 +1607,7 @@ def main():
             ("onboarding", lambda: scenario_onboarding(host, cli, workspace)),
             ("commands", lambda: scenario_commands(host, cli)),
             ("reload", lambda: scenario_reload(host, provider, cli)),
+            ("jev", lambda: scenario_jev(host)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]
