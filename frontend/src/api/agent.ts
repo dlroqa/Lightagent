@@ -882,6 +882,18 @@ export const agentApi = {
     jsonRequest<Record<string, unknown> & { about: string; included: string[]; excluded: string[] }>(
       "/diagnostics/bundle",
     ),
+  /** `lightagent init`: an initialised home is refused (409) unless `force`. */
+  initHome: (request: { force: boolean; profile?: string; base_url?: string; model?: string }) =>
+    jsonRequest<{ home: string; config_file: string; active_profile: string; base_url: string }>("/setup/init", {
+      method: "POST",
+      body: JSON.stringify(request),
+    }),
+  /** `lightagent import hermes`: a dry run reports what would be imported or skipped. */
+  importHermes: (request: { from?: string; dry_run: boolean; force: boolean }) =>
+    jsonRequest<{ dry_run: boolean; hermes_home: string; profiles: string[]; skills: string[]; skipped: string[]; errors: string[] }>(
+      "/import/hermes",
+      { method: "POST", body: JSON.stringify(request) },
+    ),
   settings: () => jsonRequest<LightagentSettings>("/settings"),
   saveSettings: (settings: LightagentSettings) =>
     jsonRequest<LightagentSettings>("/settings", {

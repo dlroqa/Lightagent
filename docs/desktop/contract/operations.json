@@ -141,6 +141,16 @@
    "path": "/api/lightagent/v1/skills/imports"
   },
   {
+   "id": "setup.init",
+   "method": "POST",
+   "path": "/api/lightagent/v1/setup/init"
+  },
+  {
+   "id": "import.hermes",
+   "method": "POST",
+   "path": "/api/lightagent/v1/import/hermes"
+  },
+  {
    "id": "diagnostics.doctor",
    "method": "GET",
    "path": "/api/lightagent/v1/diagnostics/doctor"

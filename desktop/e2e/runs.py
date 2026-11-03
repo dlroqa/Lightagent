@@ -520,6 +520,52 @@ def scenario_workers(host, cli):
     return check
 
 
+def scenario_setup(host, cli):
+    """D7 through the host transport: init on an initialised home is
+    refused; a forced init with the current profile and endpoint keeps
+    both, as the CLI then reports; a Hermes import's dry run equals the
+    CLI's and writes nothing, and the import itself is seen by the CLI."""
+    import shutil
+    import tempfile
+
+    check = Checks("setup")
+    work = tempfile.mkdtemp(prefix="lightagent-e2e-hermes-")
+
+    def cli_json(*args):
+        return json.loads(harness.run_cli(cli, "--json", *args))
+
+    try:
+        _, catalog = host.fetch("GET", f"{API}/profiles")
+        active = (catalog or {}).get("active_profile")
+        base_url = cli_json("config", "show")["inference"]["base_url"]
+        status, refused = host.fetch("POST", f"{API}/setup/init", {})
+        check.expect("init on an initialised home is refused", status == 409, (status, refused))
+        status, report = host.fetch("POST", f"{API}/setup/init",
+                                    {"force": True, "profile": active, "base_url": base_url})
+        check.expect("a forced init through the host keeps the profile and the endpoint",
+                     status == 200 and (report or {}).get("active_profile") == active
+                     and cli_json("profile", "list").get("active") == active
+                     and cli_json("config", "show")["inference"]["base_url"] == base_url,
+                     (status, report))
+        profile_dir = os.path.join(work, "profiles", "e2e-hermes")
+        os.makedirs(profile_dir)
+        with open(os.path.join(profile_dir, "SOUL.md"), "w", encoding="utf-8") as handle:
+            handle.write("You came from Hermes.\n")
+        status, dry = host.fetch("POST", f"{API}/import/hermes", {"from": work, "dry_run": True})
+        check.expect("a Hermes dry run through the host equals the CLI's and writes nothing",
+                     status == 200 and (dry or {}).get("profiles") == ["e2e-hermes"]
+                     and dry == cli_json("import", "hermes", "--from", work, "--dry-run")
+                     and "e2e-hermes" not in json.dumps(cli_json("profile", "list")), (status, dry))
+        status, applied = host.fetch("POST", f"{API}/import/hermes", {"from": work})
+        check.expect("imported through the host, seen by the CLI",
+                     status == 200 and (applied or {}).get("profiles") == ["e2e-hermes"]
+                     and "You came from Hermes." in harness.run_cli(cli, "profile", "show", "e2e-hermes"),
+                     (status, applied))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return check
+
+
 def scenario_diagnostics(host, cli):
     """D7 through the host transport: doctor and architecture equal the
     CLI's; the bundle has exactly the allowlisted sections and holds no
@@ -980,6 +1026,7 @@ def main():
             ("identity", lambda: scenario_identity(host, cli)),
             ("remote_credentials", lambda: scenario_remote_credentials(host, cli)),
             ("diagnostics", lambda: scenario_diagnostics(host, cli)),
+            ("setup", lambda: scenario_setup(host, cli)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]

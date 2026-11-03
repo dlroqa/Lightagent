@@ -105,6 +105,57 @@ impl RunFactory for LightweightRunFactory {
         }
     }
 
+    async fn setup(
+        &self,
+        request: lightagent_api::ops::SetupRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        use lightagent_api::ops::{OpCategory, OpError, SetupRequest};
+        match request {
+            SetupRequest::Init {
+                force,
+                profile,
+                base_url,
+                model,
+            } => crate::init_report(
+                &LightagentPaths::rooted_at(&self.root),
+                force,
+                profile,
+                base_url,
+                model,
+            )
+            .map_err(|error| {
+                let category = if error.starts_with("already initialised") {
+                    OpCategory::Conflict
+                } else {
+                    OpCategory::Invalid
+                };
+                OpError::new(category, error)
+            }),
+            SetupRequest::ImportHermes {
+                from,
+                dry_run,
+                force,
+            } => {
+                if from
+                    .as_deref()
+                    .is_some_and(|raw| !std::path::Path::new(raw).is_absolute())
+                {
+                    return Err(OpError::new(
+                        OpCategory::Invalid,
+                        "the Hermes home must be an absolute path",
+                    ));
+                }
+                crate::import::hermes_report(
+                    &self.root,
+                    from.map(std::path::PathBuf::from),
+                    dry_run,
+                    force,
+                )
+                .map_err(|error| OpError::new(OpCategory::Invalid, error))
+            }
+        }
+    }
+
     async fn workers_change(
         &self,
         request: lightagent_api::ops::WorkerRequest,

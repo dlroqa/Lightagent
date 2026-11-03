@@ -457,6 +457,16 @@ pub trait RunFactory: Send + Sync + 'static {
         Err(crate::ops::OpError::unavailable())
     }
 
+    /// A setup command (`lightagent init`, `lightagent import hermes`),
+    /// performed by the embedder that owns the home, answered with the JSON
+    /// the CLI prints. The default refuses.
+    async fn setup(
+        &self,
+        _request: crate::ops::SetupRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
     /// Tools currently visible to the factory's active target.
     async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
         let registry = lightagent_tools::ToolRegistry::builtin();
@@ -1342,6 +1352,14 @@ impl RunManager {
         request: crate::ops::DiagnosticsRequest,
     ) -> Result<serde_json::Value, crate::ops::OpError> {
         self.factory.diagnostics(request).await
+    }
+
+    /// Perform a setup command through the factory.
+    pub async fn setup(
+        &self,
+        request: crate::ops::SetupRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.setup(request).await
     }
 
     /// Perform a worker-assignment change through the factory.

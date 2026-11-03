@@ -1406,14 +1406,17 @@ fn jev_routing_report_text(report: &serde_json::Value) -> String {
 
 // --- init -------------------------------------------------------------------
 
-fn init(
+/// `lightagent init`, shared with the API: scaffold the home, apply the
+/// endpoint and the model through the locked config writer, and make
+/// `profile` (created when missing) active. An initialised home is refused
+/// unless `force`.
+pub(crate) fn init_report(
+    paths: &LightagentPaths,
     force: bool,
     profile: Option<String>,
     base_url: Option<String>,
     model: Option<String>,
-    json: bool,
-) -> Result<(), String> {
-    let paths = paths()?;
+) -> Result<serde_json::Value, String> {
     let already = paths.config_file().exists();
     if already && !force {
         return Err(format!(
@@ -1423,7 +1426,7 @@ fn init(
     }
     paths.scaffold().map_err(|error| error.to_string())?;
 
-    let (config, _) = ConfigStore::at(&paths)
+    let (config, _) = ConfigStore::at(paths)
         .update(None, |config| {
             if let Some(base_url) = base_url {
                 // The endpoint's own key only, never the previous endpoint's.
@@ -1456,19 +1459,30 @@ fn init(
         }
     }
     store.set_active(&id).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({
+        "home": paths.root().display().to_string(),
+        "config_file": paths.config_file().display().to_string(),
+        "active_profile": id.as_str(),
+        "base_url": config.inference.base_url,
+    }))
+}
 
+fn init(
+    force: bool,
+    profile: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    json: bool,
+) -> Result<(), String> {
+    let paths = paths()?;
+    let report = init_report(&paths, force, profile, base_url, model)?;
     if json {
-        let value = serde_json::json!({
-            "home": paths.root().display().to_string(),
-            "config_file": paths.config_file().display().to_string(),
-            "active_profile": id.as_str(),
-            "base_url": config.inference.base_url,
-        });
-        println!("{value:#}");
+        println!("{report:#}");
     } else {
-        println!("Initialised Lightagent at {}", paths.root().display());
-        println!("  active profile: {}", id.as_str());
-        println!("  provider:       {}", config.inference.base_url);
+        let field = |name: &str| report[name].as_str().unwrap_or_default().to_owned();
+        println!("Initialised Lightagent at {}", field("home"));
+        println!("  active profile: {}", field("active_profile"));
+        println!("  provider:       {}", field("base_url"));
         println!("Run `lightagent chat` to start.");
     }
     Ok(())
