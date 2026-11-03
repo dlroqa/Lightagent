@@ -273,6 +273,7 @@ fn a_source_name_names_the_document_for_the_cli_and_the_api() {
         &["rag", "add", arg(&cli_doc), "--source", "named-by-cli"],
     );
     assert_eq!(by_cli["indexed"][0]["source"], "named-by-cli", "{by_cli}");
+    assert!(by_cli["indexed"][0]["chunks"].is_u64(), "{by_cli}");
     assert_eq!(
         by_api["indexed"][0]["chunks"],
         by_cli["indexed"][0]["chunks"]

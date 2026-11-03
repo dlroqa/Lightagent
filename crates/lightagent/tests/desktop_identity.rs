@@ -293,6 +293,16 @@ fn the_cli_and_the_api_manage_one_identity_store() {
         issued["restriction"],
         cli_json(&home, &["identity", "credential", "list"])["credentials"][0]["restriction"]
     );
+    assert_eq!(
+        issued["restriction"]["profiles"],
+        json!(["work"]),
+        "{issued}"
+    );
+    assert_eq!(
+        issued["restriction"]["capabilities"],
+        json!(["runs_read", "sessions_read"]),
+        "{issued}"
+    );
     let token = std::fs::read_to_string(&alice_key).expect("secret file");
     assert!(
         token.starts_with(&format!("la_{key_id}_")),
