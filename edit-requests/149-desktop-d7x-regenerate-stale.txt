@@ -1,0 +1,32 @@
+=== base f51e891a4a41cabccfcf2fb99b8a2f07ca8a4c07
+=== message
+Row 56c: the stale refusal proven by its answer, not by model traffic
+
+Render run 41650091779 passed every Try again step but failed one
+assertion: the stub's request count changed after the refused, stale
+Try again. The server can still call the model after a run it has
+saved, so the count does not show what the refusal did (which call it
+was is not established). The check now asserts the refusal directly:
+the page's regenerate request was answered 409, and the session's runs
+are exactly as they were.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace e2e/regenerate.mjs
+--- find
+    const before = stub.requests;
+    await tryAgain();
+    await page.getByText("only the latest answer can be regenerated", { exact: false }).waitFor({ timeout: 15000 });
+    if (stub.requests !== before) failures.push("regenerate: stale: the refused Try again reached the model");
+--- with
+    const runsBefore = JSON.stringify((await api(`/sessions/${encodeURIComponent(id)}`)).runs);
+    const refusal = page.waitForResponse((response) =>
+      response.url().endsWith(`/sessions/${encodeURIComponent(id)}/regenerate`) && response.request().method() === "POST",
+      { timeout: 15000 });
+    await tryAgain();
+    const refused = await refusal;
+    await page.getByText("only the latest answer can be regenerated", { exact: false }).waitFor({ timeout: 15000 });
+    if (refused.status() !== 409) failures.push(`regenerate: stale: the page's Try again was answered ${refused.status()}, not 409`);
+    if (JSON.stringify((await api(`/sessions/${encodeURIComponent(id)}`)).runs) !== runsBefore) {
+      failures.push("regenerate: stale: the refused Try again changed the session's runs");
+    }
+=== end
