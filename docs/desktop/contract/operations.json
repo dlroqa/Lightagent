@@ -94,7 +94,10 @@
   {
    "id": "providers.remove",
    "method": "DELETE",
-   "path": "/api/lightagent/v1/providers/{id}"
+   "path": "/api/lightagent/v1/providers/{id}",
+   "query": [
+    "expected_revision"
+   ]
   },
   {
    "id": "providers.check",

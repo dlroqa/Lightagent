@@ -408,6 +408,38 @@ fn failed_installs_and_removals_leave_what_was_there() {
 }
 
 #[test]
+fn the_master_switch_is_one_setting_for_the_cli_and_the_api() {
+    let work = scratch("switch");
+    let home = work.join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    cli_ok(&home, &["config", "set", "extensions.enabled", "true"]);
+    let source = bundle(&work, "switched", false);
+    cli_json(&home, &["extensions", "install", arg(&source)]);
+    let runtime = start(&home);
+
+    // Off over the API (the shared config.set operation): off for the CLI.
+    let (status, raw) = call(
+        &runtime,
+        "PUT",
+        "/api/lightagent/v1/config/extensions.enabled",
+        Some(r#"{"value":"false"}"#),
+    );
+    assert_eq!(status, 200, "{raw}");
+    let listed = cli_json(&home, &["extensions", "list"]);
+    assert_eq!(listed["enabled"], false, "{listed}");
+    assert_eq!(listed["extensions"][0]["active"], false, "{listed}");
+    let (_, raw) = call(&runtime, "GET", EXTENSIONS, None);
+    assert_eq!(parsed(&raw), listed, "the API and the CLI list the same");
+
+    // On by the CLI: on for the API.
+    cli_ok(&home, &["config", "set", "extensions.enabled", "true"]);
+    let (_, raw) = call(&runtime, "GET", EXTENSIONS, None);
+    let listed = parsed(&raw);
+    assert_eq!(listed["enabled"], true, "{listed}");
+    assert_eq!(listed["extensions"][0]["active"], true, "{listed}");
+}
+
+#[test]
 fn a_profile_install_stays_with_its_profile_and_mcp_waits_to_be_asked() {
     let work = scratch("profile");
     let home = work.join("home");

@@ -8,7 +8,9 @@ It must:
   * list exactly the routes `lightagent_api::router` serves (method + path),
     so the host can never forward something the server lacks, and every
     server route is either reachable or deliberately added here;
-  * cover every path the frontend client (frontend/src/api/agent.ts) calls.
+  * cover every path the frontend client (frontend/src/api/agent.ts) calls,
+    and allow every query parameter it sends on that path (the host refuses
+    an unlisted one).
 
 The frontend check compares paths, not methods: the client builds requests
 through helpers, and a wrong method is refused by the host at run time.
@@ -58,6 +60,22 @@ def client_paths(text):
     return found
 
 
+def client_queries(text):
+    """Each (path shape, query parameter name) the client sends."""
+    text = text.replace("${BASE}", "")
+    found = set()
+    for literal in re.findall(r'[`"](/[^`"\s]*)[`"]', text):
+        if "?" not in literal:
+            continue
+        path, query = literal.split("?", 1)
+        path = re.sub(r"\$\{[^}]*\}", "{}", path)
+        for pair in query.split("&"):
+            key = pair.split("=", 1)[0]
+            if key and not key.startswith("$"):
+                found.add((path, key))
+    return found
+
+
 def check(contract, server_text, client_text, scan_routes):
     errors = []
     ops = contract["operations"]
@@ -78,6 +96,12 @@ def check(contract, server_text, client_text, scan_routes):
     shapes = {shape(op["path"]) for op in ops}
     for path in sorted(client_paths(client_text) - shapes):
         errors.append(f"client: frontend calls {path} but no contract operation has that path")
+    allowed = {}
+    for op in ops:
+        allowed.setdefault(shape(op["path"]), set()).update(op.get("query", []))
+    for path, key in sorted(client_queries(client_text)):
+        if key not in allowed.get(path, set()):
+            errors.append(f"client: frontend sends ?{key}= to {path} but no contract operation for that path allows it")
     return errors
 
 
@@ -96,8 +120,10 @@ def main():
                                      '.route("/health", get(health))\n        .route("/api/lightagent/v1/memory", get(health))', 1)
         added_call = client + '\nconst probe = () => jsonRequest("/memory/search");\n'
         failures = 0
+        added_query = client + '\nconst probeQuery = () => jsonRequest("/tools?probe=1");\n'
         for label, args, prefix in (("server route", (added_route, client), "server:"),
-                                    ("client path", (server, added_call), "client:")):
+                                    ("client path", (server, added_call), "client:"),
+                                    ("client query", (server, added_query), "client:")):
             hit = [e for e in check(contract, args[0], args[1], inventory.scan_routes) if e.startswith(prefix)]
             print(f"self-test {label}: {'detected' if hit else 'MISSED'} {hit[:1]}")
             failures += 0 if hit else 1
