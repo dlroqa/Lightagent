@@ -648,6 +648,10 @@ def scenario_diagnostics(host, cli):
     status, doctor = host.fetch("GET", f"{API}/diagnostics/doctor")
     check.expect("doctor through the host equals the CLI's",
                  status == 200 and doctor == cli_json("doctor"), (status, doctor))
+    named = os.environ["LIGHTAGENT_HOME"]
+    check.expect("the home doctor reports through the host is LIGHTAGENT_HOME, passed by the host to its runtime",
+                 status == 200 and os.path.realpath(str((doctor or {}).get("home"))) == os.path.realpath(named),
+                 ((doctor or {}).get("home"), named))
     status, architecture = host.fetch("GET", f"{API}/diagnostics/architecture")
     check.expect("architecture through the host equals the CLI's",
                  status == 200 and architecture == cli_json("architecture"), (status, architecture))

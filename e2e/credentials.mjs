@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const API = "/api/lightagent/v1/remote-credentials";
+const OTHER = "render-rc-other";
 
 async function get(base, path) {
   return (await fetch(`${base}${path}`)).json();
@@ -57,6 +58,7 @@ export async function checkRemoteCredentials(browser, base, outDir) {
     }
   };
   let id = "";
+  let otherMade = false;
   try {
     const active = (await get(base, "/api/lightagent/v1/profiles")).active_profile;
     await page.goto(`${base}/#/admin/credentials`);
@@ -112,6 +114,34 @@ export async function checkRemoteCredentials(browser, base, outDir) {
       await page.screenshot({ path: `${outDir}/credentials-added.png`, fullPage: true });
     });
 
+    await step("the list for one profile (remote-credential list --profile)", async () => {
+      const made = await fetch(`${base}/api/lightagent/v1/profiles`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: OTHER }),
+      });
+      if (!made.ok) throw new Error(`could not create the profile ${OTHER}: ${made.status}`);
+      otherMade = true;
+      await page.reload();
+      await screen.waitFor({ timeout: 15000 });
+      const asked = [];
+      const listen = (request) => {
+        const url = new URL(request.url());
+        if (url.pathname === API) asked.push(url.searchParams.get("profile"));
+      };
+      page.on("request", listen);
+      const show = page.locator("#rc-profile");
+      await show.selectOption(OTHER);
+      await page.getByTestId(`rc-${id}`).waitFor({ state: "detached", timeout: 10000 });
+      await screen.getByText("No credentials", { exact: true }).first().waitFor({ timeout: 10000 });
+      await show.selectOption(active);
+      await page.getByTestId(`rc-${id}`).waitFor({ timeout: 10000 });
+      page.off("request", listen);
+      if (!asked.includes(OTHER) || !asked.includes(active)) throw new Error(`the page asked for ${JSON.stringify(asked)}`);
+      await show.selectOption("");
+      await page.getByTestId(`rc-${id}`).waitFor({ timeout: 10000 });
+    });
+
     await step("rotate from a new file, then revoke", async () => {
       const row = page.getByTestId(`rc-${id}`);
       const secret = `render-probe-rotated-${Date.now()}`;
@@ -159,6 +189,7 @@ export async function checkRemoteCredentials(browser, base, outDir) {
   } finally {
     await page.close();
     await rm(dir, { recursive: true, force: true });
+    if (otherMade) await fetch(`${base}/api/lightagent/v1/profiles/${OTHER}`, { method: "DELETE" }).catch(() => {});
   }
   return failures;
 }

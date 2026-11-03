@@ -227,6 +227,13 @@ fn the_bundle_holds_the_allowlist_and_no_secret_or_private_content() {
     // Doctor and architecture: what the CLI prints.
     let (doctor, _) = ok(&runtime, "GET", &format!("{API}/diagnostics/doctor"), None);
     assert_eq!(doctor, cli_json(&home, &["doctor"]));
+    // The home is the one LIGHTAGENT_HOME names, for the runtime and the CLI.
+    let reported = PathBuf::from(doctor["home"].as_str().expect("doctor home"));
+    assert_eq!(
+        reported.canonicalize().expect("canonical reported home"),
+        home.canonicalize().expect("canonical home"),
+        "{doctor}"
+    );
     let (architecture, _) = ok(
         &runtime,
         "GET",

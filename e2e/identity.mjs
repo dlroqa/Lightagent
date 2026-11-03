@@ -113,8 +113,16 @@ export async function checkIdentity(browser, base, outDir) {
       const rotated = join(dir, "alice-rotated.key");
       await row.getByRole("button", { name: "Rotate…" }).click();
       await page.locator("#identity-rotate-file").fill(rotated);
+      await page.locator("#identity-rotate-expires").fill("900");
       await row.getByRole("button", { name: `Rotate ${keyId}` }).click();
       await announced(`to replace ${keyId}`);
+      // `identity credential rotate --expires-in`: the replacement expires in about that time.
+      const replacement = (await get(base, `${API}/credentials?principal=render-alice`)).credentials
+        .find((credential) => credential.replaces === keyId);
+      const left = (replacement?.expires_unix ?? 0) - Date.now() / 1000;
+      if (!(left > 600 && left <= 960)) {
+        throw new Error(`the replacement expires in ${Math.round(left)} s, not about 900: ${JSON.stringify(replacement)}`);
+      }
       const token = (await readFile(rotated, "utf8")).trim();
       secrets.push(token.split("_").pop());
       await row.getByRole("button", { name: "Revoke…" }).click();
