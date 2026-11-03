@@ -1,0 +1,436 @@
+=== base 49109b6fd2708c6d96285fb20c073ad4de79a201
+=== message
+D7-4: the Knowledge screen, over the shared knowledge operations
+
+The Web UI (and so the desktop) can do what `lightagent rag` does for the
+active profile: index a file or every file in a folder (with an optional
+source name), see what was indexed, skipped (and why) and any
+remote-index note, search with a result count (source, score, passage),
+list the indexed sources with their chunk counts, and clear the index
+(asks first, stating the count).
+
+- Navigation: Knowledge in the account menus (workspace and chat).
+- Browser (e2e/knowledge.mjs, real harness): index a folder of two
+  documents; both listed with chunks; search finds the passage; a missing
+  path is shown as skipped with its reason; clear asks first, and is only
+  confirmed when the harness index was empty before the check.
+- Host (desktop/e2e/runs.py `knowledge`): add, list, search and a skipped
+  path through the host equal the CLI's; a clear through the host leaves
+  the CLI nothing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace frontend/src/api/agent.ts
+--- find
+export interface MemoryItem {
+--- with
+/** What `lightagent rag add --json` reports. */
+export interface KnowledgeAdded {
+  indexed: { source: string; chunks: number }[];
+  total_chunks: number;
+  skipped: { path: string; reason: string }[];
+  notes: string[];
+}
+
+export interface KnowledgeHit {
+  source: string;
+  score: number;
+  text: string;
+}
+
+export interface MemoryItem {
+=== replace frontend/src/api/agent.ts
+--- find
+  /** `lightagent memory …` on the active profile, the same operations. */
+--- with
+  /** `lightagent rag …` on the active profile's index, the same operations. */
+  knowledge: () =>
+    jsonRequest<{ sources: { source: string; chunks: number }[]; total_chunks: number }>("/knowledge"),
+  addKnowledge: (path: string, source?: string) =>
+    jsonRequest<KnowledgeAdded>("/knowledge", { method: "POST", body: JSON.stringify({ path, source }) }),
+  clearKnowledge: () => jsonRequest<{ cleared: boolean }>("/knowledge", { method: "DELETE" }),
+  searchKnowledge: (query: string, topK?: number) =>
+    jsonRequest<{ query: string; hits: KnowledgeHit[] }>(
+      topK
+        ? `/knowledge/search?q=${encodeURIComponent(query)}&top_k=${topK}`
+        : `/knowledge/search?q=${encodeURIComponent(query)}`,
+    ),
+  /** `lightagent memory …` on the active profile, the same operations. */
+=== write frontend/src/screens/KnowledgeScreen.tsx
+import { useEffect, useState } from "react";
+
+import { agentApi, type KnowledgeAdded, type KnowledgeHit } from "../api/agent";
+import { Empty } from "../components/Bits";
+import { Card } from "../components/Card";
+import { TopBar } from "../components/Shell";
+
+function errorText(cause: unknown): string {
+  return (cause instanceof Error ? cause.message : String(cause)).replace(/^\d{3}:\s*/, "");
+}
+
+/**
+ * The active profile's document index, through the operations
+ * `lightagent rag` shares: index, search, list and clear.
+ */
+export function KnowledgeScreen() {
+  const [listing, setListing] = useState<{ sources: { source: string; chunks: number }[]; total_chunks: number } | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [path, setPath] = useState("");
+  const [source, setSource] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [added, setAdded] = useState<KnowledgeAdded | null>(null);
+  const [addError, setAddError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [topK, setTopK] = useState("");
+  const [hits, setHits] = useState<KnowledgeHit[] | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function load() {
+    try {
+      setListing(await agentApi.knowledge());
+      setLoadError(null);
+    } catch (cause) {
+      setLoadError(errorText(cause));
+    }
+  }
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  async function index() {
+    setBusy(true);
+    setAddError(null);
+    setAdded(null);
+    try {
+      setAdded(await agentApi.addKnowledge(path.trim(), source.trim() || undefined));
+      void load();
+    } catch (cause) {
+      setAddError(errorText(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function search() {
+    setSearchError(null);
+    try {
+      setHits((await agentApi.searchKnowledge(query, Number(topK) > 0 ? Number(topK) : undefined)).hits);
+    } catch (cause) {
+      setSearchError(errorText(cause));
+    }
+  }
+
+  return (
+    <>
+      <TopBar title="Knowledge" subtitle="Documents the agent can search for this profile" />
+      <div className="page" data-testid="knowledge-screen">
+        {message && <div className="notice notice--info" role="status">{message}</div>}
+
+        <Card title="Add documents">
+          <p className="card__note">
+            Shared with the terminal CLI (lightagent rag). A file, or every file directly in a folder, is read and
+            indexed; nothing in it is run.
+          </p>
+          <div className="field">
+            <label className="field__label" htmlFor="knowledge-path">File or folder (absolute path)</label>
+            <input id="knowledge-path" className="input" value={path} spellCheck={false} disabled={busy}
+              placeholder="/path/to/documents" onChange={(event) => { setPath(event.target.value); setAddError(null); }} />
+          </div>
+          <div className="field">
+            <label className="field__label" htmlFor="knowledge-source">Source name (optional)</label>
+            <input id="knowledge-source" className="input" value={source} disabled={busy}
+              onChange={(event) => setSource(event.target.value)} />
+          </div>
+          {addError && <div role="alert" style={{ fontSize: 11.5, color: "var(--danger)", marginTop: 4 }}>{addError}</div>}
+          <button type="button" className="btn" style={{ marginTop: 10 }} disabled={busy || !path.trim()}
+            aria-busy={busy || undefined} onClick={() => void index()}>Index</button>
+          {added && (
+            <div data-testid="knowledge-added" role="status" style={{ marginTop: 10 }}>
+              <div>{added.total_chunks} chunk{added.total_chunks === 1 ? "" : "s"} added.</div>
+              {added.indexed.length > 0 && (
+                <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                  {added.indexed.map((item) => <li key={item.source}>Indexed {item.source} ({item.chunks} chunks)</li>)}
+                </ul>
+              )}
+              {added.skipped.length > 0 && (
+                <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                  {added.skipped.map((item) => <li key={item.path}>Skipped {item.path}: {item.reason}</li>)}
+                </ul>
+              )}
+              {added.notes.map((note) => <div key={note} className="muted">{note}</div>)}
+            </div>
+          )}
+        </Card>
+
+        <Card title="Search">
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+            <div className="field" style={{ flex: "1 1 240px" }}>
+              <label className="field__label" htmlFor="knowledge-query">Search documents</label>
+              <input id="knowledge-query" className="input" value={query} onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter" && query.trim()) void search(); }} />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="knowledge-top-k">Results (optional)</label>
+              <input id="knowledge-top-k" className="input" type="number" min={1} value={topK} style={{ maxWidth: 110 }}
+                onChange={(event) => setTopK(event.target.value)} />
+            </div>
+            <button type="button" className="btn" disabled={!query.trim()} onClick={() => void search()}>
+              Search documents
+            </button>
+          </div>
+          {searchError && <div role="alert" style={{ fontSize: 11.5, color: "var(--danger)", marginTop: 4 }}>{searchError}</div>}
+          {hits && (
+            <div data-testid="knowledge-hits" style={{ marginTop: 10 }}>
+              {hits.length === 0 ? <span className="muted">No relevant passages found.</span> : (
+                <ol style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 8 }}>
+                  {hits.map((hit, rank) => (
+                    <li key={`${hit.source}-${rank}`}>
+                      <strong>{hit.source}</strong> <span className="muted">(score {hit.score.toFixed(2)})</span>
+                      <div style={{ whiteSpace: "pre-wrap" }}>{hit.text}</div>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </div>
+          )}
+        </Card>
+
+        <Card title="Indexed sources">
+          {loadError && (
+            <div className="notice notice--warn" role="alert">
+              The index is unavailable: {loadError}{" "}
+              <button type="button" className="btn" onClick={() => void load()}>Retry</button>
+            </div>
+          )}
+          {!listing && !loadError && <span className="muted">Loading…</span>}
+          {listing && listing.sources.length === 0 && (
+            <Empty title="Nothing indexed" hint="Add a file or a folder above." />
+          )}
+          {listing && listing.sources.length > 0 && (
+            <>
+              <ul data-testid="knowledge-sources" style={{ margin: 0, paddingLeft: 18 }}>
+                {listing.sources.map((item) => <li key={item.source}>{item.source} ({item.chunks} chunks)</li>)}
+              </ul>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+                {confirmClear ? (
+                  <>
+                    <button type="button" className="btn btn--danger"
+                      onClick={() => void agentApi.clearKnowledge()
+                        .then(() => { setConfirmClear(false); setMessage("The index was cleared."); void load(); })
+                        .catch((cause) => setMessage(errorText(cause)))}>
+                      {`Confirm: clear ${listing.total_chunks} chunks`}
+                    </button>
+                    <button type="button" className="btn" onClick={() => setConfirmClear(false)}>Keep the index</button>
+                  </>
+                ) : (
+                  <button type="button" className="btn" onClick={() => setConfirmClear(true)}>Clear the index…</button>
+                )}
+              </div>
+            </>
+          )}
+        </Card>
+      </div>
+    </>
+  );
+}
+=== replace frontend/src/App.tsx
+--- find
+import { MemoryScreen } from "./screens/MemoryScreen";
+--- with
+import { KnowledgeScreen } from "./screens/KnowledgeScreen";
+import { MemoryScreen } from "./screens/MemoryScreen";
+=== replace frontend/src/App.tsx
+--- find
+        <Route path="memory" element={<MemoryScreen />} />
+--- with
+        <Route path="memory" element={<MemoryScreen />} />
+        <Route path="knowledge" element={<KnowledgeScreen />} />
+=== replace frontend/src/components/Shell.tsx
+--- find
+import { ArrowLeft, BookOpen, Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Search, Settings, SquarePen, Users, Wrench } from "lucide-react";
+--- with
+import { ArrowLeft, BookOpen, FileText, Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Search, Settings, SquarePen, Users, Wrench } from "lucide-react";
+=== replace frontend/src/components/Shell.tsx
+--- find
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/memory"); }}><span className="session-menu__item"><BookOpen size={17} /> Memory</span></MenuItem>
+--- with
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/memory"); }}><span className="session-menu__item"><BookOpen size={17} /> Memory</span></MenuItem>
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/knowledge"); }}><span className="session-menu__item"><FileText size={17} /> Knowledge</span></MenuItem>
+=== replace frontend/src/screens/Agent.tsx
+--- find
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/memory"); }}><span className="session-menu__item"><BookOpen size={17} /> Memory</span></MenuItem>
+--- with
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/memory"); }}><span className="session-menu__item"><BookOpen size={17} /> Memory</span></MenuItem>
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/knowledge"); }}><span className="session-menu__item"><FileText size={17} /> Knowledge</span></MenuItem>
+=== write e2e/knowledge.mjs
+// The Knowledge screen against the real harness (D7-4): index a folder;
+// both documents listed with chunks; search finds the passage; a missing
+// path is shown as skipped with its reason; clear asks first, and is only
+// confirmed when the harness index was empty before the check.
+// crates/lightagent/tests/desktop_knowledge.rs proves the API's index is
+// the CLI's.
+
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+async function indexNow(base) {
+  return (await fetch(`${base}/api/lightagent/v1/knowledge`)).json();
+}
+
+async function until(probe, timeout = 15000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (await probe()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  return Boolean(await probe());
+}
+
+export async function checkKnowledge(browser, base, outDir) {
+  const failures = [];
+  const dir = await mkdtemp(join(tmpdir(), "lightagent-render-knowledge-"));
+  await writeFile(join(dir, "render-probe-rivers.md"), "Render probe rivers carry water from glaciers to the sea.\n");
+  await writeFile(join(dir, "render-probe-hills.md"), "Render probe hills are gentle slopes covered with heather.\n");
+  const empty = ((await indexNow(base)).sources ?? []).length === 0;
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1400 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const screen = page.getByTestId("knowledge-screen");
+  const step = async (name, body) => {
+    try {
+      await body();
+    } catch (err) {
+      failures.push(`knowledge: ${name}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+      await page.screenshot({ path: `${outDir}/knowledge-failed-${name.replace(/\W+/g, "-")}.png` }).catch(() => {});
+    }
+  };
+  try {
+    await page.goto(`${base}/#/knowledge`);
+    await screen.waitFor({ timeout: 15000 });
+
+    await step("index a folder", async () => {
+      await page.locator("#knowledge-path").fill(dir);
+      await screen.getByRole("button", { name: "Index", exact: true }).click();
+      await page.getByTestId("knowledge-added").getByText("render-probe-rivers.md", { exact: false }).waitFor({ timeout: 15000 });
+      const names = ((await indexNow(base)).sources ?? []).map((source) => source.source);
+      if (!names.includes("render-probe-rivers.md") || !names.includes("render-probe-hills.md")) {
+        throw new Error(`indexed ${JSON.stringify(names)}`);
+      }
+      await page.getByTestId("knowledge-sources").getByText("render-probe-hills.md", { exact: false }).waitFor({ timeout: 10000 });
+      await page.screenshot({ path: `${outDir}/knowledge-indexed.png`, fullPage: true });
+    });
+
+    await step("search finds the passage", async () => {
+      await page.locator("#knowledge-query").fill("glaciers sea");
+      await page.locator("#knowledge-top-k").fill("2");
+      await screen.getByRole("button", { name: "Search documents" }).click();
+      await page.getByTestId("knowledge-hits").getByText("render-probe-rivers.md", { exact: false }).first().waitFor({ timeout: 10000 });
+    });
+
+    await step("a missing path is shown as skipped", async () => {
+      await page.locator("#knowledge-path").fill(join(dir, "missing.md"));
+      await screen.getByRole("button", { name: "Index", exact: true }).click();
+      await page.getByTestId("knowledge-added").getByText("Skipped", { exact: false }).waitFor({ timeout: 10000 });
+    });
+
+    await step("clear asks first", async () => {
+      await screen.getByRole("button", { name: "Clear the index…" }).click();
+      await screen.getByRole("button", { name: "Keep the index" }).click();
+      if (((await indexNow(base)).sources ?? []).length === 0) throw new Error("Keep the index cleared it");
+      if (empty) {
+        await screen.getByRole("button", { name: "Clear the index…" }).click();
+        await screen.getByRole("button", { name: /^Confirm: clear \d+ chunks$/ }).click();
+        if (!(await until(async () => ((await indexNow(base)).sources ?? []).length === 0))) {
+          throw new Error("Confirm did not clear the index");
+        }
+      }
+    });
+
+    if (errors.length) failures.push(`knowledge: page errors: ${errors.join("; ")}`);
+  } catch (err) {
+    failures.push(`knowledge: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  } finally {
+    await page.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+  return failures;
+}
+=== replace e2e/render.mjs
+--- find
+import { checkMemory } from "./memory.mjs";
+--- with
+import { checkMemory } from "./memory.mjs";
+import { checkKnowledge } from "./knowledge.mjs";
+=== replace e2e/render.mjs
+--- find
+  { name: "memory", hash: "#/memory", agentBacked: true, mustContain: "Remember something" },
+--- with
+  { name: "memory", hash: "#/memory", agentBacked: true, mustContain: "Remember something" },
+  { name: "knowledge", hash: "#/knowledge", agentBacked: true, mustContain: "Add documents" },
+=== replace e2e/render.mjs
+--- find
+  // Adds and removes memories: after the routes above have rendered.
+--- with
+  // Indexes documents (and clears them only when the index was empty).
+  try {
+    failures.push(...(await checkKnowledge(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`knowledge: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Adds and removes memories: after the routes above have rendered.
+=== replace desktop/e2e/runs.py
+--- find
+            ("memory", lambda: scenario_memory(host, cli)),
+--- with
+            ("memory", lambda: scenario_memory(host, cli)),
+            ("knowledge", lambda: scenario_knowledge(host, cli)),
+=== replace desktop/e2e/runs.py
+--- find
+def scenario_memory(host, cli):
+--- with
+def scenario_knowledge(host, cli):
+    """D7 through the host transport: a document indexed through the host is
+    listed by the CLI; list, search and a skipped path through the host
+    equal the CLI's; a clear through the host leaves the CLI nothing."""
+    import shutil
+    import tempfile
+
+    check = Checks("knowledge")
+    work = tempfile.mkdtemp(prefix="lightagent-e2e-knowledge-")
+
+    def cli_json(*args):
+        return json.loads(harness.run_cli(cli, "--json", *args))
+
+    try:
+        doc = os.path.join(work, "host-rivers.md")
+        with open(doc, "w", encoding="utf-8") as handle:
+            handle.write("Host rivers carry water from glaciers to the sea.\n")
+        status, added = host.fetch("POST", f"{API}/knowledge", {"path": doc})
+        check.expect("indexed through the host",
+                     status == 200 and [i.get("source") for i in (added or {}).get("indexed", [])] == ["host-rivers.md"],
+                     (status, added))
+        status, listed = host.fetch("GET", f"{API}/knowledge")
+        check.expect("the host lists what the CLI lists", status == 200 and listed == cli_json("rag", "list"),
+                     (status, listed))
+        status, hits = host.fetch("GET", f"{API}/knowledge/search?q=glaciers&top_k=2")
+        check.expect("search through the host equals the CLI's",
+                     status == 200 and hits == cli_json("rag", "search", "glaciers", "--top-k", "2"), (status, hits))
+        missing = os.path.join(work, "missing.md")
+        status, skipped = host.fetch("POST", f"{API}/knowledge", {"path": missing})
+        check.expect("a missing path skipped alike through the host and the CLI",
+                     status == 200 and len((skipped or {}).get("skipped", [])) == 1
+                     and skipped == cli_json("rag", "add", missing), (status, skipped))
+        status, cleared = host.fetch("DELETE", f"{API}/knowledge")
+        check.expect("cleared through the host, nothing left for the CLI",
+                     status == 200 and (cleared or {}).get("cleared") is True
+                     and cli_json("rag", "list").get("sources") == [], (status, cleared))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return check
+
+
+def scenario_memory(host, cli):
+=== end
