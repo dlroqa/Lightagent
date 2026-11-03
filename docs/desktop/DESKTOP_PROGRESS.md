@@ -1492,6 +1492,103 @@ Coverage at `62e87e6`: **64 of 227** (11 rows added: the MCP server and `config.
 
 Reruns: besides the reruns this session made (job 125447936741 for #122, job 125475716344 for #123), attempt-2 reruns of the subagents runs 41503194650, 41503200320, 41503201249 ("Tester broker": the fixture run stayed queued past the test's window while five PRs' runs filled the runners) and of check run 41503194699 (macos-arm64 runner not acquired) were started from the owner's account outside this session; all passed. Their attempt-1 records remain in the run histories.
 
+## Ownership and the parity correction (2026-11-03)
+
+Two sessions wrote to this stack on 2026-11-02. The owner stopped the one
+that pushed docs `5c98b3e` (request 090); this session resumed as the sole
+writer at 00:3xZ (claim comment on #125). `5c98b3e` counted `slash.skills`
+and `skills.roots` as implemented citing the host `skills` scenario, which
+never called `GET /skills`. Under the evidence rule kept since D5 (backend,
+host and browser), coverage was **62 of 227** until row 32's host check
+passed; both rows are now counted with that evidence.
+
+## Row 32 — D6 close-out
+
+- Host (`desktop/e2e/runs.py`): `skills` lists `GET /skills` through the
+  host (a global, a profile and an extension skill, each with scope and
+  source); `mcp` saves an HTTP server's auth reference and profile lists
+  through the host and reads them back by name; `extensions` turns the
+  master switch off through the host (the CLI sees it) and on by the CLI
+  (the host sees it).
+- Browser: `e2e/mcp.mjs` saves the auth variable, other profiles and
+  credential profiles and finds each shown by name; `e2e/extensions.mjs`
+  turns the new master switch off and on.
+- The Extensions card's master switch (`extensions.enabled`) uses the
+  shared `config.set` operation, the same as `lightagent config set
+  extensions.enabled`; backend `desktop_extensions.rs` proves API and CLI
+  see one setting.
+- Contract: the desktop host refuses query parameters its contract does
+  not list for an operation. A third missing one, `providers.remove`'s
+  `expected_revision`, dated from row 15 (#110): removing a saved provider
+  in the desktop app was refused. It is listed now, and
+  `scripts/check-desktop-contract.py` checks every query parameter the
+  client sends (self-test included), so a missing one fails CI. Every
+  client query (`tools.list` `mcp`, `extensions.uninstall` `scope`,
+  `providers.remove` `expected_revision`, `sessions.search` `q`,
+  `runs.events` `after`) is now listed.
+- **Latent window for D10:** rows 15-31 carry the `providers.remove`
+  omission (the fix is at row 32). Before merge approval: backport the
+  one-line contract change to row 15 and merge forward, or accept that the
+  intermediate states between rows 15 and 32 cannot remove a saved provider
+  in the desktop app (no desktop build ships from them).
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-03 | `091`; branch `desktop/d6g-close-out`, draft PR #126 | `c70c2f9` / `cee4280` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41554358723 |
+| 2026-11-03 | `check`, `desktop`, `jev evaluation`, `subagents`: **success**, 24 of 24 (the host scenarios, the browser checks and the contract query check included) | `c70c2f9` | https://github.com/dlroqa/Lightagent/actions/runs/41554449463, https://github.com/dlroqa/Lightagent/actions/runs/41554449310 |
+
+## Row 33 — D6-6: the Git import path against a Git repository built on the runner
+
+- A private `Transport`: `Https`, the only one callers reach, and
+  `LocalFixture`, compiled only for tests (`file://`,
+  `GIT_ALLOW_PROTOCOL=file`). Production code has no file transport.
+- Unit tests with the runner's real git: a tag installs the tagged commit
+  (inactive) and records it; the default branch (replace) installs the
+  newer commit; a commit id installs exactly that commit; `#packs/writing`
+  selects a folder (`single_skill`, folder and commit recorded); an
+  unknown revision (Unavailable), a missing folder (Invalid) and a missing
+  repository (Unavailable) leave the installed copy byte for byte with
+  nothing left beside it.
+- **Evidence class:** a local Git fixture over `file://`. A real remote
+  Git host over HTTPS is not exercised: its transport and TLS are git's
+  own, and CI takes no network dependency on a host.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-03 | `092`; branch `desktop/d6h-git-fixture`, draft PR #127 | `a753206` / `320ce65` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41554673176 |
+| 2026-11-03 | `check`, `desktop`, `jev evaluation`, `subagents`: **success**, 24 of 24 (the Git-fixture tests ran in all four `check` jobs: Linux, Windows and both macOS) | `a753206` | https://github.com/dlroqa/Lightagent/actions/runs/41554806093, https://github.com/dlroqa/Lightagent/actions/runs/41554806107, https://github.com/dlroqa/Lightagent/actions/runs/41554806138, https://github.com/dlroqa/Lightagent/actions/runs/41554806168 |
+
+## Hosted-runner reliability (2026-11-02/03)
+
+Gate failures that were infrastructure, not code. Only the affected job was
+rerun; every first attempt stays in its run's history.
+
+| PR | Job | Attempts | Cause |
+|---|---|---|---|
+| #122 | `check (macos-arm64)` 125347244973 | 1 failed, 2 passed | not acquired by a hosted runner (arm64 capacity) |
+| #121 | `check (macos-arm64)` 125475694355 | 1 failed, 2 passed | same |
+| #123 | `desktop shell (macos-arm64)` 125475716344 | 1 failed, 2 passed | same |
+| #123 | `check (macos-arm64)` 125475718287 / 125517801995 | 2 failed, 3 passed | same |
+| #125 | `check (macos-arm64)` 125520601247, `desktop shell (macos-arm64)` 125520599823 | 1 failed, 2 passed | same |
+
+**The broker test.** `Tester broker (live GitHub Actions)` dispatches a
+fixture workflow twice: one run is meant to pass and one is meant to fail,
+and the test asserts both outcomes. That deliberate failure is a red
+`subagent fixture` run, reported by a green broker job; it is never a
+broker failure. Of the last 54 completed broker jobs, 4 failed (7.4%), all
+on timing, none on a product or test defect, and each rerun passed:
+
+| Broker job | Failure | Cause |
+|---|---|---|
+| 125121991667 (#110), 125145322936 (#113) | `dispatched_unlocated` | the dispatched run was not yet visible through the API |
+| 125475693770 (#121), 125475715229 (#123) | `still_running` where `passed`/`failed` was expected | the fixture's job was still queued: five stacked PRs saturated the runners |
+
+The six cancelled broker jobs in the same window were superseded by a newer
+push (cancel-in-progress), not failures. Impact: under load a broker job
+can turn a slice red for timing alone. A wider wait window, or locating the
+run by its correlation id over a longer period, would remove it; that is a
+change to the subagents tests and is proposed, not made, here.
+
 ## Artifacts and retention
 
 | Artifact | Run | Retention |
@@ -1540,6 +1637,8 @@ Reruns: besides the reruns this session made (job 125447936741 for #122, job 125
 
   | 2026-11-02T20:06:04Z | `d6b-extensions-ui` `5cc2dad`, `d6c-mcp-ops` `7ddb855`, `d6d-mcp-check` `f9b5be6`, `d6e-tools-skills` `831d05f`, `d6f-skill-import` `62e87e6`, `tools/source-edit` `f5537ff` (lower slices unchanged) | rows 28-31 and the row 27 fix; fetch only (remote-tracking refs), working tree `master` `12582a0` clean |
 
+  | 2026-11-03T00:54:57Z | `d6b-extensions-ui` `5cc2dad`, `d6c-mcp-ops` `7ddb855`, `d6d-mcp-check` `f9b5be6`, `d6e-tools-skills` `831d05f`, `d6f-skill-import` `5c98b3e`, `d6g-close-out` `c70c2f9`, `d6h-git-fixture` `a753206`, `tools/source-edit` `ef7b5a3` (lower slices unchanged) | rows 27-33 (fixes merged forward, row 32, row 33); fetch only (remote-tracking refs), working tree `master` `12582a0` clean |
+
   A documentation commit cannot record itself. Each row names the heads
   that existed when the sync ran. The commit that carries a row is
   backed up by the next sync.
@@ -1560,15 +1659,21 @@ The owner's order of 2026-11-02 (fourth continuation, DESKTOP_CLAUDE_PROMPT.md �
    operations, then the card) are done, at 53 of 227.
 5. Rows 28-31 are done (MCP configuration, the MCP check and card, tool
    permissions and the MCP-free catalog, skills with their source, and
-   skill import as new scope), at 64 of 227.
-6. **Next:** the D6 close-out (browser evidence for the three remaining MCP
-   fields, a `config.extensions` master switch), then D7 (remaining CLI
-   parity, including the diagnostics bundle and its redaction checks) and
-   D8-D10 in dependency order. D8 keeps the native WebView checks
-   (Settings, profile switching, close with active runs, run controls,
-   response actions R2-R5, Extensions, MCP and skill import). Before merge
-   approval (D10), the exact candidate merge sequence is simulated on
-   hosted runners and every candidate tree validated.
+   skill import as new scope).
+6. Row 32 closed D6's acceptance items (host GET /skills, the MCP
+   auth/profile fields, the extensions master switch, every client query
+   in the contract) and row 33 ran the Git import path against a Git
+   fixture: 68 of 227. Remaining D6 gap: a real remote Git host over HTTPS
+   (not exercised; local fixture only).
+7. **Next: D7** (remaining CLI parity: memory and RAG, agents and
+   subagents, scheduling, diagnostics with the bundle's redaction checks,
+   import/export, provisioning, where present), then D8-D10 in dependency
+   order. D8 keeps the native WebView checks (Settings, profile switching,
+   close with active runs, run controls, response actions R2-R5,
+   Extensions, MCP, the tool catalog and skill import). Before merge
+   approval (D10): the `providers.remove` window decision, then the exact
+   candidate merge sequence simulated on hosted runners and every
+   candidate tree validated.
 
 Previous order (DESKTOP_CLAUDE_PROMPT.md §5), kept for reference:
 

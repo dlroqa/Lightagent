@@ -187,11 +187,41 @@ fn derived_name(source: &Path, url: Option<&str>, subdir: &Path) -> String {
     }
 }
 
-fn git(args: Vec<OsString>) -> Result<String, ManageError> {
+/// The git transport an import may use: HTTPS for every caller. Only this
+/// module's tests add a local `file://` repository, built on the runner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Transport {
+    Https,
+    #[cfg(test)]
+    LocalFixture,
+}
+
+impl Transport {
+    fn protocol(self) -> &'static str {
+        match self {
+            Self::Https => "https",
+            #[cfg(test)]
+            Self::LocalFixture => "file",
+        }
+    }
+}
+
+fn git_source_for(
+    source: &Path,
+    transport: Transport,
+) -> Result<Option<(String, PathBuf)>, ManageError> {
+    match transport {
+        Transport::Https => manage::git_source(source),
+        #[cfg(test)]
+        Transport::LocalFixture => Ok(tests::fixture_source(source)),
+    }
+}
+
+fn git(args: Vec<OsString>, transport: Transport) -> Result<String, ManageError> {
     let output = Command::new("git")
         .args(&args)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_ALLOW_PROTOCOL", "https")
+        .env("GIT_ALLOW_PROTOCOL", transport.protocol())
         .env("GIT_LFS_SKIP_SMUDGE", "1")
         .output()
         .map_err(|e| ManageError::Unavailable(format!("could not start git: {e}")))?;
@@ -214,8 +244,9 @@ fn fetch(
     work: &Path,
     source: &Path,
     revision: Option<&str>,
+    transport: Transport,
 ) -> Result<(PathBuf, Source, String), ManageError> {
-    let Some((url, subdir)) = manage::git_source(source)? else {
+    let Some((url, subdir)) = git_source_for(source, transport)? else {
         if revision.is_some() {
             return Err(invalid("a revision applies only to a Git source"));
         }
@@ -246,22 +277,28 @@ fn fetch(
         url.clone().into(),
         checkout.clone().into_os_string(),
     ]);
-    git(clone)?;
+    git(clone, transport)?;
     if let Some(revision) = revision {
         let at = |args: &[&str]| {
             let mut all: Vec<OsString> = vec!["-C".into(), checkout.clone().into_os_string()];
             all.extend(args.iter().map(OsString::from));
             all
         };
-        git(at(&["fetch", "--depth", "1", "--", "origin", revision]))?;
-        git(at(&["checkout", "--detach", "FETCH_HEAD"]))?;
+        git(
+            at(&["fetch", "--depth", "1", "--", "origin", revision]),
+            transport,
+        )?;
+        git(at(&["checkout", "--detach", "FETCH_HEAD"]), transport)?;
     }
-    let commit = git(vec![
-        "-C".into(),
-        checkout.clone().into_os_string(),
-        "rev-parse".into(),
-        "HEAD".into(),
-    ])?;
+    let commit = git(
+        vec![
+            "-C".into(),
+            checkout.clone().into_os_string(),
+            "rev-parse".into(),
+            "HEAD".into(),
+        ],
+        transport,
+    )?;
     let base = checkout.join(&subdir);
     let inside = base
         .canonicalize()
@@ -292,7 +329,23 @@ pub fn import(
     let root = manage::root(paths, options.scope)?;
     let work =
         std::env::temp_dir().join(format!("lightagent-skill-import-{}", RunId::new().as_str()));
-    let result = import_in(paths, &work, &root, source, &options);
+    let result = import_in(paths, &work, &root, source, &options, Transport::Https);
+    let _ = std::fs::remove_dir_all(&work);
+    result
+}
+
+/// [`import`] over a chosen transport; only tests choose another.
+#[cfg(test)]
+fn import_with(
+    paths: &LightagentPaths,
+    source: &Path,
+    options: ImportOptions,
+    transport: Transport,
+) -> Result<Imported, ManageError> {
+    let root = manage::root(paths, options.scope)?;
+    let work =
+        std::env::temp_dir().join(format!("lightagent-skill-import-{}", RunId::new().as_str()));
+    let result = import_in(paths, &work, &root, source, &options, transport);
     let _ = std::fs::remove_dir_all(&work);
     result
 }
@@ -303,8 +356,9 @@ fn import_in(
     root: &Path,
     source: &Path,
     options: &ImportOptions,
+    transport: Transport,
 ) -> Result<Imported, ManageError> {
-    let (base, origin, derived) = fetch(work, source, options.revision.as_deref())?;
+    let (base, origin, derived) = fetch(work, source, options.revision.as_deref(), transport)?;
     if let Some(name) = &options.name
         && !valid_name(name)
     {
@@ -459,6 +513,265 @@ fn import_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `file://` source (with an optional `#folder`) for the local fixture
+    /// transport; anything else is a local folder.
+    pub(super) fn fixture_source(source: &Path) -> Option<(String, PathBuf)> {
+        let text = source.to_string_lossy();
+        if !text.starts_with("file://") {
+            return None;
+        }
+        let (url, subdir) = text.split_once('#').unwrap_or((&text, ""));
+        Some((url.to_owned(), PathBuf::from(subdir)))
+    }
+
+    fn scratch(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lightagent-skill-fixture-{label}-{}",
+            RunId::new().as_str()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "tag.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn write_skill(dir: &Path, name: &str, body: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Fixture\n---\n{body}\n"),
+        )
+        .unwrap();
+    }
+
+    /// A Git repository on the runner: `v1` tagged, then `v2` on the
+    /// branch. Any commit may be fetched by its id.
+    fn fixture(dir: &Path) -> (String, String) {
+        std::fs::create_dir_all(dir).unwrap();
+        run_git(dir, &["init", "-q"]);
+        run_git(dir, &["config", "uploadpack.allowAnySHA1InWant", "true"]);
+        write_skill(&dir.join("skills").join("alpha"), "alpha", "version one");
+        write_skill(
+            &dir.join("packs").join("writing"),
+            "writing",
+            "a single skill",
+        );
+        run_git(dir, &["add", "-A"]);
+        run_git(dir, &["commit", "-q", "-m", "v1"]);
+        run_git(dir, &["tag", "v1"]);
+        let first = run_git(dir, &["rev-parse", "HEAD"]);
+        write_skill(&dir.join("skills").join("alpha"), "alpha", "version two");
+        run_git(dir, &["commit", "-q", "-am", "v2"]);
+        let second = run_git(dir, &["rev-parse", "HEAD"]);
+        (first, second)
+    }
+
+    fn file_url(path: &Path) -> String {
+        let text = path.to_string_lossy().replace('\\', "/");
+        if text.starts_with('/') {
+            format!("file://{text}")
+        } else {
+            format!("file:///{text}")
+        }
+    }
+
+    fn home(label: &str) -> LightagentPaths {
+        let paths = LightagentPaths::rooted_at(scratch(label));
+        ConfigStore::at(&paths)
+            .update(None, |config| {
+                config.extensions.enabled = true;
+                Ok::<_, String>(())
+            })
+            .unwrap();
+        paths
+    }
+
+    fn options(revision: Option<&str>, replace: bool) -> ImportOptions {
+        ImportOptions {
+            scope: Scope::Global,
+            name: Some("fixture".to_owned()),
+            revision: revision.map(str::to_owned),
+            replace,
+            activate: false,
+        }
+    }
+
+    fn commit_of(imported: &Imported) -> String {
+        match &imported.source {
+            Source::Git { revision, .. } => revision.clone(),
+            other => panic!("not a Git source: {other:?}"),
+        }
+    }
+
+    /// Every file under `dir`, by relative path, with its bytes.
+    fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut found = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(next) = pending.pop() {
+            for entry in std::fs::read_dir(&next).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    let relative = path
+                        .strip_prefix(dir)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
+                    found.push((relative, std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn a_git_fixture_installs_the_requested_revision_and_records_its_commit() {
+        let repo = scratch("repo").join("repo");
+        let (first, second) = fixture(&repo);
+        let paths = home("revisions");
+        let installed = manage::root(&paths, Scope::Global).unwrap().join("fixture");
+        let url = PathBuf::from(file_url(&repo));
+        let read = || {
+            std::fs::read_to_string(installed.join("skills").join("alpha").join("SKILL.md"))
+                .unwrap()
+        };
+
+        // A tag installs the tagged commit, inactive, and records it.
+        let imported = import_with(
+            &paths,
+            &url,
+            options(Some("v1"), false),
+            Transport::LocalFixture,
+        )
+        .unwrap();
+        assert_eq!(imported.layout, Layout::SkillsFolder);
+        assert_eq!(imported.skills, vec!["alpha".to_owned()]);
+        assert!(!imported.active);
+        assert_eq!(commit_of(&imported), first);
+        assert!(read().contains("version one"));
+        let record = std::fs::read_to_string(installed.join(SOURCE_FILE)).unwrap();
+        assert!(record.contains(&first), "{record}");
+
+        // The default branch replaces it with the newer commit.
+        let imported =
+            import_with(&paths, &url, options(None, true), Transport::LocalFixture).unwrap();
+        assert!(imported.replaced);
+        assert_eq!(commit_of(&imported), second);
+        assert!(read().contains("version two"));
+
+        // A commit id installs exactly that commit.
+        let imported = import_with(
+            &paths,
+            &url,
+            options(Some(&first), true),
+            Transport::LocalFixture,
+        )
+        .unwrap();
+        assert_eq!(commit_of(&imported), first);
+        assert!(read().contains("version one"));
+    }
+
+    #[test]
+    fn a_folder_in_the_repository_is_selected_with_its_layout() {
+        let repo = scratch("folder").join("repo");
+        let (_, second) = fixture(&repo);
+        let paths = home("folder-home");
+        let url = PathBuf::from(format!("{}#packs/writing", file_url(&repo)));
+        let options = ImportOptions {
+            name: None,
+            ..options(None, false)
+        };
+        let imported = import_with(&paths, &url, options, Transport::LocalFixture).unwrap();
+        assert_eq!(imported.name, "writing");
+        assert_eq!(imported.layout, Layout::SingleSkill);
+        assert_eq!(imported.skills, vec!["writing".to_owned()]);
+        match &imported.source {
+            Source::Git {
+                subdir, revision, ..
+            } => {
+                assert_eq!(subdir, "packs/writing");
+                assert_eq!(revision, &second);
+            }
+            other => panic!("not a Git source: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failed_fetch_keeps_the_installed_copy() {
+        let work = scratch("failures");
+        let repo = work.join("repo");
+        fixture(&repo);
+        let paths = home("failures-home");
+        let root = manage::root(&paths, Scope::Global).unwrap();
+        let url = PathBuf::from(file_url(&repo));
+        import_with(
+            &paths,
+            &url,
+            options(Some("v1"), false),
+            Transport::LocalFixture,
+        )
+        .unwrap();
+        let before = snapshot(&root.join("fixture"));
+
+        let error = import_with(
+            &paths,
+            &url,
+            options(Some("no-such-branch"), true),
+            Transport::LocalFixture,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ManageError::Unavailable(_)), "{error:?}");
+
+        let missing = PathBuf::from(format!("{}#no/such/folder", file_url(&repo)));
+        let error = import_with(
+            &paths,
+            &missing,
+            options(None, true),
+            Transport::LocalFixture,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ManageError::Invalid(_)), "{error:?}");
+
+        let gone = PathBuf::from(file_url(&work.join("gone")));
+        let error =
+            import_with(&paths, &gone, options(None, true), Transport::LocalFixture).unwrap_err();
+        assert!(matches!(error, ManageError::Unavailable(_)), "{error:?}");
+
+        assert_eq!(snapshot(&root.join("fixture")), before);
+        let leftovers: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
 
     #[test]
     fn revisions_cannot_be_options_or_leave_the_references() {
