@@ -537,7 +537,7 @@ def scenario_setup(host, cli):
     try:
         _, catalog = host.fetch("GET", f"{API}/profiles")
         active = (catalog or {}).get("active_profile")
-        base_url = cli_json("config", "show")["config"]["inference"]["base_url"]
+        base_url = cli_json("config", "show")["inference"]["base_url"]
         status, refused = host.fetch("POST", f"{API}/setup/init", {})
         check.expect("init on an initialised home is refused", status == 409, (status, refused))
         status, report = host.fetch("POST", f"{API}/setup/init",
@@ -545,7 +545,7 @@ def scenario_setup(host, cli):
         check.expect("a forced init through the host keeps the profile and the endpoint",
                      status == 200 and (report or {}).get("active_profile") == active
                      and cli_json("profile", "list").get("active_profile") == active
-                     and cli_json("config", "show")["config"]["inference"]["base_url"] == base_url,
+                     and cli_json("config", "show")["inference"]["base_url"] == base_url,
                      (status, report))
         profile_dir = os.path.join(work, "profiles", "e2e-hermes")
         os.makedirs(profile_dir)
