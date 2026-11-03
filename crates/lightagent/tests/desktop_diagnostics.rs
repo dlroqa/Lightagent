@@ -249,13 +249,9 @@ fn the_bundle_holds_the_allowlist_and_no_secret_or_private_content() {
         &format!("{API}/memories"),
         Some(json!({"text": "DIAG-PRIVATE-MEMORY about a diagnosis"})),
     );
-    let (session, _) = ok(
-        &runtime,
-        "POST",
-        &format!("{API}/sessions"),
-        Some(json!({})),
-    );
-    let session = session["id"].as_str().expect("session id").to_owned();
+    let (status, raw) = call(&runtime, "POST", &format!("{API}/sessions"), Some("{}"));
+    assert!(matches!(status, 200 | 201), "POST /sessions: {raw}");
+    let session = parsed(&raw)["id"].as_str().expect("session id").to_owned();
     ok(
         &runtime,
         "PATCH",
