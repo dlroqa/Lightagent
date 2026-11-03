@@ -1906,7 +1906,55 @@ D10 candidate tree includes it.
   that existed when the sync ran. The commit that carries a row is
   backed up by the next sync.
 
+## Rows 53-56 (2026-11-03, owner `a0fb357c`)
+
+Ownership: session `a0fb357c` (lightagent-c7) took over from
+`445d73de`, which had no live process and had ended its last turn at
+12:44Z (claim: #144 issuecomment-6604428555).
+
+Failures diagnosed (each a product or test defect, fixed by source edit;
+no rerun was needed):
+- #149: the secrets gate rejected a home-directory placeholder, and the
+  contract check read a backticked `/onboard` in an agent.ts comment as a
+  client path. Request 143 → 940b1f5.
+- #150: `Vec<Value>` without `Value` in scope, and the same contract
+  issue for `/help`. Request 144 → 7315635, then the two-parent merge
+  46abd19 (tree 7423c97, row 54's fix carried up; POST /merges
+  conflicted).
+- #153: the sidebar shortens long titles (request 148), and the stale
+  check first counted model requests, which the server can make after
+  a saved run (request 149). It now asserts the 409 and unchanged runs.
+
+| Row | PR | Head | Evidence |
+|---|---|---|---|
+| 53 | #148 | `67b8124` | rotate --expires-in, rc list --profile, init --profile/--base-url, LIGHTAGENT_HOME |
+| 54 | #149 | `940b1f5` | /onboard, /onboard remove |
+| 55 | #150 | `46abd19` | /help, /reload |
+| 56a | #151 | `4e1aa34` | Jev status and check (stub evidence; desktop_jev.rs, runs.py jev, jev.mjs) |
+| 56b | #152 | `03f4cfe` | LIGHTAGENT_CREDENTIAL_KEY, HERMES_HOME (second host, second server) |
+| 56c | #153 | `0e53dd3` | regenerate on the real backend in the browser |
+
+Coverage: 218 of 222. Remaining, with the stage and the criterion:
+
+| ID | Missing | Stage | Done when |
+|---|---|---|---|
+| `cli.remote-credential.add.opt.secret-stdin` | host-side secret input | D8 | a native picker or host-owned input; no secret byte in WebView state, IPC answers, logs, diagnostics, screenshots or artifacts (seeded-secret tests); cancel, unreadable and invalid fail safely; the source file is never deleted |
+| `cli.remote-credential.rotate.opt.secret-stdin` | the same | D8 | the same, for rotate |
+| `env.LIGHTAGENT_API_KEY` | remote mode | D8 | the desktop against a `serve --key-env LIGHTAGENT_API_KEY` server: the key held by the host, never in the renderer; a failing remote is an error with no local execution |
+| `cli.chat.opt.profile` | an owner decision | D7/D8 | the desktop's profile switch persists the active profile (DESKTOP_ARCHITECTURE.md §7); `chat --profile` does not. Either accept the switch as the equivalent and document the difference, or build a non-persisting per-conversation profile; then evidence |
+
 ## Next
+
+The owner's order of 2026-11-03 (sole owner `a0fb357c`):
+
+1. The owner's decision on `cli.chat.opt.profile`.
+2. D8: native WebView verification (an e2e-hooks evaluation channel into
+   the real WebView, or tauri-driver where it exists, with unavailable
+   platforms stated), host-side secret input for the two
+   `--secret-stdin` rows, and remote mode with `LIGHTAGENT_API_KEY`.
+3. Before merge approval: the backport or reordered delivery for the
+   rows 15-31 and 21-39 defect windows, and #147's placement.
+
 
 The owner's order of 2026-11-03 (sole owner `445d73de`):
 
