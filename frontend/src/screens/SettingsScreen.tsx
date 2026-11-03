@@ -232,9 +232,8 @@ export function SettingsScreen() {
 
 
           <Card title="Capabilities">
-            <ToggleRow label="Web tools" hint="Allow configured web search and fetch tools."
-              checked={value?.web_enabled ?? false} disabled={!value || saving}
-              onChange={(web_enabled) => void persist({ web_enabled })} />
+            <WebAccessField settings={value ?? null} disabled={!value || saving}
+              onSave={(patch) => persist(patch)} />
             <ToggleRow label="Filesystem tools" hint="Allow confined file reads and writes."
               checked={value?.filesystem_tools_enabled ?? false} disabled={!value || saving}
               onChange={(filesystem_tools_enabled) => void persist({
@@ -364,6 +363,81 @@ function OptionalNumberSetting({ label, value, disabled, onSave }: {
             void onSave(next);
           } else setDraft(value == null ? "" : String(value));
         }} />
+    </div>
+  );
+}
+
+type WebMode = NonNullable<LightagentSettings["web_mode"]>;
+
+const WEB_MODES: { mode: WebMode; label: string }[] = [
+  { mode: "off", label: "Off" },
+  { mode: "fetch", label: "Fetch web pages only" },
+  { mode: "duckduckgo", label: "Agentic search — DuckDuckGo (no account)" },
+  { mode: "custom", label: "Agentic search — SearXNG or custom JSON endpoint" },
+];
+
+/**
+ * `lightagent setup` → web, on the same keys: the web tools off, fetching
+ * pages only, or agentic search, which also turns on realtime knowledge. A
+ * custom search saves only with its URL.
+ */
+function WebAccessField({ settings, disabled, onSave }: {
+  settings: LightagentSettings | null;
+  disabled: boolean;
+  onSave: (patch: Partial<LightagentSettings>) => Promise<void> | void;
+}) {
+  const mode: WebMode = settings?.web_mode ?? (settings?.web_enabled ? "fetch" : "off");
+  const savedEndpoint = mode === "custom" ? settings?.web_search_endpoint ?? "" : "";
+  const [choice, setChoice] = useState<WebMode>(mode);
+  const [endpoint, setEndpoint] = useState(savedEndpoint);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    setChoice(mode);
+    setEndpoint(savedEndpoint);
+    setError(null);
+  }, [mode, savedEndpoint]);
+  const save = (next: WebMode, url: string) => {
+    if (next === "custom" && !url.trim()) {
+      setError("Enter the search endpoint URL, such as http://127.0.0.1:8080/search?format=json.");
+      return;
+    }
+    setError(null);
+    void onSave({
+      web_mode: next,
+      web_enabled: next !== "off",
+      web_search_endpoint: next === "custom" ? url.trim() : null,
+    });
+  };
+  return (
+    <div className="field" style={{ padding: "12px 0", borderBottom: "1px solid var(--rule)" }}>
+      <label className="field__label" htmlFor="web-access">Web access</label>
+      <select id="web-access" className="select" value={choice} disabled={disabled}
+        onChange={(event) => {
+          const next = event.target.value as WebMode;
+          setChoice(next);
+          if (next !== "custom") save(next, "");
+        }}>
+        {WEB_MODES.map((option) => <option key={option.mode} value={option.mode}>{option.label}</option>)}
+      </select>
+      {choice === "custom" && (
+        <form style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}
+          onSubmit={(event) => {
+            event.preventDefault();
+            save("custom", endpoint);
+          }}>
+          <div className="field" style={{ flex: "1 1 220px" }}>
+            <label className="field__label" htmlFor="web-access-endpoint">Search endpoint (JSON)</label>
+            <input id="web-access-endpoint" className="input" value={endpoint} disabled={disabled}
+              placeholder="http://127.0.0.1:8080/search?format=json" autoComplete="off" spellCheck={false}
+              onChange={(event) => setEndpoint(event.target.value)} />
+          </div>
+          <button type="submit" className="btn" disabled={disabled}>Save endpoint</button>
+        </form>
+      )}
+      {error && <p className="config-editor__error" role="alert">{error}</p>}
+      <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>
+        The same choice as <code>lightagent setup</code> → web. Searching also turns on realtime knowledge.
+      </div>
     </div>
   );
 }

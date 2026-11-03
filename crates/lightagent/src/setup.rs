@@ -8,7 +8,7 @@ use lightagent_core::SecretRef;
 use lightagent_core::saved_providers::{self, Outcome};
 use lightagent_core::{
     AgentProfile, ApprovalPolicy, Config, ConfigError, ConfigRevision, ConfigStore,
-    DUCKDUCKGO_SEARCH_ENDPOINT, LightagentPaths, ProfileId, ProfileStore,
+    DUCKDUCKGO_SEARCH_ENDPOINT, LightagentPaths, ProfileId, ProfileStore, WebMode,
 };
 use lightagent_provider_lightweight::{LightweightProvider, ProviderConfig};
 
@@ -562,10 +562,8 @@ fn configure_web_tui(config: &mut Config, theme: &ColorfulTheme) -> Result<bool,
     else {
         return Ok(false);
     };
-    config.web.enabled = selected != 0;
-    if selected == 2 {
-        use_duckduckgo(config);
-    } else if selected == 3 {
+    let mode = WebMode::ALL[selected];
+    let endpoint = if mode == WebMode::Custom {
         let current = config
             .web
             .search
@@ -573,16 +571,17 @@ fn configure_web_tui(config: &mut Config, theme: &ColorfulTheme) -> Result<bool,
             .as_deref()
             .filter(|_| !uses_duckduckgo(config))
             .unwrap_or("http://127.0.0.1:8080/search?format=json");
-        let endpoint = Input::<String>::with_theme(theme)
-            .with_prompt("SearXNG search URL")
-            .with_initial_text(current)
-            .interact_text()
-            .map_err(dialog_error)?;
-        config.web.search.endpoint = nonempty(endpoint);
+        Some(
+            Input::<String>::with_theme(theme)
+                .with_prompt("SearXNG search URL")
+                .with_initial_text(current)
+                .interact_text()
+                .map_err(dialog_error)?,
+        )
     } else {
-        config.web.search.endpoint = None;
-    }
-    config.rag.realtime_enabled = selected >= 2;
+        None
+    };
+    mode.apply(config, endpoint.as_deref());
     Ok(true)
 }
 
@@ -956,10 +955,8 @@ fn configure_web<R: BufRead, W: Write>(
         ],
         default,
     )?;
-    config.web.enabled = selected != 1;
-    if selected == 3 {
-        use_duckduckgo(config);
-    } else if selected == 4 {
+    let mode = WebMode::ALL[selected - 1];
+    let endpoint = if mode == WebMode::Custom {
         let current = config
             .web
             .search
@@ -967,11 +964,11 @@ fn configure_web<R: BufRead, W: Write>(
             .as_deref()
             .filter(|_| !uses_duckduckgo(config))
             .unwrap_or("http://127.0.0.1:8080/search?format=json");
-        config.web.search.endpoint = nonempty(prompt.input("SearXNG search URL", current)?);
+        Some(prompt.input("SearXNG search URL", current)?)
     } else {
-        config.web.search.endpoint = None;
-    }
-    config.rag.realtime_enabled = selected >= 3;
+        None
+    };
+    mode.apply(config, endpoint.as_deref());
     Ok(())
 }
 

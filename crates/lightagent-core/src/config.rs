@@ -437,6 +437,59 @@ impl Default for SecurityConfig {
 /// The built-in, account-free search endpoint offered by `lightagent setup web`.
 pub const DUCKDUCKGO_SEARCH_ENDPOINT: &str = "https://html.duckduckgo.com/html/";
 
+/// What `lightagent setup` → web offers, in its order: the web tools off,
+/// fetching pages only, or agentic search through DuckDuckGo or a SearXNG /
+/// custom JSON endpoint. Setup and the desktop's Settings both apply it with
+/// [`WebMode::apply`], so they write the same keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebMode {
+    Off,
+    Fetch,
+    Duckduckgo,
+    Custom,
+}
+
+impl WebMode {
+    /// Setup's menu order.
+    pub const ALL: [Self; 4] = [Self::Off, Self::Fetch, Self::Duckduckgo, Self::Custom];
+
+    /// The mode `config` is in.
+    pub fn of(config: &Config) -> Self {
+        if !config.web.enabled {
+            Self::Off
+        } else if config.web.search.endpoint.as_deref() == Some(DUCKDUCKGO_SEARCH_ENDPOINT) {
+            Self::Duckduckgo
+        } else if config.web.search.endpoint.is_some() {
+            Self::Custom
+        } else {
+            Self::Fetch
+        }
+    }
+
+    /// Write the mode as setup does. Searching also turns on realtime
+    /// knowledge; DuckDuckGo needs no key. `endpoint` is the custom search
+    /// URL, used by `Custom` only; trimmed, and empty means none.
+    pub fn apply(self, config: &mut Config, endpoint: Option<&str>) {
+        config.web.enabled = self != Self::Off;
+        match self {
+            Self::Duckduckgo => {
+                config.web.search.endpoint = Some(DUCKDUCKGO_SEARCH_ENDPOINT.to_owned());
+                config.web.search.query_param = "q".to_owned();
+                config.web.search.api_key = None;
+            }
+            Self::Custom => {
+                config.web.search.endpoint = endpoint
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                    .map(str::to_owned);
+            }
+            Self::Off | Self::Fetch => config.web.search.endpoint = None,
+        }
+        config.rag.realtime_enabled = matches!(self, Self::Duckduckgo | Self::Custom);
+    }
+}
+
 /// A search backend for `web.search`.
 ///
 /// `web.search` sends the query to `endpoint` (adding `query_param=<query>`) and

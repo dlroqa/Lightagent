@@ -1215,6 +1215,14 @@ struct UiSettings {
     wall_clock_secs: Option<u64>,
     approval_policy: ApprovalPolicy,
     web_enabled: bool,
+    /// `lightagent setup` → web. Absent on a save (an older client),
+    /// `web_enabled` alone applies.
+    #[serde(default)]
+    web_mode: Option<lightagent_core::WebMode>,
+    /// The custom search URL for `web_mode: custom`; in a response, the
+    /// configured search endpoint.
+    #[serde(default)]
+    web_search_endpoint: Option<String>,
     filesystem_tools_enabled: bool,
     terminal_enabled: bool,
     memory_enabled: bool,
@@ -1243,6 +1251,8 @@ fn ui_settings(config: &lightagent_core::Config) -> UiSettings {
         wall_clock_secs: config.agent.wall_clock_secs,
         approval_policy: config.security.approval_policy,
         web_enabled: config.web.enabled,
+        web_mode: Some(lightagent_core::WebMode::of(config)),
+        web_search_endpoint: config.web.search.endpoint.clone(),
         filesystem_tools_enabled: config.tools.enabled,
         terminal_enabled: config.tools.allow_terminal,
         memory_enabled: config.memory.auto_capture,
@@ -1402,6 +1412,14 @@ async fn save_settings(
         .expected_revision
         .as_deref()
         .map(ConfigRevision::parse);
+    if settings.web_mode == Some(lightagent_core::WebMode::Custom)
+        && settings
+            .web_search_endpoint
+            .as_deref()
+            .is_none_or(|url| url.trim().is_empty())
+    {
+        return bad_request("a custom web search needs its endpoint URL");
+    }
     // Kept for the active profile, which is written after the config.
     let (approval_policy, max_turns, max_tool_calls, wall_clock_secs) = (
         settings.approval_policy,
@@ -1448,6 +1466,9 @@ fn apply_ui_settings(
     config.agent.wall_clock_secs = settings.wall_clock_secs;
     config.security.approval_policy = settings.approval_policy;
     config.web.enabled = settings.web_enabled;
+    if let Some(mode) = settings.web_mode {
+        mode.apply(config, settings.web_search_endpoint.as_deref());
+    }
     config.tools.enabled = settings.filesystem_tools_enabled;
     config.tools.allow_terminal = settings.terminal_enabled;
     config.memory.auto_capture = settings.memory_enabled;

@@ -53,7 +53,7 @@ pub use config::{
     JevRoutingPermission, McpConfig, McpServerEntry, OpenTerminalConfig, PlatformConfig,
     PlatformEndpointConfig, QdrantConfig, SavedProvider, SecretLookup, SecretRef,
     SecretUnavailable, SecurityConfig, SubagentsConfig, ToolNameMode, ToolPolicyMode, ToolsConfig,
-    UpdateError, WebConfig, WebSearchConfig, WorkerResolution, secret_state,
+    UpdateError, WebConfig, WebMode, WebSearchConfig, WorkerResolution, secret_state,
 };
 pub use event::{
     AgentEvent, ClassificationDiagnostics, SpecialistRestriction, SpecialistSelection,
