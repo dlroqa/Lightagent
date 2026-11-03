@@ -33,7 +33,10 @@ export async function checkSessions(browser, base, outDir) {
     await page.goto(`${base}/#/`);
     // Everything happens within this conversation's own sidebar row.
     const item = page.locator("li.session-row").filter({ hasText: label }).first();
+    // The row's actions show while it is hovered or focused (keyboard users
+    // reach them by Tab); a pointer user hovers the row first.
     const openDelete = async () => {
+      await item.hover();
       await item.getByRole("button", { name: `More actions for ${label}` }).click({ timeout: 10000 });
       await page.getByRole("menu", { name: `Actions for ${label}` }).getByRole("menuitem", { name: /Delete/ }).click({ timeout: 10000 });
     };
@@ -55,6 +58,7 @@ export async function checkSessions(browser, base, outDir) {
       const more = item.getByRole("button", { name: `More actions for ${label}` });
       const opened = await step("the menu opens again", async () => {
         if (await more.isDisabled()) throw new Error("More actions is disabled");
+        await item.hover();
         await more.click({ timeout: 10000 });
         await page.getByRole("menu", { name: `Actions for ${label}` }).waitFor({ timeout: 5000 });
       });
