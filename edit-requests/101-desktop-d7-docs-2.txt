@@ -1,0 +1,444 @@
+=== base c65132f6ff56b81a5dd2368ca912f5157d2f9c02
+=== message
+Desktop docs: rows 36-37 (knowledge), 99 of 227
+
+- PROGRESS: row 36 (knowledge through one shared operation set, and the
+  RagStore lost-update and torn-write fix) and row 37 (the Knowledge
+  screen); Next.
+- MERGE_ORDER: rows 36-37.
+- Inventory and parity: seven `cli.rag.*` rows implemented at `c65132f`
+  with backend, host and browser evidence: 92 → 99 of 227.
+  `cli.rag.add.opt.source` stays not-started: no test sets the source
+  name yet.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.rag.add",
+   "kind": "command",
+   "surface": "lightagent rag add",
+   "source": "crates/lightagent/src/lib.rs:342",
+   "behavior": "Index a file or directory",
+   "tree_key": "cmd lightagent rag add",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: add documents (picker)",
+   "backend": "extract: rag::add()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.rag.add",
+   "kind": "command",
+   "surface": "lightagent rag add",
+   "source": "crates/lightagent/src/lib.rs:342",
+   "behavior": "Index a file or directory",
+   "tree_key": "cmd lightagent rag add",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: add documents (picker)",
+   "backend": "extract: rag::add()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_knowledge.rs (CLI and API alike; concurrent adds keep both documents) and lightagent-rag store test (two writers); host: desktop/e2e/runs.py knowledge (add, list, search, skipped path, clear through the host, matched with the CLI); browser: e2e/knowledge.mjs (real harness); native WebView: D8",
+   "tested_sha": "c65132f6ff56b81a5dd2368ca912f5157d2f9c02",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41565023807, https://github.com/dlroqa/Lightagent/actions/runs/41565023826, https://github.com/dlroqa/Lightagent/actions/runs/41565023863, https://github.com/dlroqa/Lightagent/actions/runs/41565023903"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.rag.add` | `lightagent rag add` | applicable | yes | Memory/Knowledge: add documents (picker) | extract: rag::add() | not-started | `crates/lightagent/src/lib.rs:342` |
+--- with
+| `cli.rag.add` | `lightagent rag add` | applicable | yes | Memory/Knowledge: add documents (picker) | extract: rag::add() | implemented | `crates/lightagent/src/lib.rs:342` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.rag.add.arg.path",
+   "kind": "argument",
+   "surface": "lightagent rag add <path>",
+   "source": "crates/lightagent/src/lib.rs:342",
+   "behavior": "File or directory",
+   "tree_key": "arg lightagent rag add <path>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: add documents (picker) — input 'path'",
+   "backend": "extract: rag::add()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.rag.add.arg.path",
+   "kind": "argument",
+   "surface": "lightagent rag add <path>",
+   "source": "crates/lightagent/src/lib.rs:342",
+   "behavior": "File or directory",
+   "tree_key": "arg lightagent rag add <path>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: add documents (picker) — input 'path'",
+   "backend": "extract: rag::add()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_knowledge.rs (CLI and API alike; concurrent adds keep both documents) and lightagent-rag store test (two writers); host: desktop/e2e/runs.py knowledge (add, list, search, skipped path, clear through the host, matched with the CLI); browser: e2e/knowledge.mjs (real harness); native WebView: D8",
+   "tested_sha": "c65132f6ff56b81a5dd2368ca912f5157d2f9c02",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41565023807, https://github.com/dlroqa/Lightagent/actions/runs/41565023826, https://github.com/dlroqa/Lightagent/actions/runs/41565023863, https://github.com/dlroqa/Lightagent/actions/runs/41565023903"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.rag.add.arg.path` | `lightagent rag add <path>` | applicable | yes | Memory/Knowledge: add documents (picker) — input 'path' | extract: rag::add() | not-started | `crates/lightagent/src/lib.rs:342` |
+--- with
+| `cli.rag.add.arg.path` | `lightagent rag add <path>` | applicable | yes | Memory/Knowledge: add documents (picker) — input 'path' | extract: rag::add() | implemented | `crates/lightagent/src/lib.rs:342` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.rag.search",
+   "kind": "command",
+   "surface": "lightagent rag search",
+   "source": "crates/lightagent/src/lib.rs:349",
+   "behavior": "Search passages",
+   "tree_key": "cmd lightagent rag search",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: search",
+   "backend": "extract: rag::search()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.rag.search",
+   "kind": "command",
+   "surface": "lightagent rag search",
+   "source": "crates/lightagent/src/lib.rs:349",
+   "behavior": "Search passages",
+   "tree_key": "cmd lightagent rag search",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: search",
+   "backend": "extract: rag::search()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_knowledge.rs (CLI and API alike; concurrent adds keep both documents) and lightagent-rag store test (two writers); host: desktop/e2e/runs.py knowledge (add, list, search, skipped path, clear through the host, matched with the CLI); browser: e2e/knowledge.mjs (real harness); native WebView: D8",
+   "tested_sha": "c65132f6ff56b81a5dd2368ca912f5157d2f9c02",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41565023807, https://github.com/dlroqa/Lightagent/actions/runs/41565023826, https://github.com/dlroqa/Lightagent/actions/runs/41565023863, https://github.com/dlroqa/Lightagent/actions/runs/41565023903"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.rag.search` | `lightagent rag search` | applicable | yes | Memory/Knowledge: search | extract: rag::search() | not-started | `crates/lightagent/src/lib.rs:349` |
+--- with
+| `cli.rag.search` | `lightagent rag search` | applicable | yes | Memory/Knowledge: search | extract: rag::search() | implemented | `crates/lightagent/src/lib.rs:349` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.rag.search.arg.query",
+   "kind": "argument",
+   "surface": "lightagent rag search <query>",
+   "source": "crates/lightagent/src/lib.rs:349",
+   "behavior": "Query",
+   "tree_key": "arg lightagent rag search <query>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: search — input 'query'",
+   "backend": "extract: rag::search()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.rag.search.arg.query",
+   "kind": "argument",
+   "surface": "lightagent rag search <query>",
+   "source": "crates/lightagent/src/lib.rs:349",
+   "behavior": "Query",
+   "tree_key": "arg lightagent rag search <query>",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: search — input 'query'",
+   "backend": "extract: rag::search()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_knowledge.rs (CLI and API alike; concurrent adds keep both documents) and lightagent-rag store test (two writers); host: desktop/e2e/runs.py knowledge (add, list, search, skipped path, clear through the host, matched with the CLI); browser: e2e/knowledge.mjs (real harness); native WebView: D8",
+   "tested_sha": "c65132f6ff56b81a5dd2368ca912f5157d2f9c02",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41565023807, https://github.com/dlroqa/Lightagent/actions/runs/41565023826, https://github.com/dlroqa/Lightagent/actions/runs/41565023863, https://github.com/dlroqa/Lightagent/actions/runs/41565023903"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.rag.search.arg.query` | `lightagent rag search <query>` | applicable | yes | Memory/Knowledge: search — input 'query' | extract: rag::search() | not-started | `crates/lightagent/src/lib.rs:349` |
+--- with
+| `cli.rag.search.arg.query` | `lightagent rag search <query>` | applicable | yes | Memory/Knowledge: search — input 'query' | extract: rag::search() | implemented | `crates/lightagent/src/lib.rs:349` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.rag.search.opt.top-k",
+   "kind": "option",
+   "surface": "lightagent rag search --top-k",
+   "source": "crates/lightagent/src/lib.rs:349",
+   "behavior": "Result count",
+   "tree_key": "arg lightagent rag search --top-k",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: search — input 'top-k'",
+   "backend": "extract: rag::search()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.rag.search.opt.top-k",
+   "kind": "option",
+   "surface": "lightagent rag search --top-k",
+   "source": "crates/lightagent/src/lib.rs:349",
+   "behavior": "Result count",
+   "tree_key": "arg lightagent rag search --top-k",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: search — input 'top-k'",
+   "backend": "extract: rag::search()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_knowledge.rs (CLI and API alike; concurrent adds keep both documents) and lightagent-rag store test (two writers); host: desktop/e2e/runs.py knowledge (add, list, search, skipped path, clear through the host, matched with the CLI); browser: e2e/knowledge.mjs (real harness); native WebView: D8",
+   "tested_sha": "c65132f6ff56b81a5dd2368ca912f5157d2f9c02",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41565023807, https://github.com/dlroqa/Lightagent/actions/runs/41565023826, https://github.com/dlroqa/Lightagent/actions/runs/41565023863, https://github.com/dlroqa/Lightagent/actions/runs/41565023903"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.rag.search.opt.top-k` | `lightagent rag search --top-k` | applicable | yes | Memory/Knowledge: search — input 'top-k' | extract: rag::search() | not-started | `crates/lightagent/src/lib.rs:349` |
+--- with
+| `cli.rag.search.opt.top-k` | `lightagent rag search --top-k` | applicable | yes | Memory/Knowledge: search — input 'top-k' | extract: rag::search() | implemented | `crates/lightagent/src/lib.rs:349` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.rag.list",
+   "kind": "command",
+   "surface": "lightagent rag list",
+   "source": "crates/lightagent/src/lib.rs:355",
+   "behavior": "List indexed sources",
+   "tree_key": "cmd lightagent rag list",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: documents",
+   "backend": "extract: rag::list()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.rag.list",
+   "kind": "command",
+   "surface": "lightagent rag list",
+   "source": "crates/lightagent/src/lib.rs:355",
+   "behavior": "List indexed sources",
+   "tree_key": "cmd lightagent rag list",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: documents",
+   "backend": "extract: rag::list()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_knowledge.rs (CLI and API alike; concurrent adds keep both documents) and lightagent-rag store test (two writers); host: desktop/e2e/runs.py knowledge (add, list, search, skipped path, clear through the host, matched with the CLI); browser: e2e/knowledge.mjs (real harness); native WebView: D8",
+   "tested_sha": "c65132f6ff56b81a5dd2368ca912f5157d2f9c02",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41565023807, https://github.com/dlroqa/Lightagent/actions/runs/41565023826, https://github.com/dlroqa/Lightagent/actions/runs/41565023863, https://github.com/dlroqa/Lightagent/actions/runs/41565023903"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.rag.list` | `lightagent rag list` | applicable | yes | Memory/Knowledge: documents | extract: rag::list() | not-started | `crates/lightagent/src/lib.rs:355` |
+--- with
+| `cli.rag.list` | `lightagent rag list` | applicable | yes | Memory/Knowledge: documents | extract: rag::list() | implemented | `crates/lightagent/src/lib.rs:355` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.rag.clear",
+   "kind": "command",
+   "surface": "lightagent rag clear",
+   "source": "crates/lightagent/src/lib.rs:357",
+   "behavior": "Empty the index",
+   "tree_key": "cmd lightagent rag clear",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: clear (confirm)",
+   "backend": "extract: rag::clear()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.rag.clear",
+   "kind": "command",
+   "surface": "lightagent rag clear",
+   "source": "crates/lightagent/src/lib.rs:357",
+   "behavior": "Empty the index",
+   "tree_key": "cmd lightagent rag clear",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Memory/Knowledge: clear (confirm)",
+   "backend": "extract: rag::clear()",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_knowledge.rs (CLI and API alike; concurrent adds keep both documents) and lightagent-rag store test (two writers); host: desktop/e2e/runs.py knowledge (add, list, search, skipped path, clear through the host, matched with the CLI); browser: e2e/knowledge.mjs (real harness); native WebView: D8",
+   "tested_sha": "c65132f6ff56b81a5dd2368ca912f5157d2f9c02",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41565023807, https://github.com/dlroqa/Lightagent/actions/runs/41565023826, https://github.com/dlroqa/Lightagent/actions/runs/41565023863, https://github.com/dlroqa/Lightagent/actions/runs/41565023903"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.rag.clear` | `lightagent rag clear` | applicable | yes | Memory/Knowledge: clear (confirm) | extract: rag::clear() | not-started | `crates/lightagent/src/lib.rs:357` |
+--- with
+| `cli.rag.clear` | `lightagent rag clear` | applicable | yes | Memory/Knowledge: clear (confirm) | extract: rag::clear() | implemented | `crates/lightagent/src/lib.rs:357` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "parity_implemented": 92,
+--- with
+  "parity_implemented": 99,
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Implemented: 92 of 227
+--- with
+- Implemented: 99 of 227
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Total rows: 359
+--- with
+- D7 note (2026-11-03, rows 36-37): `cli.rag.add` (+`path`), `cli.rag.search` (+`query`, `--top-k`), `cli.rag.list` and `cli.rag.clear` are implemented at `c65132f` through `rag::perform` via `RunFactory::rag`: backend `desktop_knowledge.rs` and the RagStore two-writer test, host `runs.py knowledge`, browser `e2e/knowledge.mjs`; native WebView is D8. `cli.rag.add.opt.source` (the source name) has a UI field but no test sets it yet, so it is not counted. The RagStore now writes under a lock, atomically and owner-only; before, a CLI and an API add at the same time could drop a document
+- Total rows: 359
+=== replace docs/desktop/DESKTOP_MERGE_ORDER.md
+--- find
+| 36+ | D7 continues (RAG, sessions, workers, identity and remote credentials, init/import/chat, the remaining slash, setup, env and config rows, the diagnostics bundle and its redaction), then D8-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+--- with
+| 36 | D7-3 knowledge (RAG) through one shared operation set; the index written under a lock | https://github.com/dlroqa/Lightagent/pull/130 | `desktop/d7c-knowledge-ops` | `desktop/d7b-memory-ui` (`67ed55e`) | `49109b6` | `49109b6` |
+| 37 | D7-4 the Knowledge screen | https://github.com/dlroqa/Lightagent/pull/131 | `desktop/d7d-knowledge-ui` | `desktop/d7c-knowledge-ops` (`49109b6`) | `c65132f` | `c65132f` |
+| 38+ | D7 continues (sessions, workers, identity and remote credentials, init/import/chat, the remaining slash, setup, env and config rows, the diagnostics bundle and its redaction), then D8-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+## Artifacts and retention
+--- with
+## Row 36 — D7-3: knowledge (RAG) through one shared operation set
+
+- **Integrity fix in `lightagent-rag`.** `RagStore` wrote its in-memory
+  copy back with `std::fs::write`: two writers (the CLI and the API) lost
+  each other's documents, and a reader could see a half-written index.
+  `add` now embeds first, then, under the index's lock file, reads the
+  index again, replaces that source's chunks and writes it atomically and
+  owner-only (`paths::write_private`); `clear` likewise. A unit test
+  opens two stores on one index; both sources remain.
+- One implementation (`crates/lightagent/src/rag.rs`): add (a file or a
+  folder's files; the remote index is still synced and its failure never
+  drops the local document), search (remote first when configured, else
+  hybrid local), list, clear. The CLI prints as before; `--json` gains
+  `skipped` and `notes` (what it printed to stderr). API (operator):
+  `GET|POST|DELETE /knowledge`, `GET /knowledge/search` (`q`, `top_k`);
+  POST takes an absolute path. Contract `knowledge.*`; the host refuses
+  add and clear during a profile switch.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-03 | `099`; branch `desktop/d7c-knowledge-ops`, draft PR #130 | `49109b6` / `fdba802` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41564121251 |
+| 2026-11-03 | `check`, `desktop`, `jev evaluation`, `subagents`: **success**, 24 of 24, first run | `49109b6` | https://github.com/dlroqa/Lightagent/actions/runs/41564214555, https://github.com/dlroqa/Lightagent/actions/runs/41564214582, https://github.com/dlroqa/Lightagent/actions/runs/41564214604, https://github.com/dlroqa/Lightagent/actions/runs/41564214607 |
+
+## Row 37 — D7-4: the Knowledge screen
+
+- Index a file or folder (optional source name), see indexed, skipped (with
+  the reason) and notes; search with a result count; the indexed sources
+  with chunk counts; clear (asks first, states the count). Account menus
+  and the render route list.
+- Browser `e2e/knowledge.mjs` (clears only when the harness index was
+  empty before the check) and host `runs.py knowledge`.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-03 | `100`; branch `desktop/d7d-knowledge-ui`, draft PR #131 | `c65132f` / `e82caba` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41564945835 |
+| 2026-11-03 | `check`, `desktop`, `jev evaluation`, `subagents`: **success**, 24 of 24, first run | `c65132f` | https://github.com/dlroqa/Lightagent/actions/runs/41565023807, https://github.com/dlroqa/Lightagent/actions/runs/41565023826, https://github.com/dlroqa/Lightagent/actions/runs/41565023863, https://github.com/dlroqa/Lightagent/actions/runs/41565023903 |
+
+Coverage: seven `cli.rag.*` rows → **99 of 227** (`cli.rag.add.opt.source`
+not counted: no test sets the source name yet).
+
+## Artifacts and retention
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+8. **Next in D7:** RAG (shared operations and a knowledge view), then
+   sessions, workers, identity and remote credentials, init, import and
+   chat, the remaining slash, setup, env and config rows, and the
+   diagnostics bundle with its redaction checks. Then D8-D10 in dependency
+   order. D8 keeps the native WebView checks (Settings, profile switching,
+   close with active runs, run controls, response actions R2-R5,
+   Extensions, MCP, the tool catalog, skill import and Memory). Before
+   merge approval (D10): the `providers.remove` window decision, then the
+   exact candidate merge sequence simulated on hosted runners and every
+   candidate tree validated.
+--- with
+8. Rows 36-37 (knowledge: shared operations with the index lock fix, then
+   the Knowledge screen) are done, at 99 of 227.
+9. **Next in D7:** sessions, workers, identity and remote credentials,
+   init, import and chat, the remaining slash, setup, env and config rows,
+   `cli.rag.add.opt.source` evidence, and the diagnostics bundle with its
+   redaction checks. Then D8-D10 in dependency order. D8 keeps the native
+   WebView checks (Settings, profile switching, close with active runs,
+   run controls, response actions R2-R5, Extensions, MCP, the tool
+   catalog, skill import, Memory and Knowledge). Before merge approval
+   (D10): the `providers.remove` window decision, then the exact
+   candidate merge sequence simulated on hosted runners and every
+   candidate tree validated.
+=== end
