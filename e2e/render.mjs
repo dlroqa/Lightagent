@@ -19,6 +19,7 @@ import { checkSkillImport } from "./skills.mjs";
 import { checkMemory } from "./memory.mjs";
 import { checkKnowledge } from "./knowledge.mjs";
 import { checkSessions } from "./sessions.mjs";
+import { checkConversations } from "./conversations.mjs";
 import { checkWorkers } from "./workers.mjs";
 import { checkIdentity } from "./identity.mjs";
 import { checkSetup } from "./setup.mjs";
@@ -433,6 +434,12 @@ async function main() {
     failures.push(...(await checkSessions(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`sessions: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Seeds a conversation; searches, renames, attaches a file, sends two turns.
+  try {
+    failures.push(...(await checkConversations(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`conversations: ${err instanceof Error ? err.message : String(err)}`);
   }
   // Indexes documents (and clears them only when the index was empty).
   try {

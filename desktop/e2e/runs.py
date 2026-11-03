@@ -87,6 +87,7 @@ def scripts(provider):
             if turn == 0 else [("text", "Still "), ("gate", "crash"), ("text", "working."), ("finish", "stop")]
         ),
         "steer-hold": lambda p, turn, index: [("text", "Working"), ("gate", "steer-hold"), ("text", " done."), ("finish", "stop")],
+        "convo": lambda p, turn, index: [("text", "Noted."), ("finish", "stop")],
         "regen": lambda p, turn, index: {
             "first": [("text", "First answer."), ("finish", "stop")],
             "second": [("text", "Second answer."), ("finish", "stop")],
@@ -879,6 +880,94 @@ def scenario_sessions(host, cli):
     return check
 
 
+def scenario_conversations(host, provider, cli):
+    """D7 through the host transport: a conversation held by the desktop
+    continues in `lightagent chat --session` with its earlier turn, and one
+    started in `lightagent chat` continues through the host. Search through
+    the host finds it by what was said and by a title set through the host,
+    which the CLI reads. An attachment uploaded through the host is saved
+    byte for byte beside the profile's sessions; a name that is not plain is
+    refused by the host itself."""
+    check = Checks("conversations")
+
+    def cli_json(*args):
+        return json.loads(harness.run_cli(cli, "--json", *args))
+
+    def users(saved):
+        return [m.get("content") for m in (saved or {}).get("messages", []) if m.get("role") == "user"]
+
+    def two_turns(session):
+        return harness.wait_until(lambda: (lambda s: s if len(users(s)) >= 2 else None)(host.session(session)), timeout=30)
+
+    def carried(since):
+        # A request whose newest turn follows an earlier user turn and its answer.
+        return [r for r in provider.requests("convo")[since:]
+                if r["roles"].count("user") >= 2 and "assistant" in r["roles"]]
+
+    said = "[e2e:convo] The heron nests by the quarry."
+    session = host.new_session()
+    Stream(host, host.start_run(session, said)).finish()
+    recorded(host, session, 1)
+    since = len(provider.requests("convo"))
+    harness.run_cli_input(cli, "[e2e:convo] And the egret?\n/exit\n", "chat", "--session", session)
+    saved = two_turns(session)
+    check.expect("the CLI continued the desktop's conversation",
+                 users(saved) == [said, "[e2e:convo] And the egret?"] and harness.answers(saved) == ["Noted.", "Noted."],
+                 (users(saved), harness.answers(saved)))
+    check.expect("the CLI's turn carried the desktop's", bool(carried(since)), provider.requests("convo")[since:])
+
+    before = {s.get("id") for s in cli_json("sessions", "list")}
+    harness.run_cli_input(cli, "[e2e:convo] Started in the terminal.\n/exit\n", "chat")
+    started = [s.get("id") for s in cli_json("sessions", "list") if s.get("id") not in before]
+    check.expect("the CLI started one conversation", len(started) == 1, started)
+    if len(started) == 1:
+        since = len(provider.requests("convo"))
+        Stream(host, host.start_run(started[0], "[e2e:convo] Continued on the desktop.")).finish()
+        continued = two_turns(started[0])
+        check.expect("the host continued the CLI's conversation with its earlier turn",
+                     users(continued) == ["[e2e:convo] Started in the terminal.", "[e2e:convo] Continued on the desktop."]
+                     and bool(carried(since)), (users(continued), provider.requests("convo")[since:]))
+
+    status, found = host.fetch("GET", f"{API}/sessions/search?q=QUARRY")
+    row = next((r for r in (found or {}).get("sessions", []) if r.get("id") == session), {})
+    check.expect("search through the host finds what was said, in any case",
+                 status == 200 and row.get("matched_role") == "user" and "quarry" in (row.get("snippet") or "").lower(),
+                 (status, found))
+    status, renamed = host.fetch("PATCH", f"{API}/sessions/{session}", {"title": "  Heronry log  "})
+    shown = cli_json("sessions", "show", session)
+    listed = next((s for s in cli_json("sessions", "list") if s.get("id") == session), {})
+    check.expect("renamed through the host, trimmed, as the CLI shows and lists it",
+                 status == 200 and (renamed or {}).get("title") == "Heronry log"
+                 and shown.get("title") == "Heronry log" and listed.get("title") == "Heronry log",
+                 (status, renamed, shown.get("title"), listed.get("title")))
+    status, refused = host.fetch("PATCH", f"{API}/sessions/{session}", {"title": "   "})
+    check.expect("an empty title is refused and the title stays",
+                 status == 400 and cli_json("sessions", "show", session).get("title") == "Heronry log", (status, refused))
+    status, found = host.fetch("GET", f"{API}/sessions/search?q=HERONRY")
+    check.expect("search through the host finds the new title",
+                 status == 200 and any(r.get("id") == session for r in (found or {}).get("sessions", [])), (status, found))
+
+    data = b"field notes\n\x00\xffheron"
+    status, uploaded = host.upload(f"{API}/sessions/{session}/attachments", data, "notes 1.txt")
+    path = (uploaded or {}).get("path") or ""
+    stored = None
+    if path and os.path.isfile(path):
+        with open(path, "rb") as handle:
+            stored = handle.read()
+    check.expect("uploaded through the host and saved byte for byte, owner-only, beside the profile's sessions",
+                 status == 200 and (uploaded or {}).get("name") == "notes 1.txt" and stored == data
+                 and os.path.basename(os.path.dirname(path)) == session
+                 and os.path.basename(os.path.dirname(os.path.dirname(path))) == "attachments"
+                 and (os.name != "posix" or os.stat(path).st_mode & 0o777 == 0o600),
+                 (status, uploaded))
+    try:
+        refused = host.upload(f"{API}/sessions/{session}/attachments", data, "../escape.txt")
+    except harness.HostError as error:
+        refused = ("refused", str(error))
+    check.expect("a file name that is not plain is refused by the host", refused[0] == "refused", refused)
+    return check
+
+
 def scenario_knowledge(host, cli):
     """D7 through the host transport: a document indexed through the host is
     listed by the CLI; list, search and a skipped path through the host
@@ -1234,6 +1323,7 @@ def main():
             ("memory", lambda: scenario_memory(host, cli)),
             ("knowledge", lambda: scenario_knowledge(host, cli)),
             ("sessions", lambda: scenario_sessions(host, cli)),
+            ("conversations", lambda: scenario_conversations(host, provider, cli)),
             ("workers", lambda: scenario_workers(host, cli)),
             ("identity", lambda: scenario_identity(host, cli)),
             ("remote_credentials", lambda: scenario_remote_credentials(host, cli)),

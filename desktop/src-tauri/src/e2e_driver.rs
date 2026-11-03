@@ -36,6 +36,11 @@ enum Op {
         target: String,
         #[serde(default)]
         body: Option<String>,
+        /// A raw body (an attachment) and its file name, as `api_fetch` takes them.
+        #[serde(default)]
+        body_base64: Option<String>,
+        #[serde(default)]
+        filename: Option<String>,
     },
     Subscribe {
         target: String,
@@ -97,7 +102,9 @@ async fn run(host: &Arc<Host>, op: Op) -> Result<Value, String> {
             method,
             target,
             body,
-        } => json!(crate::fetch(host, method, target, body, None, None).await?),
+            body_base64,
+            filename,
+        } => json!(crate::fetch(host, method, target, body, body_base64, filename).await?),
         Op::Subscribe { target } => json!(crate::subscribe(host, target)?),
         Op::Poll {
             subscription,
