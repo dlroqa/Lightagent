@@ -1,0 +1,61 @@
+=== base e0e3ab4b56c87f4e758188ffa3cc0d17e603d52e
+=== message
+Broker: count queue time only when the run was seen queued
+
+The live check on e0e3ab4 (run 41616581374) showed a run that had
+already completed at the first read reported as queued for 162 ms: the
+time spent reading its jobs. The wait diagnostics now count queue time
+only when a read saw the run requested, queued, pending or waiting. A
+deterministic test covers a run that has completed before the first read
+(passed, nothing queued or running).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-tools/src/builtins/actions.rs
+--- find
+    let mut running_since: Option<Instant> = None;
+--- with
+    let mut running_since: Option<Instant> = None;
+    // Times are as observed at each poll: queue time counts only when a read
+    // saw the run waiting for a runner.
+    let mut seen_queued = false;
+=== replace crates/lightagent-tools/src/builtins/actions.rs
+--- find
+        if completed(&run) {
+            break "completed";
+        }
+        let now = Instant::now();
+--- with
+        if completed(&run) {
+            break "completed";
+        }
+        seen_queued |= queued(&run);
+        let now = Instant::now();
+=== replace crates/lightagent-tools/src/builtins/actions.rs
+--- find
+    let queued_for = running_since.unwrap_or(ended).duration_since(begun);
+--- with
+    let queued_for = if seen_queued {
+        running_since.unwrap_or(ended).duration_since(begun)
+    } else {
+        Duration::ZERO
+    };
+=== replace crates/lightagent-tools/tests/actions_broker.rs
+--- find
+    assert_eq!(capped["wait"]["limits_ms"]["overall"], 1000, "{capped}");
+}
+--- with
+    assert_eq!(capped["wait"]["limits_ms"]["overall"], 1000, "{capped}");
+}
+
+#[tokio::test]
+async fn a_run_completed_before_the_first_read_was_never_seen_queued() {
+    let github = github().await;
+    staged(&github, 508, &[("completed", Some("success"))]);
+    let ctx = waiting(&github, Duration::from_secs(5), Duration::from_secs(5));
+    let status = wait_for(&ctx, 508, 30).await;
+    assert_eq!(status["verdict"], "passed", "{status}");
+    assert_eq!(status["wait"]["outcome"], "completed", "{status}");
+    assert_eq!(status["wait"]["queued_ms"], 0, "{status}");
+    assert_eq!(status["wait"]["running_ms"], 0, "{status}");
+}
+=== end
