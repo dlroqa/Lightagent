@@ -1,0 +1,248 @@
+=== base 32e25813c0df705abae1e6f67c2c675e9a8c79da
+=== message
+Row 48 (merge resolution): identity, remote-credential and setup options at every level
+
+An audit of rows 42-46 against the evidence rule (backend, host and
+browser for each counted row) found options exercised at one or two
+levels only. This adds the missing checks; no product code changes.
+
+- Host (runs.py): identity: issue for one profile (--profile), rotate
+  (key id, expiry, secret file), reassign, revoke a grant, suspend.
+  remote credentials: keygen; add with operations, an expiry and a
+  request budget; rekey from a previous key (a grant the CLI sealed with
+  a key made through the host). setup: init with a model (restored);
+  a forced Hermes import.
+- Browser: identity: issue for one profile; the grants list by profile.
+  credentials: add with operations and an expiry. setup: reconfigure with
+  a model (restored); a forced import (asks first).
+- Backend: desktop_remote_credentials.rs adds operations and an expiry.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace desktop/e2e/runs.py
+--- find
+                  cli_json("identity", "credential", "list", "--principal", "e2e-alice").get("credentials", [])]
+        check.expect("revoked through the host, revoked for the CLI",
+                     status == 200 and states == ["revoked"], (status, revoked, states))
+--- with
+                  cli_json("identity", "credential", "list", "--principal", "e2e-alice").get("credentials", [])]
+        check.expect("revoked through the host, revoked for the CLI",
+                     status == 200 and states == ["revoked"], (status, revoked, states))
+        _, catalog = host.fetch("GET", f"{API}/profiles")
+        active = (catalog or {}).get("active_profile")
+        profiled_file = os.path.join(work, "e2e-alice-profiled.key")
+        status, profiled = host.fetch("POST", f"{API}/identity/credentials",
+                                      {"principal": "e2e-alice", "profiles": [active], "secret_file": profiled_file})
+        profiled_id = (profiled or {}).get("issued")
+        listed = cli_json("identity", "credential", "list", "--principal", "e2e-alice").get("credentials", [])
+        row = next((c for c in listed if c.get("key_id") == profiled_id), {})
+        check.expect("issued through the host for one profile only, as the CLI lists it",
+                     status == 200 and ((row.get("restriction") or {}).get("profiles")) == [active],
+                     (status, profiled, row))
+        rotated_file = os.path.join(work, "e2e-alice-rotated.key")
+        status, rotated = host.fetch("POST", f"{API}/identity/credentials/{profiled_id}/rotate",
+                                     {"expires_in": 300, "secret_file": rotated_file})
+        listed = cli_json("identity", "credential", "list", "--principal", "e2e-alice").get("credentials", [])
+        replacement = next((c for c in listed if c.get("key_id") == (rotated or {}).get("issued")), {})
+        check.expect("rotated through the host to a new file, the replacement listed by the CLI",
+                     status == 200 and (rotated or {}).get("replaces") == profiled_id and os.path.isfile(rotated_file)
+                     and replacement.get("replaces") == profiled_id and isinstance(replacement.get("expires_unix"), int),
+                     (status, rotated, replacement))
+=== replace desktop/e2e/runs.py
+--- find
+        check.expect("ownership through the host equals the CLI's",
+                     status == 200 and (owned or {}).get("owner") == "e2e-alice"
+                     and grants == cli_json("identity", "grants", "list", "--profile", active),
+                     (status, owned, grants))
+--- with
+        check.expect("ownership through the host equals the CLI's",
+                     status == 200 and (owned or {}).get("owner") == "e2e-alice"
+                     and grants == cli_json("identity", "grants", "list", "--profile", active),
+                     (status, owned, grants))
+        host.fetch("POST", f"{API}/identity/users", {"id": "e2e-bob"})
+        status, moved = host.fetch("POST", f"{API}/identity/owners/{active}/reassign", {"principal": "e2e-bob"})
+        grants = cli_json("identity", "grants", "list", "--profile", active)
+        check.expect("reassigned through the host, as the CLI lists it",
+                     status == 200 and (moved or {}).get("owner") == "e2e-bob"
+                     and [p.get("owner") for p in grants.get("profiles", [])] == ["e2e-bob"], (status, moved, grants))
+        status, revoked_grant = host.fetch("POST", f"{API}/identity/grants/revoke",
+                                           {"profile": active, "principal": "e2e-alice", "capability": "sessions_read"})
+        recent = json.dumps(cli_json("identity", "audit", "--limit", "1")).lower()
+        check.expect("a grant revoked through the host, recorded for the CLI",
+                     status == 200 and (revoked_grant or {}).get("revoked") == "sessions_read" and "grant" in recent,
+                     (status, revoked_grant, recent))
+=== replace desktop/e2e/runs.py
+--- find
+        status, audit = host.fetch("GET", f"{API}/identity/audit?limit=4")
+--- with
+        status, suspended = host.fetch("POST", f"{API}/identity/users/e2e-alice/suspend")
+        alice = next((p for p in cli_json("identity", "user", "list").get("principals", [])
+                      if p.get("id") == "e2e-alice"), {})
+        check.expect("suspended through the host, suspended for the CLI with no credential left",
+                     status == 200 and alice.get("status") == "suspended" and alice.get("unrevoked_credentials") == 0,
+                     (status, suspended, alice))
+        status, audit = host.fetch("GET", f"{API}/identity/audit?limit=4")
+=== replace desktop/e2e/runs.py
+--- find
+        states = [g.get("state") for g in cli_json("remote-credential", "list").get("credentials", [])]
+        check.expect("revoked through the host, revoked for the CLI",
+                     status == 200 and states == ["revoked"], (status, revoked, states))
+--- with
+        states = [g.get("state") for g in cli_json("remote-credential", "list").get("credentials", [])]
+        check.expect("revoked through the host, revoked for the CLI",
+                     status == 200 and states == ["revoked"], (status, revoked, states))
+        new_key = os.path.join(work, "e2e-new.key")
+        status, made = host.fetch("POST", f"{API}/remote-credentials/keys", {"path": new_key})
+        check.expect("a key file made through the host",
+                     status == 200 and (made or {}).get("key_file") == "created" and os.path.isfile(new_key),
+                     (status, made))
+        limited_file = os.path.join(work, "host-limited.secret")
+        with open(limited_file, "w", encoding="utf-8") as handle:
+            handle.write("e2e-host-secret-limited-5f6a7b\n")
+        status, limited = host.fetch("POST", f"{API}/remote-credentials", dict(
+            body, operations=["search"], expires_in=600, max_requests_per_run=4, secret_file=limited_file))
+        limited_id = (limited or {}).get("added")
+        row = next((g for g in cli_json("remote-credential", "list").get("credentials", [])
+                    if g.get("id") == limited_id), {})
+        check.expect("operations, an expiry and a request budget through the host, as the CLI lists them",
+                     status == 200 and row.get("operations") == ["search"] and row.get("max_requests_per_run") == 4
+                     and isinstance(row.get("expires_unix"), int), (status, limited, row))
+        host.fetch("POST", f"{API}/remote-credentials/{limited_id}/revoke")
+        configured = os.environ["LIGHTAGENT_CREDENTIAL_KEY_FILE"]
+        os.environ["LIGHTAGENT_CREDENTIAL_KEY_FILE"] = new_key
+        try:
+            harness.run_cli(cli, "remote-credential", "add", active, "--service", "mcp:e2e-rekey",
+                            "--destination", "https://rekey.e2e.invalid", "--secret-file", limited_file)
+        finally:
+            os.environ["LIGHTAGENT_CREDENTIAL_KEY_FILE"] = configured
+        status, resealed = host.fetch("POST", f"{API}/remote-credentials/rekey", {"previous_key_file": new_key})
+        _, vault = host.fetch("GET", f"{API}/remote-credentials/vault")
+        check.expect("re-sealed through the host from the previous key",
+                     status == 200 and (resealed or {}).get("resealed") == 1
+                     and (vault or {}).get("unopenable_with_configured_key") == 0, (status, resealed, vault))
+=== replace desktop/e2e/runs.py
+--- find
+        status, report = host.fetch("POST", f"{API}/setup/init",
+                                    {"force": True, "profile": active, "base_url": base_url})
+        check.expect("a forced init through the host keeps the profile and the endpoint",
+                     status == 200 and (report or {}).get("active_profile") == active
+                     and cli_json("profile", "list").get("active") == active
+                     and cli_json("config", "show")["inference"]["base_url"] == base_url,
+                     (status, report))
+--- with
+        original_model = harness.run_cli(cli, "config", "get", "inference.model").strip()
+        try:
+            status, report = host.fetch("POST", f"{API}/setup/init",
+                                        {"force": True, "profile": active, "base_url": base_url,
+                                         "model": "e2e-init-model"})
+            check.expect("a forced init through the host keeps the profile and the endpoint and sets the model",
+                         status == 200 and (report or {}).get("active_profile") == active
+                         and cli_json("profile", "list").get("active") == active
+                         and cli_json("config", "show")["inference"]["base_url"] == base_url
+                         and harness.run_cli(cli, "config", "get", "inference.model").strip() == "e2e-init-model",
+                         (status, report))
+        finally:
+            harness.run_cli(cli, "config", "set", "inference.model", original_model)
+=== replace desktop/e2e/runs.py
+--- find
+        check.expect("imported through the host, seen by the CLI",
+--- with
+        status, forced = host.fetch("POST", f"{API}/import/hermes", {"from": work, "force": True})
+        check.expect("a forced import through the host imports what exists again",
+                     status == 200 and (forced or {}).get("profiles") == ["e2e-hermes"]
+                     and (forced or {}).get("skipped") == [], (status, forced))
+        check.expect("imported through the host, seen by the CLI",
+=== replace e2e/identity.mjs
+--- find
+      await page.locator("#identity-issue-expires").fill("600");
+--- with
+      await page.locator("#identity-issue-expires").fill("600");
+      await page.locator("#identity-issue-profiles").fill(active);
+=== replace e2e/identity.mjs
+--- find
+      if (!token.startsWith(`la_${keyId}_`)) throw new Error("the file does not hold the issued credential");
+--- with
+      if (!token.startsWith(`la_${keyId}_`)) throw new Error("the file does not hold the issued credential");
+      const issuedRow = (await get(base, `${API}/credentials`)).credentials.find((c) => c.key_id === keyId);
+      if (JSON.stringify(issuedRow?.restriction?.profiles) !== JSON.stringify([active])) {
+        throw new Error(`the credential's restriction is ${JSON.stringify(issuedRow?.restriction)}`);
+      }
+=== replace e2e/identity.mjs
+--- find
+      const row = page.getByTestId(`owner-${active}`);
+      await row.waitFor({ timeout: 10000 });
+--- with
+      const row = page.getByTestId(`owner-${active}`);
+      await row.waitFor({ timeout: 10000 });
+      // The grants list by profile (`identity grants list --profile`).
+      await page.locator("#identity-grants-profile").selectOption(active);
+      await row.waitFor({ timeout: 10000 });
+      if ((await page.getByTestId("identity-owners").locator("li[data-testid^='owner-']").count()) !== 1) {
+        throw new Error("the grants list by profile shows another profile");
+      }
+=== replace e2e/credentials.mjs
+--- find
+      await page.locator("#rc-add-budget").fill("3");
+--- with
+      await page.locator("#rc-add-budget").fill("3");
+      await page.locator("#rc-add-operations").fill("search");
+      await page.locator("#rc-add-expires").fill("600");
+=== replace e2e/credentials.mjs
+--- find
+      if (!grant || grant.service !== "mcp:render-probe" || grant.max_requests_per_run !== 3) {
+--- with
+      if (!grant || grant.service !== "mcp:render-probe" || grant.max_requests_per_run !== 3
+        || JSON.stringify(grant.operations) !== JSON.stringify(["search"]) || typeof grant.expires_unix !== "number") {
+=== replace e2e/setup.mjs
+--- find
+      await screen.getByRole("button", { name: "Reconfigure…" }).click();
+      await screen.getByRole("button", { name: "Keep it" }).click();
+--- with
+      await page.locator("#setup-model").fill("render-init-model");
+      await screen.getByRole("button", { name: "Reconfigure…" }).click();
+      await screen.getByRole("button", { name: "Keep it" }).click();
+=== replace e2e/setup.mjs
+--- find
+      if ((await get(base, "/config")).config.inference.base_url !== endpoint) throw new Error("the endpoint changed");
+--- with
+      if ((await get(base, "/config")).config.inference.base_url !== endpoint) throw new Error("the endpoint changed");
+      const model = (await get(base, "/config")).config.inference.model;
+      await fetch(`${base}${API}/config/inference.model`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value: originalModel ?? "" }),
+      });
+      if (model !== "render-init-model") throw new Error(`the model is ${JSON.stringify(model)}`);
+=== replace e2e/setup.mjs
+--- find
+    const endpoint = (await get(base, "/config")).config.inference.base_url;
+--- with
+    const endpoint = (await get(base, "/config")).config.inference.base_url;
+    const originalModel = (await get(base, "/config")).config.inference.model;
+=== replace e2e/setup.mjs
+--- find
+      await result.getByText("Skipped (already here): profile render-hermes", { exact: false }).waitFor({ timeout: 10000 });
+--- with
+      await result.getByText("Skipped (already here): profile render-hermes", { exact: false }).waitFor({ timeout: 10000 });
+      await page.locator("#setup-hermes-force").check();
+      await screen.getByRole("button", { name: "Import…" }).click();
+      await screen.getByRole("button", { name: "Confirm: import and replace" }).click();
+      await result.getByText("Imported 1 profile(s)", { exact: false }).waitFor({ timeout: 10000 });
+=== replace crates/lightagent/tests/desktop_remote_credentials.rs
+--- find
+        "max_requests_per_run": 5,
+        "secret_file": secret_file,
+    });
+--- with
+        "max_requests_per_run": 5,
+        "operations": ["search"],
+        "expires_in": 3600,
+        "secret_file": secret_file,
+    });
+=== replace crates/lightagent/tests/desktop_remote_credentials.rs
+--- find
+    assert_eq!(grant(&listed, &id)["max_requests_per_run"], 5, "{listed}");
+--- with
+    assert_eq!(grant(&listed, &id)["max_requests_per_run"], 5, "{listed}");
+    assert_eq!(grant(&listed, &id)["operations"], json!(["search"]), "{listed}");
+    assert!(grant(&listed, &id)["expires_unix"].is_u64(), "{listed}");
+=== end
