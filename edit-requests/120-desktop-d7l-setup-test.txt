@@ -1,0 +1,26 @@
+=== base 48ad69037b32b31091ded777ab1a044a82350694
+=== message
+Row 46: the init test initialises the desktop home first
+
+`serve --desktop` scaffolds the home but writes no configuration file, so
+its home is not initialised until the first init. The test now does what
+the CLI home does: init, then a refused init, then the forced one.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent/tests/desktop_setup.rs
+--- find
+    // The desktop's home: already initialised by its runtime.
+    let by_api = scratch("api");
+    let runtime = start(&by_api, &[]);
+    let (status, refused) = post(&runtime, &format!("{API}/setup/init"), json!({}));
+    assert_eq!(status, 409, "{refused}");
+--- with
+    // The desktop's home: scaffolded by its runtime, initialised over the
+    // API, then refused until forced.
+    let by_api = scratch("api");
+    let runtime = start(&by_api, &[]);
+    let (status, first) = post(&runtime, &format!("{API}/setup/init"), json!({}));
+    assert_eq!(status, 200, "{first}");
+    let (status, refused) = post(&runtime, &format!("{API}/setup/init"), json!({}));
+    assert_eq!(status, 409, "{refused}");
+=== end
