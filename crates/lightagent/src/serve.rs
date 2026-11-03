@@ -71,6 +71,13 @@ impl RunFactory for LightweightRunFactory {
         let paths = LightagentPaths::rooted_at(&self.root);
         crate::ops::Profiles::open(&paths)?.perform(request)
     }
+    async fn memory(
+        &self,
+        request: lightagent_api::ops::MemoryRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        crate::memory::perform(&LightagentPaths::rooted_at(&self.root), request).await
+    }
+
     async fn tools(&self) -> Result<Vec<ToolDefinition>, String> {
         let paths = LightagentPaths::rooted_at(&self.root);
         let config = ConfigStore::at(&paths).load().map_err(|e| e.to_string())?;

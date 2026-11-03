@@ -131,6 +131,21 @@ pub fn router(state: AppState) -> Router {
         .route("/api/lightagent/v1/skills", get(list_skills))
         .route("/api/lightagent/v1/skills/imports", post(import_skills))
         .route(
+            "/api/lightagent/v1/memories",
+            get(list_memories).post(add_memory).delete(clear_memories),
+        )
+        .route("/api/lightagent/v1/memories/search", get(search_memories))
+        .route("/api/lightagent/v1/memories/reflect", get(reflect_memories))
+        .route(
+            "/api/lightagent/v1/memories/candidates",
+            get(memory_candidates),
+        )
+        .route("/api/lightagent/v1/memories/promote", post(promote_memory))
+        .route(
+            "/api/lightagent/v1/memories/items/{id}",
+            axum::routing::put(update_memory).delete(forget_memory),
+        )
+        .route(
             "/api/lightagent/v1/extensions",
             get(list_extensions).post(install_extension),
         )
@@ -2059,6 +2074,156 @@ async fn check_mcp_server(
             .into_response(),
         Err(error) => internal(&error),
     }
+}
+
+/// A memory operation through the embedder (`lightagent memory …`, see
+/// [`ops::MemoryRequest`]), on the active profile's memories. Operator only.
+async fn memory_operation(
+    state: &AppState,
+    headers: &HeaderMap,
+    request: ops::MemoryRequest,
+) -> Response {
+    if let Some(rejection) = deny(state, headers, Scope::Admin) {
+        return rejection;
+    }
+    match state.manager.memory(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn list_memories(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    memory_operation(&state, &headers, ops::MemoryRequest::List).await
+}
+
+#[derive(Deserialize)]
+struct AddMemoryBody {
+    text: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+async fn add_memory(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<AddMemoryBody>,
+) -> Response {
+    let request = ops::MemoryRequest::Add {
+        text: body.text,
+        kind: body.kind,
+        tags: body.tags,
+    };
+    memory_operation(&state, &headers, request).await
+}
+
+async fn clear_memories(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    memory_operation(&state, &headers, ops::MemoryRequest::Clear).await
+}
+
+#[derive(Deserialize)]
+struct UpdateMemoryBody {
+    text: String,
+}
+
+async fn update_memory(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateMemoryBody>,
+) -> Response {
+    let request = ops::MemoryRequest::Update {
+        id,
+        text: body.text,
+    };
+    memory_operation(&state, &headers, request).await
+}
+
+async fn forget_memory(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    memory_operation(&state, &headers, ops::MemoryRequest::Forget(id)).await
+}
+
+#[derive(Deserialize)]
+struct MemorySearchQuery {
+    q: String,
+    #[serde(default)]
+    top_k: Option<usize>,
+}
+
+async fn search_memories(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<MemorySearchQuery>,
+) -> Response {
+    let request = ops::MemoryRequest::Search {
+        query: query.q,
+        top_k: query.top_k,
+    };
+    memory_operation(&state, &headers, request).await
+}
+
+#[derive(Deserialize)]
+struct ReflectQuery {
+    #[serde(default)]
+    topic: Option<String>,
+}
+
+async fn reflect_memories(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ReflectQuery>,
+) -> Response {
+    memory_operation(&state, &headers, ops::MemoryRequest::Reflect(query.topic)).await
+}
+
+#[derive(Deserialize)]
+struct CandidatesQuery {
+    session: String,
+}
+
+async fn memory_candidates(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<CandidatesQuery>,
+) -> Response {
+    memory_operation(
+        &state,
+        &headers,
+        ops::MemoryRequest::Candidates(query.session),
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+struct PromoteMemoryBody {
+    session: String,
+    message: usize,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+async fn promote_memory(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<PromoteMemoryBody>,
+) -> Response {
+    let request = ops::MemoryRequest::Promote {
+        session: body.session,
+        message: body.message,
+        text: body.text,
+        kind: body.kind,
+        tags: body.tags,
+    };
+    memory_operation(&state, &headers, request).await
 }
 
 /// An import of skills from a repository or folder (new scope).

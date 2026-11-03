@@ -40,6 +40,39 @@ pub enum ProfileRequest {
     Delete(String),
 }
 
+/// One memory operation (`lightagent memory …`) on the active profile's
+/// memories.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MemoryRequest {
+    List,
+    Add {
+        text: String,
+        kind: Option<String>,
+        tags: Vec<String>,
+    },
+    Update {
+        id: String,
+        text: String,
+    },
+    Forget(String),
+    Clear,
+    Search {
+        query: String,
+        top_k: Option<usize>,
+    },
+    Reflect(Option<String>),
+    /// Durable-looking user statements of a saved session.
+    Candidates(String),
+    /// Save one user message of a saved session, optionally edited.
+    Promote {
+        session: String,
+        message: usize,
+        text: Option<String>,
+        kind: Option<String>,
+        tags: Vec<String>,
+    },
+}
+
 /// A stable error category, for the UI to act on without parsing messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpCategory {

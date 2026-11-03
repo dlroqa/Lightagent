@@ -398,6 +398,16 @@ pub trait RunFactory: Send + Sync + 'static {
         Err(crate::ops::OpError::unavailable())
     }
 
+    /// A memory operation on the active profile's memories, performed by
+    /// the embedder that owns them (`lightagent serve`), answered with the
+    /// JSON `lightagent memory … --json` prints. The default refuses.
+    async fn memory(
+        &self,
+        _request: crate::ops::MemoryRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
     /// Tools currently visible to the factory's active target.
     async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
         let registry = lightagent_tools::ToolRegistry::builtin();
@@ -1259,6 +1269,14 @@ impl RunManager {
         request: crate::ops::ProfileRequest,
     ) -> Result<serde_json::Value, crate::ops::OpError> {
         self.factory.profiles(request).await
+    }
+
+    /// Perform a memory operation through the factory (see [`crate::ops`]).
+    pub async fn memory(
+        &self,
+        request: crate::ops::MemoryRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.memory(request).await
     }
 
     /// The active revocable runs an identity change described by `scope`
