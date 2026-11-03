@@ -584,7 +584,7 @@ def scenario_setup(host, cli):
                                          "model": "e2e-init-model"})
             check.expect("a forced init through the host keeps the profile and the endpoint and sets the model",
                          status == 200 and (report or {}).get("active_profile") == active
-                         and cli_json("profile", "list").get("active_profile") == active
+                         and cli_json("profile", "list").get("active") == active
                          and cli_json("config", "show")["inference"]["base_url"] == base_url
                          and harness.run_cli(cli, "config", "get", "inference.model").strip() == "e2e-init-model",
                          (status, report))
@@ -606,7 +606,7 @@ def scenario_setup(host, cli):
                      and (forced or {}).get("skipped") == [], (status, forced))
         check.expect("imported through the host, seen by the CLI",
                      status == 200 and (applied or {}).get("profiles") == ["e2e-hermes"]
-                     and "You came from Hermes." in json.dumps(cli_json("profile", "show", "e2e-hermes")),
+                     and "You came from Hermes." in harness.run_cli(cli, "profile", "show", "e2e-hermes"),
                      (status, applied))
     finally:
         shutil.rmtree(work, ignore_errors=True)
