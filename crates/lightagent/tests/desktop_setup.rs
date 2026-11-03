@@ -198,8 +198,8 @@ fn init_over_the_api_does_what_the_cli_does() {
     assert_eq!(api_report["home"], arg(&by_api));
     assert_eq!(settings(&by_api), settings(&by_cli));
     let (cli_active, api_active) = (active(&by_cli), active(&by_api));
-    assert_eq!(api_active["active_profile"], "fresh", "{api_active}");
-    assert_eq!(api_active["active_profile"], cli_active["active_profile"]);
+    assert_eq!(api_active["active"], "fresh", "{api_active}");
+    assert_eq!(api_active["active"], cli_active["active"]);
 }
 
 /// A Hermes home with one profile and one skill.
@@ -258,8 +258,15 @@ fn a_hermes_import_over_the_api_is_the_clis() {
     let (status, applied) = post(&runtime, &import, json!({"from": from}));
     assert_eq!(status, 200, "{applied}");
     assert_eq!(applied["profiles"], json!(["research-bot"]), "{applied}");
-    let shown = cli_json(&home, &["profile", "show", "research-bot"]).to_string();
+    // The persona lives in SOUL.md and only the text form shows it.
+    let output = cli(&home, &["profile", "show", "research-bot"]);
+    let shown = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{shown}");
     assert!(shown.contains("You read papers carefully."), "{shown}");
+    assert_eq!(
+        cli_json(&home, &["profile", "show", "research-bot"])["description"],
+        "Reads papers"
+    );
 
     // Again: skipped, alike for the API and the CLI; forced: imported.
     let (_, again) = post(&runtime, &import, json!({"from": from}));
