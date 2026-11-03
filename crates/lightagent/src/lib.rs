@@ -1231,7 +1231,13 @@ fn sessions_cmd(action: SessionsAction, json: bool) -> Result<(), String> {
         }
         SessionsAction::Delete { id } => {
             let id = SessionId::parse(&id).map_err(|error| error.to_string())?;
-            if sessions.delete(&id).map_err(|error| error.to_string())? {
+            let deleted = sessions.delete(&id).map_err(|error| error.to_string())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "id": id.as_str(), "deleted": deleted })
+                );
+            } else if deleted {
                 println!("Deleted session {}.", id.as_str());
             } else {
                 println!("No session {} to delete.", id.as_str());
