@@ -1,0 +1,56 @@
+=== base 283cee0e7d9e04d9fa3df0969e676e9ad247c8d9
+=== message
+Row 46: a needless borrow; the CLI's own profile list and show shapes
+
+check run 41596993945 (every platform): clippy denied
+`ConfigStore::at(&paths)` in init_report, where `paths` is already a
+reference. desktop run 41596993827 (job 125786917348): the host `setup`
+scenario read `active_profile` from `lightagent --json profile list`,
+which prints `active` (only GET /profiles says `active_profile`), and
+looked for the persona in `profile show --json`, which never holds it
+(AgentProfile skips the persona: it lives in SOUL.md; the text form
+prints a `persona:` line). The backend test made the same two mistakes;
+it had not run, because the library did not build.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent/src/lib.rs
+--- find
+    let (config, _) = ConfigStore::at(&paths)
+        .update(None, |config| {
+            if let Some(base_url) = base_url {
+--- with
+    let (config, _) = ConfigStore::at(paths)
+        .update(None, |config| {
+            if let Some(base_url) = base_url {
+=== replace crates/lightagent/tests/desktop_setup.rs
+--- find
+    assert_eq!(api_active["active_profile"], "fresh", "{api_active}");
+    assert_eq!(api_active["active_profile"], cli_active["active_profile"]);
+--- with
+    assert_eq!(api_active["active"], "fresh", "{api_active}");
+    assert_eq!(api_active["active"], cli_active["active"]);
+=== replace crates/lightagent/tests/desktop_setup.rs
+--- find
+    let shown = cli_json(&home, &["profile", "show", "research-bot"]).to_string();
+    assert!(shown.contains("You read papers carefully."), "{shown}");
+--- with
+    // The persona lives in SOUL.md and only the text form shows it.
+    let output = cli(&home, &["profile", "show", "research-bot"]);
+    let shown = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{shown}");
+    assert!(shown.contains("You read papers carefully."), "{shown}");
+    assert_eq!(
+        cli_json(&home, &["profile", "show", "research-bot"])["description"],
+        "Reads papers"
+    );
+=== replace desktop/e2e/runs.py
+--- find
+                     and cli_json("profile", "list").get("active_profile") == active
+--- with
+                     and cli_json("profile", "list").get("active") == active
+=== replace desktop/e2e/runs.py
+--- find
+                     and "You came from Hermes." in json.dumps(cli_json("profile", "show", "e2e-hermes")),
+--- with
+                     and "You came from Hermes." in harness.run_cli(cli, "profile", "show", "e2e-hermes"),
+=== end
