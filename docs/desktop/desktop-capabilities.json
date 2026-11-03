@@ -117,7 +117,7 @@
    "not-applicable": 29
   },
   "parity_denominator": 227,
-  "parity_implemented": 62,
+  "parity_implemented": 68,
   "pending_decision_rows": 0,
   "not_counted_duplicates": 26
  },
@@ -4789,10 +4789,10 @@
    "backend": "api: GET /skills",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": "pending: host GET /skills scenario (row 32); backend desktop_tools.rs and browser e2e/tools.mjs passed at 62e87e6",
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_tools.rs (skills as a run loads them, with source); host: desktop/e2e/runs.py skills (GET /skills through the host: global, profile and extension skills with scope and source, row 32); browser: e2e/tools.mjs; native WebView: D8",
+   "tested_sha": "c70c2f9a6d56d78f0698a6589aa27c8ebb95b86e",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41554449463, https://github.com/dlroqa/Lightagent/actions/runs/41554449310"
   },
   {
    "id": "slash.reload",
@@ -5639,10 +5639,10 @@
    "backend": "config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6)",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_mcp.rs; host: desktop/e2e/runs.py mcp (auth reference and profile lists saved and read back through the host, row 32); browser: e2e/mcp.mjs (auth variable, other and credential profiles saved and shown by name, row 32); native WebView: D8",
+   "tested_sha": "c70c2f9a6d56d78f0698a6589aa27c8ebb95b86e",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41554449463, https://github.com/dlroqa/Lightagent/actions/runs/41554449310"
   },
   {
    "id": "mcp.server.http.untrusted_profiles",
@@ -5663,10 +5663,10 @@
    "backend": "config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6)",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_mcp.rs; host: desktop/e2e/runs.py mcp (auth reference and profile lists saved and read back through the host, row 32); browser: e2e/mcp.mjs (auth variable, other and credential profiles saved and shown by name, row 32); native WebView: D8",
+   "tested_sha": "c70c2f9a6d56d78f0698a6589aa27c8ebb95b86e",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41554449463, https://github.com/dlroqa/Lightagent/actions/runs/41554449310"
   },
   {
    "id": "mcp.server.http.credential_profiles",
@@ -5687,10 +5687,10 @@
    "backend": "config: [mcp].servers (no dedicated CLI/API operation; new typed config operation in D6)",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_mcp.rs; host: desktop/e2e/runs.py mcp (auth reference and profile lists saved and read back through the host, row 32); browser: e2e/mcp.mjs (auth variable, other and credential profiles saved and shown by name, row 32); native WebView: D8",
+   "tested_sha": "c70c2f9a6d56d78f0698a6589aa27c8ebb95b86e",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41554449463, https://github.com/dlroqa/Lightagent/actions/runs/41554449310"
   },
   {
    "id": "extension.manifest.name",
@@ -5851,10 +5851,10 @@
    "backend": "api: GET /skills",
    "permission": "local-operator",
    "data_scope": "home|profile",
-   "desktop_status": "not-started",
-   "verification": "pending: host GET /skills scenario (row 32); backend desktop_tools.rs and browser e2e/tools.mjs passed at 62e87e6",
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_tools.rs (skills as a run loads them, with source); host: desktop/e2e/runs.py skills (GET /skills through the host: global, profile and extension skills with scope and source, row 32); browser: e2e/tools.mjs; native WebView: D8",
+   "tested_sha": "c70c2f9a6d56d78f0698a6589aa27c8ebb95b86e",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41554449463, https://github.com/dlroqa/Lightagent/actions/runs/41554449310"
   },
   {
    "id": "config.inference",
@@ -6067,10 +6067,10 @@
    "backend": "api: GET/PUT /settings (subset); extract: typed config read/write",
    "permission": "local-operator",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_extensions.rs (master switch: API set = CLI list and back; per-extension enable/disable); host: desktop/e2e/runs.py extensions (switch off through the host, on by the CLI); browser: e2e/extensions.mjs (master switch off and on, enable/disable); native WebView: D8",
+   "tested_sha": "c70c2f9a6d56d78f0698a6589aa27c8ebb95b86e",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41554449463, https://github.com/dlroqa/Lightagent/actions/runs/41554449310"
   },
   {
    "id": "config.runtime",

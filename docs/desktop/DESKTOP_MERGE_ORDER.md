@@ -43,7 +43,15 @@ tree are recorded here.
 | 29 | D6-4 an explicit MCP server check, and the MCP card | https://github.com/dlroqa/Lightagent/pull/123 | `desktop/d6d-mcp-check` | `desktop/d6c-mcp-ops` (via merge commit `f9b5be6`) | `f9b5be6` | `f9b5be6` (macos-arm64 jobs waiting for runner capacity when this was written) |
 | 30 | D6-5 effective tool permissions, an MCP-free catalog, skills with their source | https://github.com/dlroqa/Lightagent/pull/124 | `desktop/d6e-tools-skills` | `desktop/d6d-mcp-check` (via merge commit `ef1984d`) | `831d05f` | `831d05f` |
 | 31 | D6-6 (new scope) import skills from a repository or folder | https://github.com/dlroqa/Lightagent/pull/125 | `desktop/d6f-skill-import` | `desktop/d6e-tools-skills` (via merge commit `62e87e6`) | `62e87e6` | `62e87e6` |
-| 32+ | D6 close-out (the three MCP auth/profile fields' browser evidence, the `config.extensions` switch), then D7-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+| 32 | D6 close-out: GET /skills through the host, MCP auth/profile fields, the extensions master switch, every client query in the contract | https://github.com/dlroqa/Lightagent/pull/126 | `desktop/d6g-close-out` | `desktop/d6f-skill-import` (`5c98b3e`) | `c70c2f9` | `c70c2f9` |
+| 33 | D6-6 the Git import path against a Git repository built on the runner | https://github.com/dlroqa/Lightagent/pull/127 | `desktop/d6h-git-fixture` | `desktop/d6g-close-out` (`c70c2f9`) | `a753206` | `a753206` |
+| 34+ | D7 (remaining CLI parity, diagnostics bundle and its redaction), then D8-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+
+**D10 decision carried:** rows 15-31 lack `providers.remove`'s
+`expected_revision` in the desktop contract (fixed at row 32), so between
+those rows the desktop app cannot remove a saved provider. Backport the
+one-line contract change to row 15 (#110) and merge it forward before
+approval, or accept the window (no desktop build ships from those states).
 
 Row 27's head is now `5cc2dad` (the uninstall `scope` contract fix, `088`); its last fully tested head is recorded in DESKTOP_PROGRESS.md when its macos-arm64 jobs finish.
 
