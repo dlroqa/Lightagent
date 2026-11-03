@@ -1630,6 +1630,46 @@ change to the subagents tests and is proposed, not made, here.
 
 Coverage: the 24 `cli.memory.*` rows → **92 of 227**.
 
+## Row 36 — D7-3: knowledge (RAG) through one shared operation set
+
+- **Integrity fix in `lightagent-rag`.** `RagStore` wrote its in-memory
+  copy back with `std::fs::write`: two writers (the CLI and the API) lost
+  each other's documents, and a reader could see a half-written index.
+  `add` now embeds first, then, under the index's lock file, reads the
+  index again, replaces that source's chunks and writes it atomically and
+  owner-only (`paths::write_private`); `clear` likewise. A unit test
+  opens two stores on one index; both sources remain.
+- One implementation (`crates/lightagent/src/rag.rs`): add (a file or a
+  folder's files; the remote index is still synced and its failure never
+  drops the local document), search (remote first when configured, else
+  hybrid local), list, clear. The CLI prints as before; `--json` gains
+  `skipped` and `notes` (what it printed to stderr). API (operator):
+  `GET|POST|DELETE /knowledge`, `GET /knowledge/search` (`q`, `top_k`);
+  POST takes an absolute path. Contract `knowledge.*`; the host refuses
+  add and clear during a profile switch.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-03 | `099`; branch `desktop/d7c-knowledge-ops`, draft PR #130 | `49109b6` / `fdba802` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41564121251 |
+| 2026-11-03 | `check`, `desktop`, `jev evaluation`, `subagents`: **success**, 24 of 24, first run | `49109b6` | https://github.com/dlroqa/Lightagent/actions/runs/41564214555, https://github.com/dlroqa/Lightagent/actions/runs/41564214582, https://github.com/dlroqa/Lightagent/actions/runs/41564214604, https://github.com/dlroqa/Lightagent/actions/runs/41564214607 |
+
+## Row 37 — D7-4: the Knowledge screen
+
+- Index a file or folder (optional source name), see indexed, skipped (with
+  the reason) and notes; search with a result count; the indexed sources
+  with chunk counts; clear (asks first, states the count). Account menus
+  and the render route list.
+- Browser `e2e/knowledge.mjs` (clears only when the harness index was
+  empty before the check) and host `runs.py knowledge`.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-03 | `100`; branch `desktop/d7d-knowledge-ui`, draft PR #131 | `c65132f` / `e82caba` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41564945835 |
+| 2026-11-03 | `check`, `desktop`, `jev evaluation`, `subagents`: **success**, 24 of 24, first run | `c65132f` | https://github.com/dlroqa/Lightagent/actions/runs/41565023807, https://github.com/dlroqa/Lightagent/actions/runs/41565023826, https://github.com/dlroqa/Lightagent/actions/runs/41565023863, https://github.com/dlroqa/Lightagent/actions/runs/41565023903 |
+
+Coverage: seven `cli.rag.*` rows → **99 of 227** (`cli.rag.add.opt.source`
+not counted: no test sets the source name yet).
+
 ## Artifacts and retention
 
 | Artifact | Run | Retention |
@@ -1708,15 +1748,17 @@ The owner's order of 2026-11-02 (fourth continuation, DESKTOP_CLAUDE_PROMPT.md �
    (not exercised; local fixture only).
 7. D7 has started: rows 34-35 (memory: shared operations, then the
    Memory screen), at 92 of 227.
-8. **Next in D7:** RAG (shared operations and a knowledge view), then
-   sessions, workers, identity and remote credentials, init, import and
-   chat, the remaining slash, setup, env and config rows, and the
-   diagnostics bundle with its redaction checks. Then D8-D10 in dependency
-   order. D8 keeps the native WebView checks (Settings, profile switching,
-   close with active runs, run controls, response actions R2-R5,
-   Extensions, MCP, the tool catalog, skill import and Memory). Before
-   merge approval (D10): the `providers.remove` window decision, then the
-   exact candidate merge sequence simulated on hosted runners and every
+8. Rows 36-37 (knowledge: shared operations with the index lock fix, then
+   the Knowledge screen) are done, at 99 of 227.
+9. **Next in D7:** sessions, workers, identity and remote credentials,
+   init, import and chat, the remaining slash, setup, env and config rows,
+   `cli.rag.add.opt.source` evidence, and the diagnostics bundle with its
+   redaction checks. Then D8-D10 in dependency order. D8 keeps the native
+   WebView checks (Settings, profile switching, close with active runs,
+   run controls, response actions R2-R5, Extensions, MCP, the tool
+   catalog, skill import, Memory and Knowledge). Before merge approval
+   (D10): the `providers.remove` window decision, then the exact
+   candidate merge sequence simulated on hosted runners and every
    candidate tree validated.
 
 Previous order (DESKTOP_CLAUDE_PROMPT.md §5), kept for reference:

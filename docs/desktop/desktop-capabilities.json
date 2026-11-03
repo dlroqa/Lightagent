@@ -117,7 +117,7 @@
    "not-applicable": 29
   },
   "parity_denominator": 227,
-  "parity_implemented": 92,
+  "parity_implemented": 99,
   "pending_decision_rows": 0,
   "not_counted_duplicates": 26
  },
@@ -3637,10 +3637,10 @@
    "backend": "extract: rag::add()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_knowledge.rs (CLI and API alike; concurrent adds keep both documents) and lightagent-rag store test (two writers); host: desktop/e2e/runs.py knowledge (add, list, search, skipped path, clear through the host, matched with the CLI); browser: e2e/knowledge.mjs (real harness); native WebView: D8",
+   "tested_sha": "c65132f6ff56b81a5dd2368ca912f5157d2f9c02",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41565023807, https://github.com/dlroqa/Lightagent/actions/runs/41565023826, https://github.com/dlroqa/Lightagent/actions/runs/41565023863, https://github.com/dlroqa/Lightagent/actions/runs/41565023903"
   },
   {
    "id": "cli.rag.add.arg.path",
@@ -3659,10 +3659,10 @@
    "backend": "extract: rag::add()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_knowledge.rs (CLI and API alike; concurrent adds keep both documents) and lightagent-rag store test (two writers); host: desktop/e2e/runs.py knowledge (add, list, search, skipped path, clear through the host, matched with the CLI); browser: e2e/knowledge.mjs (real harness); native WebView: D8",
+   "tested_sha": "c65132f6ff56b81a5dd2368ca912f5157d2f9c02",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41565023807, https://github.com/dlroqa/Lightagent/actions/runs/41565023826, https://github.com/dlroqa/Lightagent/actions/runs/41565023863, https://github.com/dlroqa/Lightagent/actions/runs/41565023903"
   },
   {
    "id": "cli.rag.add.opt.source",
@@ -3703,10 +3703,10 @@
    "backend": "extract: rag::search()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_knowledge.rs (CLI and API alike; concurrent adds keep both documents) and lightagent-rag store test (two writers); host: desktop/e2e/runs.py knowledge (add, list, search, skipped path, clear through the host, matched with the CLI); browser: e2e/knowledge.mjs (real harness); native WebView: D8",
+   "tested_sha": "c65132f6ff56b81a5dd2368ca912f5157d2f9c02",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41565023807, https://github.com/dlroqa/Lightagent/actions/runs/41565023826, https://github.com/dlroqa/Lightagent/actions/runs/41565023863, https://github.com/dlroqa/Lightagent/actions/runs/41565023903"
   },
   {
    "id": "cli.rag.search.arg.query",
@@ -3725,10 +3725,10 @@
    "backend": "extract: rag::search()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_knowledge.rs (CLI and API alike; concurrent adds keep both documents) and lightagent-rag store test (two writers); host: desktop/e2e/runs.py knowledge (add, list, search, skipped path, clear through the host, matched with the CLI); browser: e2e/knowledge.mjs (real harness); native WebView: D8",
+   "tested_sha": "c65132f6ff56b81a5dd2368ca912f5157d2f9c02",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41565023807, https://github.com/dlroqa/Lightagent/actions/runs/41565023826, https://github.com/dlroqa/Lightagent/actions/runs/41565023863, https://github.com/dlroqa/Lightagent/actions/runs/41565023903"
   },
   {
    "id": "cli.rag.search.opt.top-k",
@@ -3747,10 +3747,10 @@
    "backend": "extract: rag::search()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_knowledge.rs (CLI and API alike; concurrent adds keep both documents) and lightagent-rag store test (two writers); host: desktop/e2e/runs.py knowledge (add, list, search, skipped path, clear through the host, matched with the CLI); browser: e2e/knowledge.mjs (real harness); native WebView: D8",
+   "tested_sha": "c65132f6ff56b81a5dd2368ca912f5157d2f9c02",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41565023807, https://github.com/dlroqa/Lightagent/actions/runs/41565023826, https://github.com/dlroqa/Lightagent/actions/runs/41565023863, https://github.com/dlroqa/Lightagent/actions/runs/41565023903"
   },
   {
    "id": "cli.rag.list",
@@ -3769,10 +3769,10 @@
    "backend": "extract: rag::list()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_knowledge.rs (CLI and API alike; concurrent adds keep both documents) and lightagent-rag store test (two writers); host: desktop/e2e/runs.py knowledge (add, list, search, skipped path, clear through the host, matched with the CLI); browser: e2e/knowledge.mjs (real harness); native WebView: D8",
+   "tested_sha": "c65132f6ff56b81a5dd2368ca912f5157d2f9c02",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41565023807, https://github.com/dlroqa/Lightagent/actions/runs/41565023826, https://github.com/dlroqa/Lightagent/actions/runs/41565023863, https://github.com/dlroqa/Lightagent/actions/runs/41565023903"
   },
   {
    "id": "cli.rag.clear",
@@ -3791,10 +3791,10 @@
    "backend": "extract: rag::clear()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_knowledge.rs (CLI and API alike; concurrent adds keep both documents) and lightagent-rag store test (two writers); host: desktop/e2e/runs.py knowledge (add, list, search, skipped path, clear through the host, matched with the CLI); browser: e2e/knowledge.mjs (real harness); native WebView: D8",
+   "tested_sha": "c65132f6ff56b81a5dd2368ca912f5157d2f9c02",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41565023807, https://github.com/dlroqa/Lightagent/actions/runs/41565023826, https://github.com/dlroqa/Lightagent/actions/runs/41565023863, https://github.com/dlroqa/Lightagent/actions/runs/41565023903"
   },
   {
    "id": "cli.memory",

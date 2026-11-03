@@ -47,7 +47,9 @@ tree are recorded here.
 | 33 | D6-6 the Git import path against a Git repository built on the runner | https://github.com/dlroqa/Lightagent/pull/127 | `desktop/d6h-git-fixture` | `desktop/d6g-close-out` (`c70c2f9`) | `a753206` | `a753206` |
 | 34 | D7-1 memory through one shared operation set for the CLI, the API and the desktop | https://github.com/dlroqa/Lightagent/pull/128 | `desktop/d7a-memory-ops` | `desktop/d6h-git-fixture` (`dd83001`) | `f681980` | `f681980` |
 | 35 | D7-2 the Memory screen | https://github.com/dlroqa/Lightagent/pull/129 | `desktop/d7b-memory-ui` | `desktop/d7a-memory-ops` (`f681980`) | `630988a` | `630988a` |
-| 36+ | D7 continues (RAG, sessions, workers, identity and remote credentials, init/import/chat, the remaining slash, setup, env and config rows, the diagnostics bundle and its redaction), then D8-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+| 36 | D7-3 knowledge (RAG) through one shared operation set; the index written under a lock | https://github.com/dlroqa/Lightagent/pull/130 | `desktop/d7c-knowledge-ops` | `desktop/d7b-memory-ui` (`67ed55e`) | `49109b6` | `49109b6` |
+| 37 | D7-4 the Knowledge screen | https://github.com/dlroqa/Lightagent/pull/131 | `desktop/d7d-knowledge-ui` | `desktop/d7c-knowledge-ops` (`49109b6`) | `c65132f` | `c65132f` |
+| 38+ | D7 continues (sessions, workers, identity and remote credentials, init/import/chat, the remaining slash, setup, env and config rows, the diagnostics bundle and its redaction), then D8-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
 
 **D10 decision carried:** rows 15-31 lack `providers.remove`'s
 `expected_revision` in the desktop contract (fixed at row 32), so between
