@@ -475,6 +475,47 @@ def scenario_extensions(host, cli):
     return check
 
 
+def scenario_knowledge(host, cli):
+    """D7 through the host transport: a document indexed through the host is
+    listed by the CLI; list, search and a skipped path through the host
+    equal the CLI's; a clear through the host leaves the CLI nothing."""
+    import shutil
+    import tempfile
+
+    check = Checks("knowledge")
+    work = tempfile.mkdtemp(prefix="lightagent-e2e-knowledge-")
+
+    def cli_json(*args):
+        return json.loads(harness.run_cli(cli, "--json", *args))
+
+    try:
+        doc = os.path.join(work, "host-rivers.md")
+        with open(doc, "w", encoding="utf-8") as handle:
+            handle.write("Host rivers carry water from glaciers to the sea.\n")
+        status, added = host.fetch("POST", f"{API}/knowledge", {"path": doc})
+        check.expect("indexed through the host",
+                     status == 200 and [i.get("source") for i in (added or {}).get("indexed", [])] == ["host-rivers.md"],
+                     (status, added))
+        status, listed = host.fetch("GET", f"{API}/knowledge")
+        check.expect("the host lists what the CLI lists", status == 200 and listed == cli_json("rag", "list"),
+                     (status, listed))
+        status, hits = host.fetch("GET", f"{API}/knowledge/search?q=glaciers&top_k=2")
+        check.expect("search through the host equals the CLI's",
+                     status == 200 and hits == cli_json("rag", "search", "glaciers", "--top-k", "2"), (status, hits))
+        missing = os.path.join(work, "missing.md")
+        status, skipped = host.fetch("POST", f"{API}/knowledge", {"path": missing})
+        check.expect("a missing path skipped alike through the host and the CLI",
+                     status == 200 and len((skipped or {}).get("skipped", [])) == 1
+                     and skipped == cli_json("rag", "add", missing), (status, skipped))
+        status, cleared = host.fetch("DELETE", f"{API}/knowledge")
+        check.expect("cleared through the host, nothing left for the CLI",
+                     status == 200 and (cleared or {}).get("cleared") is True
+                     and cli_json("rag", "list").get("sources") == [], (status, cleared))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return check
+
+
 def scenario_memory(host, cli):
     """D7 through the host transport: a memory added through the host is
     listed by the CLI; list, search and candidates through the host equal
@@ -695,6 +736,7 @@ def main():
             ("tools", lambda: scenario_tools(host, cli)),
             ("skills", lambda: scenario_skills(host, cli)),
             ("memory", lambda: scenario_memory(host, cli)),
+            ("knowledge", lambda: scenario_knowledge(host, cli)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]

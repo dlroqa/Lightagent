@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { Shell } from "./components/Shell";
 import { Agent } from "./screens/Agent";
 import { AgentTools } from "./screens/AgentTools";
+import { KnowledgeScreen } from "./screens/KnowledgeScreen";
 import { MemoryScreen } from "./screens/MemoryScreen";
 import { ProfilesScreen } from "./screens/ProfilesScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
@@ -16,6 +17,7 @@ export function App() {
         <Route path="agent/tools" element={<Navigate to="/tools" replace />} />
         <Route path="tools" element={<AgentTools />} />
         <Route path="memory" element={<MemoryScreen />} />
+        <Route path="knowledge" element={<KnowledgeScreen />} />
         <Route path="profiles" element={<ProfilesScreen />} />
         <Route path="settings" element={<SettingsScreen />} />
         <Route path="*" element={<Navigate to="/" replace />} />
