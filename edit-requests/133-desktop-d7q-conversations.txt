@@ -1,0 +1,1039 @@
+=== base f17115c927ce8117dbe53b6f6fabbb9999f4d470
+=== message
+Row 51: conversations: chat continuity, search, rename, attachments, Enter, New chat
+
+Evidence for the conversation rows at every level (backend, host and
+browser), plus one product change.
+
+- Rename now edits the title in place: Enter saves (trimmed) and Escape
+  keeps the old title. It used window.prompt, and native script dialogs
+  are not available in every desktop WebView (WKWebView returns null from
+  prompt unless the host implements its text-input panel), so rename
+  could silently do nothing in the desktop app.
+- Backend (crates/lightagent/tests/desktop_conversations.rs): a
+  conversation the desktop runtime holds continues in `lightagent chat
+  --session` with its earlier turn, and one started in `lightagent chat`
+  continues over the API (the provider is sent the earlier turn both
+  ways). Search finds a conversation by what was said and by a title set
+  over the API, which `lightagent sessions show|list` read too. An
+  attachment is saved byte for byte, owner-only, beside the profile's
+  sessions; names that are not plain are refused.
+- Host (runs.py `conversations`): the same through the host transport.
+  The test driver's fetch now passes a raw body and file name as the
+  WebView's api_fetch does, so an attachment goes through the host; a name
+  that is not plain is refused by the host itself.
+- Browser (e2e/conversations.mjs): search finds what was said and opens
+  it (GET /sessions/search is what the page asked); Rename with Enter
+  and with Escape; search finds the new title; a file added to the
+  composer is uploaded and saved byte for byte; Shift+Enter starts a new
+  line, and Enter sends the draft with the attachment; New chat starts a
+  fresh conversation in the same profile.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace desktop/src-tauri/src/e2e_driver.rs
+--- find
+    Fetch {
+        method: String,
+        target: String,
+        #[serde(default)]
+        body: Option<String>,
+    },
+--- with
+    Fetch {
+        method: String,
+        target: String,
+        #[serde(default)]
+        body: Option<String>,
+        /// A raw body (an attachment) and its file name, as `api_fetch` takes them.
+        #[serde(default)]
+        body_base64: Option<String>,
+        #[serde(default)]
+        filename: Option<String>,
+    },
+=== replace desktop/src-tauri/src/e2e_driver.rs
+--- find
+        Op::Fetch {
+            method,
+            target,
+            body,
+        } => json!(crate::fetch(host, method, target, body, None, None).await?),
+--- with
+        Op::Fetch {
+            method,
+            target,
+            body,
+            body_base64,
+            filename,
+        } => json!(crate::fetch(host, method, target, body, body_base64, filename).await?),
+=== replace desktop/e2e/harness.py
+--- find
+import json
+import os
+import re
+import subprocess
+--- with
+import base64
+import json
+import os
+import re
+import subprocess
+=== replace desktop/e2e/harness.py
+--- find
+    def try_fetch(self, method, target, body=None):
+        """A fetch, or ("refused", message) when the host itself refuses it."""
+--- with
+    def upload(self, target, data, filename):
+        """A raw-body POST (an attachment), sent as the WebView sends one."""
+        result = self.call("fetch", method="POST", target=target,
+                           body_base64=base64.b64encode(data).decode("ascii"), filename=filename)
+        try:
+            value = json.loads(result["body"]) if result["body"] else None
+        except ValueError:
+            value = result["body"]
+        return result["status"], value
+
+    def try_fetch(self, method, target, body=None):
+        """A fetch, or ("refused", message) when the host itself refuses it."""
+=== replace desktop/e2e/harness.py
+--- find
+def run_cli(cli, *args):
+    out = subprocess.run([cli, *args], capture_output=True, text=True, timeout=60)
+    if out.returncode != 0:
+        raise RuntimeError(f"lightagent {' '.join(args)}: {out.stderr.strip()[:300]}")
+    return out.stdout
+--- with
+def run_cli(cli, *args):
+    out = subprocess.run([cli, *args], capture_output=True, text=True, timeout=60)
+    if out.returncode != 0:
+        raise RuntimeError(f"lightagent {' '.join(args)}: {out.stderr.strip()[:300]}")
+    return out.stdout
+
+
+def run_cli_input(cli, text, *args):
+    """`lightagent` with `text` on its standard input, which is not a terminal."""
+    out = subprocess.run([cli, *args], input=text, capture_output=True, text=True, timeout=120)
+    if out.returncode != 0:
+        raise RuntimeError(f"lightagent {' '.join(args)}: {out.stderr.strip()[:300]}")
+    return out.stdout
+=== replace desktop/e2e/runs.py
+--- find
+        "steer-hold": lambda p, turn, index: [("text", "Working"), ("gate", "steer-hold"), ("text", " done."), ("finish", "stop")],
+--- with
+        "steer-hold": lambda p, turn, index: [("text", "Working"), ("gate", "steer-hold"), ("text", " done."), ("finish", "stop")],
+        "convo": lambda p, turn, index: [("text", "Noted."), ("finish", "stop")],
+=== replace desktop/e2e/runs.py
+--- find
+    check.expect("deleted through the host, gone for the CLI",
+                 status in (200, 204) and session not in remaining, (status, remaining))
+    return check
+--- with
+    check.expect("deleted through the host, gone for the CLI",
+                 status in (200, 204) and session not in remaining, (status, remaining))
+    return check
+
+
+def scenario_conversations(host, provider, cli):
+    """D7 through the host transport: a conversation held by the desktop
+    continues in `lightagent chat --session` with its earlier turn, and one
+    started in `lightagent chat` continues through the host. Search through
+    the host finds it by what was said and by a title set through the host,
+    which the CLI reads. An attachment uploaded through the host is saved
+    byte for byte beside the profile's sessions; a name that is not plain is
+    refused by the host itself."""
+    check = Checks("conversations")
+
+    def cli_json(*args):
+        return json.loads(harness.run_cli(cli, "--json", *args))
+
+    def users(saved):
+        return [m.get("content") for m in (saved or {}).get("messages", []) if m.get("role") == "user"]
+
+    def two_turns(session):
+        return harness.wait_until(lambda: (lambda s: s if len(users(s)) >= 2 else None)(host.session(session)), timeout=30)
+
+    def carried(since):
+        # A request whose newest turn follows an earlier user turn and its answer.
+        return [r for r in provider.requests("convo")[since:]
+                if r["roles"].count("user") >= 2 and "assistant" in r["roles"]]
+
+    said = "[e2e:convo] The heron nests by the quarry."
+    session = host.new_session()
+    Stream(host, host.start_run(session, said)).finish()
+    recorded(host, session, 1)
+    since = len(provider.requests("convo"))
+    harness.run_cli_input(cli, "[e2e:convo] And the egret?\n/exit\n", "chat", "--session", session)
+    saved = two_turns(session)
+    check.expect("the CLI continued the desktop's conversation",
+                 users(saved) == [said, "[e2e:convo] And the egret?"] and harness.answers(saved) == ["Noted.", "Noted."],
+                 (users(saved), harness.answers(saved)))
+    check.expect("the CLI's turn carried the desktop's", bool(carried(since)), provider.requests("convo")[since:])
+
+    before = {s.get("id") for s in cli_json("sessions", "list")}
+    harness.run_cli_input(cli, "[e2e:convo] Started in the terminal.\n/exit\n", "chat")
+    started = [s.get("id") for s in cli_json("sessions", "list") if s.get("id") not in before]
+    check.expect("the CLI started one conversation", len(started) == 1, started)
+    if len(started) == 1:
+        since = len(provider.requests("convo"))
+        Stream(host, host.start_run(started[0], "[e2e:convo] Continued on the desktop.")).finish()
+        continued = two_turns(started[0])
+        check.expect("the host continued the CLI's conversation with its earlier turn",
+                     users(continued) == ["[e2e:convo] Started in the terminal.", "[e2e:convo] Continued on the desktop."]
+                     and bool(carried(since)), (users(continued), provider.requests("convo")[since:]))
+
+    status, found = host.fetch("GET", f"{API}/sessions/search?q=QUARRY")
+    row = next((r for r in (found or {}).get("sessions", []) if r.get("id") == session), {})
+    check.expect("search through the host finds what was said, in any case",
+                 status == 200 and row.get("matched_role") == "user" and "quarry" in (row.get("snippet") or "").lower(),
+                 (status, found))
+    status, renamed = host.fetch("PATCH", f"{API}/sessions/{session}", {"title": "  Heronry log  "})
+    shown = cli_json("sessions", "show", session)
+    listed = next((s for s in cli_json("sessions", "list") if s.get("id") == session), {})
+    check.expect("renamed through the host, trimmed, as the CLI shows and lists it",
+                 status == 200 and (renamed or {}).get("title") == "Heronry log"
+                 and shown.get("title") == "Heronry log" and listed.get("title") == "Heronry log",
+                 (status, renamed, shown.get("title"), listed.get("title")))
+    status, refused = host.fetch("PATCH", f"{API}/sessions/{session}", {"title": "   "})
+    check.expect("an empty title is refused and the title stays",
+                 status == 400 and cli_json("sessions", "show", session).get("title") == "Heronry log", (status, refused))
+    status, found = host.fetch("GET", f"{API}/sessions/search?q=HERONRY")
+    check.expect("search through the host finds the new title",
+                 status == 200 and any(r.get("id") == session for r in (found or {}).get("sessions", [])), (status, found))
+
+    data = b"field notes\n\x00\xffheron"
+    status, uploaded = host.upload(f"{API}/sessions/{session}/attachments", data, "notes 1.txt")
+    path = (uploaded or {}).get("path") or ""
+    stored = None
+    if path and os.path.isfile(path):
+        with open(path, "rb") as handle:
+            stored = handle.read()
+    check.expect("uploaded through the host and saved byte for byte, owner-only, beside the profile's sessions",
+                 status == 200 and (uploaded or {}).get("name") == "notes 1.txt" and stored == data
+                 and os.path.basename(os.path.dirname(path)) == session
+                 and os.path.basename(os.path.dirname(os.path.dirname(path))) == "attachments"
+                 and (os.name != "posix" or os.stat(path).st_mode & 0o777 == 0o600),
+                 (status, uploaded))
+    try:
+        refused = host.upload(f"{API}/sessions/{session}/attachments", data, "../escape.txt")
+    except harness.HostError as error:
+        refused = ("refused", str(error))
+    check.expect("a file name that is not plain is refused by the host", refused[0] == "refused", refused)
+    return check
+=== replace desktop/e2e/runs.py
+--- find
+            ("sessions", lambda: scenario_sessions(host, cli)),
+--- with
+            ("sessions", lambda: scenario_sessions(host, cli)),
+            ("conversations", lambda: scenario_conversations(host, provider, cli)),
+=== replace frontend/src/screens/Agent.tsx
+--- find
+  const menuButton = useRef<HTMLButtonElement | null>(null);
+  const label = row.title || "Untitled";
+  const rename = () => {
+    const title = window.prompt("Rename conversation", label);
+    if (title?.trim() && title.trim() !== label) void onUpdate(row.id, { title: title.trim() });
+    setMenuOpen(false);
+  };
+--- with
+  const [renaming, setRenaming] = useState(false);
+  const [draftTitle, setDraftTitle] = useState("");
+  const menuButton = useRef<HTMLButtonElement | null>(null);
+  const renameField = useRef<HTMLInputElement | null>(null);
+  const renameDone = useRef(false);
+  const label = row.title || "Untitled";
+  // Renamed in place, not with window.prompt: native script dialogs are not
+  // available in every desktop WebView.
+  const rename = () => {
+    setMenuOpen(false);
+    setDraftTitle(label);
+    renameDone.current = false;
+    setRenaming(true);
+  };
+  const finishRename = (save: boolean) => {
+    if (renameDone.current) return;
+    renameDone.current = true;
+    setRenaming(false);
+    const title = draftTitle.trim();
+    if (save && title && title !== label) void onUpdate(row.id, { title });
+  };
+  useEffect(() => {
+    if (!renaming) return;
+    renameField.current?.focus();
+    renameField.current?.select();
+  }, [renaming]);
+=== replace frontend/src/screens/Agent.tsx
+--- find
+        <button type="button" className="session-row__open" onClick={onOpen}
+          aria-current={active ? "true" : undefined}>
+          <span>{label}</span>
+        </button>
+--- with
+        {renaming ? (
+          <input ref={renameField} className="session-row__rename" value={draftTitle} maxLength={200}
+            aria-label={`Rename ${label}`} autoComplete="off" spellCheck={false}
+            onChange={(event) => setDraftTitle(event.target.value)}
+            onBlur={() => finishRename(true)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                finishRename(true);
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                finishRename(false);
+              }
+            }} />
+        ) : (
+          <button type="button" className="session-row__open" onClick={onOpen}
+            aria-current={active ? "true" : undefined}>
+            <span>{label}</span>
+          </button>
+        )}
+=== replace frontend/src/styles/app.css
+--- find
+.session-row__content.is-active .session-row__open {
+--- with
+.session-row__rename {
+  flex: 1;
+  min-width: 0;
+  padding: 1px 6px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.session-row__rename:focus-visible {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 0;
+}
+
+.session-row__content.is-active .session-row__open {
+=== replace e2e/render.mjs
+--- find
+import { checkSessions } from "./sessions.mjs";
+--- with
+import { checkSessions } from "./sessions.mjs";
+import { checkConversations } from "./conversations.mjs";
+=== replace e2e/render.mjs
+--- find
+    failures.push(`sessions: ${err instanceof Error ? err.message : String(err)}`);
+  }
+--- with
+    failures.push(`sessions: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Seeds a conversation; searches, renames, attaches a file, sends two turns.
+  try {
+    failures.push(...(await checkConversations(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`conversations: ${err instanceof Error ? err.message : String(err)}`);
+  }
+=== write e2e/conversations.mjs
+// Conversations against the real harness (D7). Search finds a saved
+// conversation by what was said (the page asks GET /sessions/search) and
+// opens it. Rename edits the title in place: Enter saves it trimmed, Escape
+// keeps the old one, and search then finds the new title. A file added to
+// the composer is uploaded and saved byte for byte. Shift+Enter starts a new
+// line, and Enter sends the draft with the attachment. New chat starts a
+// fresh conversation in the same profile. The harness has no model, so a
+// sent run fails; the check is what the page sent.
+// crates/lightagent/tests/desktop_conversations.rs proves API = CLI;
+// desktop/e2e/runs.py `conversations` covers the host and `lightagent chat`.
+
+import { readFileSync } from "node:fs";
+
+import { seededSession } from "./delivery.mjs";
+
+const SAID = "The heron nests by the old quarry";
+const TITLE = "Heronry field log";
+const NOTE = Buffer.from("field notes\nheron, quarry\n");
+
+export async function checkConversations(browser, base, outDir) {
+  const failures = [];
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const api = `${base}/api/lightagent/v1`;
+  const searches = [];
+  const sent = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === "/api/lightagent/v1/sessions/search") searches.push(url.searchParams.get("q"));
+    if (url.pathname === "/api/lightagent/v1/runs" && request.method() === "POST") {
+      try {
+        sent.push(JSON.parse(request.postData() ?? "{}"));
+      } catch {
+        sent.push({});
+      }
+    }
+  });
+  const created = [];
+  const sessionOf = async (id) => (await fetch(`${api}/sessions/${encodeURIComponent(id)}`)).json();
+  const until = async (what, probe, timeout = 15000) => {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      if (await probe()) return;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+    throw new Error(`timed out waiting for ${what}`);
+  };
+  const step = async (name, body) => {
+    try {
+      await body();
+      return true;
+    } catch (err) {
+      const text = await page.evaluate(() => document.body.innerText).catch(() => "");
+      const message = err instanceof Error ? err.message.split("\n")[0] : String(err);
+      failures.push(`conversations: ${name}: ${message} [page ends: ${text.replace(/\s+/g, " ").slice(-300)}]`);
+      await page.screenshot({ path: `${outDir}/conversations-failed-${name.replace(/\W+/g, "-")}.png` }).catch(() => {});
+      return false;
+    }
+  };
+  const searchFor = async (term, expected) => {
+    await page.getByRole("button", { name: "Search chats" }).first().click({ timeout: 10000 });
+    const dialog = page.getByRole("dialog", { name: "Search chats" });
+    await dialog.getByRole("textbox", { name: "Search agent conversations and messages" }).fill(term);
+    const result = dialog.locator("button.chat-search__result").filter({ hasText: expected }).first();
+    await result.waitFor({ timeout: 10000 });
+    if (!searches.includes(term)) throw new Error(`the page searched ${JSON.stringify(searches)}, not “${term}”`);
+    return result;
+  };
+  // The row's actions show while it is hovered or focused.
+  const openRename = async (label) => {
+    const row = page.locator("li.session-row").filter({ hasText: label }).first();
+    await row.hover();
+    await row.getByRole("button", { name: `More actions for ${label}` }).click({ timeout: 10000 });
+    await page.getByRole("menu", { name: `Actions for ${label}` }).getByRole("menuitem", { name: /Rename/ })
+      .click({ timeout: 10000 });
+    const field = page.getByRole("textbox", { name: `Rename ${label}` });
+    await field.waitFor({ timeout: 5000 });
+    return field;
+  };
+  try {
+    const id = await seededSession(base, SAID);
+    created.push(id);
+    const listed = (await (await fetch(`${api}/sessions`)).json()).sessions ?? [];
+    const label = listed.find((session) => session.id === id)?.title || SAID;
+    await page.goto(`${base}/#/`);
+
+    const opened = await step("search finds what was said and opens the conversation", async () => {
+      const result = await searchFor("old quarry", "old quarry");
+      await page.screenshot({ path: `${outDir}/conversations-search.png` });
+      await result.click({ timeout: 10000 });
+      await page.getByRole("dialog", { name: "Search chats" }).waitFor({ state: "detached", timeout: 5000 });
+      await page.locator('li.session-row .session-row__open[aria-current="true"]').filter({ hasText: label })
+        .waitFor({ timeout: 10000 });
+    });
+
+    const renamed = opened && await step("Rename saves a trimmed title in place with Enter", async () => {
+      const field = await openRename(label);
+      const initial = await field.inputValue();
+      if (initial !== label) throw new Error(`the field starts as “${initial}”`);
+      await field.fill(`  ${TITLE}  `);
+      await page.screenshot({ path: `${outDir}/conversations-rename.png` });
+      await field.press("Enter");
+      await page.locator("li.session-row").filter({ hasText: TITLE }).first().waitFor({ timeout: 10000 });
+      await until("the server to hold the new title", async () => (await sessionOf(id)).title === TITLE);
+    });
+    if (renamed) {
+      await step("Escape keeps the title", async () => {
+        const field = await openRename(TITLE);
+        await field.fill("Not this title");
+        await field.press("Escape");
+        await field.waitFor({ state: "detached", timeout: 5000 });
+        await page.locator("li.session-row").filter({ hasText: TITLE }).first().waitFor({ timeout: 5000 });
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const title = (await sessionOf(id)).title;
+        if (title !== TITLE) throw new Error(`Escape changed the title to “${title}”`);
+      });
+      await step("search finds the new title", async () => {
+        const result = await searchFor("heronry", TITLE);
+        await result.click({ timeout: 10000 });
+        await page.getByRole("dialog", { name: "Search chats" }).waitFor({ state: "detached", timeout: 5000 });
+      });
+    }
+
+    let attached = null;
+    if (opened) {
+      await step("a file added to the composer is uploaded and saved byte for byte", async () => {
+        const response = page.waitForResponse((answer) => answer.request().method() === "POST"
+          && answer.url().includes(`/sessions/${id}/attachments`), { timeout: 15000 });
+        await page.locator("input.composer-attachment-input")
+          .setInputFiles({ name: "field notes.txt", mimeType: "text/plain", buffer: NOTE });
+        const answer = await response;
+        const saved = await answer.json();
+        if (answer.status() !== 200 || saved.name !== "field notes.txt") {
+          throw new Error(`the upload answered ${answer.status()} ${JSON.stringify(saved)}`);
+        }
+        if (!readFileSync(saved.path).equals(NOTE)) throw new Error("the saved attachment differs from the file");
+        await page.getByLabel("Attached files").getByText("field notes.txt").waitFor({ timeout: 5000 });
+        attached = saved;
+      });
+
+      await step("Shift+Enter starts a new line and Enter sends the draft with the attachment", async () => {
+        const composer = page.getByRole("textbox", { name: "Ask Lightagent" });
+        await composer.click();
+        await composer.pressSequentially("First line");
+        await composer.press("Shift+Enter");
+        await composer.pressSequentially("second line");
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        if (sent.length !== 0) throw new Error("Shift+Enter sent the draft");
+        const draft = await composer.inputValue();
+        if (draft !== "First line\nsecond line") throw new Error(`the draft is ${JSON.stringify(draft)}`);
+        await composer.press("Enter");
+        await until("the page to send the draft", async () => sent.length === 1, 10000);
+        const [message] = sent;
+        if (message.session_id !== id || !message.message?.startsWith("First line\nsecond line")) {
+          throw new Error(`the page sent ${JSON.stringify(message)}`);
+        }
+        if (attached && !message.message.includes(attached.path)) throw new Error("the sent draft does not name the attachment");
+        await until("the run to settle", async () => ((await sessionOf(id)).runs ?? []).length >= 2);
+      });
+    }
+
+    await step("New chat starts a fresh conversation in the same profile", async () => {
+      await page.getByRole("button", { name: "New chat" }).first().click({ timeout: 10000 });
+      await page.locator(".agent-welcome").waitFor({ timeout: 10000 });
+      const composer = page.getByRole("textbox", { name: "Ask Lightagent" });
+      const draft = await composer.inputValue();
+      if (draft !== "") throw new Error(`the new conversation starts with ${JSON.stringify(draft)}`);
+      await page.screenshot({ path: `${outDir}/conversations-new-chat.png` });
+      const before = sent.length;
+      await composer.pressSequentially("A fresh start");
+      await composer.press("Enter");
+      await until("the page to send the first turn", async () => sent.length === before + 1, 10000);
+      const fresh = sent[before].session_id;
+      if (!fresh || fresh === id) throw new Error(`the first turn went to ${JSON.stringify(fresh)}`);
+      created.push(fresh);
+      const [first, next] = [await sessionOf(id), await sessionOf(fresh)];
+      if (!next.profile || next.profile !== first.profile) {
+        throw new Error(`the profiles are ${first.profile} and ${next.profile}`);
+      }
+    });
+    if (errors.length) failures.push(`conversations: page errors: ${errors.join("; ")}`);
+  } catch (err) {
+    failures.push(`conversations: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  } finally {
+    await page.close();
+    for (const id of created) {
+      // A run that is still settling keeps its session busy for a moment.
+      const deadline = Date.now() + 10000;
+      while (Date.now() < deadline) {
+        const answer = await fetch(`${api}/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => null);
+        if (!answer || answer.status !== 409) break;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+  }
+  return failures;
+}
+=== write crates/lightagent/tests/desktop_conversations.rs
+//! Conversations through one store (D7): a conversation the desktop
+//! runtime holds continues in `lightagent chat --session` with its earlier
+//! turn, and one started in `lightagent chat` continues over the runtime's
+//! API. Search finds a conversation by what was said and by a title set over
+//! the API, which `lightagent sessions show|list` read too. An attachment is
+//! saved byte for byte, owner-only, beside the profile's sessions; a name
+//! that is not plain is refused. Every process here is separate: the
+//! runtime, the provider, the CLI and this test.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+
+const KEY: &str = "a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192";
+const MODELS: &str = r#"{"object":"list","data":[{"id":"m1"}]}"#;
+const API: &str = "/api/lightagent/v1";
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-conversations-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+fn connect(runtime: &Runtime) -> TcpStream {
+    let stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    stream
+}
+
+/// The status and raw body of the response on `stream`.
+fn response(mut stream: TcpStream) -> (u16, String) {
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, raw)
+}
+
+/// One authenticated JSON request.
+fn call(runtime: &Runtime, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    let mut stream = connect(runtime);
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    response(stream)
+}
+
+/// An attachment as the WebUI uploads one: raw bytes, named by a header.
+fn upload(runtime: &Runtime, session: &str, filename: &str, bytes: &[u8]) -> (u16, String) {
+    let mut stream = connect(runtime);
+    let head = format!(
+        "POST {API}/sessions/{session}/attachments HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nX-Lightagent-Filename: {filename}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        runtime.addr,
+        bytes.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    stream.write_all(bytes).expect("body");
+    response(stream)
+}
+
+fn parsed(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|error| panic!("{error}: {raw}"))
+}
+
+fn cli(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent")
+}
+
+fn cli_json(home: &Path, args: &[&str]) -> Value {
+    let mut all = vec!["--json"];
+    all.extend_from_slice(args);
+    let output = cli(home, &all);
+    assert!(
+        output.status.success(),
+        "lightagent {all:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("CLI JSON")
+}
+
+/// `lightagent chat` with `lines` on its standard input, which is not a
+/// terminal. A chat still running after two minutes fails the test.
+fn chat(home: &Path, args: &[&str], lines: &str) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .arg("chat")
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start lightagent chat");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(lines.as_bytes())
+        .expect("lines");
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("chat status") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("lightagent chat {args:?} did not finish");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    assert!(status.success(), "lightagent chat {args:?}: {stderr}");
+}
+
+/// Read one request; return its head and body.
+fn read_request(stream: &mut TcpStream) -> Option<(String, String)> {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&bytes[..end]).into_owned();
+            let length = head
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|value| value.trim().parse::<usize>().unwrap_or(0))
+                })
+                .unwrap_or(0);
+            if bytes.len() >= end + 4 + length {
+                let body = String::from_utf8_lossy(&bytes[end + 4..end + 4 + length]).into_owned();
+                return Some((head, body));
+            }
+        }
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => return None,
+            Ok(read) => bytes.extend_from_slice(&buffer[..read]),
+        }
+    }
+}
+
+fn sse(chunks: &[Value]) -> String {
+    let mut response =
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n"
+            .to_owned();
+    for chunk in chunks {
+        response.push_str(&format!("data: {chunk}\n\n"));
+    }
+    response.push_str("data: [DONE]\n\n");
+    response
+}
+
+/// A provider that answers every turn "Noted." and keeps each request body.
+fn provider() -> (String, Arc<Mutex<Vec<Value>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let url = format!("http://{}", listener.local_addr().expect("address"));
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::clone(&bodies);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let kept = Arc::clone(&kept);
+            std::thread::spawn(move || {
+                let Some((head, body)) = read_request(&mut stream) else {
+                    return;
+                };
+                if head.starts_with("GET") {
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{MODELS}",
+                        MODELS.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    return;
+                }
+                kept.lock()
+                    .expect("bodies")
+                    .push(serde_json::from_str(&body).unwrap_or(Value::Null));
+                let answer = sse(&[
+                    json!({"choices":[{"index":0,"delta":{"role":"assistant","content":"Noted."}}]}),
+                    json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+                ]);
+                let _ = stream.write_all(answer.as_bytes());
+            });
+        }
+    });
+    (url, bodies)
+}
+
+/// A message's text, whether a string or a list of parts.
+fn text(message: &Value) -> String {
+    match &message["content"] {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .collect(),
+        _ => String::new(),
+    }
+}
+
+/// Whether the provider was sent `latest` as the newest user turn, after
+/// `earlier` and an answer.
+fn carried(bodies: &Mutex<Vec<Value>>, latest: &str, earlier: &str) -> bool {
+    bodies.lock().expect("bodies").iter().any(|body| {
+        let messages = body["messages"].as_array().cloned().unwrap_or_default();
+        let Some(last) = messages.iter().rposition(|message| message["role"] == "user") else {
+            return false;
+        };
+        let before = &messages[..last];
+        text(&messages[last]).contains(latest)
+            && before
+                .iter()
+                .any(|message| message["role"] == "user" && text(message).contains(earlier))
+            && before.iter().any(|message| message["role"] == "assistant")
+    })
+}
+
+/// What `role` said in a saved session, in order.
+fn said_by(session: &Value, role: &str) -> Vec<String> {
+    session["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|message| message["role"] == role)
+        .map(text)
+        .collect()
+}
+
+fn setup(label: &str) -> (PathBuf, Runtime, Arc<Mutex<Vec<Value>>>) {
+    let home = scratch_home(label);
+    let (url, bodies) = provider();
+    let output = cli(&home, &["config", "set", "inference.base_url", &url]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let runtime = start(&home);
+    (home, runtime, bodies)
+}
+
+fn new_session(runtime: &Runtime) -> String {
+    let (status, raw) = call(runtime, "POST", &format!("{API}/sessions"), Some("{}"));
+    assert_eq!(status, 201, "{raw}");
+    parsed(&raw)["id"].as_str().expect("session id").to_owned()
+}
+
+/// One turn in `session` over the API, waited for until it completes.
+fn turn(runtime: &Runtime, session: &str, message: &str) {
+    let body = json!({ "message": message, "session_id": session }).to_string();
+    let (status, raw) = call(runtime, "POST", &format!("{API}/runs"), Some(&body));
+    assert_eq!(status, 202, "{raw}");
+    let run = parsed(&raw)["id"].as_str().expect("run id").to_owned();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (status, raw) = call(runtime, "GET", &format!("{API}/runs/{run}"), None);
+        assert_eq!(status, 200, "{raw}");
+        let state = parsed(&raw)["status"].as_str().unwrap_or_default().to_owned();
+        if state == "completed" {
+            return;
+        }
+        assert!(
+            !matches!(state.as_str(), "failed" | "cancelled"),
+            "the turn ended {state}: {raw}"
+        );
+        assert!(Instant::now() < deadline, "the turn did not complete: {raw}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn session(runtime: &Runtime, id: &str) -> Value {
+    let (status, raw) = call(runtime, "GET", &format!("{API}/sessions/{id}"), None);
+    assert_eq!(status, 200, "{raw}");
+    parsed(&raw)
+}
+
+fn search(runtime: &Runtime, query: &str) -> Vec<Value> {
+    let (status, raw) = call(
+        runtime,
+        "GET",
+        &format!("{API}/sessions/search?q={query}"),
+        None,
+    );
+    assert_eq!(status, 200, "{raw}");
+    parsed(&raw)["sessions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn ids(listed: &Value) -> Vec<String> {
+    listed
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row["id"].as_str())
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn a_conversation_continues_between_the_desktop_and_lightagent_chat() {
+    let (home, runtime, bodies) = setup("continue");
+    let id = new_session(&runtime);
+    turn(&runtime, &id, "The heron nests by the quarry.");
+
+    // `chat --session` resumes the desktop's conversation with its turn.
+    chat(&home, &["--session", &id], "And the egret?\n/exit\n");
+    let saved = session(&runtime, &id);
+    assert_eq!(
+        said_by(&saved, "user"),
+        ["The heron nests by the quarry.", "And the egret?"],
+        "{saved}"
+    );
+    assert_eq!(said_by(&saved, "assistant"), ["Noted.", "Noted."], "{saved}");
+    assert!(
+        carried(&bodies, "And the egret?", "The heron nests by the quarry."),
+        "the CLI's turn carried the desktop's"
+    );
+
+    // A conversation started in `chat` continues over the API.
+    let before = ids(&cli_json(&home, &["sessions", "list"]));
+    chat(&home, &[], "Started in the terminal.\n/exit\n");
+    let started: Vec<String> = ids(&cli_json(&home, &["sessions", "list"]))
+        .into_iter()
+        .filter(|listed| !before.contains(listed))
+        .collect();
+    assert_eq!(started.len(), 1, "{started:?}");
+    turn(&runtime, &started[0], "Continued on the desktop.");
+    let saved = session(&runtime, &started[0]);
+    assert_eq!(
+        said_by(&saved, "user"),
+        ["Started in the terminal.", "Continued on the desktop."],
+        "{saved}"
+    );
+    assert!(
+        carried(&bodies, "Continued on the desktop.", "Started in the terminal."),
+        "the desktop's turn carried the CLI's"
+    );
+}
+
+#[test]
+fn search_rename_and_attachments_share_the_clis_store() {
+    let (home, runtime, _bodies) = setup("store");
+    let id = new_session(&runtime);
+    turn(&runtime, &id, "The heron nests by the quarry.");
+
+    // Search: by what was said, in any case; nothing for what was not.
+    let found = search(&runtime, "QUARRY");
+    let row = found
+        .iter()
+        .find(|row| row["id"] == id.as_str())
+        .unwrap_or_else(|| panic!("not found: {found:?}"));
+    assert_eq!(row["matched_role"], "user", "{row}");
+    assert!(
+        row["snippet"]
+            .as_str()
+            .is_some_and(|snippet| snippet.to_lowercase().contains("quarry")),
+        "{row}"
+    );
+    assert!(search(&runtime, "absentword").is_empty());
+
+    // Rename: trimmed, read by the CLI, found by search; an empty title is
+    // refused and changes nothing.
+    let path = format!("{API}/sessions/{id}");
+    let (status, raw) = call(
+        &runtime,
+        "PATCH",
+        &path,
+        Some(r#"{"title":"  Heronry log  "}"#),
+    );
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(parsed(&raw)["title"], "Heronry log", "{raw}");
+    let shown = cli_json(&home, &["sessions", "show", &id]);
+    assert_eq!(shown["title"], "Heronry log", "{shown}");
+    let listed = cli_json(&home, &["sessions", "list"]);
+    let row = listed
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["id"] == id.as_str()))
+        .unwrap_or_else(|| panic!("not listed: {listed}"));
+    assert_eq!(row["title"], "Heronry log", "{row}");
+    assert!(
+        search(&runtime, "HERONRY")
+            .iter()
+            .any(|row| row["id"] == id.as_str()),
+        "search finds the new title"
+    );
+    let (status, raw) = call(&runtime, "PATCH", &path, Some(r#"{"title":"   "}"#));
+    assert_eq!(status, 400, "{raw}");
+    assert_eq!(
+        cli_json(&home, &["sessions", "show", &id])["title"],
+        "Heronry log"
+    );
+
+    // An attachment: saved byte for byte, owner-only, beside the profile's
+    // sessions. A name that is not plain is refused.
+    let bytes = b"field notes\n\x00\xffheron";
+    let (status, raw) = upload(&runtime, &id, "notes 1.txt", bytes);
+    assert_eq!(status, 200, "{raw}");
+    let saved = parsed(&raw);
+    assert_eq!(saved["name"], "notes 1.txt", "{saved}");
+    let file = PathBuf::from(saved["path"].as_str().expect("path"));
+    assert_eq!(std::fs::read(&file).expect("saved"), bytes);
+    assert!(
+        file.parent()
+            .is_some_and(|dir| dir.ends_with(Path::new("attachments").join(&id))),
+        "{}",
+        file.display()
+    );
+    assert!(
+        file.canonicalize()
+            .expect("canonical")
+            .starts_with(home.canonicalize().expect("canonical home")),
+        "{}",
+        file.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&file)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+    }
+    for name in ["../escape.txt", "", "a/b.txt"] {
+        let (status, raw) = upload(&runtime, &id, name, b"x");
+        assert_eq!(status, 400, "{name:?}: {raw}");
+    }
+    assert!(!file.with_file_name("b.txt").exists());
+}
+=== end
