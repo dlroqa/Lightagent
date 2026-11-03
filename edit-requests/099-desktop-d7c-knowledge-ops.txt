@@ -1,0 +1,1201 @@
+=== base 67ed55e7e885a24e4afc120124f14306a71477a2
+=== message
+D7-3: knowledge (RAG) through one shared operation set; the index is written under a lock
+
+- lightagent-rag: RagStore wrote its in-memory copy back with
+  std::fs::write, so two writers (the CLI and, from now on, the API)
+  lost each other's documents, and a reader could see a half-written
+  index. add embeds first, then, under the index's lock file, reads the
+  index again, replaces that source's chunks and writes it atomically and
+  owner-only (paths::write_private, as the module doc promises); clear
+  does the same. Single-writer behavior is unchanged. A test: two stores
+  opened on one index each add a source; both remain (the old code kept
+  only the second).
+- crate lightagent rag: one implementation of add (a file, or every file
+  in a folder; the remote index is still synced and a remote failure
+  never drops the local document), search (remote first when configured,
+  else hybrid local), list and clear. The CLI prints as before; its
+  --json gains `skipped` and `notes` (what it printed to stderr), and
+  rag::perform answers the API with the same JSON.
+- ops::RagRequest and RunFactory::rag (default: unavailable).
+- API (operator): GET|POST|DELETE /knowledge, GET /knowledge/search
+  (`q`, `top_k`). POST takes an absolute file or folder path. Contract
+  knowledge.*; the host refuses add and clear during a profile switch.
+  Four backend inventory rows (not counted).
+- Tests (separate processes): CLI and API list, search and add alike; a
+  relative path refused; a missing path reported as skipped by both;
+  CLI and API adds of different documents at the same time keep both;
+  clear over the API empties the CLI's list.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-rag/src/store.rs
+--- find
+    ) -> Result<usize, String> {
+        self.records.retain(|record| record.source != source);
+        let chunks = chunk(text, max_chars, overlap);
+        if chunks.is_empty() {
+            self.persist().map_err(|error| error.to_string())?;
+            return Ok(0);
+        }
+        // One batched semantic call for the whole document, index-aligned to
+        // `chunks`; a failure degrades to lexical-only rather than aborting.
+        let semantic_vectors: Option<Vec<Vec<f32>>> = match semantic {
+            Some(embedder) => match embedder.embed(&chunks).await {
+                Ok(vectors) if vectors.len() == chunks.len() => Some(vectors),
+                _ => None,
+            },
+            None => None,
+        };
+
+        let mut added = 0;
+        for (index, piece) in chunks.iter().enumerate() {
+            let vector = lexical.embed(piece);
+            let semantic = semantic_vectors
+                .as_ref()
+                .and_then(|all| all.get(index).cloned());
+            if vector.iter().all(|value| *value == 0.0) && semantic.is_none() {
+                continue; // nothing to match on
+            }
+            self.records.push(Record {
+                source: source.to_owned(),
+                chunk: index,
+                text: piece.clone(),
+                vector,
+                semantic,
+            });
+            added += 1;
+        }
+        self.persist().map_err(|error| error.to_string())?;
+        Ok(added)
+    }
+--- with
+    ) -> Result<usize, String> {
+        let chunks = chunk(text, max_chars, overlap);
+        // One batched semantic call for the whole document, index-aligned to
+        // `chunks`; a failure degrades to lexical-only rather than aborting.
+        let semantic_vectors: Option<Vec<Vec<f32>>> = match semantic {
+            Some(embedder) if !chunks.is_empty() => match embedder.embed(&chunks).await {
+                Ok(vectors) if vectors.len() == chunks.len() => Some(vectors),
+                _ => None,
+            },
+            _ => None,
+        };
+
+        let mut fresh = Vec::new();
+        for (index, piece) in chunks.iter().enumerate() {
+            let vector = lexical.embed(piece);
+            let semantic = semantic_vectors
+                .as_ref()
+                .and_then(|all| all.get(index).cloned());
+            if vector.iter().all(|value| *value == 0.0) && semantic.is_none() {
+                continue; // nothing to match on
+            }
+            fresh.push(Record {
+                source: source.to_owned(),
+                chunk: index,
+                text: piece.clone(),
+                vector,
+                semantic,
+            });
+        }
+        let added = fresh.len();
+        // Embedded first; then, under the lock, on the index as it is now, so
+        // a document another writer added meanwhile is kept.
+        self.mutate(|records| {
+            records.retain(|record| record.source != source);
+            records.extend(fresh);
+        })
+        .map_err(|error| error.to_string())?;
+        Ok(added)
+    }
+=== replace crates/lightagent-rag/src/store.rs
+--- find
+    /// Drop every record and persist the empty index.
+    pub fn clear(&mut self) -> io::Result<()> {
+        self.records.clear();
+        self.persist()
+    }
+
+    fn persist(&self) -> io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+--- with
+    /// Drop every record and persist the empty index.
+    pub fn clear(&mut self) -> io::Result<()> {
+        self.mutate(Vec::clear)
+    }
+
+    /// Change the index under its lock file: read it again from disk, apply
+    /// `change`, and write the result atomically. Two writers (the CLI and
+    /// the API) then never drop each other's documents.
+    fn mutate(&mut self, change: impl FnOnce(&mut Vec<Record>)) -> io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let lock = options.open(self.path.with_extension("lock"))?;
+        lock.lock()?;
+        let mut fresh = Self::open(&self.path)?;
+        change(&mut fresh.records);
+        fresh.persist()?;
+        self.records = fresh.records;
+        Ok(())
+    }
+
+    fn persist(&self) -> io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+=== replace crates/lightagent-rag/src/store.rs
+--- find
+        std::fs::write(&self.path, out)
+    }
+}
+--- with
+        lightagent_core::paths::write_private(&self.path, out.as_bytes())
+    }
+}
+=== replace crates/lightagent-rag/src/store.rs
+--- find
+    fn scratch_index() -> PathBuf {
+--- with
+    #[tokio::test]
+    async fn two_writers_keep_each_others_documents() {
+        let path = scratch_index();
+        let mut first = RagStore::open(&path).unwrap();
+        let mut second = RagStore::open(&path).unwrap();
+        first
+            .add("alpha", "alpha document about rivers", &HashingEmbedder, None, 400, 0)
+            .await
+            .unwrap();
+        second
+            .add("beta", "beta document about mountains", &HashingEmbedder, None, 400, 0)
+            .await
+            .unwrap();
+        let mut sources: Vec<String> = RagStore::open(&path)
+            .unwrap()
+            .sources()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        sources.sort();
+        assert_eq!(sources, vec!["alpha".to_owned(), "beta".to_owned()]);
+        second.clear().unwrap();
+        assert!(RagStore::open(&path).unwrap().sources().is_empty());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    fn scratch_index() -> PathBuf {
+=== replace crates/lightagent-api/src/ops.rs
+--- find
+/// A stable error category, for the UI to act on without parsing messages.
+--- with
+/// One knowledge (RAG) operation (`lightagent rag …`) on the active
+/// profile's index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RagRequest {
+    List,
+    /// Index a file, or every file in a folder.
+    Add {
+        path: String,
+        source: Option<String>,
+    },
+    Search {
+        query: String,
+        top_k: Option<usize>,
+    },
+    Clear,
+}
+
+/// A stable error category, for the UI to act on without parsing messages.
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    /// Tools currently visible to the factory's active target.
+    async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
+--- with
+    /// A knowledge (RAG) operation on the active profile's index, performed
+    /// by the embedder that owns it, answered with the JSON
+    /// `lightagent rag … --json` prints. The default refuses.
+    async fn rag(
+        &self,
+        _request: crate::ops::RagRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
+    /// Tools currently visible to the factory's active target.
+    async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    /// Perform a memory operation through the factory (see [`crate::ops`]).
+--- with
+    /// Perform a knowledge (RAG) operation through the factory.
+    pub async fn rag(
+        &self,
+        request: crate::ops::RagRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.rag(request).await
+    }
+
+    /// Perform a memory operation through the factory (see [`crate::ops`]).
+=== replace crates/lightagent/src/serve.rs
+--- find
+    async fn memory(
+--- with
+    async fn rag(
+        &self,
+        request: lightagent_api::ops::RagRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        crate::rag::perform(&LightagentPaths::rooted_at(&self.root), request).await
+    }
+
+    async fn memory(
+=== replace crates/lightagent/src/rag.rs
+--- find
+/// Resolve the active profile's index path and the loaded config.
+fn active_index() -> Result<(PathBuf, Config, String), String> {
+    let paths = LightagentPaths::resolve().map_err(|error| error.to_string())?;
+    let config = ConfigStore::at(&paths)
+        .load()
+        .map_err(|error| error.to_string())?;
+    let store = ProfileStore::new(paths.root());
+    let active = store
+        .active()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "no active profile — run `lightagent init` first".to_owned())?;
+    let dir = store.handle(&active).dir().to_path_buf();
+    Ok((index_path(&dir), config, active.to_string()))
+}
+
+/// `rag add <path>` — index a file, or every file in a directory.
+pub async fn add(path: PathBuf, source: Option<String>, json: bool) -> Result<(), String> {
+    let (index, config, profile) = active_index()?;
+    let mut store = RagStore::open(&index).map_err(|error| error.to_string())?;
+    let embedder = HashingEmbedder;
+    let semantic = semantic_embedder(&config);
+
+    let mut targets = Vec::new();
+    if path.is_dir() {
+        let entries = std::fs::read_dir(&path).map_err(|error| error.to_string())?;
+        for entry in entries.flatten() {
+            if entry.path().is_file() {
+                targets.push(entry.path());
+            }
+        }
+        targets.sort();
+    } else {
+        targets.push(path.clone());
+    }
+
+    let mut total = 0;
+    let mut indexed = Vec::new();
+    for target in targets {
+        let text = match std::fs::read_to_string(&target) {
+            Ok(text) => text,
+            Err(error) => {
+                eprintln!("· skipping {}: {error}", target.display());
+                continue;
+            }
+        };
+        let name = source.clone().unwrap_or_else(|| {
+            target
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| target.display().to_string())
+        });
+        let added = store
+            .add(
+                &name,
+                &text,
+                &embedder,
+                semantic.as_deref(),
+                config.rag.max_chunk_chars,
+                config.rag.chunk_overlap_chars,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        // The local write succeeds independently. A remote outage must never
+        // make an indexed document disappear from this profile's RAG store.
+        if let Some(remote) = RemoteRag::from_config(&config, &profile)
+            && let Err(error) = remote
+                .upsert(
+                    &name,
+                    &text,
+                    config.rag.max_chunk_chars,
+                    config.rag.chunk_overlap_chars,
+                )
+                .await
+        {
+            eprintln!("· remote RAG sync skipped for {name}: {error}");
+        }
+        total += added;
+        indexed.push((name, added));
+    }
+
+    if json {
+        let value = serde_json::json!({
+            "indexed": indexed.iter().map(|(n, c)| serde_json::json!({ "source": n, "chunks": c })).collect::<Vec<_>>(),
+            "total_chunks": total,
+        });
+        println!("{value:#}");
+    } else {
+        for (name, added) in &indexed {
+            println!("indexed {name} ({added} chunks)");
+        }
+        println!("{total} chunk(s) added.");
+    }
+    Ok(())
+}
+
+/// `rag search <query>` — the best passages for a query.
+pub async fn search(query: String, top_k: Option<usize>, json: bool) -> Result<(), String> {
+    let (index, config, profile) = active_index()?;
+    let store = RagStore::open(&index).map_err(|error| error.to_string())?;
+    let k = top_k.unwrap_or(config.rag.top_k).max(1);
+    let semantic = semantic_embedder(&config);
+    let hits = match RemoteRag::from_config(&config, profile) {
+        Some(remote) => match remote.search(&query, k).await {
+            Ok(hits) if !hits.is_empty() => hits,
+            _ => {
+                store
+                    .search(&query, &HashingEmbedder, semantic.as_deref(), k)
+                    .await
+            }
+        },
+        None => {
+            store
+                .search(&query, &HashingEmbedder, semantic.as_deref(), k)
+                .await
+        }
+    };
+
+    if json {
+        let value = serde_json::json!({
+            "query": query,
+            "hits": hits.iter().map(|hit| serde_json::json!({
+                "source": hit.source, "score": hit.score, "text": hit.text,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{value:#}");
+        return Ok(());
+    }
+    if hits.is_empty() {
+        println!("No relevant passages found.");
+        return Ok(());
+    }
+    for (rank, hit) in hits.iter().enumerate() {
+        println!("[{}] {} (score {:.2})", rank + 1, hit.source, hit.score);
+        println!("{}\n", hit.text);
+    }
+    Ok(())
+}
+
+/// `rag list` — the indexed sources and their chunk counts.
+pub fn list(json: bool) -> Result<(), String> {
+    let (index, _, _) = active_index()?;
+    let store = RagStore::open(&index).map_err(|error| error.to_string())?;
+    let sources = store.sources();
+    if json {
+        let value = serde_json::json!({
+            "sources": sources.iter().map(|(n, c)| serde_json::json!({ "source": n, "chunks": c })).collect::<Vec<_>>(),
+            "total_chunks": store.len(),
+        });
+        println!("{value:#}");
+        return Ok(());
+    }
+    if sources.is_empty() {
+        println!("Nothing indexed. Add documents with `lightagent rag add <path>`.");
+        return Ok(());
+    }
+    for (name, count) in sources {
+        println!("{name}  ({count} chunks)");
+    }
+    Ok(())
+}
+
+/// `rag clear` — empty the index.
+pub fn clear(json: bool) -> Result<(), String> {
+    let (index, _, _) = active_index()?;
+    let mut store = RagStore::open(&index).map_err(|error| error.to_string())?;
+    store.clear().map_err(|error| error.to_string())?;
+    if json {
+        println!("{}", serde_json::json!({ "cleared": true }));
+    } else {
+        println!("Index cleared.");
+    }
+    Ok(())
+}
+--- with
+use lightagent_api::ops::{OpCategory, OpError, RagRequest};
+
+/// The active profile's index, the config, and the profile's id.
+struct ActiveIndex {
+    index: PathBuf,
+    config: Config,
+    profile: String,
+}
+
+fn op_internal(error: impl std::fmt::Display) -> OpError {
+    OpError::new(OpCategory::Internal, error.to_string())
+}
+
+fn active_index_at(paths: &LightagentPaths) -> Result<ActiveIndex, OpError> {
+    let config = ConfigStore::at(paths).load().map_err(op_internal)?;
+    let store = ProfileStore::new(paths.root());
+    let active = store.active().map_err(op_internal)?.ok_or_else(|| {
+        OpError::new(
+            OpCategory::Invalid,
+            "no active profile — run `lightagent init` first",
+        )
+    })?;
+    let dir = store.handle(&active).dir().to_path_buf();
+    Ok(ActiveIndex {
+        index: index_path(&dir),
+        config,
+        profile: active.to_string(),
+    })
+}
+
+fn cli_index() -> Result<ActiveIndex, String> {
+    let paths = LightagentPaths::resolve().map_err(|error| error.to_string())?;
+    active_index_at(&paths).map_err(|error| error.to_string())
+}
+
+/// What an add did: each indexed source and its chunks, the files that
+/// could not be read, and remote-index notes.
+struct Added {
+    indexed: Vec<(String, usize)>,
+    total: usize,
+    skipped: Vec<(String, String)>,
+    notes: Vec<String>,
+}
+
+async fn op_add(active: &ActiveIndex, path: &Path, source: Option<&str>) -> Result<Added, OpError> {
+    let mut store = RagStore::open(&active.index).map_err(op_internal)?;
+    let embedder = HashingEmbedder;
+    let semantic = semantic_embedder(&active.config);
+    let config = &active.config;
+
+    let mut targets = Vec::new();
+    if path.is_dir() {
+        let entries = std::fs::read_dir(path).map_err(op_internal)?;
+        for entry in entries.flatten() {
+            if entry.path().is_file() {
+                targets.push(entry.path());
+            }
+        }
+        targets.sort();
+    } else {
+        targets.push(path.to_path_buf());
+    }
+
+    let mut added = Added {
+        indexed: Vec::new(),
+        total: 0,
+        skipped: Vec::new(),
+        notes: Vec::new(),
+    };
+    for target in targets {
+        let text = match std::fs::read_to_string(&target) {
+            Ok(text) => text,
+            Err(error) => {
+                added
+                    .skipped
+                    .push((target.display().to_string(), error.to_string()));
+                continue;
+            }
+        };
+        let name = source.map(str::to_owned).unwrap_or_else(|| {
+            target
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| target.display().to_string())
+        });
+        let count = store
+            .add(
+                &name,
+                &text,
+                &embedder,
+                semantic.as_deref(),
+                config.rag.max_chunk_chars,
+                config.rag.chunk_overlap_chars,
+            )
+            .await
+            .map_err(op_internal)?;
+        // The local write succeeds independently. A remote outage must never
+        // make an indexed document disappear from this profile's RAG store.
+        if let Some(remote) = RemoteRag::from_config(config, active.profile.as_str())
+            && let Err(error) = remote
+                .upsert(
+                    &name,
+                    &text,
+                    config.rag.max_chunk_chars,
+                    config.rag.chunk_overlap_chars,
+                )
+                .await
+        {
+            added
+                .notes
+                .push(format!("remote RAG sync skipped for {name}: {error}"));
+        }
+        added.total += count;
+        added.indexed.push((name, count));
+    }
+    Ok(added)
+}
+
+async fn op_search(active: &ActiveIndex, query: &str, top_k: Option<usize>) -> Result<Vec<Hit>, OpError> {
+    let store = RagStore::open(&active.index).map_err(op_internal)?;
+    let k = top_k.unwrap_or(active.config.rag.top_k).max(1);
+    let semantic = semantic_embedder(&active.config);
+    Ok(match RemoteRag::from_config(&active.config, active.profile.as_str()) {
+        Some(remote) => match remote.search(query, k).await {
+            Ok(hits) if !hits.is_empty() => hits,
+            _ => {
+                store
+                    .search(query, &HashingEmbedder, semantic.as_deref(), k)
+                    .await
+            }
+        },
+        None => {
+            store
+                .search(query, &HashingEmbedder, semantic.as_deref(), k)
+                .await
+        }
+    })
+}
+
+fn op_list(active: &ActiveIndex) -> Result<(Vec<(String, usize)>, usize), OpError> {
+    let store = RagStore::open(&active.index).map_err(op_internal)?;
+    Ok((store.sources(), store.len()))
+}
+
+fn op_clear(active: &ActiveIndex) -> Result<(), OpError> {
+    RagStore::open(&active.index)
+        .map_err(op_internal)?
+        .clear()
+        .map_err(op_internal)
+}
+
+fn added_value(added: &Added) -> Value {
+    json!({
+        "indexed": added.indexed.iter().map(|(n, c)| json!({ "source": n, "chunks": c })).collect::<Vec<_>>(),
+        "total_chunks": added.total,
+        "skipped": added.skipped.iter().map(|(p, r)| json!({ "path": p, "reason": r })).collect::<Vec<_>>(),
+        "notes": added.notes,
+    })
+}
+
+fn search_value(query: &str, hits: &[Hit]) -> Value {
+    json!({
+        "query": query,
+        "hits": hits.iter().map(|hit| json!({
+            "source": hit.source, "score": hit.score, "text": hit.text,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn list_value(sources: &[(String, usize)], total: usize) -> Value {
+    json!({
+        "sources": sources.iter().map(|(n, c)| json!({ "source": n, "chunks": c })).collect::<Vec<_>>(),
+        "total_chunks": total,
+    })
+}
+
+/// One knowledge operation for the HTTP API (`RunFactory::rag`), on the
+/// active profile's index, answered with the JSON `lightagent rag … --json`
+/// prints.
+pub(crate) async fn perform(paths: &LightagentPaths, request: RagRequest) -> Result<Value, OpError> {
+    let active = active_index_at(paths)?;
+    Ok(match request {
+        RagRequest::List => {
+            let (sources, total) = op_list(&active)?;
+            list_value(&sources, total)
+        }
+        RagRequest::Add { path, source } => {
+            added_value(&op_add(&active, Path::new(&path), source.as_deref()).await?)
+        }
+        RagRequest::Search { query, top_k } => {
+            search_value(&query, &op_search(&active, &query, top_k).await?)
+        }
+        RagRequest::Clear => {
+            op_clear(&active)?;
+            json!({ "cleared": true })
+        }
+    })
+}
+
+/// `rag add <path>` — index a file, or every file in a directory.
+pub async fn add(path: PathBuf, source: Option<String>, json: bool) -> Result<(), String> {
+    let active = cli_index()?;
+    let added = op_add(&active, &path, source.as_deref())
+        .await
+        .map_err(|error| error.to_string())?;
+    for (target, reason) in &added.skipped {
+        eprintln!("· skipping {target}: {reason}");
+    }
+    for note in &added.notes {
+        eprintln!("· {note}");
+    }
+    if json {
+        println!("{:#}", added_value(&added));
+    } else {
+        for (name, count) in &added.indexed {
+            println!("indexed {name} ({count} chunks)");
+        }
+        println!("{} chunk(s) added.", added.total);
+    }
+    Ok(())
+}
+
+/// `rag search <query>` — the best passages for a query.
+pub async fn search(query: String, top_k: Option<usize>, json: bool) -> Result<(), String> {
+    let active = cli_index()?;
+    let hits = op_search(&active, &query, top_k)
+        .await
+        .map_err(|error| error.to_string())?;
+    if json {
+        println!("{:#}", search_value(&query, &hits));
+        return Ok(());
+    }
+    if hits.is_empty() {
+        println!("No relevant passages found.");
+        return Ok(());
+    }
+    for (rank, hit) in hits.iter().enumerate() {
+        println!("[{}] {} (score {:.2})", rank + 1, hit.source, hit.score);
+        println!("{}\n", hit.text);
+    }
+    Ok(())
+}
+
+/// `rag list` — the indexed sources and their chunk counts.
+pub fn list(json: bool) -> Result<(), String> {
+    let active = cli_index()?;
+    let (sources, total) = op_list(&active).map_err(|error| error.to_string())?;
+    if json {
+        println!("{:#}", list_value(&sources, total));
+        return Ok(());
+    }
+    if sources.is_empty() {
+        println!("Nothing indexed. Add documents with `lightagent rag add <path>`.");
+        return Ok(());
+    }
+    for (name, count) in sources {
+        println!("{name}  ({count} chunks)");
+    }
+    Ok(())
+}
+
+/// `rag clear` — empty the index.
+pub fn clear(json: bool) -> Result<(), String> {
+    let active = cli_index()?;
+    op_clear(&active).map_err(|error| error.to_string())?;
+    if json {
+        println!("{}", json!({ "cleared": true }));
+    } else {
+        println!("Index cleared.");
+    }
+    Ok(())
+}
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+            axum::routing::put(update_memory).delete(forget_memory),
+        )
+--- with
+            axum::routing::put(update_memory).delete(forget_memory),
+        )
+        .route(
+            "/api/lightagent/v1/knowledge",
+            get(list_knowledge).post(add_knowledge).delete(clear_knowledge),
+        )
+        .route("/api/lightagent/v1/knowledge/search", get(search_knowledge))
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+/// A memory operation through the embedder (`lightagent memory …`, see
+--- with
+/// A knowledge (RAG) operation through the embedder (`lightagent rag …`),
+/// on the active profile's index. Operator only.
+async fn rag_operation(state: &AppState, headers: &HeaderMap, request: ops::RagRequest) -> Response {
+    if let Some(rejection) = deny(state, headers, Scope::Admin) {
+        return rejection;
+    }
+    match state.manager.rag(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn list_knowledge(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    rag_operation(&state, &headers, ops::RagRequest::List).await
+}
+
+#[derive(Deserialize)]
+struct AddKnowledgeBody {
+    path: String,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// Index a file, or every file in a folder. The server's working folder
+/// means nothing to a client, so the path must be absolute.
+async fn add_knowledge(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<AddKnowledgeBody>,
+) -> Response {
+    if !std::path::Path::new(&body.path).is_absolute() {
+        if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+            return rejection;
+        }
+        return bad_request("the path must be an absolute file or folder path");
+    }
+    let request = ops::RagRequest::Add {
+        path: body.path,
+        source: body.source,
+    };
+    rag_operation(&state, &headers, request).await
+}
+
+async fn clear_knowledge(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    rag_operation(&state, &headers, ops::RagRequest::Clear).await
+}
+
+#[derive(Deserialize)]
+struct KnowledgeSearchQuery {
+    q: String,
+    #[serde(default)]
+    top_k: Option<usize>,
+}
+
+async fn search_knowledge(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<KnowledgeSearchQuery>,
+) -> Response {
+    let request = ops::RagRequest::Search {
+        query: query.q,
+        top_k: query.top_k,
+    };
+    rag_operation(&state, &headers, request).await
+}
+
+/// A memory operation through the embedder (`lightagent memory …`, see
+=== replace docs/desktop/contract/operations.json
+--- find
+   "id": "memory.forget",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/memories/items/{id}"
+  },
+--- with
+   "id": "memory.forget",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/memories/items/{id}"
+  },
+  {
+   "id": "knowledge.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/knowledge"
+  },
+  {
+   "id": "knowledge.add",
+   "method": "POST",
+   "path": "/api/lightagent/v1/knowledge"
+  },
+  {
+   "id": "knowledge.clear",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/knowledge"
+  },
+  {
+   "id": "knowledge.search",
+   "method": "GET",
+   "path": "/api/lightagent/v1/knowledge/search",
+   "query": [
+    "q",
+    "top_k"
+   ]
+  },
+=== replace desktop/src-tauri/src/switch.rs
+--- find
+            | "memory.promote"
+--- with
+            | "memory.promote"
+            | "knowledge.add"
+            | "knowledge.clear"
+=== replace desktop/src-tauri/src/switch.rs
+--- find
+        assert!(blocked_while_switching("memory.promote"));
+--- with
+        assert!(blocked_while_switching("memory.promote"));
+        assert!(blocked_while_switching("knowledge.add"));
+        assert!(blocked_while_switching("knowledge.clear"));
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  {
+   "id": "api.get.sessions",
+--- with
+  {
+   "id": "api.get.knowledge",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/knowledge",
+   "source": "crates/lightagent-api/src/lib.rs:145",
+   "behavior": "Indexed sources and chunk counts (D7-3)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/knowledge"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.rag.list)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: crate lightagent rag::perform via RunFactory::rag",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.post.knowledge",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/knowledge",
+   "source": "crates/lightagent-api/src/lib.rs:145",
+   "behavior": "Index an absolute file or folder path (D7-3)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/knowledge"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.rag.add)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: crate lightagent rag::perform via RunFactory::rag",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.delete.knowledge",
+   "kind": "api",
+   "surface": "DELETE /api/lightagent/v1/knowledge",
+   "source": "crates/lightagent-api/src/lib.rs:145",
+   "behavior": "Empty the index (D7-3)",
+   "tree_key": null,
+   "tokens": [
+    "DELETE /api/lightagent/v1/knowledge"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.rag.clear)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: crate lightagent rag::perform via RunFactory::rag",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.knowledge.search",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/knowledge/search",
+   "source": "crates/lightagent-api/src/lib.rs:145",
+   "behavior": "The best passages for a query (D7-3)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/knowledge/search"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.rag.search)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: crate lightagent rag::perform via RunFactory::rag",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.sessions",
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.delete.memories.items.id` | `DELETE /api/lightagent/v1/memories/items/{id}` | applicable | no | (backend reuse) | shared: memory::perform via RunFactory::memory | not-started | `crates/lightagent-api/src/lib.rs:133` |
+--- with
+| `api.delete.memories.items.id` | `DELETE /api/lightagent/v1/memories/items/{id}` | applicable | no | (backend reuse) | shared: memory::perform via RunFactory::memory | not-started | `crates/lightagent-api/src/lib.rs:133` |
+| `api.get.knowledge` | `GET /api/lightagent/v1/knowledge` | applicable | no | (backend reuse) | shared: rag::perform via RunFactory::rag | not-started | `crates/lightagent-api/src/lib.rs:145` |
+| `api.post.knowledge` | `POST /api/lightagent/v1/knowledge` | applicable | no | (backend reuse) | shared: rag::perform via RunFactory::rag | not-started | `crates/lightagent-api/src/lib.rs:145` |
+| `api.delete.knowledge` | `DELETE /api/lightagent/v1/knowledge` | applicable | no | (backend reuse) | shared: rag::perform via RunFactory::rag | not-started | `crates/lightagent-api/src/lib.rs:145` |
+| `api.get.knowledge.search` | `GET /api/lightagent/v1/knowledge/search` | applicable | no | (backend reuse) | shared: rag::perform via RunFactory::rag | not-started | `crates/lightagent-api/src/lib.rs:145` |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Total rows: 355
+--- with
+- Total rows: 359
+=== write crates/lightagent/tests/desktop_knowledge.rs
+//! Knowledge (RAG) through one shared operation set (D7-3): the desktop
+//! runtime's API and `lightagent rag` act on the active profile's index
+//! alike, and adds from both at the same time keep both documents. Every
+//! process here is separate.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+
+const KEY: &str = "92a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081";
+const KNOWLEDGE: &str = "/api/lightagent/v1/knowledge";
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-knowledge-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+/// One authenticated request: the status and the raw body.
+fn call(runtime: &Runtime, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, raw)
+}
+
+fn cli_ok(home: &Path, args: &[&str]) {
+    let output: Output = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent");
+    assert!(
+        output.status.success(),
+        "lightagent {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn parsed(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|error| panic!("not JSON ({error}): {raw}"))
+}
+
+fn cli_json(home: &Path, args: &[&str]) -> Value {
+    let mut all = vec!["--json"];
+    all.extend_from_slice(args);
+    let output: Output = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(&all)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent");
+    assert!(
+        output.status.success(),
+        "lightagent {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("JSON output")
+}
+
+fn arg(path: &Path) -> &str {
+    path.to_str().expect("UTF-8 path")
+}
+
+fn sources(listing: &Value) -> Vec<String> {
+    let mut names: Vec<String> = listing["sources"]
+        .as_array()
+        .expect("sources")
+        .iter()
+        .filter_map(|source| source["source"].as_str().map(str::to_owned))
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn the_cli_and_the_api_keep_one_index() {
+    let home = scratch_home("one");
+    cli_ok(&home, &["config", "set", "extensions.enabled", "true"]);
+    cli_ok(&home, &["profile", "create", "work"]);
+    cli_ok(&home, &["profile", "use", "work"]);
+    let docs = home.join("docs");
+    std::fs::create_dir_all(docs.join("folder")).expect("docs");
+    std::fs::write(
+        docs.join("rivers.md"),
+        "Rivers carry water from mountains to the sea.\n",
+    )
+    .expect("doc");
+    std::fs::write(
+        docs.join("folder").join("a.md"),
+        "Glaciers carve valleys over centuries.\n",
+    )
+    .expect("doc");
+    std::fs::write(
+        docs.join("folder").join("b.md"),
+        "Deltas form where rivers slow down.\n",
+    )
+    .expect("doc");
+    let runtime = start(&home);
+
+    // A file indexed over the API, listed by the CLI; the listings are equal.
+    let body = json!({ "path": docs.join("rivers.md") }).to_string();
+    let (status, raw) = call(&runtime, "POST", KNOWLEDGE, Some(&body));
+    assert_eq!(status, 200, "{raw}");
+    let added = parsed(&raw);
+    assert_eq!(added["indexed"][0]["source"], "rivers.md", "{added}");
+    assert_eq!(added["skipped"], json!([]), "{added}");
+    let (_, raw) = call(&runtime, "GET", KNOWLEDGE, None);
+    assert_eq!(parsed(&raw), cli_json(&home, &["rag", "list"]));
+
+    // A folder indexed by the CLI, listed over the API.
+    cli_json(&home, &["rag", "add", arg(&docs.join("folder"))]);
+    let (_, raw) = call(&runtime, "GET", KNOWLEDGE, None);
+    assert_eq!(
+        sources(&parsed(&raw)),
+        vec!["a.md".to_owned(), "b.md".to_owned(), "rivers.md".to_owned()]
+    );
+
+    // Search: the API answers what the CLI prints.
+    let (status, raw) = call(
+        &runtime,
+        "GET",
+        &format!("{KNOWLEDGE}/search?q=rivers%20sea&top_k=2"),
+        None,
+    );
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(
+        parsed(&raw),
+        cli_json(&home, &["rag", "search", "rivers sea", "--top-k", "2"])
+    );
+
+    // A relative path is refused; a missing one is reported as skipped by both.
+    let body = json!({ "path": "docs/rivers.md" }).to_string();
+    assert_eq!(call(&runtime, "POST", KNOWLEDGE, Some(&body)).0, 400);
+    let missing = docs.join("missing.md");
+    let body = json!({ "path": missing }).to_string();
+    let (status, raw) = call(&runtime, "POST", KNOWLEDGE, Some(&body));
+    assert_eq!(status, 200, "{raw}");
+    let by_api = parsed(&raw);
+    let by_cli = cli_json(&home, &["rag", "add", arg(&missing)]);
+    assert_eq!(by_api["skipped"].as_array().map(Vec::len), Some(1), "{by_api}");
+    assert_eq!(by_api, by_cli);
+
+    // Adds from both at once keep both documents (the index is written
+    // under its lock).
+    for round in 0..4 {
+        let api_doc = docs.join(format!("api-{round}.md"));
+        let cli_doc = docs.join(format!("cli-{round}.md"));
+        std::fs::write(&api_doc, format!("API document {round} about lakes.\n")).expect("doc");
+        std::fs::write(&cli_doc, format!("CLI document {round} about hills.\n")).expect("doc");
+        let body = json!({ "path": api_doc }).to_string();
+        std::thread::scope(|scope| {
+            let api = scope.spawn(|| call(&runtime, "POST", KNOWLEDGE, Some(&body)).0);
+            let cli = scope.spawn(|| cli_json(&home, &["rag", "add", arg(&cli_doc)]));
+            assert_eq!(api.join().expect("api add"), 200);
+            cli.join().expect("cli add");
+        });
+        let names = sources(&cli_json(&home, &["rag", "list"]));
+        assert!(
+            names.contains(&format!("api-{round}.md")) && names.contains(&format!("cli-{round}.md")),
+            "round {round}: {names:?}"
+        );
+    }
+
+    // Cleared over the API: the CLI lists nothing.
+    let (status, raw) = call(&runtime, "DELETE", KNOWLEDGE, None);
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(cli_json(&home, &["rag", "list"])["sources"], json!([]));
+}
+=== end
