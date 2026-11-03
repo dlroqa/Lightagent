@@ -487,6 +487,24 @@ fn a_configured_key_that_cannot_be_used_refuses_every_command() {
         .success(),
         "the CLI refuses as well"
     );
+    // A new key is still made, by the API and by the CLI; the vault stays
+    // refused until the configuration names a usable key.
+    let (status, raw) = call(
+        &runtime,
+        "POST",
+        &format!("{CREDENTIALS}/keys"),
+        Some(&json!({"path": outside.join("new-by-api.key")}).to_string()),
+    );
+    assert_eq!(status, 200, "{raw}");
+    let by_cli = outside.join("new-by-cli.key");
+    cli_ok(
+        &home,
+        KeyEnv::File(&missing),
+        &["remote-credential", "keygen", arg(&by_cli)],
+    );
+    assert!(by_cli.is_file());
+    let (status, _) = call(&runtime, "GET", &format!("{CREDENTIALS}/vault"), None);
+    assert_eq!(status, 400);
     drop(runtime);
 
     // A key given as hex in the environment is reported as such.
