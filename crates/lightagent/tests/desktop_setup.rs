@@ -290,3 +290,127 @@ fn a_hermes_import_over_the_api_is_the_clis() {
     assert_eq!(status, 200, "{by_default}");
     assert_eq!(by_default["hermes_home"], from, "{by_default}");
 }
+
+/// Every file under `dir`, by relative path, with its bytes.
+fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next).expect("read dir").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let bytes = std::fs::read(&path).expect("read file");
+                let relative = path.strip_prefix(dir).expect("under dir").to_path_buf();
+                found.push((relative, bytes));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// `lightagent --json import hermes <args>` with `env` set and HERMES_HOME
+/// otherwise unset: whether it succeeded, and what it printed.
+fn cli_import(home: &Path, env: &[(&str, &Path)], args: &[&str]) -> (bool, Value) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lightagent"));
+    command
+        .args(["--json", "import", "hermes"])
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .env_remove("HERMES_HOME")
+        .stdin(Stdio::null());
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let output = command.output().expect("run lightagent");
+    let printed = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
+    (output.status.success(), printed)
+}
+
+#[test]
+fn hermes_home_names_the_source_and_lightagent_home_the_destination() {
+    let named = hermes_home("named-hermes");
+    let explicit = hermes_home("explicit-hermes");
+    let user = scratch("user-home");
+    let fallback = user.join(".hermes").join("profiles").join("Home Bot");
+    std::fs::create_dir_all(&fallback).expect("fallback profile");
+    std::fs::write(fallback.join("SOUL.md"), "You live in ~/.hermes.\n").expect("persona");
+    let home = scratch("homes");
+    let import = format!("{API}/import/hermes");
+    let before = snapshot(&named);
+    let env = [("HERMES_HOME", named.as_path()), ("HOME", user.as_path())];
+
+    // With no folder, HERMES_HOME is read, before ~/.hermes; a folder given
+    // comes first. The runtime and the CLI agree.
+    let runtime = start(&home, &env);
+    let (status, dry) = post(&runtime, &import, json!({"dry_run": true}));
+    assert_eq!(status, 200, "{dry}");
+    assert_eq!(dry["hermes_home"], arg(&named), "{dry}");
+    assert_eq!(dry["profiles"], json!(["research-bot"]), "{dry}");
+    let (succeeded, by_cli) = cli_import(&home, &env, &["--dry-run"]);
+    assert!(succeeded, "{by_cli}");
+    assert_eq!(dry, by_cli);
+    let (status, given) = post(
+        &runtime,
+        &import,
+        json!({"from": explicit, "dry_run": true}),
+    );
+    assert_eq!(status, 200, "{given}");
+    assert_eq!(given["hermes_home"], arg(&explicit), "{given}");
+
+    // Applied: written into LIGHTAGENT_HOME, which stays the runtime's
+    // home; the Hermes home is only read.
+    let (status, applied) = post(&runtime, &import, json!({}));
+    assert_eq!(status, 200, "{applied}");
+    assert_eq!(applied["profiles"], json!(["research-bot"]), "{applied}");
+    let listed = cli_json(&home, &["profile", "list"]).to_string();
+    assert!(listed.contains("research-bot"), "{listed}");
+    assert!(
+        snapshot(&named) == before,
+        "the import changed the Hermes home"
+    );
+    let (status, raw) = call(&runtime, "GET", &format!("{API}/diagnostics/doctor"), None);
+    assert_eq!(status, 200, "{raw}");
+    let doctor = parsed(&raw);
+    let shown = PathBuf::from(doctor["home"].as_str().expect("doctor home"));
+    assert_eq!(
+        shown.canonicalize().expect("shown home"),
+        home.canonicalize().expect("home"),
+        "{doctor}"
+    );
+    drop(runtime);
+
+    // Without HERMES_HOME: ~/.hermes.
+    let runtime = start(&home, &[("HOME", user.as_path())]);
+    let (status, dry) = post(&runtime, &import, json!({"dry_run": true}));
+    assert_eq!(status, 200, "{dry}");
+    assert_eq!(dry["hermes_home"], arg(&user.join(".hermes")), "{dry}");
+    assert_eq!(dry["profiles"], json!(["home-bot"]), "{dry}");
+    drop(runtime);
+
+    // A HERMES_HOME naming no folder is refused, with nothing written, and
+    // ~/.hermes is not tried instead.
+    let missing = named.join("missing");
+    let unusable = [("HERMES_HOME", missing.as_path()), ("HOME", user.as_path())];
+    let runtime = start(&home, &unusable);
+    let (status, refused) = post(&runtime, &import, json!({"dry_run": true}));
+    assert_eq!(status, 400, "{refused}");
+    assert!(refused.to_string().contains("no Hermes home"), "{refused}");
+    let (succeeded, _) = cli_import(&home, &unusable, &["--dry-run"]);
+    assert!(!succeeded, "the CLI refuses as well");
+    let listed = cli_json(&home, &["profile", "list"]).to_string();
+    assert!(!listed.contains("home-bot"), "{listed}");
+    drop(runtime);
+
+    // An empty HERMES_HOME is a value, not unset: it is refused as well.
+    #[cfg(unix)]
+    {
+        let empty = [("HERMES_HOME", Path::new("")), ("HOME", user.as_path())];
+        let runtime = start(&home, &empty);
+        let (status, refused) = post(&runtime, &import, json!({"dry_run": true}));
+        assert_eq!(status, 400, "{refused}");
+        drop(runtime);
+    }
+}

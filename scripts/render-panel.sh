@@ -15,11 +15,13 @@ export LIGHTAGENT_HOME="$work_dir/agent-home"
 agent_log="$work_dir/agent.log"
 agent_pid=""
 release_pid=""
+env_pid=""
 
 cleanup() {
   local status=$?
   [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null || true
   [ -n "$release_pid" ] && kill "$release_pid" 2>/dev/null || true
+  [ -n "$env_pid" ] && kill "$env_pid" 2>/dev/null || true
   wait 2>/dev/null || true
   if [ "$status" -ne 0 ]; then
     echo "== agent server log =="
@@ -91,7 +93,29 @@ if ! curl -fsS "http://127.0.0.1:$AGENT_PORT/api/lightagent/v1/tools" | grep -q 
   exit 1
 fi
 
+# A second server, started as a user would start one with the vault key
+# itself in LIGHTAGENT_CREDENTIAL_KEY (no key file) and HERMES_HOME naming a
+# Hermes home, in its own home. The key is random for this run and is only
+# ever in the environment; e2e/environment.mjs checks the browser's view.
+ENV_PORT="${ENV_PORT:-8736}"
+env_home="$work_dir/env-home"
+export RENDER_ENV_HERMES_HOME="$work_dir/env-hermes"
+mkdir -p "$RENDER_ENV_HERMES_HOME/profiles/render-env-hermes"
+printf 'You came from HERMES_HOME in the render.\n' \
+  >"$RENDER_ENV_HERMES_HOME/profiles/render-env-hermes/SOUL.md"
+LIGHTAGENT_HOME="$env_home" ./target/debug/lightagent init --base-url http://127.0.0.1:0 >/dev/null
+RENDER_ENV_CREDENTIAL_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+export RENDER_ENV_CREDENTIAL_KEY
+echo "== start the environment server (port $ENV_PORT) =="
+env -u LIGHTAGENT_CREDENTIAL_KEY_FILE LIGHTAGENT_HOME="$env_home" \
+  LIGHTAGENT_CREDENTIAL_KEY="$RENDER_ENV_CREDENTIAL_KEY" HERMES_HOME="$RENDER_ENV_HERMES_HOME" \
+  ./target/debug/lightagent serve --host 127.0.0.1 --port "$ENV_PORT" \
+  --web-root frontend/dist >"$work_dir/env-agent.log" 2>&1 &
+env_pid=$!
+wait_for "http://127.0.0.1:$ENV_PORT/health" "the environment server" "$env_pid"
+
 echo "== render in a headless browser =="
-PANEL_BASE="http://127.0.0.1:$AGENT_PORT" OUT_DIR="$OUT_DIR" node e2e/render.mjs
+PANEL_BASE="http://127.0.0.1:$AGENT_PORT" PANEL_ENV_BASE="http://127.0.0.1:$ENV_PORT" OUT_DIR="$OUT_DIR" \
+  node e2e/render.mjs
 
 echo "Lightagent Web UI render complete. Screenshots in $OUT_DIR/"

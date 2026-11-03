@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 
 const KEY: &str = "b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3";
 const VAULT_HEX_KEY: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+const OTHER_HEX_KEY: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
 const CREDENTIALS: &str = "/api/lightagent/v1/remote-credentials";
 
 struct Runtime {
@@ -46,12 +47,14 @@ fn scratch(label: &str) -> PathBuf {
     dir
 }
 
-/// The key environment a process runs with: none, a key file, or a key.
+/// The key environment a process runs with: none, a key file, a key, or
+/// both a key file and a key.
 #[derive(Clone, Copy)]
 enum KeyEnv<'a> {
     None,
     File(&'a Path),
     Hex(&'a str),
+    Both(&'a Path, &'a str),
 }
 
 fn with_key(command: &mut Command, key: KeyEnv<'_>) {
@@ -64,6 +67,10 @@ fn with_key(command: &mut Command, key: KeyEnv<'_>) {
             command.env("LIGHTAGENT_CREDENTIAL_KEY_FILE", path);
         }
         KeyEnv::Hex(hex) => {
+            command.env("LIGHTAGENT_CREDENTIAL_KEY", hex);
+        }
+        KeyEnv::Both(path, hex) => {
+            command.env("LIGHTAGENT_CREDENTIAL_KEY_FILE", path);
             command.env("LIGHTAGENT_CREDENTIAL_KEY", hex);
         }
     }
@@ -550,4 +557,123 @@ fn a_keyed_server_refuses_every_credential_route() {
         assert_eq!(code, 403, "{method} {path}: {raw}");
     }
     assert!(!Path::new("/tmp/never.key").exists());
+}
+
+#[test]
+fn a_key_in_the_environment_seals_opens_and_fails_closed() {
+    let home = scratch("env-home");
+    let outside = scratch("env-outside");
+    cli_ok(
+        &home,
+        KeyEnv::None,
+        &["config", "set", "extensions.enabled", "true"],
+    );
+    cli_ok(&home, KeyEnv::None, &["profile", "create", "work"]);
+    let vault = format!("{CREDENTIALS}/vault");
+    let secret_file = outside.join("env.secret");
+    let secret = "env-secret-1c2d3e4f5a6b7c8d9e0f";
+    std::fs::write(&secret_file, format!("{secret}\n")).expect("secret file");
+    let add = json!({
+        "profile": "work",
+        "service": "mcp:env-docs",
+        "destinations": ["https://docs.example.com"],
+        "secret_file": secret_file,
+    });
+
+    // The key in LIGHTAGENT_CREDENTIAL_KEY seals a grant; the CLI with the
+    // same key lists it, and the status names the source.
+    let key = KeyEnv::Hex(VAULT_HEX_KEY);
+    let runtime = start_desktop(&home, key);
+    let (added, added_raw) = ok(&runtime, "POST", CREDENTIALS, Some(add.clone()));
+    let id = added["added"].as_str().expect("grant id").to_owned();
+    let (listed, listed_raw) = ok(&runtime, "GET", CREDENTIALS, None);
+    assert_eq!(listed, cli_json(&home, key, &["remote-credential", "list"]));
+    assert_eq!(grant(&listed, &id)["version"], 1, "{listed}");
+    let (status, status_raw) = ok(&runtime, "GET", &vault, None);
+    assert_eq!(status["key_source"], "env", "{status}");
+    assert_eq!(status["key_configured"], true, "{status}");
+    assert_eq!(status["unopenable_with_configured_key"], 0, "{status}");
+    assert_eq!(
+        status,
+        cli_json(&home, key, &["remote-credential", "status"])
+    );
+    for raw in [&added_raw, &listed_raw, &status_raw] {
+        assert!(
+            !raw.contains(secret) && !raw.contains(VAULT_HEX_KEY),
+            "an answer holds the secret or the key: {raw}"
+        );
+    }
+    assert_nowhere(&home, secret);
+    assert_nowhere(&home, VAULT_HEX_KEY);
+    drop(runtime);
+
+    // Another key opens nothing this one sealed: it is counted, not opened.
+    let runtime = start_desktop(&home, KeyEnv::Hex(OTHER_HEX_KEY));
+    let (status, _) = ok(&runtime, "GET", &vault, None);
+    assert_eq!(status["key_source"], "env", "{status}");
+    assert_eq!(status["unopenable_with_configured_key"], 1, "{status}");
+    drop(runtime);
+
+    // A key file and a key: the key file is used.
+    let key_file = outside.join("file.key");
+    cli_ok(
+        &home,
+        KeyEnv::None,
+        &["remote-credential", "keygen", arg(&key_file)],
+    );
+    let both = KeyEnv::Both(&key_file, VAULT_HEX_KEY);
+    let runtime = start_desktop(&home, both);
+    let (status, _) = ok(&runtime, "GET", &vault, None);
+    assert_eq!(
+        status["key_source"], "file",
+        "the key file comes first: {status}"
+    );
+    assert_eq!(status["unopenable_with_configured_key"], 1, "{status}");
+    assert_eq!(
+        status,
+        cli_json(&home, both, &["remote-credential", "status"])
+    );
+    drop(runtime);
+
+    // Not a key: every command is refused, by the API and the CLI, and no
+    // answer repeats the value.
+    let invalid = "not-a-key-5e6f7a8b9c";
+    let runtime = start_desktop(&home, KeyEnv::Hex(invalid));
+    for (method, path, body) in [
+        ("GET", vault.clone(), None),
+        ("GET", CREDENTIALS.to_owned(), None),
+        ("POST", CREDENTIALS.to_owned(), Some(add.to_string())),
+    ] {
+        let (code, raw) = call(&runtime, method, &path, body.as_deref());
+        assert_eq!(code, 400, "{method} {path}: {raw}");
+        assert!(
+            raw.contains("the configured credential key is unusable"),
+            "{raw}"
+        );
+        assert!(
+            !raw.contains(invalid) && !raw.contains(secret),
+            "{method} {path}: {raw}"
+        );
+    }
+    let refused = cli(
+        &home,
+        KeyEnv::Hex(invalid),
+        &["remote-credential", "status"],
+    );
+    assert!(!refused.status.success(), "the CLI refuses as well");
+    assert!(
+        !String::from_utf8_lossy(&refused.stderr).contains(invalid),
+        "the CLI repeats the value"
+    );
+    drop(runtime);
+
+    // An empty value is no key: nothing opens, and adding is refused.
+    let runtime = start_desktop(&home, KeyEnv::Hex(""));
+    let (status, _) = ok(&runtime, "GET", &vault, None);
+    assert_eq!(status["key_configured"], false, "{status}");
+    assert_eq!(status["key_source"], Value::Null, "{status}");
+    assert_eq!(status["unopenable_with_configured_key"], 1, "{status}");
+    let (code, raw) = call(&runtime, "POST", CREDENTIALS, Some(&add.to_string()));
+    assert_eq!(code, 400, "{raw}");
+    assert!(raw.contains("no credential key is configured"), "{raw}");
 }
