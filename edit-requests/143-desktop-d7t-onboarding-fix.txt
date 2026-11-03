@@ -1,0 +1,29 @@
+=== base e817f9035a930e22662f897abb4b6090e33d8835
+=== message
+Row 54: no committed home path; slash commands named without quotes
+
+- The Guidance card's path placeholder was a home-directory path, which
+  the secrets gate rejects; it is /path/to/onboarding.md, as on the
+  other screens that take a file path.
+- Two comments in the API client quoted the chat's /onboard command in
+  backticks, which the desktop contract check reads as a path the
+  frontend calls. They name the command without quotes; the check is
+  unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace frontend/src/screens/ProfilesScreen.tsx
+--- find
+          placeholder="/home/me/notes/onboarding.md"
+--- with
+          placeholder="/path/to/onboarding.md"
+=== replace frontend/src/api/agent.ts
+--- find
+/** The profile's onboarding guidance (the chat's `/onboard`). */
+--- with
+/** The profile's onboarding guidance (the chat's /onboard command). */
+=== replace frontend/src/api/agent.ts
+--- find
+  /** `/onboard`: the guidance installed for the profile the runtime serves. */
+--- with
+  /** The chat's /onboard: the guidance installed for the profile the runtime serves. */
+=== end
