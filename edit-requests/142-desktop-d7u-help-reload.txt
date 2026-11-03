@@ -1,0 +1,870 @@
+=== base e817f9035a930e22662f897abb4b6090e33d8835
+=== message
+Row 55: /help through one shared list; /reload as Reload tools
+
+- /help: lightagent_core::commands::SLASH_COMMANDS is the one list of the
+  terminal chat's slash commands and what each does. The chat's /help
+  prints it (its output is unchanged), and the API serves it at GET
+  /api/lightagent/v1/commands (contract commands.list). The desktop's
+  account menu opens a Commands dialog listing each command, what it does
+  and where it is in the app, and that Enter sends while Shift+Enter is a
+  new line.
+- /reload: in the chat it rebuilds the runtime from the settings between
+  turns. A desktop run is always built from the current settings, so a
+  change made by the CLI, another window or the app applies to the next
+  run with no restart. The Tools screen's Reload tools shows the catalog
+  as it is now. Evidence: a web setting the CLI changes while the runtime
+  runs is offered to the model in the next run and listed by GET /tools.
+- Inventory: api.get.commands (backend; counted through slash.help).
+- Evidence: backend desktop_commands_reload.rs, host runs.py `commands`
+  and `reload`, browser e2e/commands.mjs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== write crates/lightagent-core/src/commands.rs
+//! The terminal chat's slash commands, in the order `/help` lists them: one
+//! list behind the chat's `/help` and the API's `GET /commands`, which the
+//! desktop shows with where each command is in the app.
+
+/// One slash command and what it does.
+pub struct SlashCommand {
+    pub name: &'static str,
+    pub summary: &'static str,
+}
+
+pub const SLASH_COMMANDS: &[SlashCommand] = &[
+    SlashCommand {
+        name: "help",
+        summary: "List the commands",
+    },
+    SlashCommand {
+        name: "tools",
+        summary: "List the tools this chat can call",
+    },
+    SlashCommand {
+        name: "skills",
+        summary: "List the installed skills",
+    },
+    SlashCommand {
+        name: "extensions",
+        summary: "List, install or uninstall extensions",
+    },
+    SlashCommand {
+        name: "onboard",
+        summary: "Install a Markdown file as the profile's guidance; /onboard remove withdraws it",
+    },
+    SlashCommand {
+        name: "reload",
+        summary: "Reload extensions and tool settings between turns",
+    },
+    SlashCommand {
+        name: "new",
+        summary: "Start a fresh session in the same profile",
+    },
+    SlashCommand {
+        name: "continue",
+        summary: "Continue a run paused on its time budget",
+    },
+    SlashCommand {
+        name: "stop",
+        summary: "Stop the running turn",
+    },
+    SlashCommand {
+        name: "update",
+        summary: "Update Lightagent",
+    },
+    SlashCommand {
+        name: "exit",
+        summary: "Leave the chat",
+    },
+];
+=== replace crates/lightagent-core/src/lib.rs
+--- find
+pub mod config_keys;
+--- with
+pub mod commands;
+pub mod config_keys;
+=== replace crates/lightagent/src/chat.rs
+--- find
+            println!(
+                "Commands: /help  /tools  /skills  /extensions  /onboard  /reload  /new  /continue  /stop  /update  /exit"
+            );
+--- with
+            let names: Vec<String> = lightagent_core::commands::SLASH_COMMANDS
+                .iter()
+                .map(|command| format!("/{}", command.name))
+                .collect();
+            println!("Commands: {}", names.join("  "));
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+        .route("/api/lightagent/v1/tools", get(list_tools))
+--- with
+        .route("/api/lightagent/v1/tools", get(list_tools))
+        .route("/api/lightagent/v1/commands", get(list_commands))
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+/// `lightagent extensions list`, from the same shared operation.
+--- with
+/// The terminal chat's slash commands, as its `/help` lists them.
+async fn list_commands(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::ToolsRead) {
+        return rejection;
+    }
+    let commands: Vec<Value> = lightagent_core::commands::SLASH_COMMANDS
+        .iter()
+        .map(|command| json!({ "name": command.name, "summary": command.summary }))
+        .collect();
+    Json(json!({ "commands": commands })).into_response()
+}
+
+/// `lightagent extensions list`, from the same shared operation.
+=== replace docs/desktop/contract/operations.json
+--- find
+  {
+   "id": "onboarding.get",
+--- with
+  {
+   "id": "commands.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/commands"
+  },
+  {
+   "id": "onboarding.get",
+=== replace frontend/src/api/agent.ts
+--- find
+/** The profile's onboarding guidance (the chat's `/onboard`). */
+--- with
+/** One of the terminal chat's slash commands. */
+export interface SlashCommandInfo {
+  name: string;
+  summary: string;
+}
+
+/** The profile's onboarding guidance (the chat's `/onboard`). */
+=== replace frontend/src/api/agent.ts
+--- find
+  /** `/onboard`: the guidance installed for the profile the runtime serves. */
+--- with
+  /** The terminal chat's slash commands, as its `/help` lists them. */
+  commands: () => jsonRequest<{ commands: SlashCommandInfo[] }>("/commands"),
+  /** `/onboard`: the guidance installed for the profile the runtime serves. */
+=== replace frontend/src/screens/Agent.tsx
+--- find
+  const [accountOpen, setAccountOpen] = useState(false);
+--- with
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [commandsOpen, setCommandsOpen] = useState(false);
+  const closeCommands = useCallback(() => setCommandsOpen(false), []);
+=== replace frontend/src/screens/Agent.tsx
+--- find
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/settings"); }}><span className="session-menu__item"><ShieldCheck size={17} /> Settings</span></MenuItem>
+--- with
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/settings"); }}><span className="session-menu__item"><ShieldCheck size={17} /> Settings</span></MenuItem>
+              <MenuItem onClick={() => { setAccountOpen(false); setCommandsOpen(true); }}><span className="session-menu__item"><Terminal size={17} /> Commands</span></MenuItem>
+=== replace frontend/src/screens/Agent.tsx
+--- find
+        <section className="agent-conversation chat-thread" style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
+--- with
+        {commandsOpen && <CommandsDialog onClose={closeCommands} />}
+        <section className="agent-conversation chat-thread" style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
+=== replace frontend/src/screens/Agent.tsx
+--- find
+function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete, projectNames }: {
+--- with
+/** Where each terminal chat command is in the desktop app. */
+const COMMAND_EQUIVALENTS: Record<string, string> = {
+  help: "This list (account menu → Commands)",
+  tools: "Tools screen",
+  skills: "Tools → Installed skills",
+  extensions: "Tools → Extensions",
+  onboard: "Profiles → Guidance",
+  reload: "Tools → Reload tools (every run starts with the current settings)",
+  new: "New chat",
+  continue: "Continue, on a run paused on its time budget",
+  stop: "Stop, beside the running answer",
+  update: "Diagnostics → Check for updates (check only; nothing is installed)",
+  exit: "Close the window",
+};
+
+/** The chat's `/help`: its commands, from the API, and where each is here. */
+function CommandsDialog({ onClose }: { onClose: () => void }) {
+  const [commands, setCommands] = useState<SlashCommandInfo[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    agentApi.commands()
+      .then((answer) => { if (live) setCommands(answer.commands); })
+      .catch((cause) => { if (live) setError(cause instanceof Error ? cause.message : String(cause)); });
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      live = false;
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+  return (
+    <div className="chat-search" role="dialog" aria-modal="true" aria-label="Commands">
+      <button type="button" className="chat-search__backdrop" tabIndex={-1} aria-label="Close commands" onClick={onClose} />
+      <div className="chat-search__panel">
+        <div className="chat-search__header">
+          <h2 className="commands__title">Commands</h2>
+          <div className="chat-search__actions">
+            <button type="button" className="chat-search__close" aria-label="Close commands" autoFocus onClick={onClose}><X size={21} /></button>
+          </div>
+        </div>
+        <p className="commands__note">
+          The terminal chat&apos;s slash commands, and where each one is in the app. Enter sends a message; Shift+Enter starts a new line.
+        </p>
+        {error ? (
+          <p className="config-editor__error" role="alert">{error}</p>
+        ) : !commands ? (
+          <p className="muted">Loading…</p>
+        ) : (
+          <div className="commands__scroll">
+            <table className="commands__table">
+              <thead>
+                <tr><th scope="col">Command</th><th scope="col">What it does</th><th scope="col">In the app</th></tr>
+              </thead>
+              <tbody>
+                {commands.map((command) => (
+                  <tr key={command.name} data-testid={`command-${command.name}`}>
+                    <td><code>/{command.name}</code></td>
+                    <td>{command.summary}</td>
+                    <td>{COMMAND_EQUIVALENTS[command.name] ?? "Not in the app"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete, projectNames }: {
+=== replace frontend/src/screens/Agent.tsx
+--- find
+  type SessionSummary,
+  type SystemTime,
+--- with
+  type SessionSummary,
+  type SlashCommandInfo,
+  type SystemTime,
+=== replace frontend/src/styles/app.css
+--- find
+.chat-search__header input::placeholder {
+  color: var(--popover-muted);
+}
+--- with
+.chat-search__header input::placeholder {
+  color: var(--popover-muted);
+}
+
+.commands__title {
+  flex: 1;
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.commands__note {
+  margin: 0 0 12px;
+  padding: 0 10px;
+  color: var(--popover-muted);
+  font-size: 13px;
+}
+
+.commands__scroll {
+  max-height: min(60vh, 520px);
+  overflow: auto;
+}
+
+.commands__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.commands__table th,
+.commands__table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--popover-border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.commands__table th {
+  color: var(--popover-muted);
+  font-weight: 500;
+}
+=== replace frontend/src/screens/AgentTools.tsx
+--- find
+            Permission is what a run&apos;s call does under this profile&apos;s approval policy, as lightagent tools
+            list reports it.
+          </p>
+--- with
+            Permission is what a run&apos;s call does under this profile&apos;s approval policy, as lightagent tools
+            list reports it.
+          </p>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", margin: "8px 0 12px" }}>
+            <button type="button" className="btn" onClick={() => setAttempt((value) => value + 1)}>
+              Reload tools
+            </button>
+            <span className="card__note" style={{ margin: 0 }}>
+              The chat&apos;s <code>/reload</code>: shows the tools, extensions and settings as they are now. Every run
+              starts with the current settings, so a change applies to the next run without a restart.
+            </span>
+          </div>
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  {
+   "id": "api.get.onboarding",
+--- with
+  {
+   "id": "api.get.commands",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/commands",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "The terminal chat's slash commands, as its /help lists them (row 55)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/commands"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the slash capability it serves (slash.help)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: lightagent_core::commands::SLASH_COMMANDS",
+   "permission": "local-operator",
+   "data_scope": "none",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.onboarding",
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "total_rows": 337,
+--- with
+  "total_rows": 338,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "api": 55,
+--- with
+   "api": 56,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "applicable": 296,
+--- with
+   "applicable": 297,
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| api | 55 |
+--- with
+| api | 56 |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| applicable | 296 |
+--- with
+| applicable | 297 |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.get.onboarding` | `GET /api/lightagent/v1/onboarding` | applicable | no | (backend reuse) | shared: lightagent_extensions::onboarding::current | not-started | `crates/lightagent-api/src/lib.rs` |
+--- with
+| `api.get.commands` | `GET /api/lightagent/v1/commands` | applicable | no | (backend reuse) | shared: lightagent_core::commands::SLASH_COMMANDS | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.get.onboarding` | `GET /api/lightagent/v1/onboarding` | applicable | no | (backend reuse) | shared: lightagent_extensions::onboarding::current | not-started | `crates/lightagent-api/src/lib.rs` |
+=== replace desktop/e2e/runs.py
+--- find
+        "convo": lambda p, turn, index: [("text", "Noted."), ("finish", "stop")],
+--- with
+        "convo": lambda p, turn, index: [("text", "Noted."), ("finish", "stop")],
+        "reload": lambda p, turn, index: [("text", "Done."), ("finish", "stop")],
+=== replace desktop/e2e/runs.py
+--- find
+def scenario_onboarding(host, cli, workspace):
+--- with
+def scenario_commands(host, cli):
+    """D7 through the host transport (`/help`): the commands the host lists
+    are the ones the chat's /help prints, in its order."""
+    check = Checks("commands")
+    status, listed = host.fetch("GET", f"{API}/commands")
+    names = [command.get("name") for command in (listed or {}).get("commands", [])]
+    out = harness.run_cli_input(cli, "/help\n/exit\n", "chat")
+    line = next((line for line in out.splitlines() if line.startswith("Commands:")), "")
+    check.expect("the commands through the host are the chat's /help",
+                 status == 200 and bool(names) and line.split()[1:] == [f"/{name}" for name in names],
+                 (status, names, line))
+    return check
+
+
+def scenario_reload(host, provider, cli):
+    """D7 through the host transport (`/reload`): a web setting the CLI
+    changes while the desktop runs is offered in the next run, with no
+    restart, and listed by the host's tool catalog. Restored."""
+    check = Checks("reload")
+    original = harness.run_cli(cli, "config", "get", "web.enabled").strip()
+
+    def web(names):
+        return any("web" in str(name).lower() for name in names)
+
+    try:
+        harness.run_cli(cli, "config", "set", "web.enabled", "false")
+        Stream(host, host.start_run(host.new_session(), "[e2e:reload] One.")).finish()
+        before = provider.requests("reload")[-1]["tools"]
+        harness.run_cli(cli, "config", "set", "web.enabled", "true")
+        status, listed = host.fetch("GET", f"{API}/tools")
+        names = [tool.get("name", "") for tool in (listed or {}).get("tools", [])]
+        Stream(host, host.start_run(host.new_session(), "[e2e:reload] Two.")).finish()
+        after = provider.requests("reload")[-1]["tools"]
+        check.expect("a web setting the CLI changed is in the next run and the catalog, with no restart",
+                     status == 200 and not web(before) and web(after) and web(names), (before, after, names))
+    finally:
+        harness.run_cli(cli, "config", "set", "web.enabled", original or "false")
+    return check
+
+
+def scenario_onboarding(host, cli, workspace):
+=== replace desktop/e2e/runs.py
+--- find
+            ("onboarding", lambda: scenario_onboarding(host, cli, workspace)),
+--- with
+            ("onboarding", lambda: scenario_onboarding(host, cli, workspace)),
+            ("commands", lambda: scenario_commands(host, cli)),
+            ("reload", lambda: scenario_reload(host, provider, cli)),
+=== replace e2e/render.mjs
+--- find
+import { checkOnboarding } from "./onboarding.mjs";
+--- with
+import { checkOnboarding } from "./onboarding.mjs";
+import { checkCommands } from "./commands.mjs";
+=== replace e2e/render.mjs
+--- find
+    failures.push(`onboarding: ${err instanceof Error ? err.message : String(err)}`);
+  }
+--- with
+    failures.push(`onboarding: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // The Commands dialog (/help) and Reload tools (/reload); web access restored.
+  try {
+    failures.push(...(await checkCommands(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`commands: ${err instanceof Error ? err.message : String(err)}`);
+  }
+=== write e2e/commands.mjs
+// The chat's /help and /reload against the real harness. The account menu's
+// Commands dialog lists every command the API returns (the chat's /help
+// list), with what it does and where it is in the app, and Escape closes
+// it. On the Tools screen, a web setting changed elsewhere (here through
+// the API, as the CLI would) shows after Reload tools, not before. Web
+// access is restored.
+// crates/lightagent/tests/desktop_commands_reload.rs proves the list is the
+// chat's and that the next run uses a changed setting; desktop/e2e/runs.py
+// `commands` and `reload` cover the host.
+
+export async function checkCommands(browser, base, outDir) {
+  const failures = [];
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1100 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const api = `${base}/api/lightagent/v1`;
+  const setWeb = (value) =>
+    fetch(`${api}/config/web.enabled`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
+  const webTools = async () =>
+    ((await (await fetch(`${api}/tools`)).json()).tools ?? []).map((tool) => tool.name).filter((name) => /web/i.test(name));
+  const step = async (name, body) => {
+    try {
+      await body();
+    } catch (err) {
+      failures.push(`commands: ${name}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+      await page.screenshot({ path: `${outDir}/commands-failed-${name.replace(/\W+/g, "-")}.png` }).catch(() => {});
+    }
+  };
+  const original = (await (await fetch(`${api}/config/web.enabled`)).json()).value;
+  try {
+    await step("the Commands dialog lists the chat's /help", async () => {
+      const commands = (await (await fetch(`${api}/commands`)).json()).commands ?? [];
+      if (commands.length === 0) throw new Error("the API lists no commands");
+      await page.goto(`${base}/#/`);
+      await page.getByRole("button", { name: "Open account menu" }).click({ timeout: 15000 });
+      await page.getByRole("menuitem", { name: /Commands/ }).click({ timeout: 10000 });
+      const dialog = page.getByRole("dialog", { name: "Commands" });
+      await dialog.waitFor({ timeout: 10000 });
+      for (const command of commands) {
+        const row = dialog.getByTestId(`command-${command.name}`);
+        await row.getByText(`/${command.name}`, { exact: true }).waitFor({ timeout: 5000 });
+        await row.getByText(command.summary, { exact: true }).waitFor({ timeout: 5000 });
+        if ((await row.innerText()).includes("Not in the app")) throw new Error(`/${command.name} has no place in the app`);
+      }
+      await page.screenshot({ path: `${outDir}/commands-dialog.png` });
+      await page.keyboard.press("Escape");
+      await dialog.waitFor({ state: "detached", timeout: 5000 });
+    });
+
+    await step("Reload tools shows a setting changed elsewhere", async () => {
+      await setWeb("false");
+      await page.goto(`${base}/#/tools`);
+      const reload = page.getByRole("button", { name: "Reload tools", exact: true });
+      await reload.waitFor({ timeout: 15000 });
+      await reload.click();
+      if ((await webTools()).length !== 0) throw new Error("web tools are listed with web access off");
+      await setWeb("true");
+      const names = await webTools();
+      if (names.length === 0) throw new Error("the API lists no web tool with web access on");
+      const tool = page.getByText(names[0], { exact: true }).first();
+      if (await tool.isVisible()) throw new Error("the screen changed before Reload tools");
+      await reload.click();
+      await tool.waitFor({ timeout: 10000 });
+      await page.screenshot({ path: `${outDir}/commands-reloaded-tools.png` });
+    });
+    if (errors.length) failures.push(`commands: page errors: ${errors.join("; ")}`);
+  } catch (err) {
+    failures.push(`commands: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  } finally {
+    await page.close();
+    await setWeb(String(original ?? "false")).catch(() => {});
+  }
+  return failures;
+}
+=== write crates/lightagent/tests/desktop_commands_reload.rs
+//! The chat's `/help` and `/reload` on the desktop (D7). The commands the
+//! desktop runtime lists are the ones the chat's `/help` prints, in its
+//! order. A desktop run is built from the current settings: a web setting
+//! the CLI changes while the runtime runs is offered to the model in the
+//! next run, with no restart, and listed by the tool catalog. Every process
+//! here is separate: the runtime, the provider, the CLI and this test.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+
+const KEY: &str = "d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5";
+const MODELS: &str = r#"{"object":"list","data":[{"id":"m1"}]}"#;
+const API: &str = "/api/lightagent/v1";
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-commands-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+fn call(runtime: &Runtime, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, raw)
+}
+
+fn parsed(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|error| panic!("{error}: {raw}"))
+}
+
+fn cli(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent")
+}
+
+fn cli_ok(home: &Path, args: &[&str]) {
+    let output = cli(home, args);
+    assert!(
+        output.status.success(),
+        "lightagent {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `lightagent chat` with `lines` on its standard input, which is not a
+/// terminal; what it printed. Two minutes at most.
+fn chat(home: &Path, lines: &str) -> String {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .arg("chat")
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start lightagent chat");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(lines.as_bytes())
+        .expect("lines");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    let output = rx
+        .recv_timeout(Duration::from_secs(120))
+        .expect("lightagent chat did not finish")
+        .expect("chat output");
+    assert!(
+        output.status.success(),
+        "lightagent chat {lines:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// Read one request; return its head and body.
+fn read_request(stream: &mut TcpStream) -> Option<(String, String)> {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&bytes[..end]).into_owned();
+            let length = head
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|value| value.trim().parse::<usize>().unwrap_or(0))
+                })
+                .unwrap_or(0);
+            if bytes.len() >= end + 4 + length {
+                let body = String::from_utf8_lossy(&bytes[end + 4..end + 4 + length]).into_owned();
+                return Some((head, body));
+            }
+        }
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => return None,
+            Ok(read) => bytes.extend_from_slice(&buffer[..read]),
+        }
+    }
+}
+
+fn sse(chunks: &[Value]) -> String {
+    let mut response =
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n"
+            .to_owned();
+    for chunk in chunks {
+        response.push_str(&format!("data: {chunk}\n\n"));
+    }
+    response.push_str("data: [DONE]\n\n");
+    response
+}
+
+/// A provider that answers every turn "Done." and keeps each request body.
+fn provider() -> (String, Arc<Mutex<Vec<Value>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let url = format!("http://{}", listener.local_addr().expect("address"));
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::clone(&bodies);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let kept = Arc::clone(&kept);
+            std::thread::spawn(move || {
+                let Some((head, body)) = read_request(&mut stream) else {
+                    return;
+                };
+                if head.starts_with("GET") {
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{MODELS}",
+                        MODELS.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    return;
+                }
+                kept.lock()
+                    .expect("bodies")
+                    .push(serde_json::from_str(&body).unwrap_or(Value::Null));
+                let answer = sse(&[
+                    json!({"choices":[{"index":0,"delta":{"role":"assistant","content":"Done."}}]}),
+                    json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+                ]);
+                let _ = stream.write_all(answer.as_bytes());
+            });
+        }
+    });
+    (url, bodies)
+}
+
+fn turn(runtime: &Runtime, message: &str) {
+    let (status, raw) = call(runtime, "POST", &format!("{API}/sessions"), Some("{}"));
+    assert_eq!(status, 201, "{raw}");
+    let session = parsed(&raw)["id"].as_str().expect("session id").to_owned();
+    let body = json!({ "message": message, "session_id": session }).to_string();
+    let (status, raw) = call(runtime, "POST", &format!("{API}/runs"), Some(&body));
+    assert_eq!(status, 202, "{raw}");
+    let run = parsed(&raw)["id"].as_str().expect("run id").to_owned();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (status, raw) = call(runtime, "GET", &format!("{API}/runs/{run}"), None);
+        assert_eq!(status, 200, "{raw}");
+        let state = parsed(&raw)["status"].as_str().unwrap_or_default().to_owned();
+        if state == "completed" {
+            return;
+        }
+        assert!(
+            !matches!(state.as_str(), "failed" | "cancelled"),
+            "the turn ended {state}: {raw}"
+        );
+        assert!(Instant::now() < deadline, "the turn did not complete: {raw}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The tool names the provider was offered in its latest request.
+fn offered(bodies: &Mutex<Vec<Value>>) -> Vec<String> {
+    bodies
+        .lock()
+        .expect("bodies")
+        .last()
+        .and_then(|body| body["tools"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+        .collect()
+}
+
+fn web(names: &[String]) -> bool {
+    names.iter().any(|name| name.to_lowercase().contains("web"))
+}
+
+fn setup(label: &str) -> (PathBuf, Runtime, Arc<Mutex<Vec<Value>>>) {
+    let home = scratch_home(label);
+    let (url, bodies) = provider();
+    cli_ok(&home, &["config", "set", "inference.base_url", &url]);
+    let runtime = start(&home);
+    (home, runtime, bodies)
+}
+
+#[test]
+fn the_commands_listed_are_the_chats_help() {
+    let (home, runtime, _bodies) = setup("help");
+    let (status, raw) = call(&runtime, "GET", &format!("{API}/commands"), None);
+    assert_eq!(status, 200, "{raw}");
+    let listed = parsed(&raw);
+    let names: Vec<String> = listed["commands"]
+        .as_array()
+        .expect("commands")
+        .iter()
+        .map(|command| {
+            assert!(
+                command["summary"].as_str().is_some_and(|summary| !summary.is_empty()),
+                "{command}"
+            );
+            format!("/{}", command["name"].as_str().expect("name"))
+        })
+        .collect();
+    assert!(names.len() >= 10, "{listed}");
+    let printed = chat(&home, "/help\n/exit\n");
+    let line = printed
+        .lines()
+        .find(|line| line.starts_with("Commands:"))
+        .unwrap_or_else(|| panic!("no /help line in {printed:?}"));
+    let help: Vec<&str> = line.split_whitespace().skip(1).collect();
+    assert_eq!(help, names, "{line}");
+}
+
+#[test]
+fn the_next_desktop_run_uses_a_setting_the_cli_changed() {
+    let (home, runtime, bodies) = setup("reload");
+    cli_ok(&home, &["config", "set", "web.enabled", "false"]);
+    turn(&runtime, "One.");
+    let before = offered(&bodies);
+    assert!(!web(&before), "{before:?}");
+
+    // Changed by the CLI while the runtime runs: no restart, no reload.
+    cli_ok(&home, &["config", "set", "web.enabled", "true"]);
+    let (status, raw) = call(&runtime, "GET", &format!("{API}/tools"), None);
+    assert_eq!(status, 200, "{raw}");
+    let catalog: Vec<String> = parsed(&raw)["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+        .collect();
+    assert!(web(&catalog), "{catalog:?}");
+    turn(&runtime, "Two.");
+    let after = offered(&bodies);
+    assert!(web(&after), "{after:?}");
+}
+=== end
