@@ -1,0 +1,1323 @@
+=== base 0db83a1072514d6a0ea5f297d794085ea0fccb46
+=== message
+Row 45: D7-10 — doctor, architecture and the diagnostics bundle, and the Diagnostics screen
+
+- doctor_report and architecture_report: the JSON `lightagent doctor`
+  and `lightagent architecture` print (unchanged), shared with the API.
+- The diagnostics bundle (new scope, crate lightagent diagnostics): built
+  field by field from an explicit allowlist, and it says what it holds
+  (`included`) and what it leaves out (`excluded`). Never a credential
+  value (provider keys, MCP headers, remote credentials, identity
+  credentials, the vault key), a conversation or its title, memory or
+  knowledge contents, identity records, the desktop launch key, an
+  environment variable, a profile id or a path (paths are `<home>`);
+  URLs are reduced to their origin, so a user, password, path or query
+  never appears. Nothing is uploaded: it is returned to the caller.
+- API (local operator only): GET /diagnostics/doctor,
+  /diagnostics/architecture, /diagnostics/bundle; contract diagnostics.*;
+  three backend inventory rows (not counted).
+- The Diagnostics screen (#/diagnostics, account menu): doctor (with the
+  active home), architecture, and the bundle: Prepare shows what it holds
+  and leaves out and the exact JSON; Save writes it to a file the person
+  chooses (a browser download).
+- Tests: desktop_diagnostics.rs (separate processes; the doctor and
+  architecture over the API equal the CLI's; a home seeded with a saved
+  provider key, a URL with a user, password and query, environment
+  secrets, a memory, a session title, a document, an identity credential
+  and a remote credential: the bundle has exactly the allowlisted
+  sections and none of them, nor the launch key or a path; a keyed server
+  refuses), runs.py `diagnostics` (host), e2e/diagnostics.mjs (browser:
+  the saved file itself is checked).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-api/src/ops.rs
+--- find
+/// A stable error category, for the UI to act on without parsing messages.
+--- with
+/// A read-only diagnostics report: `lightagent doctor`, `lightagent
+/// architecture`, or the diagnostics bundle (allowlisted fields only).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagnosticsRequest {
+    Doctor,
+    Architecture,
+    Bundle,
+}
+
+/// A stable error category, for the UI to act on without parsing messages.
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    /// Tools currently visible to the factory's active target.
+    async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
+--- with
+    /// A diagnostics report, built by the embedder that owns the home. The
+    /// default refuses.
+    async fn diagnostics(
+        &self,
+        _request: crate::ops::DiagnosticsRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
+    /// Tools currently visible to the factory's active target.
+    async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    /// Perform a worker-assignment change through the factory.
+--- with
+    /// Build a diagnostics report through the factory.
+    pub async fn diagnostics(
+        &self,
+        request: crate::ops::DiagnosticsRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.diagnostics(request).await
+    }
+
+    /// Perform a worker-assignment change through the factory.
+=== replace crates/lightagent/src/serve.rs
+--- find
+    async fn workers_change(
+        &self,
+        request: lightagent_api::ops::WorkerRequest,
+--- with
+    async fn diagnostics(
+        &self,
+        request: lightagent_api::ops::DiagnosticsRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        use lightagent_api::ops::{DiagnosticsRequest, OpCategory, OpError};
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let internal = |error: String| OpError::new(OpCategory::Internal, error);
+        match request {
+            // The desktop shows no terminal banner.
+            DiagnosticsRequest::Doctor => crate::doctor_report(&paths, false).map_err(internal),
+            DiagnosticsRequest::Architecture => {
+                let config = ConfigStore::at(&paths)
+                    .load()
+                    .map_err(|error| internal(error.to_string()))?;
+                Ok(crate::architecture_report(&config))
+            }
+            DiagnosticsRequest::Bundle => crate::diagnostics::bundle(&self.root).await,
+        }
+    }
+
+    async fn workers_change(
+        &self,
+        request: lightagent_api::ops::WorkerRequest,
+=== replace crates/lightagent/src/lib.rs
+--- find
+mod identity_admin;
+--- with
+mod diagnostics;
+mod identity_admin;
+=== replace crates/lightagent/src/lib.rs
+--- find
+fn architecture(json: bool) -> Result<(), String> {
+--- with
+/// `lightagent doctor --json`, shared with the API. `banner` is whether the
+/// caller shows the banner (the CLI: whether its stderr is a terminal).
+pub(crate) fn doctor_report(
+    paths: &LightagentPaths,
+    banner: bool,
+) -> Result<serde_json::Value, String> {
+    let config = load_config(paths)?;
+    let store = ProfileStore::new(paths.root());
+    let active = active_profile_id(&store)?;
+    let profiles = store.list().map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({
+        "version": VERSION,
+        "home": paths.root().display().to_string(),
+        "home_exists": paths.root().exists(),
+        "config_file": paths.config_file().display().to_string(),
+        "provider": config.inference.provider,
+        "base_url": config.inference.base_url,
+        "active_profile": active.as_ref().map(|id| id.as_str().to_string()),
+        "profiles": profiles.iter().map(|id| id.as_str().to_string()).collect::<Vec<_>>(),
+        "tools": ToolRegistry::builtin().names().len(),
+        "banner": banner,
+    }))
+}
+
+/// `lightagent architecture --json`, shared with the API.
+pub(crate) fn architecture_report(config: &Config) -> serde_json::Value {
+    let component = |endpoint: &lightagent_core::PlatformEndpointConfig| {
+        if endpoint.enabled {
+            format!(
+                "configured @ {}",
+                endpoint.base_url.as_deref().unwrap_or("(invalid)")
+            )
+        } else {
+            "not configured".to_owned()
+        }
+    };
+    serde_json::json!({
+        "harness": "Lightagent CLI/API and browser UI",
+        "web_ui": "served by `lightagent serve --web-root`",
+        "jev": component(&config.platform.jev.endpoint),
+        "qdrant": component(&config.platform.qdrant.endpoint),
+        "infinity": component(&config.platform.infinity.endpoint),
+        "searxng": if config.web.enabled { config.web.search.endpoint.clone() } else { None },
+        "open_terminal": component(&config.platform.open_terminal.endpoint),
+        "lightweight": config.inference.base_url,
+    })
+}
+
+fn architecture(json: bool) -> Result<(), String> {
+=== replace crates/lightagent/src/lib.rs
+--- find
+    if json {
+        let value = serde_json::json!({
+            "harness": "Lightagent CLI/API and browser UI",
+            "web_ui": "served by `lightagent serve --web-root`",
+            "jev": component(&config.platform.jev.endpoint),
+            "qdrant": component(&config.platform.qdrant.endpoint),
+            "infinity": component(&config.platform.infinity.endpoint),
+            "searxng": if config.web.enabled { config.web.search.endpoint.clone() } else { None },
+            "open_terminal": component(&config.platform.open_terminal.endpoint),
+            "lightweight": config.inference.base_url,
+        });
+        println!("{value:#}");
+        return Ok(());
+    }
+--- with
+    if json {
+        println!("{:#}", architecture_report(&config));
+        return Ok(());
+    }
+=== replace crates/lightagent/src/lib.rs
+--- find
+    if json {
+        let value = serde_json::json!({
+            "version": VERSION,
+            "home": paths.root().display().to_string(),
+            "home_exists": home_exists,
+            "config_file": paths.config_file().display().to_string(),
+            "provider": config.inference.provider,
+            "base_url": config.inference.base_url,
+            "active_profile": active.as_ref().map(|id| id.as_str().to_string()),
+            "profiles": profiles.iter().map(|id| id.as_str().to_string()).collect::<Vec<_>>(),
+            "tools": tool_count,
+            "banner": std::io::stderr().is_terminal(),
+        });
+        println!("{value:#}");
+        return Ok(());
+    }
+--- with
+    if json {
+        println!(
+            "{:#}",
+            doctor_report(&paths, std::io::stderr().is_terminal())?
+        );
+        return Ok(());
+    }
+=== write crates/lightagent/src/diagnostics.rs
+//! The diagnostics bundle (D7): what a person can save and hand to someone
+//! helping them. It is built field by field from an explicit allowlist;
+//! nothing is copied wholesale. It never holds a credential value, a
+//! conversation or its title, memory or knowledge contents, identity
+//! records, the desktop launch key, an environment variable, a profile id
+//! or a path: paths are shown as `<home>`, and URLs as their origin only.
+//! Nothing is uploaded: the bundle is returned to the caller, who decides
+//! where to save it.
+
+use std::path::Path;
+
+use lightagent_api::ops::{
+    IdentityRequest, MemoryRequest, OpCategory, OpError, RagRequest, RemoteCredentialRequest,
+};
+use lightagent_core::{ConfigStore, LightagentPaths, PlatformEndpointConfig, ProfileStore};
+use lightagent_store::SessionStore;
+use serde_json::{Value, json};
+
+/// The bundle's top-level fields, in order: the only ones it has.
+pub(crate) const SECTIONS: [&str; 10] = [
+    "schema",
+    "about",
+    "included",
+    "excluded",
+    "lightagent",
+    "doctor",
+    "architecture",
+    "settings",
+    "counts",
+    "stores",
+];
+
+const INCLUDED: [&str; 6] = [
+    "the Lightagent version, operating system and architecture",
+    "doctor: whether the home exists, the provider's kind and origin, whether a profile is active, and how many profiles and built-in tools there are",
+    "architecture: which platform components are configured, by origin (scheme, host and port) only",
+    "settings: on/off switches and limits from the configuration, never a value that can hold a secret",
+    "counts: profiles, saved providers, MCP servers, and the active profile's sessions, memories and indexed documents",
+    "stores: whether the identity store and the credential vault exist, whether a vault key is configured and where it comes from, and how many records they hold",
+];
+
+const EXCLUDED: [&str; 7] = [
+    "credential values: provider keys, MCP headers, remote credentials, identity credentials and the vault key",
+    "conversations, their titles and transcripts",
+    "memory and knowledge contents",
+    "identity records: users, credentials, ownership and grants",
+    "the desktop app's launch key and environment variables",
+    "profile names and ids",
+    "file paths, shown as <home>; URLs are reduced to scheme, host and port",
+];
+
+/// A URL as its origin (scheme, host and port): never a user, password,
+/// path, query or fragment. Anything that is not a URL is left out.
+fn origin(url: &str) -> Value {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return Value::Null;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    if scheme.is_empty() || host.is_empty() {
+        return Value::Null;
+    }
+    Value::String(format!(
+        "{}://{}",
+        scheme.to_ascii_lowercase(),
+        host.to_ascii_lowercase()
+    ))
+}
+
+fn endpoint(endpoint: &PlatformEndpointConfig) -> Value {
+    if endpoint.enabled {
+        json!({
+            "configured": true,
+            "origin": endpoint.base_url.as_deref().map_or(Value::Null, origin),
+        })
+    } else {
+        json!({ "configured": false })
+    }
+}
+
+/// How many entries `field` of an operation's answer holds, when it worked.
+fn count(answer: Result<Value, OpError>, field: &str) -> Option<usize> {
+    answer
+        .ok()
+        .and_then(|value| value[field].as_array().map(Vec::len))
+}
+
+/// The bundle for the home at `root`.
+pub(crate) async fn bundle(root: &Path) -> Result<Value, OpError> {
+    let internal = |error: String| OpError::new(OpCategory::Internal, error);
+    let paths = LightagentPaths::rooted_at(root);
+    let config = ConfigStore::at(&paths)
+        .load()
+        .map_err(|error| internal(error.to_string()))?;
+    let profiles = ProfileStore::new(root);
+    let active = profiles
+        .active()
+        .map_err(|error| internal(error.to_string()))?;
+    let listed = profiles
+        .list()
+        .map_err(|error| internal(error.to_string()))?;
+    let sessions = active.as_ref().and_then(|id| {
+        SessionStore::at_profile(&profiles.handle(id))
+            .list()
+            .ok()
+            .map(|rows| rows.len())
+    });
+    let memories = count(
+        crate::memory::perform(&paths, MemoryRequest::List).await,
+        "memories",
+    );
+    let documents = count(
+        crate::rag::perform(&paths, RagRequest::List).await,
+        "sources",
+    );
+    let identity = crate::identity_admin::perform(root, IdentityRequest::Status)
+        .map(|status| {
+            json!({
+                "store": status["store"],
+                "multi_user": status["multi_user"],
+                "principals": status["principals"],
+                "credentials": status["credentials"],
+            })
+        })
+        .unwrap_or_else(|_| json!({ "error": "the identity store could not be read" }));
+    let vault = crate::remote_credentials::perform(root, RemoteCredentialRequest::Status)
+        .map(|status| {
+            json!({
+                "vault": status["vault"],
+                "key_configured": status["key_configured"],
+                "key_source": status["key_source"],
+                "grants": status["grants"],
+            })
+        })
+        .unwrap_or_else(|_| json!({ "error": "the configured credential key is unusable" }));
+    let platform = &config.platform;
+    let searxng = config
+        .web
+        .search
+        .endpoint
+        .as_deref()
+        .filter(|_| config.web.enabled)
+        .map_or(Value::Null, origin);
+    Ok(json!({
+        "schema": "lightagent-diagnostics/1",
+        "about": "A diagnostics bundle to share with someone helping you with Lightagent. It holds only what `included` lists; everything `excluded` lists is left out. It is not sent anywhere: you choose where to save it.",
+        "included": INCLUDED,
+        "excluded": EXCLUDED,
+        "lightagent": {
+            "version": crate::VERSION,
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+        },
+        "doctor": {
+            "home": "<home>",
+            "home_exists": root.exists(),
+            "config_file": "<home>/config.json",
+            "provider": config.inference.provider,
+            "provider_origin": origin(&config.inference.base_url),
+            "active_profile_set": active.is_some(),
+            "profiles": listed.len(),
+            "tools": lightagent_tools::ToolRegistry::builtin().names().len(),
+        },
+        "architecture": {
+            "jev": endpoint(&platform.jev.endpoint),
+            "qdrant": endpoint(&platform.qdrant.endpoint),
+            "infinity": endpoint(&platform.infinity.endpoint),
+            "open_terminal": endpoint(&platform.open_terminal.endpoint),
+            "searxng": searxng,
+        },
+        "settings": {
+            "tools_enabled": config.tools.enabled,
+            "terminal_allowed": config.tools.allow_terminal,
+            "web_enabled": config.web.enabled,
+            "mcp_enabled": config.mcp.enabled,
+            "extensions_enabled": config.extensions.enabled,
+            "agent_max_turns": config.agent.max_turns,
+            "agent_max_tool_calls": config.agent.max_tool_calls,
+            "context_tokens": config.runtime.n_ctx,
+        },
+        "counts": {
+            "profiles": listed.len(),
+            "saved_providers": config.inference.saved_providers.len(),
+            "mcp_servers": config.mcp.servers.len(),
+            "active_profile_sessions": sessions,
+            "active_profile_memories": memories,
+            "active_profile_documents": documents,
+        },
+        "stores": {
+            "identity": identity,
+            "remote_credentials": vault,
+        },
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_url_is_reduced_to_its_origin() {
+        assert_eq!(
+            origin("https://user:pass@Example.COM:8443/v1/chat?token=abc#x"),
+            json!("https://example.com:8443")
+        );
+        assert_eq!(origin("http://127.0.0.1:0"), json!("http://127.0.0.1:0"));
+        assert_eq!(origin("not a url"), Value::Null);
+        assert_eq!(origin("https://user@/path"), Value::Null);
+    }
+
+    #[test]
+    fn the_sections_are_the_allowlist() {
+        let names: Vec<&str> = SECTIONS.to_vec();
+        assert_eq!(names.len(), 10);
+        assert!(EXCLUDED.iter().any(|item| item.contains("credential values")));
+        assert!(EXCLUDED.iter().any(|item| item.contains("conversations")));
+        assert!(EXCLUDED.iter().any(|item| item.contains("memory and knowledge")));
+    }
+}
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+        .route("/api/lightagent/v1/identity/audit", get(identity_audit))
+--- with
+        .route("/api/lightagent/v1/identity/audit", get(identity_audit))
+        .route(
+            "/api/lightagent/v1/diagnostics/doctor",
+            get(diagnostics_doctor),
+        )
+        .route(
+            "/api/lightagent/v1/diagnostics/architecture",
+            get(diagnostics_architecture),
+        )
+        .route(
+            "/api/lightagent/v1/diagnostics/bundle",
+            get(diagnostics_bundle),
+        )
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+/// An import of skills from a repository or folder (new scope).
+--- with
+/// A diagnostics report through the embedder (see
+/// [`ops::DiagnosticsRequest`]), for the local operator only.
+async fn diagnostics_operation(
+    state: &AppState,
+    headers: &HeaderMap,
+    admitted: FromDesktop,
+    request: ops::DiagnosticsRequest,
+) -> Response {
+    if let Some(rejection) = local_operator(state, headers, admitted.is_some()) {
+        return rejection;
+    }
+    match state.manager.diagnostics(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn diagnostics_doctor(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+) -> Response {
+    diagnostics_operation(&state, &headers, admitted, ops::DiagnosticsRequest::Doctor).await
+}
+
+async fn diagnostics_architecture(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+) -> Response {
+    let request = ops::DiagnosticsRequest::Architecture;
+    diagnostics_operation(&state, &headers, admitted, request).await
+}
+
+/// The diagnostics bundle: allowlisted fields only, returned, never sent.
+async fn diagnostics_bundle(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+) -> Response {
+    diagnostics_operation(&state, &headers, admitted, ops::DiagnosticsRequest::Bundle).await
+}
+
+/// An import of skills from a repository or folder (new scope).
+=== replace docs/desktop/contract/operations.json
+--- find
+  {
+   "id": "remote_credentials.status",
+--- with
+  {
+   "id": "diagnostics.doctor",
+   "method": "GET",
+   "path": "/api/lightagent/v1/diagnostics/doctor"
+  },
+  {
+   "id": "diagnostics.architecture",
+   "method": "GET",
+   "path": "/api/lightagent/v1/diagnostics/architecture"
+  },
+  {
+   "id": "diagnostics.bundle",
+   "method": "GET",
+   "path": "/api/lightagent/v1/diagnostics/bundle"
+  },
+  {
+   "id": "remote_credentials.status",
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  {
+   "id": "api.get.remote-credentials.vault",
+--- with
+  {
+   "id": "api.get.diagnostics.doctor",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/diagnostics/doctor",
+   "source": "crates/lightagent-api/src/lib.rs:177",
+   "behavior": "The report `lightagent doctor --json` prints (D7-10)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/diagnostics/doctor"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.doctor)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: doctor_report via RunFactory::diagnostics",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.diagnostics.architecture",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/diagnostics/architecture",
+   "source": "crates/lightagent-api/src/lib.rs:177",
+   "behavior": "The report `lightagent architecture --json` prints (D7-10)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/diagnostics/architecture"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.architecture)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: architecture_report via RunFactory::diagnostics",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.diagnostics.bundle",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/diagnostics/bundle",
+   "source": "crates/lightagent-api/src/lib.rs:177",
+   "behavior": "The diagnostics bundle: allowlisted fields only, returned to the caller, never uploaded (D7-10)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/diagnostics/bundle"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "New scope (the D7 diagnostics bundle the build plan requires); no CLI capability, so it is never counted toward parity",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "Settings/Diagnostics: diagnostics bundle (prepare, review, save)",
+   "backend": "crate lightagent diagnostics::bundle via RunFactory::diagnostics",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.remote-credentials.vault",
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.get.remote-credentials.vault` | `GET /api/lightagent/v1/remote-credentials/vault` | applicable | no | (backend reuse) | shared: remote_credentials::perform via RunFactory::remote_credentials | not-started | `crates/lightagent-api/src/lib.rs:177` |
+--- with
+| `api.get.diagnostics.doctor` | `GET /api/lightagent/v1/diagnostics/doctor` | applicable | no | (backend reuse) | shared: doctor_report via RunFactory::diagnostics | not-started | `crates/lightagent-api/src/lib.rs:177` |
+| `api.get.diagnostics.architecture` | `GET /api/lightagent/v1/diagnostics/architecture` | applicable | no | (backend reuse) | shared: architecture_report via RunFactory::diagnostics | not-started | `crates/lightagent-api/src/lib.rs:177` |
+| `api.get.diagnostics.bundle` | `GET /api/lightagent/v1/diagnostics/bundle` | applicable | no | Settings/Diagnostics: diagnostics bundle (new scope, never counted) | crate lightagent diagnostics::bundle via RunFactory::diagnostics | not-started | `crates/lightagent-api/src/lib.rs:177` |
+| `api.get.remote-credentials.vault` | `GET /api/lightagent/v1/remote-credentials/vault` | applicable | no | (backend reuse) | shared: remote_credentials::perform via RunFactory::remote_credentials | not-started | `crates/lightagent-api/src/lib.rs:177` |
+=== write crates/lightagent/tests/desktop_diagnostics.rs
+//! Diagnostics (D7-10): the desktop runtime's doctor and architecture
+//! reports equal what `lightagent doctor --json` and `lightagent
+//! architecture --json` print, and the diagnostics bundle, built from a
+//! home seeded with every kind of secret and private content, holds
+//! exactly the allowlisted sections and none of them. Every process here
+//! is separate.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+
+const KEY: &str = "c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4";
+const API: &str = "/api/lightagent/v1";
+const SECTIONS: [&str; 10] = [
+    "schema",
+    "about",
+    "included",
+    "excluded",
+    "lightagent",
+    "doctor",
+    "architecture",
+    "settings",
+    "counts",
+    "stores",
+];
+
+struct Runtime {
+    child: Child,
+    _lifeline: Option<ChildStdin>,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!(
+        "lightagent-desktop-diagnostics-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    dir
+}
+
+fn first_line(child: &mut Child) -> String {
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        let _ = reader.read_line(&mut line);
+        let _ = tx.send(line);
+        let mut rest = String::new();
+        while reader.read_line(&mut rest).is_ok_and(|read| read > 0) {
+            rest.clear();
+        }
+    });
+    rx.recv_timeout(Duration::from_secs(60))
+        .expect("first line")
+}
+
+fn start_desktop(home: &Path, env: &[(&str, &str)]) -> Runtime {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lightagent"));
+    command
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let mut child = command.spawn().expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let line = first_line(&mut child);
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: Some(lifeline),
+        addr,
+    }
+}
+
+fn start_keyed(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--host", "127.0.0.1", "--port", "0"])
+        .args(["--key-env", "LIGHTAGENT_TEST_DIAGNOSTICS_KEY"])
+        .env("LIGHTAGENT_TEST_DIAGNOSTICS_KEY", KEY)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve");
+    let line = first_line(&mut child);
+    let addr = line
+        .split("http://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or_else(|| panic!("no address in {line:?}"))
+        .to_owned();
+    Runtime {
+        child,
+        _lifeline: None,
+        addr,
+    }
+}
+
+fn call(runtime: &Runtime, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, raw)
+}
+
+fn parsed(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|error| panic!("not JSON ({error}): {raw}"))
+}
+
+fn ok(runtime: &Runtime, method: &str, path: &str, body: Option<Value>) -> (Value, String) {
+    let body = body.map(|body| body.to_string());
+    let (status, raw) = call(runtime, method, path, body.as_deref());
+    assert_eq!(status, 200, "{method} {path}: {raw}");
+    (parsed(&raw), raw)
+}
+
+fn cli(home: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lightagent"));
+    command
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null());
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    command.output().expect("run lightagent")
+}
+
+fn cli_ok(home: &Path, env: &[(&str, &str)], args: &[&str]) {
+    let output = cli(home, env, args);
+    assert!(
+        output.status.success(),
+        "lightagent {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn cli_json(home: &Path, args: &[&str]) -> Value {
+    let mut all = vec!["--json"];
+    all.extend_from_slice(args);
+    let output = cli(home, &[], &all);
+    assert!(
+        output.status.success(),
+        "lightagent {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("JSON output")
+}
+
+fn arg(path: &Path) -> &str {
+    path.to_str().expect("UTF-8 path")
+}
+
+#[test]
+fn the_bundle_holds_the_allowlist_and_no_secret_or_private_content() {
+    let home = scratch("home");
+    let outside = scratch("outside");
+    cli_ok(&home, &[], &["config", "set", "extensions.enabled", "true"]);
+    cli_ok(&home, &[], &["profile", "create", "diag-private-profile"]);
+    cli_ok(&home, &[], &["profile", "use", "diag-private-profile"]);
+    let base_url = "https://diag-user:DIAG-URL-PASSWORD@llm.diag.example:8443/v1/private-path?token=DIAG-URL-TOKEN";
+    cli_ok(&home, &[], &["config", "set", "inference.base_url", base_url]);
+    let vault_key = outside.join("vault.key");
+    cli_ok(&home, &[], &["remote-credential", "keygen", arg(&vault_key)]);
+    let key_env = ("LIGHTAGENT_CREDENTIAL_KEY_FILE", arg(&vault_key));
+    let env = [
+        key_env,
+        ("LIGHTAGENT_OPEN_TERMINAL_TOKEN", "DIAG-ENV-TERMINAL-TOKEN"),
+        ("LIGHTAGENT_PROVIDER_KEY", "DIAG-ENV-PROVIDER-KEY"),
+        ("LIGHTAGENT_API_KEY", "DIAG-ENV-API-KEY"),
+    ];
+    let runtime = start_desktop(&home, &env);
+
+    // Doctor and architecture: what the CLI prints.
+    let (doctor, _) = ok(&runtime, "GET", &format!("{API}/diagnostics/doctor"), None);
+    assert_eq!(doctor, cli_json(&home, &["doctor"]));
+    let (architecture, _) = ok(&runtime, "GET", &format!("{API}/diagnostics/architecture"), None);
+    assert_eq!(architecture, cli_json(&home, &["architecture"]));
+
+    // Seed: a saved provider key, a memory, a session title, a document, an
+    // identity credential and a remote credential.
+    ok(
+        &runtime,
+        "PUT",
+        &format!("{API}/provider/credential"),
+        Some(json!({"key": "DIAG-SAVED-PROVIDER-KEY"})),
+    );
+    ok(
+        &runtime,
+        "POST",
+        &format!("{API}/memories"),
+        Some(json!({"text": "DIAG-PRIVATE-MEMORY about a diagnosis"})),
+    );
+    let (session, _) = ok(&runtime, "POST", &format!("{API}/sessions"), Some(json!({})));
+    let session = session["id"].as_str().expect("session id").to_owned();
+    ok(
+        &runtime,
+        "PATCH",
+        &format!("{API}/sessions/{session}"),
+        Some(json!({"title": "DIAG-PRIVATE-TITLE"})),
+    );
+    let document = outside.join("diag-private-document.md");
+    std::fs::write(&document, "DIAG-PRIVATE-DOCUMENT text about rivers.\n").expect("document");
+    ok(
+        &runtime,
+        "POST",
+        &format!("{API}/knowledge"),
+        Some(json!({"path": document, "source": "diag-private-source"})),
+    );
+    ok(
+        &runtime,
+        "POST",
+        &format!("{API}/identity/users"),
+        Some(json!({"id": "diag-private-user"})),
+    );
+    let token_file = outside.join("identity.key");
+    ok(
+        &runtime,
+        "POST",
+        &format!("{API}/identity/credentials"),
+        Some(json!({"principal": "diag-private-user", "secret_file": token_file})),
+    );
+    let token = std::fs::read_to_string(&token_file).expect("token");
+    let identity_secret = token.trim().rsplit('_').next().unwrap_or_default().to_owned();
+    assert!(identity_secret.len() >= 32);
+    let remote_secret_file = outside.join("remote.secret");
+    std::fs::write(&remote_secret_file, "DIAG-REMOTE-SECRET\n").expect("secret");
+    ok(
+        &runtime,
+        "POST",
+        &format!("{API}/remote-credentials"),
+        Some(json!({
+            "profile": "diag-private-profile",
+            "service": "web-search",
+            "destinations": ["https://remote.diag.example"],
+            "secret_file": remote_secret_file,
+        })),
+    );
+
+    // The bundle: exactly the allowlisted sections.
+    let (bundle, raw) = ok(&runtime, "GET", &format!("{API}/diagnostics/bundle"), None);
+    let mut sections: Vec<&str> = bundle
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    sections.sort_unstable();
+    let mut expected = SECTIONS.to_vec();
+    expected.sort_unstable();
+    assert_eq!(sections, expected);
+    assert_eq!(bundle["schema"], "lightagent-diagnostics/1");
+
+    // None of the seeded secrets or private content; no launch key, path,
+    // user or password from the URL.
+    let forbidden = [
+        "DIAG-SAVED-PROVIDER-KEY",
+        "DIAG-URL-PASSWORD",
+        "DIAG-URL-TOKEN",
+        "diag-user",
+        "private-path",
+        "DIAG-ENV-TERMINAL-TOKEN",
+        "DIAG-ENV-PROVIDER-KEY",
+        "DIAG-ENV-API-KEY",
+        "DIAG-PRIVATE-MEMORY",
+        "DIAG-PRIVATE-TITLE",
+        "DIAG-PRIVATE-DOCUMENT",
+        "diag-private-source",
+        "diag-private-user",
+        "diag-private-profile",
+        "DIAG-REMOTE-SECRET",
+        "remote.diag.example",
+        identity_secret.as_str(),
+        KEY,
+        arg(&home),
+        arg(&outside),
+    ];
+    for text in forbidden {
+        assert!(!raw.contains(text), "the bundle holds {text:?}: {raw}");
+    }
+
+    // What it does hold: the origin, the counts, the stores' state.
+    assert_eq!(bundle["doctor"]["provider_origin"], "https://llm.diag.example:8443");
+    assert_eq!(bundle["doctor"]["home"], "<home>");
+    assert_eq!(bundle["counts"]["active_profile_memories"], 1, "{bundle}");
+    assert_eq!(bundle["counts"]["active_profile_sessions"], 1, "{bundle}");
+    assert_eq!(bundle["counts"]["active_profile_documents"], 1, "{bundle}");
+    assert_eq!(bundle["stores"]["identity"]["store"], "present", "{bundle}");
+    assert_eq!(
+        bundle["stores"]["remote_credentials"]["key_source"],
+        "file",
+        "{bundle}"
+    );
+    assert_eq!(
+        bundle["stores"]["remote_credentials"]["grants"]["active"],
+        1,
+        "{bundle}"
+    );
+}
+
+#[test]
+fn a_keyed_server_refuses_diagnostics() {
+    let home = scratch("gate");
+    cli_ok(&home, &[], &["config", "set", "extensions.enabled", "true"]);
+    cli_ok(&home, &[], &["profile", "create", "work"]);
+    cli_ok(&home, &[], &["profile", "use", "work"]);
+    let keyed = start_keyed(&home);
+    for path in ["doctor", "architecture", "bundle"] {
+        let (status, raw) = call(&keyed, "GET", &format!("{API}/diagnostics/{path}"), None);
+        assert_eq!(status, 403, "{path}: {raw}");
+    }
+}
+=== replace desktop/e2e/runs.py
+--- find
+            ("remote_credentials", lambda: scenario_remote_credentials(host, cli)),
+--- with
+            ("remote_credentials", lambda: scenario_remote_credentials(host, cli)),
+            ("diagnostics", lambda: scenario_diagnostics(host, cli)),
+=== replace desktop/e2e/runs.py
+--- find
+def scenario_remote_credentials(host, cli):
+--- with
+def scenario_diagnostics(host, cli):
+    """D7 through the host transport: doctor and architecture equal the
+    CLI's; the bundle has exactly the allowlisted sections and holds no
+    path of the home and none of the secrets the earlier scenarios used."""
+    check = Checks("diagnostics")
+
+    def cli_json(*args):
+        return json.loads(harness.run_cli(cli, "--json", *args))
+
+    status, doctor = host.fetch("GET", f"{API}/diagnostics/doctor")
+    check.expect("doctor through the host equals the CLI's",
+                 status == 200 and doctor == cli_json("doctor"), (status, doctor))
+    status, architecture = host.fetch("GET", f"{API}/diagnostics/architecture")
+    check.expect("architecture through the host equals the CLI's",
+                 status == 200 and architecture == cli_json("architecture"), (status, architecture))
+    status, bundle = host.fetch("GET", f"{API}/diagnostics/bundle")
+    sections = sorted((bundle or {}).keys()) if isinstance(bundle, dict) else []
+    expected = sorted(["schema", "about", "included", "excluded", "lightagent", "doctor",
+                       "architecture", "settings", "counts", "stores"])
+    raw = json.dumps(bundle)
+    forbidden = [os.environ["LIGHTAGENT_HOME"], "e2e-host-secret", "e2e-alice", "docs.e2e.invalid"]
+    leaked = [text for text in forbidden if text in raw]
+    check.expect("the bundle has the allowlisted sections and none of the earlier secrets or paths",
+                 status == 200 and sections == expected and not leaked, (status, sections, leaked))
+    return check
+
+
+def scenario_remote_credentials(host, cli):
+=== replace frontend/src/api/agent.ts
+--- find
+  settings: () => jsonRequest<LightagentSettings>("/settings"),
+--- with
+  /** `lightagent doctor|architecture --json`, and the diagnostics bundle (allowlisted fields only; never uploaded). */
+  doctor: () => jsonRequest<Record<string, unknown>>("/diagnostics/doctor"),
+  architecture: () => jsonRequest<Record<string, unknown>>("/diagnostics/architecture"),
+  diagnosticsBundle: () =>
+    jsonRequest<Record<string, unknown> & { about: string; included: string[]; excluded: string[] }>(
+      "/diagnostics/bundle",
+    ),
+  settings: () => jsonRequest<LightagentSettings>("/settings"),
+=== write frontend/src/screens/DiagnosticsScreen.tsx
+import { useEffect, useState } from "react";
+
+import { agentApi } from "../api/agent";
+import { Card } from "../components/Card";
+import { TopBar } from "../components/Shell";
+
+type Report = Record<string, unknown>;
+type Bundle = Report & { about: string; included: string[]; excluded: string[] };
+
+const DOCTOR_LABELS: [string, string][] = [
+  ["version", "Version"],
+  ["home", "Home (LIGHTAGENT_HOME)"],
+  ["home_exists", "Home exists"],
+  ["config_file", "Configuration file"],
+  ["provider", "Provider"],
+  ["base_url", "Provider endpoint"],
+  ["active_profile", "Active profile"],
+  ["profiles", "Profiles"],
+  ["tools", "Built-in tools"],
+];
+
+const ARCHITECTURE_LABELS: [string, string][] = [
+  ["jev", "Jev: routing and confidence decisions"],
+  ["qdrant", "Qdrant: knowledge retrieval"],
+  ["infinity", "Infinity: reranking"],
+  ["searxng", "SearXNG: web search"],
+  ["open_terminal", "Open Terminal: isolated code execution"],
+  ["lightweight", "Lightweight: local inference and API gateway"],
+];
+
+function errorText(cause: unknown): string {
+  return (cause instanceof Error ? cause.message : String(cause)).replace(/^\d{3}:\s*/, "");
+}
+
+function shown(value: unknown): string {
+  if (value === null || value === undefined) return "not configured";
+  if (Array.isArray(value)) return value.length ? value.join(", ") : "(none)";
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+function Rows({ labels, report, testId }: { labels: [string, string][]; report: Report; testId: string }) {
+  return (
+    <dl data-testid={testId} style={{ display: "grid", gridTemplateColumns: "minmax(120px, max-content) 1fr", gap: "4px 16px", margin: 0 }}>
+      {labels.map(([key, label]) => (
+        <div key={key} style={{ display: "contents" }}>
+          <dt className="muted">{label}</dt>
+          <dd style={{ margin: 0, overflowWrap: "anywhere" }}>{shown(report[key])}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+/**
+ * Doctor and architecture as `lightagent doctor|architecture` report them,
+ * and the diagnostics bundle: prepared on request, shown in full before it
+ * is saved, and saved only where the person chooses. Nothing is uploaded.
+ */
+export function DiagnosticsScreen() {
+  const [doctor, setDoctor] = useState<Report | null>(null);
+  const [architecture, setArchitecture] = useState<Report | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [bundle, setBundle] = useState<Bundle | null>(null);
+  const [bundleError, setBundleError] = useState<string | null>(null);
+  const [preparing, setPreparing] = useState(false);
+  const [saved, setSaved] = useState<string | null>(null);
+
+  async function load() {
+    try {
+      const [nextDoctor, nextArchitecture] = await Promise.all([agentApi.doctor(), agentApi.architecture()]);
+      setDoctor(nextDoctor);
+      setArchitecture(nextArchitecture);
+      setLoadError(null);
+    } catch (cause) {
+      setLoadError(errorText(cause));
+    }
+  }
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  async function prepare() {
+    setPreparing(true);
+    setBundleError(null);
+    setSaved(null);
+    try {
+      setBundle(await agentApi.diagnosticsBundle());
+    } catch (cause) {
+      setBundleError(errorText(cause));
+    } finally {
+      setPreparing(false);
+    }
+  }
+
+  function save() {
+    if (!bundle) return;
+    const name = `lightagent-diagnostics-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.json`;
+    const url = URL.createObjectURL(new Blob([`${JSON.stringify(bundle, null, 2)}\n`], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setSaved(`Saved as ${name}. It was not sent anywhere.`);
+  }
+
+  return (
+    <>
+      <TopBar title="Diagnostics" subtitle="What lightagent doctor and architecture report, and a bundle you can share" />
+      <div className="page" data-testid="diagnostics-screen">
+        {loadError && (
+          <div className="notice notice--warn" role="alert">
+            Diagnostics are unavailable: {loadError}{" "}
+            <button type="button" className="btn" onClick={() => void load()}>Retry</button>
+          </div>
+        )}
+
+        <Card title="Doctor">
+          {doctor ? <Rows labels={DOCTOR_LABELS} report={doctor} testId="diagnostics-doctor" /> : !loadError && <span className="muted">Loading…</span>}
+        </Card>
+
+        <Card title="Architecture">
+          {architecture
+            ? <Rows labels={ARCHITECTURE_LABELS} report={architecture} testId="diagnostics-architecture" />
+            : !loadError && <span className="muted">Loading…</span>}
+        </Card>
+
+        <Card title="Diagnostics bundle">
+          <p className="card__note">
+            A file to share with someone helping you. It is built from a fixed list of fields and never holds a
+            credential, a conversation, memory or knowledge contents, identity records, profile names or file paths.
+            Review it before you save it; nothing is uploaded.
+          </p>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button type="button" className="btn" disabled={preparing} aria-busy={preparing || undefined}
+              onClick={() => void prepare()}>Prepare bundle</button>
+            <button type="button" className="btn" disabled={!bundle} onClick={save}>Save bundle…</button>
+          </div>
+          {bundleError && <div role="alert" style={{ fontSize: 11.5, color: "var(--danger)", marginTop: 4 }}>{bundleError}</div>}
+          {saved && <div className="notice notice--info" role="status" style={{ marginTop: 10 }}>{saved}</div>}
+          {bundle && (
+            <div data-testid="diagnostics-bundle" style={{ marginTop: 12, display: "grid", gap: 10 }}>
+              <div>{bundle.about}</div>
+              <div>
+                <strong>Included</strong>
+                <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                  {bundle.included.map((item) => <li key={item}>{item}</li>)}
+                </ul>
+              </div>
+              <div>
+                <strong>Left out</strong>
+                <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                  {bundle.excluded.map((item) => <li key={item}>{item}</li>)}
+                </ul>
+              </div>
+              <details>
+                <summary>The exact contents</summary>
+                <pre data-testid="diagnostics-preview" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 12 }}>
+                  {JSON.stringify(bundle, null, 2)}
+                </pre>
+              </details>
+            </div>
+          )}
+        </Card>
+      </div>
+    </>
+  );
+}
+=== replace frontend/src/App.tsx
+--- find
+import { IdentityScreen } from "./screens/IdentityScreen";
+--- with
+import { DiagnosticsScreen } from "./screens/DiagnosticsScreen";
+import { IdentityScreen } from "./screens/IdentityScreen";
+=== replace frontend/src/App.tsx
+--- find
+        <Route path="admin/identity" element={<IdentityScreen />} />
+--- with
+        <Route path="admin/identity" element={<IdentityScreen />} />
+        <Route path="diagnostics" element={<DiagnosticsScreen />} />
+=== replace frontend/src/components/Shell.tsx
+--- find
+import { ArrowLeft, BookOpen, FileText, KeyRound, Lock, Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Search, Settings, SquarePen, Users, Wrench } from "lucide-react";
+--- with
+import { ArrowLeft, BookOpen, FileText, KeyRound, Lock, Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Search, Settings, SquarePen, Stethoscope, Users, Wrench } from "lucide-react";
+=== replace frontend/src/components/Shell.tsx
+--- find
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/admin/credentials"); }}><span className="session-menu__item"><Lock size={17} /> Remote credentials</span></MenuItem>
+--- with
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/admin/credentials"); }}><span className="session-menu__item"><Lock size={17} /> Remote credentials</span></MenuItem>
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/diagnostics"); }}><span className="session-menu__item"><Stethoscope size={17} /> Diagnostics</span></MenuItem>
+=== replace frontend/src/screens/Agent.tsx
+--- find
+import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, Clock, CornerDownLeft, Cpu, FilePenLine, FileText, Folder, Globe, KeyRound, Lock, MessageCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, SquarePen, Terminal, Trash2, Wrench, X } from "lucide-react";
+--- with
+import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, Clock, CornerDownLeft, Cpu, FilePenLine, FileText, Folder, Globe, KeyRound, Lock, MessageCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, SquarePen, Stethoscope, Terminal, Trash2, Wrench, X } from "lucide-react";
+=== replace frontend/src/screens/Agent.tsx
+--- find
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/admin/credentials"); }}><span className="session-menu__item"><Lock size={17} /> Remote credentials</span></MenuItem>
+--- with
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/admin/credentials"); }}><span className="session-menu__item"><Lock size={17} /> Remote credentials</span></MenuItem>
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/diagnostics"); }}><span className="session-menu__item"><Stethoscope size={17} /> Diagnostics</span></MenuItem>
+=== write e2e/diagnostics.mjs
+// The Diagnostics screen against the real harness (D7-10): doctor (with
+// the active home) and architecture show what the API reports; the bundle
+// is prepared, shows what it holds and leaves out, and is saved as a file.
+// The saved file itself is checked: exactly the allowlisted sections, and
+// none of a memory, a session title, the harness's vault secret, the home
+// path or a profile id seeded or present in the harness.
+
+import { readFile } from "node:fs/promises";
+
+const API = "/api/lightagent/v1";
+const SECTIONS = ["schema", "about", "included", "excluded", "lightagent", "doctor", "architecture", "settings", "counts", "stores"];
+
+async function call(base, method, path, body) {
+  const response = await fetch(`${base}${API}${path}`, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  return response.json();
+}
+
+export async function checkDiagnostics(browser, base, outDir) {
+  const failures = [];
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1600 }, acceptDownloads: true });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const marker = `render-diagnostics-private-${Date.now()}`;
+  let memory = "";
+  let session = "";
+  try {
+    const doctor = await call(base, "GET", "/diagnostics/doctor");
+    const catalog = await call(base, "GET", "/profiles");
+    memory = (await call(base, "POST", "/memories", { text: `${marker} memory` })).id ?? "";
+    session = (await call(base, "POST", "/sessions", {})).id ?? "";
+    if (session) await call(base, "PATCH", `/sessions/${session}`, { title: `${marker} title` });
+
+    await page.goto(`${base}/#/diagnostics`);
+    const screen = page.getByTestId("diagnostics-screen");
+    await screen.waitFor({ timeout: 15000 });
+    await page.getByTestId("diagnostics-doctor").getByText(String(doctor.home), { exact: true }).waitFor({ timeout: 15000 });
+    await page.getByTestId("diagnostics-architecture").waitFor({ timeout: 10000 });
+
+    await screen.getByRole("button", { name: "Prepare bundle" }).click();
+    const shown = page.getByTestId("diagnostics-bundle");
+    await shown.getByText("Left out", { exact: true }).waitFor({ timeout: 15000 });
+    await page.screenshot({ path: `${outDir}/diagnostics-bundle.png`, fullPage: true });
+
+    const [download] = await Promise.all([
+      page.waitForEvent("download", { timeout: 15000 }),
+      screen.getByRole("button", { name: "Save bundle…" }).click(),
+    ]);
+    const file = await download.path();
+    const text = await readFile(file, "utf8");
+    const saved = JSON.parse(text);
+    const sections = Object.keys(saved).sort();
+    if (JSON.stringify(sections) !== JSON.stringify([...SECTIONS].sort())) {
+      failures.push(`diagnostics: the saved bundle's sections are ${JSON.stringify(sections)}`);
+    }
+    const forbidden = [marker, "render-previous-secret", String(doctor.home), ...catalog.profiles.map((p) => `"${p.id}"`)];
+    for (const item of forbidden) {
+      if (text.includes(item)) failures.push(`diagnostics: the saved bundle holds ${JSON.stringify(item)}`);
+    }
+    if ((saved.counts?.active_profile_memories ?? 0) < 1) {
+      failures.push(`diagnostics: the bundle counts no memory: ${JSON.stringify(saved.counts)}`);
+    }
+    await page.getByRole("status").filter({ hasText: "It was not sent anywhere." }).waitFor({ timeout: 10000 });
+    if (errors.length) failures.push(`diagnostics: page errors: ${errors.join("; ")}`);
+  } catch (err) {
+    failures.push(`diagnostics: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+    await page.screenshot({ path: `${outDir}/diagnostics-failed.png`, fullPage: true }).catch(() => {});
+  } finally {
+    await page.close();
+    if (memory) await call(base, "DELETE", `/memories/items/${memory}`).catch(() => {});
+    if (session) await call(base, "DELETE", `/sessions/${session}`).catch(() => {});
+  }
+  return failures;
+}
+=== replace e2e/render.mjs
+--- find
+import { checkIdentity } from "./identity.mjs";
+--- with
+import { checkIdentity } from "./identity.mjs";
+import { checkDiagnostics } from "./diagnostics.mjs";
+=== replace e2e/render.mjs
+--- find
+  { name: "identity", hash: "#/admin/identity", agentBacked: true, mustContain: "Identity store" },
+--- with
+  { name: "identity", hash: "#/admin/identity", agentBacked: true, mustContain: "Identity store" },
+  { name: "diagnostics", hash: "#/diagnostics", agentBacked: true, mustContain: "Diagnostics bundle" },
+=== replace e2e/render.mjs
+--- find
+  // Assigns and revokes a specialist role.
+--- with
+  // Prepares and saves the diagnostics bundle, after identity and credentials exist.
+  try {
+    failures.push(...(await checkDiagnostics(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`diagnostics: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  }
+  // Assigns and revokes a specialist role.
+=== end
