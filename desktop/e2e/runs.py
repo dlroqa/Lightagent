@@ -520,6 +520,63 @@ def scenario_workers(host, cli):
     return check
 
 
+CONFIG_SECTIONS = [
+    ("inference.model", "sections-model-a", "sections-model-b"),
+    ("agent.max_turns", "17", "19"),
+    ("web.timeout_secs", "21", "23"),
+    ("tools.profile_policy", "report_only", "enforce"),
+    ("rag.realtime_enabled", "true", "false"),
+    ("memory.top_k", "6", "8"),
+    ("runtime.threads", "3", "5"),
+    ("generation.max_output_tokens", "1234", "2345"),
+    ("platform.infinity.timeout_secs", "11", "13"),
+    ("subagents.selection_profiles", "alpha", "alpha,beta"),
+    ("tui.show_reasoning", "false", "true"),
+]
+
+
+def scenario_config_sections(host, cli):
+    """D7 through the host transport: one key of every settable
+    configuration section, written through the host, is what the CLI reads,
+    and the CLI's write is what the host reads. An optional key with no value
+    is unset for both alike (the host's 404, the CLI's refusal). Every value
+    is restored, and a key that had none is cleared again."""
+    check = Checks("config_sections")
+    for key, by_host, by_cli in CONFIG_SECTIONS:
+        before_status, before = host.fetch("GET", f"{API}/config/{key}")
+        if before_status == 404:
+            try:
+                harness.run_cli(cli, "config", "get", key)
+                refused = None
+            except RuntimeError as error:
+                refused = str(error)
+            check.expect(f"{key}: unset through the host and for the CLI alike",
+                         refused is not None and f"unknown or unreadable config key '{key}'" in refused,
+                         (before, refused))
+            original = ""
+        else:
+            original = (before or {}).get("value")
+            check.expect(f"{key}: readable through the host",
+                         before_status == 200 and isinstance(original, str), (before_status, before))
+            if not isinstance(original, str):
+                continue
+        try:
+            status, written = host.fetch("PUT", f"{API}/config/{key}", {"value": by_host})
+            read = harness.run_cli(cli, "config", "get", key).strip()
+            harness.run_cli(cli, "config", "set", key, by_cli)
+            _, shown = host.fetch("GET", f"{API}/config/{key}")
+            check.expect(f"{key}: through the host and by the CLI alike",
+                         status == 200 and read == by_host and (shown or {}).get("value") == by_cli,
+                         (status, written, read, shown))
+        finally:
+            harness.run_cli(cli, "config", "set", key, original)
+        after_status, after = host.fetch("GET", f"{API}/config/{key}")
+        check.expect(f"{key}: restored",
+                     after_status == before_status and (after or {}).get("value") == (before or {}).get("value"),
+                     (before_status, before, after_status, after))
+    return check
+
+
 def scenario_setup(host, cli):
     """D7 through the host transport: init on an initialised home is
     refused; a forced init with the current profile and endpoint keeps
@@ -1027,6 +1084,7 @@ def main():
             ("remote_credentials", lambda: scenario_remote_credentials(host, cli)),
             ("diagnostics", lambda: scenario_diagnostics(host, cli)),
             ("setup", lambda: scenario_setup(host, cli)),
+            ("config_sections", lambda: scenario_config_sections(host, cli)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]

@@ -10,6 +10,7 @@ import { checkDeliveryStates } from "./delivery.mjs";
 import { checkJevStates } from "./jev.mjs";
 import { checkProfileStates } from "./profiles.mjs";
 import { checkConfigEditor } from "./config.mjs";
+import { checkConfigSections } from "./config-sections.mjs";
 import { checkSettingsStates } from "./settings.mjs";
 import { checkExtensions } from "./extensions.mjs";
 import { checkMcp } from "./mcp.mjs";
@@ -472,6 +473,12 @@ async function main() {
     failures.push(...(await checkProfileStates(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`profile states: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // One key of every settable section, each restored.
+  try {
+    failures.push(...(await checkConfigSections(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`config sections: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
   }
   // Changes the config file.
   try {
