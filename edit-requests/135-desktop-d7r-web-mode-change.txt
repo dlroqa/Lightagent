@@ -1,0 +1,74 @@
+=== base cfbdf9351a92dcfe0183d7bbaf42226b18e28374
+=== message
+Row 52: apply the web mode only as a change; drop setup's unused nonempty
+
+Every Settings save carries the whole settings object, including the web
+mode it read. Re-applying that mode on an unrelated save (memory, turns)
+would reset what the mode implies: Off and Fetch turn realtime knowledge
+off, which silently undid a `lightagent config set rag.realtime_enabled
+true`. The mode now applies only when it differs from the configured one,
+read before web_enabled is assigned, or when a custom search's URL
+changes. The backend test checks that an unrelated save keeps realtime
+knowledge on.
+
+setup.rs's nonempty() lost its last callers to WebMode::apply.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+    config.web.enabled = settings.web_enabled;
+    if let Some(mode) = settings.web_mode {
+        mode.apply(config, settings.web_search_endpoint.as_deref());
+    }
+--- with
+    // The web mode applies only as a change: every save carries the mode it
+    // read, and an unrelated one must not reset what a mode implies
+    // (realtime knowledge, the search key).
+    let web_before = lightagent_core::WebMode::of(config);
+    config.web.enabled = settings.web_enabled;
+    if let Some(mode) = settings.web_mode {
+        let endpoint = settings
+            .web_search_endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty());
+        let moved = mode == lightagent_core::WebMode::Custom
+            && endpoint != config.web.search.endpoint.as_deref();
+        if mode != web_before || moved {
+            mode.apply(config, endpoint);
+        }
+    }
+=== replace crates/lightagent/src/setup.rs
+--- find
+fn nonempty(value: String) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+--- with
+=== replace crates/lightagent/tests/desktop_setup_sections.rs
+--- find
+    assert_eq!(status, 400, "{raw}");
+    assert_eq!(sections(&by_settings), before);
+}
+--- with
+    assert_eq!(status, 400, "{raw}");
+    assert_eq!(sections(&by_settings), before);
+
+    // A save that leaves the web mode alone keeps what the mode implies:
+    // realtime knowledge turned on with `config set` stays on through an
+    // unrelated change.
+    cli_ok(
+        &by_settings,
+        &["config", "set", "rag.realtime_enabled", "true"],
+    );
+    let (_, raw) = call(&desktop, "GET", SETTINGS, None);
+    let mut settings = parsed(&raw);
+    assert_eq!(settings["web_mode"], "off", "{settings}");
+    let turns = settings["max_turns"].as_u64().expect("max_turns");
+    settings["max_turns"] = json!(turns + 1);
+    let (status, raw) = call(&desktop, "PUT", SETTINGS, Some(&settings.to_string()));
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(sections(&by_settings)["realtime"], true);
+}
+=== end
