@@ -1,0 +1,1346 @@
+=== base 67b812451c1fc22ee9f0469d4b51dc848dfdc0a2
+=== message
+Row 54: profile guidance (/onboard) through one shared operation
+
+The terminal chat's `/onboard <file.md>` installs a Markdown file as the
+profile's `user-onboarding` extension, whose text joins the agent's
+instructions, and `/onboard remove` removes it. The desktop had no path to
+it. The implementation moves unchanged from the CLI's markdown module to
+lightagent_extensions::onboarding (read, install, remove), with current()
+(what is installed; an unrelated bundle under the name is an error) and
+enable() (the configuration change /onboard makes: extensions on, the
+guidance not disabled). The chat calls the same functions.
+
+- API: GET, PUT {path} and DELETE /api/lightagent/v1/onboarding for the
+  profile the runtime serves (local operator). A relative path is refused.
+  A removal with nothing installed is 404, and an unrelated bundle is 409.
+  The guidance applies from the next run. Contract operations
+  onboarding.get, onboarding.set and onboarding.remove; set and remove are
+  blocked while a profile switch is in progress.
+- Profiles screen: a Guidance card (install or replace from a file path,
+  the installed text, Remove asks first).
+- Inventory: the three backend API rows (not counted; they serve
+  slash.onboard and slash.onboard-remove).
+- Evidence: backend desktop_onboarding.rs (install over the API → in the
+  next run's instructions; the chat's /onboard remove and /onboard <file>
+  act on the same bundle; refusals); host runs.py `onboarding`; browser
+  e2e/onboarding.mjs. A unit test covers current() and enable().
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== write crates/lightagent-extensions/src/onboarding.rs
+//! Profile onboarding guidance: a Markdown file installed as the profile's
+//! `user-onboarding` extension, whose text joins the agent's instructions.
+//! One implementation behind the terminal chat's `/onboard <file.md>` and
+//! `/onboard remove`, the HTTP API and the desktop.
+
+use std::path::Path;
+
+use lightagent_core::Config;
+use lightagent_core::paths::{create_private_dir, write_private};
+
+/// The extension the guidance is installed as.
+pub const NAME: &str = "user-onboarding";
+/// The largest Markdown file read: 64 KiB.
+pub const MAX_BYTES: u64 = 65_536;
+const MANIFEST: &str = r#"{"name":"user-onboarding","description":"Profile onboarding guidance","instructions_file":"ONBOARDING.md"}"#;
+
+/// Read a Markdown file: a regular file of at most [`MAX_BYTES`], in UTF-8.
+pub fn read(path: &Path) -> Result<String, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| format!("could not read Markdown file {}: {e}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    if metadata.len() > MAX_BYTES {
+        return Err(format!(
+            "{} is too large (maximum {} KiB)",
+            path.display(),
+            MAX_BYTES / 1024
+        ));
+    }
+    std::fs::read_to_string(path)
+        .map_err(|e| format!("could not read Markdown file {}: {e}", path.display()))
+}
+
+/// Install or replace the profile's guidance. The old bundle stays
+/// available until the new one is fully written and can be renamed in.
+pub fn install(source: &Path, profile_dir: &Path) -> Result<(), String> {
+    let body = read(source)?;
+    let root = profile_dir.join("extensions");
+    create_private_dir(&root).map_err(|e| e.to_string())?;
+    let id = lightagent_core::RunId::new();
+    let staging = profile_dir.join(format!(".onboarding-stage-{}", id.as_str()));
+    let backup = profile_dir.join(format!(".onboarding-backup-{}", id.as_str()));
+    let destination = root.join(NAME);
+    create_private_dir(&staging).map_err(|e| e.to_string())?;
+    let write_result = (|| {
+        write_private(&staging.join("extension.json"), MANIFEST.as_bytes())
+            .map_err(|e| e.to_string())?;
+        write_private(&staging.join("ONBOARDING.md"), body.as_bytes())
+            .map_err(|e| e.to_string())?;
+        Ok::<(), String>(())
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    let replacing = match std::fs::symlink_metadata(&destination) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+            if std::fs::read_to_string(destination.join("extension.json"))
+                .ok()
+                .as_deref()
+                != Some(MANIFEST)
+            {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err("an unrelated extension already uses 'user-onboarding'".to_owned());
+            }
+            true
+        }
+        Ok(_) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err("existing onboarding bundle is not a regular directory".to_owned());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(format!("could not inspect onboarding bundle: {error}"));
+        }
+    };
+    if replacing && let Err(error) = std::fs::rename(&destination, &backup) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!("could not prepare onboarding update: {error}"));
+    }
+    if let Err(error) = std::fs::rename(&staging, &destination) {
+        if replacing {
+            let _ = std::fs::rename(&backup, &destination);
+        }
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!("could not install onboarding: {error}"));
+    }
+    if replacing {
+        let _ = std::fs::remove_dir_all(&backup);
+    }
+    Ok(())
+}
+
+/// Remove the profile's guidance.
+pub fn remove(profile_dir: &Path) -> Result<(), String> {
+    let root = profile_dir.join("extensions");
+    let manifest = std::fs::read_to_string(root.join(NAME).join("extension.json"))
+        .map_err(|e| format!("profile onboarding is not installed: {e}"))?;
+    if manifest != MANIFEST {
+        return Err("an unrelated extension uses 'user-onboarding'".to_owned());
+    }
+    crate::uninstall(NAME, &root)
+}
+
+/// The guidance installed for the profile, if any. An unrelated extension
+/// under the name is an error, never mistaken for guidance.
+pub fn current(profile_dir: &Path) -> Result<Option<String>, String> {
+    let bundle = profile_dir.join("extensions").join(NAME);
+    match std::fs::read_to_string(bundle.join("extension.json")) {
+        Ok(manifest) if manifest == MANIFEST => std::fs::read_to_string(bundle.join("ONBOARDING.md"))
+            .map(Some)
+            .map_err(|e| format!("could not read the installed onboarding: {e}")),
+        Ok(_) => Err("an unrelated extension uses 'user-onboarding'".to_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("could not read the onboarding bundle: {error}")),
+    }
+}
+
+/// What installing guidance changes in the configuration so that it
+/// applies: extensions on, and the guidance not disabled.
+pub fn enable(config: &mut Config) {
+    config.extensions.enabled = true;
+    config.extensions.disabled.retain(|name| name != NAME);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guidance_is_read_back_and_an_unrelated_bundle_is_refused() {
+        let dir = std::env::temp_dir().join(format!(
+            "lightagent-onboarding-{}",
+            lightagent_core::RunId::new().as_str()
+        ));
+        let profile = dir.join("profile");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(current(&profile).unwrap(), None);
+        let source = dir.join("guide.md");
+        std::fs::write(&source, "Answer briefly.").unwrap();
+        install(&source, &profile).unwrap();
+        assert_eq!(current(&profile).unwrap().as_deref(), Some("Answer briefly."));
+        remove(&profile).unwrap();
+        assert_eq!(current(&profile).unwrap(), None);
+
+        let other = profile.join("extensions").join(NAME);
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("extension.json"), r#"{"name":"user-onboarding"}"#).unwrap();
+        assert!(current(&profile).is_err());
+        assert!(install(&source, &profile).is_err());
+
+        let mut config = Config::default();
+        config.extensions.enabled = false;
+        config.extensions.disabled = vec![NAME.to_owned(), "other".to_owned()];
+        enable(&mut config);
+        assert!(config.extensions.enabled);
+        assert_eq!(config.extensions.disabled, ["other"]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+}
+=== replace crates/lightagent-extensions/src/lib.rs
+--- find
+pub mod manage;
+--- with
+pub mod manage;
+pub mod onboarding;
+=== replace crates/lightagent/src/markdown.rs
+--- find
+use lightagent_core::paths::{create_private_dir, write_private};
+
+const MAX_MARKDOWN_BYTES: u64 = 65_536;
+const ONBOARDING_NAME: &str = "user-onboarding";
+const ONBOARDING_MANIFEST: &str = r#"{"name":"user-onboarding","description":"Profile onboarding guidance","instructions_file":"ONBOARDING.md"}"#;
+--- with
+use lightagent_extensions::onboarding;
+=== replace crates/lightagent/src/markdown.rs
+--- find
+pub(crate) fn read(path: &Path) -> Result<String, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| format!("could not read Markdown file {}: {e}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    if metadata.len() > MAX_MARKDOWN_BYTES {
+        return Err(format!(
+            "{} is too large (maximum {} KiB)",
+            path.display(),
+            MAX_MARKDOWN_BYTES / 1024
+        ));
+    }
+    std::fs::read_to_string(path)
+        .map_err(|e| format!("could not read Markdown file {}: {e}", path.display()))
+}
+
+/// Install or replace the active profile's onboarding bundle. The old bundle
+/// stays available until the new one is fully written and can be renamed in.
+pub(crate) fn install_onboarding(source: &Path, profile_dir: &Path) -> Result<(), String> {
+    let body = read(source)?;
+    let root = profile_dir.join("extensions");
+    create_private_dir(&root).map_err(|e| e.to_string())?;
+    let id = lightagent_core::RunId::new();
+    let staging = profile_dir.join(format!(".onboarding-stage-{}", id.as_str()));
+    let backup = profile_dir.join(format!(".onboarding-backup-{}", id.as_str()));
+    let destination = root.join(ONBOARDING_NAME);
+    create_private_dir(&staging).map_err(|e| e.to_string())?;
+    let write_result = (|| {
+        write_private(
+            &staging.join("extension.json"),
+            ONBOARDING_MANIFEST.as_bytes(),
+        )
+        .map_err(|e| e.to_string())?;
+        write_private(&staging.join("ONBOARDING.md"), body.as_bytes())
+            .map_err(|e| e.to_string())?;
+        Ok::<(), String>(())
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    let replacing = match std::fs::symlink_metadata(&destination) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+            if std::fs::read_to_string(destination.join("extension.json"))
+                .ok()
+                .as_deref()
+                != Some(ONBOARDING_MANIFEST)
+            {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err("an unrelated extension already uses 'user-onboarding'".to_owned());
+            }
+            true
+        }
+        Ok(_) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err("existing onboarding bundle is not a regular directory".to_owned());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(format!("could not inspect onboarding bundle: {error}"));
+        }
+    };
+    if replacing && let Err(error) = std::fs::rename(&destination, &backup) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!("could not prepare onboarding update: {error}"));
+    }
+    if let Err(error) = std::fs::rename(&staging, &destination) {
+        if replacing {
+            let _ = std::fs::rename(&backup, &destination);
+        }
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!("could not install onboarding: {error}"));
+    }
+    if replacing {
+        let _ = std::fs::remove_dir_all(&backup);
+    }
+    Ok(())
+}
+
+pub(crate) fn remove_onboarding(profile_dir: &Path) -> Result<(), String> {
+    let root = profile_dir.join("extensions");
+    let manifest = std::fs::read_to_string(root.join(ONBOARDING_NAME).join("extension.json"))
+        .map_err(|e| format!("profile onboarding is not installed: {e}"))?;
+    if manifest != ONBOARDING_MANIFEST {
+        return Err("an unrelated extension uses 'user-onboarding'".to_owned());
+    }
+    lightagent_extensions::uninstall(ONBOARDING_NAME, &root)
+}
+--- with
+pub(crate) fn read(path: &Path) -> Result<String, String> {
+    onboarding::read(path)
+}
+
+/// Install or replace the active profile's onboarding bundle (the shared
+/// operation the API and the desktop use too).
+pub(crate) fn install_onboarding(source: &Path, profile_dir: &Path) -> Result<(), String> {
+    onboarding::install(source, profile_dir)
+}
+
+pub(crate) fn remove_onboarding(profile_dir: &Path) -> Result<(), String> {
+    onboarding::remove(profile_dir)
+}
+=== replace crates/lightagent/src/chat.rs
+--- find
+                                .update(None, |updated| {
+                                    updated.extensions.enabled = true;
+                                    updated
+                                        .extensions
+                                        .disabled
+                                        .retain(|name| name != "user-onboarding");
+                                    Ok::<(), String>(())
+                                })
+--- with
+                                .update(None, |updated| {
+                                    lightagent_extensions::onboarding::enable(updated);
+                                    Ok::<(), String>(())
+                                })
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+use lightagent_extensions::manage as extension_ops;
+--- with
+use lightagent_extensions::manage as extension_ops;
+use lightagent_extensions::onboarding;
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+        .route(
+            "/api/lightagent/v1/extensions/{name}/enabled",
+            axum::routing::put(set_extension_enabled),
+        )
+--- with
+        .route(
+            "/api/lightagent/v1/extensions/{name}/enabled",
+            axum::routing::put(set_extension_enabled),
+        )
+        .route(
+            "/api/lightagent/v1/onboarding",
+            get(get_onboarding)
+                .put(put_onboarding)
+                .delete(delete_onboarding),
+        )
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+/// `lightagent extensions list`, from the same shared operation.
+--- with
+/// The profile this runtime serves: its directory, where its onboarding
+/// guidance lives.
+fn onboarding_dir(state: &AppState) -> Result<std::path::PathBuf, Box<Response>> {
+    let paths = extension_paths(state)?;
+    let profile = ProfileId::new(&state.session_profile)
+        .map_err(|error| Box::new(internal(&error.to_string())))?;
+    Ok(ProfileStore::new(paths.root())
+        .handle(&profile)
+        .dir()
+        .to_path_buf())
+}
+
+fn onboarding_view(text: Option<String>) -> Response {
+    Json(json!({ "installed": text.is_some(), "text": text })).into_response()
+}
+
+fn onboarding_conflict(error: String) -> Response {
+    (StatusCode::CONFLICT, Json(json!({ "error": error }))).into_response()
+}
+
+/// The chat's `/onboard`: the guidance installed for the profile this
+/// runtime serves, if any.
+async fn get_onboarding(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let dir = match onboarding_dir(&state) {
+        Ok(dir) => dir,
+        Err(response) => return *response,
+    };
+    match onboarding::current(&dir) {
+        Ok(text) => onboarding_view(text),
+        Err(error) => onboarding_conflict(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct OnboardingBody {
+    path: String,
+}
+
+/// `/onboard <file.md>`: install or replace the guidance from a Markdown file
+/// on this machine, and turn it on as the chat does. New runs use it.
+async fn put_onboarding(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<OnboardingBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    // The server's working folder means nothing to a client.
+    let source = std::path::Path::new(body.path.trim());
+    if !source.is_absolute() {
+        return bad_request("the guidance file must be an absolute path");
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let dir = match onboarding_dir(&state) {
+        Ok(dir) => dir,
+        Err(response) => return *response,
+    };
+    if let Err(error) = onboarding::current(&dir) {
+        return onboarding_conflict(error);
+    }
+    if let Err(error) = onboarding::install(source, &dir) {
+        return bad_request(&error);
+    }
+    match store.update(None, |config| {
+        onboarding::enable(config);
+        Ok::<(), String>(())
+    }) {
+        Ok(_) => {}
+        Err(UpdateError::Change(error)) => return internal(&error),
+        Err(UpdateError::Store(error)) => return config_error(error),
+    }
+    match onboarding::current(&dir) {
+        Ok(text) => onboarding_view(text),
+        Err(error) => internal(&error),
+    }
+}
+
+/// `/onboard remove`.
+async fn delete_onboarding(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let dir = match onboarding_dir(&state) {
+        Ok(dir) => dir,
+        Err(response) => return *response,
+    };
+    match onboarding::current(&dir) {
+        Ok(None) => return not_found("no guidance is installed for this profile"),
+        Err(error) => return onboarding_conflict(error),
+        Ok(Some(_)) => {}
+    }
+    match onboarding::remove(&dir) {
+        Ok(()) => onboarding_view(None),
+        Err(error) => internal(&error),
+    }
+}
+
+/// `lightagent extensions list`, from the same shared operation.
+=== replace docs/desktop/contract/operations.json
+--- find
+  {
+   "id": "extensions.set_enabled",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/extensions/{name}/enabled"
+  },
+--- with
+  {
+   "id": "extensions.set_enabled",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/extensions/{name}/enabled"
+  },
+  {
+   "id": "onboarding.get",
+   "method": "GET",
+   "path": "/api/lightagent/v1/onboarding"
+  },
+  {
+   "id": "onboarding.set",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/onboarding"
+  },
+  {
+   "id": "onboarding.remove",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/onboarding"
+  },
+=== replace desktop/src-tauri/src/switch.rs
+--- find
+            | "workers.revoke"
+--- with
+            | "workers.revoke"
+            | "onboarding.set"
+            | "onboarding.remove"
+=== replace frontend/src/api/agent.ts
+--- find
+export const agentApi = {
+--- with
+/** The profile's onboarding guidance (the chat's `/onboard`). */
+export interface Onboarding {
+  installed: boolean;
+  text: string | null;
+}
+
+export const agentApi = {
+=== replace frontend/src/api/agent.ts
+--- find
+  configKey: (key: string) => jsonRequest<ConfigValue>(`/config/${encodeURIComponent(key)}`),
+--- with
+  configKey: (key: string) => jsonRequest<ConfigValue>(`/config/${encodeURIComponent(key)}`),
+  /** `/onboard`: the guidance installed for the profile the runtime serves. */
+  onboarding: () => jsonRequest<Onboarding>("/onboarding"),
+  /** `/onboard <file.md>`: install or replace it from a Markdown file on this machine. */
+  setOnboarding: (path: string) =>
+    jsonRequest<Onboarding>("/onboarding", { method: "PUT", body: JSON.stringify({ path }) }),
+  /** `/onboard remove`. */
+  removeOnboarding: () => jsonRequest<Onboarding>("/onboarding", { method: "DELETE" }),
+=== replace frontend/src/screens/ProfilesScreen.tsx
+--- find
+import { agentApi, type AgentProfileDetail, type ProfileCatalog } from "../api/agent";
+--- with
+import { agentApi, type AgentProfileDetail, type Onboarding, type ProfileCatalog } from "../api/agent";
+=== replace frontend/src/screens/ProfilesScreen.tsx
+--- find
+        {selected && <ProfileDetail id={selected} onChanged={() => void load()} />}
+--- with
+        {selected && <ProfileDetail id={selected} onChanged={() => void load()} />}
+        <GuidanceCard active={active} />
+=== replace frontend/src/screens/ProfilesScreen.tsx
+--- find
+function CreateProfile({ onCreated }: { onCreated: (id: string) => void }) {
+--- with
+/**
+ * The terminal chat's `/onboard <file.md>` and `/onboard remove`, for the
+ * profile this runtime serves: a Markdown file on this machine becomes the
+ * profile's onboarding guidance, added to the agent's instructions from the
+ * next run. Remove asks first.
+ */
+function GuidanceCard({ active }: { active: string | null }) {
+  const [guidance, setGuidance] = useState<Onboarding | null>(null);
+  const [path, setPath] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const ids = { path: useId(), hint: useId() };
+
+  const load = useCallback(async () => {
+    try {
+      setGuidance(await agentApi.onboarding());
+      setError(null);
+    } catch (cause) {
+      setError(message(cause));
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load, active]);
+
+  const install = async (event: FormEvent) => {
+    event.preventDefault();
+    const file = path.trim();
+    if (!file) {
+      setError("Enter the absolute path of a Markdown file.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      setGuidance(await agentApi.setOnboarding(file));
+      setNotice("Installed the guidance. New runs use it.");
+      setPath("");
+    } catch (cause) {
+      setError(message(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      setGuidance(await agentApi.removeOnboarding());
+      setNotice("Removed the guidance. New runs no longer use it.");
+    } catch (cause) {
+      setError(message(cause));
+    } finally {
+      setBusy(false);
+      setConfirming(false);
+    }
+  };
+
+  return (
+    <Card title="Guidance">
+      <p className="card__note">
+        The terminal chat&apos;s <code>/onboard</code>: a Markdown file becomes{" "}
+        {active ? <>profile <code>{active}</code>&apos;s</> : "this profile's"} onboarding guidance, added to the
+        agent&apos;s instructions from the next run.
+      </p>
+      {guidance?.installed ? (
+        <details className="profile-guidance" data-testid="guidance-current">
+          <summary>Installed guidance</summary>
+          <pre>{guidance.text}</pre>
+        </details>
+      ) : guidance ? (
+        <p className="muted" data-testid="guidance-none">No guidance is installed.</p>
+      ) : null}
+      <form className="profile-form" onSubmit={(event) => void install(event)} noValidate>
+        <label htmlFor={ids.path}>Markdown file (absolute path on this machine)</label>
+        <input
+          id={ids.path}
+          className="input"
+          value={path}
+          disabled={busy}
+          autoComplete="off"
+          spellCheck={false}
+          aria-describedby={ids.hint}
+          placeholder="/home/me/notes/onboarding.md"
+          onChange={(event) => setPath(event.target.value)}
+        />
+        <p id={ids.hint} className="card__note">
+          At most 64 KiB of UTF-8 Markdown. Installing replaces any guidance already there; the file itself is
+          left where it is.
+        </p>
+        <div className="profile-form__row">
+          <button type="submit" className="btn btn--primary" disabled={busy}>
+            {guidance?.installed ? "Replace guidance" : "Install guidance"}
+          </button>
+          {guidance?.installed && !confirming && (
+            <button type="button" className="btn" disabled={busy} onClick={() => setConfirming(true)}>
+              Remove guidance…
+            </button>
+          )}
+          {confirming && (
+            <>
+              <button type="button" className="btn btn--danger" disabled={busy} onClick={() => void remove()}>
+                Confirm: remove guidance
+              </button>
+              <button type="button" className="btn" disabled={busy} onClick={() => setConfirming(false)}>
+                Keep it
+              </button>
+            </>
+          )}
+        </div>
+      </form>
+      {error && (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      )}
+      {notice && (
+        <p className="notice notice--info" role="status">
+          {notice}
+        </p>
+      )}
+    </Card>
+  );
+}
+
+function CreateProfile({ onCreated }: { onCreated: (id: string) => void }) {
+=== replace frontend/src/screens/profiles.css
+--- find
+.profile-detail__persona {
+  white-space: pre-wrap;
+  color: var(--text-soft);
+}
+--- with
+.profile-detail__persona {
+  white-space: pre-wrap;
+  color: var(--text-soft);
+}
+
+.profile-guidance {
+  margin-bottom: 12px;
+}
+
+.profile-guidance pre {
+  max-height: 240px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--text-soft);
+  white-space: pre-wrap;
+}
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "backend": "shared: lightagent_extensions::manage::list",
+   "permission": "local-operator",
+   "data_scope": "home|profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+--- with
+   "backend": "shared: lightagent_extensions::manage::list",
+   "permission": "local-operator",
+   "data_scope": "home|profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.onboarding",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/onboarding",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "The onboarding guidance installed for the profile the runtime serves (row 54)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/onboarding"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the slash capability it serves (slash.onboard)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: lightagent_extensions::onboarding::current",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.put.onboarding",
+   "kind": "api",
+   "surface": "PUT /api/lightagent/v1/onboarding",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "Install or replace the profile's onboarding guidance from a Markdown file (row 54)",
+   "tree_key": null,
+   "tokens": [
+    "PUT /api/lightagent/v1/onboarding"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the slash capability it serves (slash.onboard)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: lightagent_extensions::onboarding::install",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.delete.onboarding",
+   "kind": "api",
+   "surface": "DELETE /api/lightagent/v1/onboarding",
+   "source": "crates/lightagent-api/src/lib.rs",
+   "behavior": "Remove the profile's onboarding guidance (row 54)",
+   "tree_key": null,
+   "tokens": [
+    "DELETE /api/lightagent/v1/onboarding"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the slash capability it serves (slash.onboard-remove)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: lightagent_extensions::onboarding::remove",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "total_rows": 334,
+--- with
+  "total_rows": 337,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "api": 52,
+--- with
+   "api": 55,
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "applicable": 293,
+--- with
+   "applicable": 296,
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| api | 52 |
+--- with
+| api | 55 |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| applicable | 293 |
+--- with
+| applicable | 296 |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.get.extensions` | `GET /api/lightagent/v1/extensions` | applicable | no | (backend reuse) | shared: lightagent_extensions::manage::list | not-started | `crates/lightagent-api/src/lib.rs:131` |
+--- with
+| `api.get.extensions` | `GET /api/lightagent/v1/extensions` | applicable | no | (backend reuse) | shared: lightagent_extensions::manage::list | not-started | `crates/lightagent-api/src/lib.rs:131` |
+| `api.get.onboarding` | `GET /api/lightagent/v1/onboarding` | applicable | no | (backend reuse) | shared: lightagent_extensions::onboarding::current | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.put.onboarding` | `PUT /api/lightagent/v1/onboarding` | applicable | no | (backend reuse) | shared: lightagent_extensions::onboarding::install | not-started | `crates/lightagent-api/src/lib.rs` |
+| `api.delete.onboarding` | `DELETE /api/lightagent/v1/onboarding` | applicable | no | (backend reuse) | shared: lightagent_extensions::onboarding::remove | not-started | `crates/lightagent-api/src/lib.rs` |
+=== replace desktop/e2e/runs.py
+--- find
+def scenario_conversations(host, provider, cli):
+--- with
+def scenario_onboarding(host, cli, workspace):
+    """D7 through the host transport: guidance installed through the host is
+    what the chat's `/onboard remove` removes, and what the chat's `/onboard
+    <file>` installs is what the host shows; replaced and removed through the
+    host. Whatever was there before, and the extensions switch, are put back."""
+    check = Checks("onboarding")
+    status, before = host.fetch("GET", f"{API}/onboarding")
+    check.expect("guidance through the host", status == 200 and isinstance((before or {}).get("installed"), bool),
+                 (status, before))
+    if status != 200:
+        return check
+    config = json.loads(harness.run_cli(cli, "--json", "config", "show"))
+    switch = (config.get("extensions") or {}).get("enabled")
+    first = os.path.join(workspace, "e2e-guidance-first.md")
+    second = os.path.join(workspace, "e2e-guidance-second.md")
+    for path, text in ((first, "Answer as a heron would."), (second, "Answer as an egret would.")):
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    try:
+        status, refused = host.fetch("PUT", f"{API}/onboarding", {"path": "relative.md"})
+        check.expect("a relative path is refused", status == 400, (status, refused))
+        status, put = host.fetch("PUT", f"{API}/onboarding", {"path": first})
+        check.expect("installed through the host, shown alike",
+                     status == 200 and (put or {}).get("text") == "Answer as a heron would.", (status, put))
+        extensions = json.loads(harness.run_cli(cli, "--json", "config", "show")).get("extensions") or {}
+        check.expect("installing turns the guidance on, as /onboard does",
+                     extensions.get("enabled") is True and "user-onboarding" not in (extensions.get("disabled") or []),
+                     extensions)
+        harness.run_cli_input(cli, "/onboard remove\n/exit\n", "chat")
+        _, shown = host.fetch("GET", f"{API}/onboarding")
+        check.expect("the chat's /onboard remove removes what the host installed",
+                     (shown or {}).get("installed") is False, shown)
+        harness.run_cli_input(cli, f"/onboard {second}\n/exit\n", "chat")
+        _, shown = host.fetch("GET", f"{API}/onboarding")
+        check.expect("what the chat's /onboard installs, the host shows",
+                     (shown or {}).get("text") == "Answer as an egret would.", shown)
+        status, gone = host.fetch("DELETE", f"{API}/onboarding")
+        again, refused = host.fetch("DELETE", f"{API}/onboarding")
+        check.expect("removed through the host; removing nothing is refused",
+                     status == 200 and (gone or {}).get("installed") is False and again == 404, (status, gone, again, refused))
+    finally:
+        if before.get("installed"):
+            restore = os.path.join(workspace, "e2e-guidance-restore.md")
+            with open(restore, "w", encoding="utf-8") as handle:
+                handle.write(before.get("text") or "")
+            host.fetch("PUT", f"{API}/onboarding", {"path": restore})
+        else:
+            host.fetch("DELETE", f"{API}/onboarding")
+        if isinstance(switch, bool):
+            harness.run_cli(cli, "config", "set", "extensions.enabled", str(switch).lower())
+    return check
+
+
+def scenario_conversations(host, provider, cli):
+=== replace desktop/e2e/runs.py
+--- find
+            ("setup_sections", lambda: scenario_setup_sections(host, cli)),
+--- with
+            ("setup_sections", lambda: scenario_setup_sections(host, cli)),
+            ("onboarding", lambda: scenario_onboarding(host, cli, workspace)),
+=== replace e2e/render.mjs
+--- find
+import { checkExtensions } from "./extensions.mjs";
+--- with
+import { checkExtensions } from "./extensions.mjs";
+import { checkOnboarding } from "./onboarding.mjs";
+=== replace e2e/render.mjs
+--- find
+    failures.push(`extensions: ${err instanceof Error ? err.message : String(err)}`);
+  }
+--- with
+    failures.push(`extensions: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Installs, replaces and removes profile guidance; puts back what was there.
+  try {
+    failures.push(...(await checkOnboarding(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`onboarding: ${err instanceof Error ? err.message : String(err)}`);
+  }
+=== write e2e/onboarding.mjs
+// Profile guidance (the chat's `/onboard`) against the real harness: the
+// Guidance card on the Profiles screen refuses a missing file and installs
+// nothing, installs a Markdown file and shows it, replaces it, and removes
+// it after asking (Keep it keeps it). The API confirms each step; whatever
+// was installed before, and the extensions switch, are put back.
+// crates/lightagent/tests/desktop_onboarding.rs proves the chat and the API
+// act on one bundle; desktop/e2e/runs.py `onboarding` covers the host.
+
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const API = "/api/lightagent/v1/onboarding";
+
+export async function checkOnboarding(browser, base, outDir) {
+  const failures = [];
+  const dir = await mkdtemp(join(tmpdir(), "lightagent-render-guidance-"));
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1800 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const current = async () => (await fetch(`${base}${API}`)).json();
+  const step = async (name, body) => {
+    try {
+      await body();
+    } catch (err) {
+      failures.push(`onboarding: ${name}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+      await page.screenshot({ path: `${outDir}/onboarding-failed-${name.replace(/\W+/g, "-")}.png`, fullPage: true }).catch(() => {});
+    }
+  };
+  const before = await current();
+  const switchBefore = (await (await fetch(`${base}/api/lightagent/v1/config/extensions.enabled`)).json()).value;
+  const field = page.getByLabel("Markdown file (absolute path on this machine)", { exact: true });
+  const submit = (name) => page.getByRole("button", { name, exact: true }).click({ timeout: 10000 });
+  try {
+    if (before.installed) await fetch(`${base}${API}`, { method: "DELETE" });
+    await page.goto(`${base}/#/profiles`);
+    await page.getByTestId("guidance-none").waitFor({ timeout: 15000 });
+
+    await step("a missing file is refused and installs nothing", async () => {
+      await field.fill(join(dir, "missing.md"));
+      await submit("Install guidance");
+      await page.getByRole("alert").filter({ hasText: "could not read Markdown file" }).waitFor({ timeout: 10000 });
+      if ((await current()).installed) throw new Error("a missing file installed guidance");
+    });
+
+    await step("install from a Markdown file", async () => {
+      const first = join(dir, "first.md");
+      await writeFile(first, "Answer as a heron would.");
+      await field.fill(first);
+      await submit("Install guidance");
+      await page.getByRole("status").filter({ hasText: "Installed the guidance." }).waitFor({ timeout: 10000 });
+      const shown = page.getByTestId("guidance-current");
+      await shown.locator("summary").click();
+      await shown.getByText("Answer as a heron would.", { exact: true }).waitFor({ timeout: 5000 });
+      if ((await current()).text !== "Answer as a heron would.") throw new Error("the API does not show the guidance");
+      await page.screenshot({ path: `${outDir}/onboarding-installed.png`, fullPage: true });
+    });
+
+    await step("replace it", async () => {
+      const second = join(dir, "second.md");
+      await writeFile(second, "Answer as an egret would.");
+      await field.fill(second);
+      await submit("Replace guidance");
+      await page.getByTestId("guidance-current").getByText("Answer as an egret would.", { exact: true })
+        .waitFor({ timeout: 10000 });
+      if ((await current()).text !== "Answer as an egret would.") throw new Error("the guidance was not replaced");
+    });
+
+    await step("remove asks first", async () => {
+      await submit("Remove guidance…");
+      await submit("Keep it");
+      if (!(await current()).installed) throw new Error("Keep it removed the guidance");
+      await submit("Remove guidance…");
+      await submit("Confirm: remove guidance");
+      await page.getByTestId("guidance-none").waitFor({ timeout: 10000 });
+      if ((await current()).installed) throw new Error("Confirm did not remove the guidance");
+    });
+    if (errors.length) failures.push(`onboarding: page errors: ${errors.join("; ")}`);
+  } catch (err) {
+    failures.push(`onboarding: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  } finally {
+    await page.close();
+    if (before.installed) {
+      const restore = join(dir, "restore.md");
+      await writeFile(restore, before.text ?? "");
+      await fetch(`${base}${API}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: restore }),
+      }).catch(() => {});
+    } else {
+      await fetch(`${base}${API}`, { method: "DELETE" }).catch(() => {});
+    }
+    await fetch(`${base}/api/lightagent/v1/config/extensions.enabled`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: String(switchBefore) }),
+    }).catch(() => {});
+    await rm(dir, { recursive: true, force: true });
+  }
+  return failures;
+}
+=== write crates/lightagent/tests/desktop_onboarding.rs
+//! Profile guidance (D7, the chat's `/onboard`): the desktop runtime
+//! installs, shows, replaces and removes the onboarding guidance that
+//! `/onboard <file.md>` and `/onboard remove` manage in the terminal chat,
+//! on the same files, and the next run carries it in its instructions.
+//! Every process here is separate: the runtime, the provider, the CLI and
+//! this test.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+
+const KEY: &str = "c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4";
+const MODELS: &str = r#"{"object":"list","data":[{"id":"m1"}]}"#;
+const API: &str = "/api/lightagent/v1";
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-onboarding-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+fn call(runtime: &Runtime, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, raw)
+}
+
+fn parsed(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|error| panic!("{error}: {raw}"))
+}
+
+fn cli(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent")
+}
+
+fn cli_json(home: &Path, args: &[&str]) -> Value {
+    let mut all = vec!["--json"];
+    all.extend_from_slice(args);
+    let output = cli(home, &all);
+    assert!(
+        output.status.success(),
+        "lightagent {all:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("CLI JSON")
+}
+
+/// `lightagent chat` with `lines` on its standard input, which is not a
+/// terminal. A chat still running after two minutes fails the test.
+fn chat(home: &Path, lines: &str) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .arg("chat")
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start lightagent chat");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(lines.as_bytes())
+        .expect("lines");
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("chat status") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("lightagent chat did not finish");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    assert!(status.success(), "lightagent chat {lines:?}: {stderr}");
+}
+
+/// Read one request; return its head and body.
+fn read_request(stream: &mut TcpStream) -> Option<(String, String)> {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&bytes[..end]).into_owned();
+            let length = head
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|value| value.trim().parse::<usize>().unwrap_or(0))
+                })
+                .unwrap_or(0);
+            if bytes.len() >= end + 4 + length {
+                let body = String::from_utf8_lossy(&bytes[end + 4..end + 4 + length]).into_owned();
+                return Some((head, body));
+            }
+        }
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => return None,
+            Ok(read) => bytes.extend_from_slice(&buffer[..read]),
+        }
+    }
+}
+
+fn sse(chunks: &[Value]) -> String {
+    let mut response =
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n"
+            .to_owned();
+    for chunk in chunks {
+        response.push_str(&format!("data: {chunk}\n\n"));
+    }
+    response.push_str("data: [DONE]\n\n");
+    response
+}
+
+/// A provider that answers every turn "Noted." and keeps each request body.
+fn provider() -> (String, Arc<Mutex<Vec<Value>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let url = format!("http://{}", listener.local_addr().expect("address"));
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::clone(&bodies);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let kept = Arc::clone(&kept);
+            std::thread::spawn(move || {
+                let Some((head, body)) = read_request(&mut stream) else {
+                    return;
+                };
+                if head.starts_with("GET") {
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{MODELS}",
+                        MODELS.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    return;
+                }
+                kept.lock()
+                    .expect("bodies")
+                    .push(serde_json::from_str(&body).unwrap_or(Value::Null));
+                let answer = sse(&[
+                    json!({"choices":[{"index":0,"delta":{"role":"assistant","content":"Noted."}}]}),
+                    json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+                ]);
+                let _ = stream.write_all(answer.as_bytes());
+            });
+        }
+    });
+    (url, bodies)
+}
+
+/// Whether any request the provider received carried `text` in a message.
+fn sent_with(bodies: &Mutex<Vec<Value>>, text: &str) -> bool {
+    bodies.lock().expect("bodies").iter().any(|body| {
+        body["messages"].as_array().is_some_and(|messages| {
+            messages.iter().any(|message| match &message["content"] {
+                Value::String(content) => content.contains(text),
+                Value::Array(parts) => parts
+                    .iter()
+                    .any(|part| part["text"].as_str().is_some_and(|t| t.contains(text))),
+                _ => false,
+            })
+        })
+    })
+}
+
+fn turn(runtime: &Runtime, message: &str) {
+    let (status, raw) = call(runtime, "POST", &format!("{API}/sessions"), Some("{}"));
+    assert_eq!(status, 201, "{raw}");
+    let session = parsed(&raw)["id"].as_str().expect("session id").to_owned();
+    let body = json!({ "message": message, "session_id": session }).to_string();
+    let (status, raw) = call(runtime, "POST", &format!("{API}/runs"), Some(&body));
+    assert_eq!(status, 202, "{raw}");
+    let run = parsed(&raw)["id"].as_str().expect("run id").to_owned();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (status, raw) = call(runtime, "GET", &format!("{API}/runs/{run}"), None);
+        assert_eq!(status, 200, "{raw}");
+        let state = parsed(&raw)["status"].as_str().unwrap_or_default().to_owned();
+        if state == "completed" {
+            return;
+        }
+        assert!(
+            !matches!(state.as_str(), "failed" | "cancelled"),
+            "the turn ended {state}: {raw}"
+        );
+        assert!(Instant::now() < deadline, "the turn did not complete: {raw}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn shown(runtime: &Runtime) -> Value {
+    let (status, raw) = call(runtime, "GET", &format!("{API}/onboarding"), None);
+    assert_eq!(status, 200, "{raw}");
+    parsed(&raw)
+}
+
+fn install(runtime: &Runtime, path: &str) -> (u16, String) {
+    let body = json!({ "path": path }).to_string();
+    call(runtime, "PUT", &format!("{API}/onboarding"), Some(&body))
+}
+
+#[test]
+fn guidance_is_one_bundle_for_the_chat_and_the_desktop() {
+    let home = scratch_home("guidance");
+    let (url, bodies) = provider();
+    let output = cli(&home, &["config", "set", "inference.base_url", &url]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let runtime = start(&home);
+    assert_eq!(shown(&runtime)["installed"], false);
+    assert_eq!(shown(&runtime)["text"], Value::Null);
+
+    // Refused, and nothing installed: a relative path, a missing file.
+    let missing = home.join("missing.md");
+    for path in ["guide.md", missing.to_str().expect("path")] {
+        let (status, raw) = install(&runtime, path);
+        assert_eq!(status, 400, "{path}: {raw}");
+    }
+    assert_eq!(shown(&runtime)["installed"], false);
+
+    // Installed over the API: shown, turned on, and in the next run.
+    let first = home.join("first.md");
+    std::fs::write(&first, "Answer as a heron would.").expect("first");
+    let (status, raw) = install(&runtime, first.to_str().expect("path"));
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(parsed(&raw)["installed"], true, "{raw}");
+    assert_eq!(parsed(&raw)["text"], "Answer as a heron would.", "{raw}");
+    let config = cli_json(&home, &["config", "show"]);
+    assert_eq!(config["extensions"]["enabled"], true, "{config}");
+    turn(&runtime, "Who are you?");
+    assert!(
+        sent_with(&bodies, "Answer as a heron would."),
+        "the next run carries the guidance"
+    );
+
+    // The chat's `/onboard remove` removes what the desktop installed, and
+    // what its `/onboard <file>` installs is what the desktop shows.
+    chat(&home, "/onboard remove\n/exit\n");
+    assert_eq!(shown(&runtime)["installed"], false);
+    let second = home.join("second.md");
+    std::fs::write(&second, "Answer as an egret would.").expect("second");
+    chat(&home, &format!("/onboard {}\n/exit\n", second.display()));
+    assert_eq!(shown(&runtime)["text"], "Answer as an egret would.");
+
+    // Replaced, then removed over the API; removing nothing is refused.
+    let (status, raw) = install(&runtime, first.to_str().expect("path"));
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(shown(&runtime)["text"], "Answer as a heron would.");
+    let (status, raw) = call(&runtime, "DELETE", &format!("{API}/onboarding"), None);
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(parsed(&raw)["installed"], false, "{raw}");
+    let (status, raw) = call(&runtime, "DELETE", &format!("{API}/onboarding"), None);
+    assert_eq!(status, 404, "{raw}");
+    assert!(first.exists(), "the source file is left where it is");
+}
+=== end
