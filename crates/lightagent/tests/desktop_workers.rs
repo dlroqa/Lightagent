@@ -166,7 +166,17 @@ fn the_cli_and_the_api_keep_one_set_of_assignments() {
     assert!(parsed(&raw)["id"].is_string(), "{raw}");
     let after = api_status(&runtime, None);
     assert_eq!(after, cli_json(&home, &["workers", "status"]));
-    assert!(after.to_string().contains("helper"), "{after}");
+    let coder = after
+        .as_array()
+        .and_then(|roles| roles.iter().find(|role| role["role"] == "coder"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert!(
+        coder["worker"]
+            .as_str()
+            .is_some_and(|worker| worker.starts_with("assigned:")),
+        "{coder}"
+    );
 
     // Revoked by the CLI: the API reports the same.
     let revoked = cli_json(&home, &["workers", "revoke", "coder"]);
