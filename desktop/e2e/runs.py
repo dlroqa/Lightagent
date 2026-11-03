@@ -951,8 +951,8 @@ def main():
     # calls here both inherit it.
     import tempfile
     key_dir = tempfile.mkdtemp(prefix="lightagent-e2e-credential-key-")
+    harness.run_cli(cli, "remote-credential", "keygen", os.path.join(key_dir, "credential.key"))
     os.environ["LIGHTAGENT_CREDENTIAL_KEY_FILE"] = os.path.join(key_dir, "credential.key")
-    harness.run_cli(cli, "remote-credential", "keygen", os.environ["LIGHTAGENT_CREDENTIAL_KEY_FILE"])
     env = dict(os.environ, LIGHTAGENT_DESKTOP_E2E_DRIVER="1", LIGHTAGENT_DESKTOP_E2E_REPORT=report)
     host = harness.Host(command, env, os.path.join(out, "driver-runs.log"))
     results, failures = {}, []
