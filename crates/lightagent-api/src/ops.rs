@@ -153,6 +153,41 @@ pub enum IdentityRequest {
     },
 }
 
+/// One `lightagent remote-credential …` command, performed as the local
+/// operator with the runtime's configured key. A secret is read by the
+/// runtime from `secret_file`, named by an absolute path; no request or
+/// answer carries it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RemoteCredentialRequest {
+    Status,
+    Keygen {
+        path: String,
+    },
+    Add {
+        profile: String,
+        service: String,
+        destinations: Vec<String>,
+        operations: Vec<String>,
+        expires_in: Option<u64>,
+        max_requests_per_run: Option<u32>,
+        secret_file: Option<String>,
+    },
+    Rotate {
+        id: String,
+        secret_file: Option<String>,
+    },
+    Revoke(String),
+    List {
+        profile: Option<String>,
+    },
+    Audit {
+        limit: Option<usize>,
+    },
+    Rekey {
+        previous_key_file: String,
+    },
+}
+
 /// A stable error category, for the UI to act on without parsing messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpCategory {

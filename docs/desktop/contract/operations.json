@@ -141,6 +141,53 @@
    "path": "/api/lightagent/v1/skills/imports"
   },
   {
+   "id": "remote_credentials.status",
+   "method": "GET",
+   "path": "/api/lightagent/v1/remote-credentials/vault"
+  },
+  {
+   "id": "remote_credentials.keygen",
+   "method": "POST",
+   "path": "/api/lightagent/v1/remote-credentials/keys"
+  },
+  {
+   "id": "remote_credentials.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/remote-credentials",
+   "query": [
+    "profile"
+   ]
+  },
+  {
+   "id": "remote_credentials.add",
+   "method": "POST",
+   "path": "/api/lightagent/v1/remote-credentials"
+  },
+  {
+   "id": "remote_credentials.rotate",
+   "method": "POST",
+   "path": "/api/lightagent/v1/remote-credentials/{id}/rotate"
+  },
+  {
+   "id": "remote_credentials.revoke",
+   "method": "POST",
+   "path": "/api/lightagent/v1/remote-credentials/{id}/revoke",
+   "destructive": true
+  },
+  {
+   "id": "remote_credentials.audit",
+   "method": "GET",
+   "path": "/api/lightagent/v1/remote-credentials/audit",
+   "query": [
+    "limit"
+   ]
+  },
+  {
+   "id": "remote_credentials.rekey",
+   "method": "POST",
+   "path": "/api/lightagent/v1/remote-credentials/rekey"
+  },
+  {
    "id": "identity.status",
    "method": "GET",
    "path": "/api/lightagent/v1/identity"
