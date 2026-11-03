@@ -498,11 +498,34 @@ def scenario_memory(host, cli):
     status, found = host.fetch("GET", f"{API}/memories/candidates?session={session}")
     check.expect("candidates through the host equal the CLI's",
                  status == 200 and found == cli_json("memory", "candidates", session), (status, found))
+    status, page = host.fetch("GET", f"{API}/memories/reflect")
+    check.expect("reflect through the host equals the CLI's",
+                 status == 200 and page == cli_json("memory", "reflect"), (status, page))
+    status, updated = host.fetch("PUT", f"{API}/memories/items/{memory}", {"text": "Host probe prefers tabs always"})
+    texts = [m.get("text") for m in cli_json("memory", "list").get("memories", [])]
+    check.expect("updated through the host, as the CLI lists it",
+                 status == 200 and (updated or {}).get("updated") is True and "Host probe prefers tabs always" in texts,
+                 (status, updated, texts))
+    # A conversation an earlier scenario saved: its first message is the user's.
+    _, sessions = host.fetch("GET", f"{API}/sessions")
+    saved = next((s.get("id") for s in (sessions or {}).get("sessions", []) if s.get("id") != session), None)
+    status, kept = host.fetch("POST", f"{API}/memories/promote",
+                              {"session": saved, "message": 1, "text": "Host kept fact", "kind": "decision", "tags": ["host"]})
+    listed = cli_json("memory", "list").get("memories", [])
+    kept_memory = next((m for m in listed if m.get("text") == "Host kept fact"), {})
+    check.expect("a conversation's message kept through the host, with its source, as the CLI lists it",
+                 status == 200 and kept_memory.get("kind") == "decision" and "host" in (kept_memory.get("tags") or [])
+                 and (kept_memory.get("source") or {}).get("session_id") == saved,
+                 (status, kept, saved, kept_memory))
     status, gone = host.fetch("DELETE", f"{API}/memories/items/{memory}")
     left = cli_json("memory", "list").get("memories", [])
     check.expect("forgotten through the host, gone for the CLI",
                  status == 200 and (gone or {}).get("removed") is True and all(m.get("id") != memory for m in left),
                  (status, gone, left))
+    status, cleared = host.fetch("DELETE", f"{API}/memories")
+    check.expect("cleared through the host, nothing left for the CLI",
+                 status == 200 and (cleared or {}).get("cleared") is True
+                 and cli_json("memory", "list").get("memories") == [], (status, cleared))
     return check
 
 
