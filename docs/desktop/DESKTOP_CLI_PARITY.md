@@ -5,12 +5,13 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 ## Coverage
 
 - Denominator: 227
-- Implemented: 68 of 227
+- Implemented: 92 of 227
 - Pending D1 decision rows: 0
 - D5a note (2026-11-02, rows 21-24): `slash.approve`, `slash.reject`, `slash.stop`, `slash.continue` and `key.steer` are implemented at `e164dde`: browser UI e2e (e2e/runs.mjs), host-level (desktop/e2e/runs.py, switch.py) and backend (desktop_continue.rs) evidence; native WebView interaction is D8 and not claimed. #98's regenerate (`api.post.sessions.id.regenerate`) has host-level R1 evidence and stays not counted until its browser and native checks (R1 is met at host level; R2-R5 are D8)
 - D6 note (2026-11-02, rows 26-27): the 13 `cli.extensions.*` rows, the 5 `extension.manifest.*` rows and `extension.roots` are implemented at `c89c989` through `lightagent_extensions::manage`: backend (crates/lightagent/tests/desktop_extensions.rs, CLI and API alike), host-level (desktop/e2e/runs.py `extensions`) and browser UI (e2e/extensions.mjs) evidence; native WebView interaction is D8 and not claimed. `config.extensions` waits for a master-switch control (row 28); the five `api.*.extensions*` rows are backend rows and not counted
 - D6 note (2026-11-02, rows 28-31): `mcp.server.stdio` (+`command`, `args`, `env`), `mcp.server.http` (+`url`, `headers`), `config.mcp`, `cli.tools.list` are implemented at `62e87e6` with backend, host and browser evidence; native WebView is D8. `mcp.server.http.auth`, `mcp.server.http.untrusted_profiles` and `mcp.server.http.credential_profiles` are supported by the shared operation and the MCP card's form but not yet exercised by a browser check, so they are not counted. Difference recorded: `lightagent extensions install` turns MCP on for a bundle with MCP servers (and says so); the API and desktop do only when asked, and the desktop's MCP switch asks for confirmation. Skill import (`api.post.skills.imports`) is new scope beyond the CLI and never counted Correction (row 32): `slash.skills` and `skills.roots` were counted at `5c98b3e` without host evidence (runs.py `skills` never called GET /skills); they are not-started again until the row 32 host scenario passes.
 - D6 note (2026-11-03, row 32): `slash.skills`, `skills.roots` (host: GET /skills through the host with scope and source), `mcp.server.http.auth`, `mcp.server.http.untrusted_profiles`, `mcp.server.http.credential_profiles` (browser and host: saved and shown by name) and `config.extensions` (the master switch through the shared config.set operation, with per-extension enable/disable) are implemented at `c70c2f9` with backend, host and browser evidence; native WebView is D8. Install activation differs on purpose: `lightagent extensions install` turns MCP on for a bundle with MCP servers and says so; the API and the desktop do so only when asked (`activate_mcp`), and a skills import never does. MCP servers are connected per run: extension and MCP changes apply from the next run, and a run in progress keeps the connections it made.
+- D7 note (2026-11-03, rows 34-35): the 24 `cli.memory.*` rows (add, list, search, reflect, candidates, promote, update, forget, clear, with their arguments and options) are implemented at `630988a` through one shared implementation (`memory::perform` via `RunFactory::memory`): backend `desktop_memory.rs` (CLI and API alike), host `runs.py memory` (every operation through the host, matched with the CLI) and browser `e2e/memory.mjs`; native WebView is D8. The nine `api.*.memories*` rows are backend rows and not counted; `config.memory` (auto capture, injected count, result count) has no control yet
 - Total rows: 355
 
 | Kind | Rows |
@@ -171,15 +172,15 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.rag.list` | `lightagent rag list` | applicable | yes | Memory/Knowledge: documents | extract: rag::list() | not-started | `crates/lightagent/src/lib.rs:355` |
 | `cli.rag.clear` | `lightagent rag clear` | applicable | yes | Memory/Knowledge: clear (confirm) | extract: rag::clear() | not-started | `crates/lightagent/src/lib.rs:357` |
 | `cli.memory` | `lightagent memory` | applicable | no | Memory/Knowledge: memories | extract: memory.rs | not-started | `crates/lightagent/src/lib.rs:171` |
-| `cli.memory.add` | `lightagent memory add` | applicable | yes | Memory/Knowledge: add | extract: memory::add() | not-started | `crates/lightagent/src/lib.rs:299` |
-| `cli.memory.list` | `lightagent memory list` | applicable | yes | Memory/Knowledge: memories | extract: memory::list() | not-started | `crates/lightagent/src/lib.rs:307` |
-| `cli.memory.reflect` | `lightagent memory reflect` | applicable | yes | Memory/Knowledge: reflect | extract: memory::reflect() | not-started | `crates/lightagent/src/lib.rs:309` |
-| `cli.memory.search` | `lightagent memory search` | applicable | yes | Memory/Knowledge: search | extract: memory::search() | not-started | `crates/lightagent/src/lib.rs:311` |
-| `cli.memory.candidates` | `lightagent memory candidates` | applicable | yes | Conversations: session → memory candidates | extract: memory::candidates() | not-started | `crates/lightagent/src/lib.rs:317` |
-| `cli.memory.promote` | `lightagent memory promote` | applicable | yes | Conversations: message → remember | extract: memory::promote() | not-started | `crates/lightagent/src/lib.rs:319` |
-| `cli.memory.update` | `lightagent memory update` | applicable | yes | Memory/Knowledge: edit | extract: memory::update() | not-started | `crates/lightagent/src/lib.rs:332` |
-| `cli.memory.forget` | `lightagent memory forget` | applicable | yes | Memory/Knowledge: forget (confirm) | extract: memory::forget() | not-started | `crates/lightagent/src/lib.rs:334` |
-| `cli.memory.clear` | `lightagent memory clear` | applicable | yes | Memory/Knowledge: clear (typed confirmation) | extract: memory::clear() | not-started | `crates/lightagent/src/lib.rs:336` |
+| `cli.memory.add` | `lightagent memory add` | applicable | yes | Memory/Knowledge: add | extract: memory::add() | implemented | `crates/lightagent/src/lib.rs:299` |
+| `cli.memory.list` | `lightagent memory list` | applicable | yes | Memory/Knowledge: memories | extract: memory::list() | implemented | `crates/lightagent/src/lib.rs:307` |
+| `cli.memory.reflect` | `lightagent memory reflect` | applicable | yes | Memory/Knowledge: reflect | extract: memory::reflect() | implemented | `crates/lightagent/src/lib.rs:309` |
+| `cli.memory.search` | `lightagent memory search` | applicable | yes | Memory/Knowledge: search | extract: memory::search() | implemented | `crates/lightagent/src/lib.rs:311` |
+| `cli.memory.candidates` | `lightagent memory candidates` | applicable | yes | Conversations: session → memory candidates | extract: memory::candidates() | implemented | `crates/lightagent/src/lib.rs:317` |
+| `cli.memory.promote` | `lightagent memory promote` | applicable | yes | Conversations: message → remember | extract: memory::promote() | implemented | `crates/lightagent/src/lib.rs:319` |
+| `cli.memory.update` | `lightagent memory update` | applicable | yes | Memory/Knowledge: edit | extract: memory::update() | implemented | `crates/lightagent/src/lib.rs:332` |
+| `cli.memory.forget` | `lightagent memory forget` | applicable | yes | Memory/Knowledge: forget (confirm) | extract: memory::forget() | implemented | `crates/lightagent/src/lib.rs:334` |
+| `cli.memory.clear` | `lightagent memory clear` | applicable | yes | Memory/Knowledge: clear (typed confirmation) | extract: memory::clear() | implemented | `crates/lightagent/src/lib.rs:336` |
 | `cli.banner` | `lightagent banner` | not-applicable | no | Terminal cosmetic |  | not-started | `crates/lightagent/src/lib.rs:176` |
 | `cli.update` | `lightagent update` | not-applicable (D1-Q1) | no | (decision D1-Q1) | release_update::run() | not-started | `crates/lightagent/src/lib.rs:182` |
 
@@ -236,12 +237,12 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.import.hermes.opt.force` | `lightagent import hermes --force` | applicable | yes | Profiles/Workspaces: import from Hermes (preview then apply) — input 'force' | extract: import::hermes() | not-started | `crates/lightagent/src/lib.rs:363; crates/lightagent/src/import.rs:28` |
 | `cli.rag.add.opt.source` | `lightagent rag add --source` | applicable | yes | Memory/Knowledge: add documents (picker) — input 'source' | extract: rag::add() | not-started | `crates/lightagent/src/lib.rs:342` |
 | `cli.rag.search.opt.top-k` | `lightagent rag search --top-k` | applicable | yes | Memory/Knowledge: search — input 'top-k' | extract: rag::search() | not-started | `crates/lightagent/src/lib.rs:349` |
-| `cli.memory.add.opt.kind` | `lightagent memory add --kind` | applicable | yes | Memory/Knowledge: add — input 'kind' | extract: memory::add() | not-started | `crates/lightagent/src/lib.rs:299` |
-| `cli.memory.add.opt.tag` | `lightagent memory add --tag` | applicable | yes | Memory/Knowledge: add — input 'tag' | extract: memory::add() | not-started | `crates/lightagent/src/lib.rs:299` |
-| `cli.memory.search.opt.top-k` | `lightagent memory search --top-k` | applicable | yes | Memory/Knowledge: search — input 'top-k' | extract: memory::search() | not-started | `crates/lightagent/src/lib.rs:311` |
-| `cli.memory.promote.opt.text` | `lightagent memory promote --text` | applicable | yes | Conversations: message → remember — input 'text' | extract: memory::promote() | not-started | `crates/lightagent/src/lib.rs:319` |
-| `cli.memory.promote.opt.kind` | `lightagent memory promote --kind` | applicable | yes | Conversations: message → remember — input 'kind' | extract: memory::promote() | not-started | `crates/lightagent/src/lib.rs:319` |
-| `cli.memory.promote.opt.tag` | `lightagent memory promote --tag` | applicable | yes | Conversations: message → remember — input 'tag' | extract: memory::promote() | not-started | `crates/lightagent/src/lib.rs:319` |
+| `cli.memory.add.opt.kind` | `lightagent memory add --kind` | applicable | yes | Memory/Knowledge: add — input 'kind' | extract: memory::add() | implemented | `crates/lightagent/src/lib.rs:299` |
+| `cli.memory.add.opt.tag` | `lightagent memory add --tag` | applicable | yes | Memory/Knowledge: add — input 'tag' | extract: memory::add() | implemented | `crates/lightagent/src/lib.rs:299` |
+| `cli.memory.search.opt.top-k` | `lightagent memory search --top-k` | applicable | yes | Memory/Knowledge: search — input 'top-k' | extract: memory::search() | implemented | `crates/lightagent/src/lib.rs:311` |
+| `cli.memory.promote.opt.text` | `lightagent memory promote --text` | applicable | yes | Conversations: message → remember — input 'text' | extract: memory::promote() | implemented | `crates/lightagent/src/lib.rs:319` |
+| `cli.memory.promote.opt.kind` | `lightagent memory promote --kind` | applicable | yes | Conversations: message → remember — input 'kind' | extract: memory::promote() | implemented | `crates/lightagent/src/lib.rs:319` |
+| `cli.memory.promote.opt.tag` | `lightagent memory promote --tag` | applicable | yes | Conversations: message → remember — input 'tag' | extract: memory::promote() | implemented | `crates/lightagent/src/lib.rs:319` |
 | `cli.banner.opt.preview` | `lightagent banner --preview` | not-applicable | no | Option of lightagent banner: Terminal cosmetic |  | not-started | `crates/lightagent/src/lib.rs:176` |
 | `cli.update.opt.check` | `lightagent update --check` | applicable (D1-Q1) | yes | Settings/Diagnostics: Check for updates (read-only; installs nothing) | extract: release_update check-only operation | not-started | `crates/lightagent/src/lib.rs:182` |
 | `cli.update.opt.force` | `lightagent update --force` | not-applicable (D1-Q1) | no | (decision D1-Q1) — input 'force' | release_update::run() | not-started | `crates/lightagent/src/lib.rs:182` |
@@ -288,15 +289,15 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `cli.remote-credential.revoke.arg.id` | `lightagent remote-credential revoke <id>` | applicable | yes | Settings/Credentials: revoke (confirm) — input 'id' | extract: remote_credentials | not-started | `crates/lightagent/src/remote_credentials.rs:59` |
 | `cli.rag.add.arg.path` | `lightagent rag add <path>` | applicable | yes | Memory/Knowledge: add documents (picker) — input 'path' | extract: rag::add() | not-started | `crates/lightagent/src/lib.rs:342` |
 | `cli.rag.search.arg.query` | `lightagent rag search <query>` | applicable | yes | Memory/Knowledge: search — input 'query' | extract: rag::search() | not-started | `crates/lightagent/src/lib.rs:349` |
-| `cli.memory.add.arg.text` | `lightagent memory add <text>` | applicable | yes | Memory/Knowledge: add — input 'text' | extract: memory::add() | not-started | `crates/lightagent/src/lib.rs:299` |
-| `cli.memory.reflect.arg.topic` | `lightagent memory reflect <topic>` | applicable | yes | Memory/Knowledge: reflect — input 'topic' | extract: memory::reflect() | not-started | `crates/lightagent/src/lib.rs:309` |
-| `cli.memory.search.arg.query` | `lightagent memory search <query>` | applicable | yes | Memory/Knowledge: search — input 'query' | extract: memory::search() | not-started | `crates/lightagent/src/lib.rs:311` |
-| `cli.memory.candidates.arg.session` | `lightagent memory candidates <session>` | applicable | yes | Conversations: session → memory candidates — input 'session' | extract: memory::candidates() | not-started | `crates/lightagent/src/lib.rs:317` |
-| `cli.memory.promote.arg.session` | `lightagent memory promote <session>` | applicable | yes | Conversations: message → remember — input 'session' | extract: memory::promote() | not-started | `crates/lightagent/src/lib.rs:319` |
-| `cli.memory.promote.arg.message` | `lightagent memory promote <message>` | applicable | yes | Conversations: message → remember — input 'message' | extract: memory::promote() | not-started | `crates/lightagent/src/lib.rs:319` |
-| `cli.memory.update.arg.id` | `lightagent memory update <id>` | applicable | yes | Memory/Knowledge: edit — input 'id' | extract: memory::update() | not-started | `crates/lightagent/src/lib.rs:332` |
-| `cli.memory.update.arg.text` | `lightagent memory update <text>` | applicable | yes | Memory/Knowledge: edit — input 'text' | extract: memory::update() | not-started | `crates/lightagent/src/lib.rs:332` |
-| `cli.memory.forget.arg.id` | `lightagent memory forget <id>` | applicable | yes | Memory/Knowledge: forget (confirm) — input 'id' | extract: memory::forget() | not-started | `crates/lightagent/src/lib.rs:334` |
+| `cli.memory.add.arg.text` | `lightagent memory add <text>` | applicable | yes | Memory/Knowledge: add — input 'text' | extract: memory::add() | implemented | `crates/lightagent/src/lib.rs:299` |
+| `cli.memory.reflect.arg.topic` | `lightagent memory reflect <topic>` | applicable | yes | Memory/Knowledge: reflect — input 'topic' | extract: memory::reflect() | implemented | `crates/lightagent/src/lib.rs:309` |
+| `cli.memory.search.arg.query` | `lightagent memory search <query>` | applicable | yes | Memory/Knowledge: search — input 'query' | extract: memory::search() | implemented | `crates/lightagent/src/lib.rs:311` |
+| `cli.memory.candidates.arg.session` | `lightagent memory candidates <session>` | applicable | yes | Conversations: session → memory candidates — input 'session' | extract: memory::candidates() | implemented | `crates/lightagent/src/lib.rs:317` |
+| `cli.memory.promote.arg.session` | `lightagent memory promote <session>` | applicable | yes | Conversations: message → remember — input 'session' | extract: memory::promote() | implemented | `crates/lightagent/src/lib.rs:319` |
+| `cli.memory.promote.arg.message` | `lightagent memory promote <message>` | applicable | yes | Conversations: message → remember — input 'message' | extract: memory::promote() | implemented | `crates/lightagent/src/lib.rs:319` |
+| `cli.memory.update.arg.id` | `lightagent memory update <id>` | applicable | yes | Memory/Knowledge: edit — input 'id' | extract: memory::update() | implemented | `crates/lightagent/src/lib.rs:332` |
+| `cli.memory.update.arg.text` | `lightagent memory update <text>` | applicable | yes | Memory/Knowledge: edit — input 'text' | extract: memory::update() | implemented | `crates/lightagent/src/lib.rs:332` |
+| `cli.memory.forget.arg.id` | `lightagent memory forget <id>` | applicable | yes | Memory/Knowledge: forget (confirm) — input 'id' | extract: memory::forget() | implemented | `crates/lightagent/src/lib.rs:334` |
 
 ## value
 

@@ -1589,6 +1589,47 @@ can turn a slice red for timing alone. A wider wait window, or locating the
 run by its correlation id over a longer period, would remove it; that is a
 change to the subagents tests and is proposed, not made, here.
 
+## Row 34 — D7-1: memory through one shared operation set
+
+- `lightagent memory` worked on the active profile's memory file directly
+  and the API had no memory route. One implementation now
+  (`crates/lightagent/src/memory.rs`): list, add, update, forget, clear,
+  search (hybrid recall with the configured semantic embedder), reflect,
+  candidates and promote, returning typed results. The CLI prints them as
+  before; `memory::perform` answers the API with exactly the CLI's
+  `--json`, through `ops::MemoryRequest` and `RunFactory::memory` (the
+  profiles pattern; the default refuses). `MemoryStore` locks and
+  re-reads before each change, so the CLI and the API never overwrite each
+  other. New: an empty text is refused for add and update.
+- API (operator) under `/memories` — not `/memory`, which the inventory
+  and contract checkers' self-tests inject as their unlisted probe.
+  Contract `memory.*` with every query listed; the host refuses the memory
+  writes during a profile switch (memory belongs to the active profile).
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-03 | `094`; branch `desktop/d7a-memory-ops`, draft PR #128 | `f681980` / `4f03211` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41558246059 |
+| 2026-11-03 | `check`, `desktop`, `jev evaluation`, `subagents`: **success**, 24 of 24, first run | `f681980` | https://github.com/dlroqa/Lightagent/actions/runs/41558340948, https://github.com/dlroqa/Lightagent/actions/runs/41558341043, https://github.com/dlroqa/Lightagent/actions/runs/41558341167, https://github.com/dlroqa/Lightagent/actions/runs/41558341185 |
+
+## Row 35 — D7-2: the Memory screen
+
+- A Memory screen (account menus, `/memory`): remember with kind and
+  tags, search with a result count, edit, forget (asks first), forget
+  everything (asks first and states the count), the knowledge page with a
+  topic, and from a saved conversation the suggested facts and keeping any
+  user message by its number, optionally edited, with kind and tags.
+- Browser `e2e/memory.mjs` (real harness) and host `runs.py memory` (every
+  operation through the host, matched with the CLI).
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-03 | `095`; branch `desktop/d7b-memory-ui`, draft PR #129 | `d691c90` / `7dd2106` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41559560433 |
+| 2026-11-03 | render **failure**, two test causes: "Search" also named the workspace rail's button; and the harness remembers durable statements automatically (`memory.auto_capture`), so promoting the seeded message's own text merged into that memory | `d691c90` | https://github.com/dlroqa/Lightagent/actions/runs/41559630729 |
+| 2026-11-03 | `096` (scope Search to the screen; promote an edited text, the CLI's `--text`) → `f43378f`: 24 of 24 | `f43378f` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41560232731 |
+| 2026-11-03 | `097`: the host scenario adds reflect, update, promote and clear, so every memory operation has host evidence → `630988a`: **success**, 24 of 24 | `630988a` | source-edit https://github.com/dlroqa/Lightagent/actions/runs/41561924601; https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752 |
+
+Coverage: the 24 `cli.memory.*` rows → **92 of 227**.
+
 ## Artifacts and retention
 
 | Artifact | Run | Retention |
@@ -1665,14 +1706,17 @@ The owner's order of 2026-11-02 (fourth continuation, DESKTOP_CLAUDE_PROMPT.md �
    in the contract) and row 33 ran the Git import path against a Git
    fixture: 68 of 227. Remaining D6 gap: a real remote Git host over HTTPS
    (not exercised; local fixture only).
-7. **Next: D7** (remaining CLI parity: memory and RAG, agents and
-   subagents, scheduling, diagnostics with the bundle's redaction checks,
-   import/export, provisioning, where present), then D8-D10 in dependency
+7. D7 has started: rows 34-35 (memory: shared operations, then the
+   Memory screen), at 92 of 227.
+8. **Next in D7:** RAG (shared operations and a knowledge view), then
+   sessions, workers, identity and remote credentials, init, import and
+   chat, the remaining slash, setup, env and config rows, and the
+   diagnostics bundle with its redaction checks. Then D8-D10 in dependency
    order. D8 keeps the native WebView checks (Settings, profile switching,
    close with active runs, run controls, response actions R2-R5,
-   Extensions, MCP, the tool catalog and skill import). Before merge
-   approval (D10): the `providers.remove` window decision, then the exact
-   candidate merge sequence simulated on hosted runners and every
+   Extensions, MCP, the tool catalog, skill import and Memory). Before
+   merge approval (D10): the `providers.remove` window decision, then the
+   exact candidate merge sequence simulated on hosted runners and every
    candidate tree validated.
 
 Previous order (DESKTOP_CLAUDE_PROMPT.md §5), kept for reference:

@@ -45,7 +45,9 @@ tree are recorded here.
 | 31 | D6-6 (new scope) import skills from a repository or folder | https://github.com/dlroqa/Lightagent/pull/125 | `desktop/d6f-skill-import` | `desktop/d6e-tools-skills` (via merge commit `62e87e6`) | `62e87e6` | `62e87e6` |
 | 32 | D6 close-out: GET /skills through the host, MCP auth/profile fields, the extensions master switch, every client query in the contract | https://github.com/dlroqa/Lightagent/pull/126 | `desktop/d6g-close-out` | `desktop/d6f-skill-import` (`5c98b3e`) | `c70c2f9` | `c70c2f9` |
 | 33 | D6-6 the Git import path against a Git repository built on the runner | https://github.com/dlroqa/Lightagent/pull/127 | `desktop/d6h-git-fixture` | `desktop/d6g-close-out` (`c70c2f9`) | `a753206` | `a753206` |
-| 34+ | D7 (remaining CLI parity, diagnostics bundle and its redaction), then D8-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+| 34 | D7-1 memory through one shared operation set for the CLI, the API and the desktop | https://github.com/dlroqa/Lightagent/pull/128 | `desktop/d7a-memory-ops` | `desktop/d6h-git-fixture` (`dd83001`) | `f681980` | `f681980` |
+| 35 | D7-2 the Memory screen | https://github.com/dlroqa/Lightagent/pull/129 | `desktop/d7b-memory-ui` | `desktop/d7a-memory-ops` (`f681980`) | `630988a` | `630988a` |
+| 36+ | D7 continues (RAG, sessions, workers, identity and remote credentials, init/import/chat, the remaining slash, setup, env and config rows, the diagnostics bundle and its redaction), then D8-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
 
 **D10 decision carried:** rows 15-31 lack `providers.remove`'s
 `expected_revision` in the desktop contract (fixed at row 32), so between

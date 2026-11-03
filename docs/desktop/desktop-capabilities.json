@@ -117,7 +117,7 @@
    "not-applicable": 29
   },
   "parity_denominator": 227,
-  "parity_implemented": 68,
+  "parity_implemented": 92,
   "pending_decision_rows": 0,
   "not_counted_duplicates": 26
  },
@@ -3835,10 +3835,10 @@
    "backend": "extract: memory::add()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.add.arg.text",
@@ -3857,10 +3857,10 @@
    "backend": "extract: memory::add()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.add.opt.kind",
@@ -3879,10 +3879,10 @@
    "backend": "extract: memory::add()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.add.opt.tag",
@@ -3901,10 +3901,10 @@
    "backend": "extract: memory::add()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.list",
@@ -3923,10 +3923,10 @@
    "backend": "extract: memory::list()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.reflect",
@@ -3945,10 +3945,10 @@
    "backend": "extract: memory::reflect()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.reflect.arg.topic",
@@ -3967,10 +3967,10 @@
    "backend": "extract: memory::reflect()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.search",
@@ -3989,10 +3989,10 @@
    "backend": "extract: memory::search()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.search.arg.query",
@@ -4011,10 +4011,10 @@
    "backend": "extract: memory::search()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.search.opt.top-k",
@@ -4033,10 +4033,10 @@
    "backend": "extract: memory::search()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.candidates",
@@ -4055,10 +4055,10 @@
    "backend": "extract: memory::candidates()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.candidates.arg.session",
@@ -4077,10 +4077,10 @@
    "backend": "extract: memory::candidates()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.promote",
@@ -4099,10 +4099,10 @@
    "backend": "extract: memory::promote()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.promote.arg.session",
@@ -4121,10 +4121,10 @@
    "backend": "extract: memory::promote()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.promote.arg.message",
@@ -4143,10 +4143,10 @@
    "backend": "extract: memory::promote()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.promote.opt.text",
@@ -4165,10 +4165,10 @@
    "backend": "extract: memory::promote()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.promote.opt.kind",
@@ -4187,10 +4187,10 @@
    "backend": "extract: memory::promote()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.promote.opt.tag",
@@ -4209,10 +4209,10 @@
    "backend": "extract: memory::promote()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.update",
@@ -4231,10 +4231,10 @@
    "backend": "extract: memory::update()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.update.arg.id",
@@ -4253,10 +4253,10 @@
    "backend": "extract: memory::update()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.update.arg.text",
@@ -4275,10 +4275,10 @@
    "backend": "extract: memory::update()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.forget",
@@ -4297,10 +4297,10 @@
    "backend": "extract: memory::forget()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.forget.arg.id",
@@ -4319,10 +4319,10 @@
    "backend": "extract: memory::forget()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.memory.clear",
@@ -4341,10 +4341,10 @@
    "backend": "extract: memory::clear()",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "backend: crates/lightagent/tests/desktop_memory.rs (CLI and API alike, separate processes, four platforms); host: desktop/e2e/runs.py memory (add, list, search, reflect, candidates, promote, update, forget, clear through the host, each matched with the CLI); browser: e2e/memory.mjs (real harness); native WebView: D8",
+   "tested_sha": "630988a5922fe50a64b6ef7478479a669540ffe5",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41561977615, https://github.com/dlroqa/Lightagent/actions/runs/41561977631, https://github.com/dlroqa/Lightagent/actions/runs/41561977677, https://github.com/dlroqa/Lightagent/actions/runs/41561977752"
   },
   {
    "id": "cli.banner",
