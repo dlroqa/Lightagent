@@ -1,0 +1,625 @@
+=== base 4e1aa343f5e9bfcb5f1197b7dadceb33cfc3ede5
+=== message
+Row 56b: LIGHTAGENT_CREDENTIAL_KEY and HERMES_HOME, evidence (test-only)
+
+Both are read by the runtime from its own environment, which the
+desktop host passes on as it starts it. This proves what each does at
+the backend, host and browser levels, as the code does it today. No
+product code changes.
+
+LIGHTAGENT_CREDENTIAL_KEY is the vault's master key (64 hex digits), not
+a provider API key.
+- With the variable alone, a grant is sealed and opened with it, and the
+  status names the source "env", as the CLI with the same environment
+  reports it.
+- Another key opens nothing it sealed (counted as unopenable).
+- LIGHTAGENT_CREDENTIAL_KEY_FILE comes first when both are set.
+- A value that is not a key refuses every command, through the API and
+  the CLI, with an answer that never repeats the value.
+- An empty value is no key.
+- No answer, and no file under the home, holds the key or a secret.
+
+HERMES_HOME names where an import reads from; LIGHTAGENT_HOME names
+where it writes.
+- With no folder given, the import reads HERMES_HOME, before ~/.hermes.
+  A folder that is given comes first. The runtime and the CLI agree.
+- The import writes into LIGHTAGENT_HOME, which stays the runtime's home,
+  and leaves the Hermes home byte for byte as it was.
+- A HERMES_HOME naming no folder is refused, and ~/.hermes is not tried
+  instead. An empty HERMES_HOME is a value, not unset: refused as well
+  (Unix; recorded as the current behavior).
+
+Where:
+- Backend: desktop_remote_credentials.rs
+  a_key_in_the_environment_seals_opens_and_fails_closed (KeyEnv::Both
+  added), and desktop_setup.rs
+  hermes_home_names_the_source_and_lightagent_home_the_destination.
+- Host: runs.py `environment`, a second host started after the first
+  stops, with the key itself (no key file) and HERMES_HOME.
+- Browser: render-panel.sh starts a second server the same way, in its
+  own home, with a per-run random key. e2e/environment.mjs checks the
+  key's source on Remote credentials, a grant that opens with that key,
+  the Setup preview with no folder, and that no JSON answer the page
+  received holds the key.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent/tests/desktop_remote_credentials.rs
+--- find
+const VAULT_HEX_KEY: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+--- with
+const VAULT_HEX_KEY: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+const OTHER_HEX_KEY: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+=== replace crates/lightagent/tests/desktop_remote_credentials.rs
+--- find
+/// The key environment a process runs with: none, a key file, or a key.
+--- with
+/// The key environment a process runs with: none, a key file, a key, or
+/// both a key file and a key.
+=== replace crates/lightagent/tests/desktop_remote_credentials.rs
+--- find
+    Hex(&'a str),
+--- with
+    Hex(&'a str),
+    Both(&'a Path, &'a str),
+=== replace crates/lightagent/tests/desktop_remote_credentials.rs
+--- find
+        KeyEnv::Hex(hex) => {
+            command.env("LIGHTAGENT_CREDENTIAL_KEY", hex);
+        }
+--- with
+        KeyEnv::Hex(hex) => {
+            command.env("LIGHTAGENT_CREDENTIAL_KEY", hex);
+        }
+        KeyEnv::Both(path, hex) => {
+            command.env("LIGHTAGENT_CREDENTIAL_KEY_FILE", path);
+            command.env("LIGHTAGENT_CREDENTIAL_KEY", hex);
+        }
+=== replace crates/lightagent/tests/desktop_remote_credentials.rs
+--- find
+    assert!(!Path::new("/tmp/never.key").exists());
+}
+--- with
+    assert!(!Path::new("/tmp/never.key").exists());
+}
+
+#[test]
+fn a_key_in_the_environment_seals_opens_and_fails_closed() {
+    let home = scratch("env-home");
+    let outside = scratch("env-outside");
+    cli_ok(
+        &home,
+        KeyEnv::None,
+        &["config", "set", "extensions.enabled", "true"],
+    );
+    cli_ok(&home, KeyEnv::None, &["profile", "create", "work"]);
+    let vault = format!("{CREDENTIALS}/vault");
+    let secret_file = outside.join("env.secret");
+    let secret = "env-secret-1c2d3e4f5a6b7c8d9e0f";
+    std::fs::write(&secret_file, format!("{secret}\n")).expect("secret file");
+    let add = json!({
+        "profile": "work",
+        "service": "mcp:env-docs",
+        "destinations": ["https://docs.example.com"],
+        "secret_file": secret_file,
+    });
+
+    // The key in LIGHTAGENT_CREDENTIAL_KEY seals a grant; the CLI with the
+    // same key lists it, and the status names the source.
+    let key = KeyEnv::Hex(VAULT_HEX_KEY);
+    let runtime = start_desktop(&home, key);
+    let (added, added_raw) = ok(&runtime, "POST", CREDENTIALS, Some(add.clone()));
+    let id = added["added"].as_str().expect("grant id").to_owned();
+    let (listed, listed_raw) = ok(&runtime, "GET", CREDENTIALS, None);
+    assert_eq!(
+        listed,
+        cli_json(&home, key, &["remote-credential", "list"])
+    );
+    assert_eq!(grant(&listed, &id)["version"], 1, "{listed}");
+    let (status, status_raw) = ok(&runtime, "GET", &vault, None);
+    assert_eq!(status["key_source"], "env", "{status}");
+    assert_eq!(status["key_configured"], true, "{status}");
+    assert_eq!(status["unopenable_with_configured_key"], 0, "{status}");
+    assert_eq!(
+        status,
+        cli_json(&home, key, &["remote-credential", "status"])
+    );
+    for raw in [&added_raw, &listed_raw, &status_raw] {
+        assert!(
+            !raw.contains(secret) && !raw.contains(VAULT_HEX_KEY),
+            "an answer holds the secret or the key: {raw}"
+        );
+    }
+    assert_nowhere(&home, secret);
+    assert_nowhere(&home, VAULT_HEX_KEY);
+    drop(runtime);
+
+    // Another key opens nothing this one sealed: it is counted, not opened.
+    let runtime = start_desktop(&home, KeyEnv::Hex(OTHER_HEX_KEY));
+    let (status, _) = ok(&runtime, "GET", &vault, None);
+    assert_eq!(status["key_source"], "env", "{status}");
+    assert_eq!(status["unopenable_with_configured_key"], 1, "{status}");
+    drop(runtime);
+
+    // A key file and a key: the key file is used.
+    let key_file = outside.join("file.key");
+    cli_ok(
+        &home,
+        KeyEnv::None,
+        &["remote-credential", "keygen", arg(&key_file)],
+    );
+    let both = KeyEnv::Both(&key_file, VAULT_HEX_KEY);
+    let runtime = start_desktop(&home, both);
+    let (status, _) = ok(&runtime, "GET", &vault, None);
+    assert_eq!(
+        status["key_source"], "file",
+        "the key file comes first: {status}"
+    );
+    assert_eq!(status["unopenable_with_configured_key"], 1, "{status}");
+    assert_eq!(
+        status,
+        cli_json(&home, both, &["remote-credential", "status"])
+    );
+    drop(runtime);
+
+    // Not a key: every command is refused, by the API and the CLI, and no
+    // answer repeats the value.
+    let invalid = "not-a-key-5e6f7a8b9c";
+    let runtime = start_desktop(&home, KeyEnv::Hex(invalid));
+    for (method, path, body) in [
+        ("GET", vault.clone(), None),
+        ("GET", CREDENTIALS.to_owned(), None),
+        ("POST", CREDENTIALS.to_owned(), Some(add.to_string())),
+    ] {
+        let (code, raw) = call(&runtime, method, &path, body.as_deref());
+        assert_eq!(code, 400, "{method} {path}: {raw}");
+        assert!(
+            raw.contains("the configured credential key is unusable"),
+            "{raw}"
+        );
+        assert!(
+            !raw.contains(invalid) && !raw.contains(secret),
+            "{method} {path}: {raw}"
+        );
+    }
+    let refused = cli(&home, KeyEnv::Hex(invalid), &["remote-credential", "status"]);
+    assert!(!refused.status.success(), "the CLI refuses as well");
+    assert!(
+        !String::from_utf8_lossy(&refused.stderr).contains(invalid),
+        "the CLI repeats the value"
+    );
+    drop(runtime);
+
+    // An empty value is no key: nothing opens, and adding is refused.
+    let runtime = start_desktop(&home, KeyEnv::Hex(""));
+    let (status, _) = ok(&runtime, "GET", &vault, None);
+    assert_eq!(status["key_configured"], false, "{status}");
+    assert_eq!(status["key_source"], Value::Null, "{status}");
+    assert_eq!(status["unopenable_with_configured_key"], 1, "{status}");
+    let (code, raw) = call(&runtime, "POST", CREDENTIALS, Some(&add.to_string()));
+    assert_eq!(code, 400, "{raw}");
+    assert!(raw.contains("no credential key is configured"), "{raw}");
+}
+=== replace crates/lightagent/tests/desktop_setup.rs
+--- find
+    assert_eq!(by_default["hermes_home"], from, "{by_default}");
+}
+--- with
+    assert_eq!(by_default["hermes_home"], from, "{by_default}");
+}
+
+/// Every file under `dir`, by relative path, with its bytes.
+fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next).expect("read dir").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let bytes = std::fs::read(&path).expect("read file");
+                let relative = path.strip_prefix(dir).expect("under dir").to_path_buf();
+                found.push((relative, bytes));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// `lightagent --json import hermes <args>` with `env` set and HERMES_HOME
+/// otherwise unset: whether it succeeded, and what it printed.
+fn cli_import(home: &Path, env: &[(&str, &Path)], args: &[&str]) -> (bool, Value) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lightagent"));
+    command
+        .args(["--json", "import", "hermes"])
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .env_remove("HERMES_HOME")
+        .stdin(Stdio::null());
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let output = command.output().expect("run lightagent");
+    let printed = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
+    (output.status.success(), printed)
+}
+
+#[test]
+fn hermes_home_names_the_source_and_lightagent_home_the_destination() {
+    let named = hermes_home("named-hermes");
+    let explicit = hermes_home("explicit-hermes");
+    let user = scratch("user-home");
+    let fallback = user.join(".hermes").join("profiles").join("Home Bot");
+    std::fs::create_dir_all(&fallback).expect("fallback profile");
+    std::fs::write(fallback.join("SOUL.md"), "You live in ~/.hermes.\n").expect("persona");
+    let home = scratch("homes");
+    let import = format!("{API}/import/hermes");
+    let before = snapshot(&named);
+    let env = [("HERMES_HOME", named.as_path()), ("HOME", user.as_path())];
+
+    // With no folder, HERMES_HOME is read, before ~/.hermes; a folder given
+    // comes first. The runtime and the CLI agree.
+    let runtime = start(&home, &env);
+    let (status, dry) = post(&runtime, &import, json!({"dry_run": true}));
+    assert_eq!(status, 200, "{dry}");
+    assert_eq!(dry["hermes_home"], arg(&named), "{dry}");
+    assert_eq!(dry["profiles"], json!(["research-bot"]), "{dry}");
+    let (succeeded, by_cli) = cli_import(&home, &env, &["--dry-run"]);
+    assert!(succeeded, "{by_cli}");
+    assert_eq!(dry, by_cli);
+    let (status, given) = post(
+        &runtime,
+        &import,
+        json!({"from": explicit, "dry_run": true}),
+    );
+    assert_eq!(status, 200, "{given}");
+    assert_eq!(given["hermes_home"], arg(&explicit), "{given}");
+
+    // Applied: written into LIGHTAGENT_HOME, which stays the runtime's
+    // home; the Hermes home is only read.
+    let (status, applied) = post(&runtime, &import, json!({}));
+    assert_eq!(status, 200, "{applied}");
+    assert_eq!(applied["profiles"], json!(["research-bot"]), "{applied}");
+    let listed = cli_json(&home, &["profile", "list"]).to_string();
+    assert!(listed.contains("research-bot"), "{listed}");
+    assert!(
+        snapshot(&named) == before,
+        "the import changed the Hermes home"
+    );
+    let (status, raw) = call(&runtime, "GET", &format!("{API}/diagnostics/doctor"), None);
+    assert_eq!(status, 200, "{raw}");
+    let doctor = parsed(&raw);
+    let shown = PathBuf::from(doctor["home"].as_str().expect("doctor home"));
+    assert_eq!(
+        shown.canonicalize().expect("shown home"),
+        home.canonicalize().expect("home"),
+        "{doctor}"
+    );
+    drop(runtime);
+
+    // Without HERMES_HOME: ~/.hermes.
+    let runtime = start(&home, &[("HOME", user.as_path())]);
+    let (status, dry) = post(&runtime, &import, json!({"dry_run": true}));
+    assert_eq!(status, 200, "{dry}");
+    assert_eq!(dry["hermes_home"], arg(&user.join(".hermes")), "{dry}");
+    assert_eq!(dry["profiles"], json!(["home-bot"]), "{dry}");
+    drop(runtime);
+
+    // A HERMES_HOME naming no folder is refused, with nothing written, and
+    // ~/.hermes is not tried instead.
+    let missing = named.join("missing");
+    let unusable = [("HERMES_HOME", missing.as_path()), ("HOME", user.as_path())];
+    let runtime = start(&home, &unusable);
+    let (status, refused) = post(&runtime, &import, json!({"dry_run": true}));
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused.to_string().contains("no Hermes home"),
+        "{refused}"
+    );
+    let (succeeded, _) = cli_import(&home, &unusable, &["--dry-run"]);
+    assert!(!succeeded, "the CLI refuses as well");
+    let listed = cli_json(&home, &["profile", "list"]).to_string();
+    assert!(!listed.contains("home-bot"), "{listed}");
+    drop(runtime);
+
+    // An empty HERMES_HOME is a value, not unset: it is refused as well.
+    #[cfg(unix)]
+    {
+        let empty = [("HERMES_HOME", Path::new("")), ("HOME", user.as_path())];
+        let runtime = start(&home, &empty);
+        let (status, refused) = post(&runtime, &import, json!({"dry_run": true}));
+        assert_eq!(status, 400, "{refused}");
+        drop(runtime);
+    }
+}
+=== replace desktop/e2e/runs.py
+--- find
+def main():
+--- with
+def scenario_environment(command, env, cli, out):
+    """The env rows through a second host, started after the first stops, as
+    a user would start the app: the vault key itself in
+    LIGHTAGENT_CREDENTIAL_KEY (no key file) and HERMES_HOME naming a Hermes
+    home. The vault through the host names the key's source, as the CLI with
+    the same environment does; a grant sealed with that key opens with it
+    while the grants the key file sealed do not; no answer holds the secret
+    or the key. An import with no folder reads HERMES_HOME, as the CLI's
+    does, writes into LIGHTAGENT_HOME only and leaves the Hermes home as it
+    was."""
+    import secrets
+    import shutil
+    import tempfile
+
+    check = Checks("environment")
+    work = tempfile.mkdtemp(prefix="lightagent-e2e-environment-")
+    key = secrets.token_hex(32)
+    hermes = os.path.join(work, "hermes")
+    os.makedirs(os.path.join(hermes, "profiles", "e2e-env-hermes"))
+    with open(os.path.join(hermes, "profiles", "e2e-env-hermes", "SOUL.md"), "w", encoding="utf-8") as handle:
+        handle.write("You came from HERMES_HOME.\n")
+
+    def snapshot(root):
+        found = {}
+        for base, _, files in os.walk(root):
+            for name in files:
+                path = os.path.join(base, name)
+                with open(path, "rb") as handle:
+                    found[os.path.relpath(path, root)] = handle.read()
+        return found
+
+    overrides = {"LIGHTAGENT_CREDENTIAL_KEY": key, "HERMES_HOME": hermes}
+    started = {name: value for name, value in env.items() if name != "LIGHTAGENT_CREDENTIAL_KEY_FILE"}
+    started.update(overrides, LIGHTAGENT_DESKTOP_E2E_REPORT=os.path.join(out, "report-environment.txt"))
+
+    def cli_json(*args):
+        saved = dict(os.environ)
+        os.environ.pop("LIGHTAGENT_CREDENTIAL_KEY_FILE", None)
+        os.environ.update(overrides)
+        try:
+            return json.loads(harness.run_cli(cli, "--json", *args))
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+
+    before = snapshot(hermes)
+    host = harness.Host(command, started, os.path.join(out, "driver-environment.log"))
+    try:
+        host.ready()
+        status, vault = host.fetch("GET", f"{API}/remote-credentials/vault")
+        vault = vault if isinstance(vault, dict) else {}
+        check.expect("LIGHTAGENT_CREDENTIAL_KEY: the vault through the host names it as the key's source, as the CLI does",
+                     status == 200 and vault.get("key_source") == "env"
+                     and vault == cli_json("remote-credential", "status") and key not in json.dumps(vault),
+                     (status, vault))
+        unopenable = vault.get("unopenable_with_configured_key")
+        check.expect("the grants the key file sealed do not open with that key",
+                     isinstance(unopenable, int) and unopenable >= 1, vault)
+        _, catalog = host.fetch("GET", f"{API}/profiles")
+        active = (catalog or {}).get("active_profile")
+        secret = "e2e-env-secret-9c8b7a6f5e4d"
+        secret_file = os.path.join(work, "env.secret")
+        with open(secret_file, "w", encoding="utf-8") as handle:
+            handle.write(secret + "\n")
+        status, added = host.fetch("POST", f"{API}/remote-credentials", {
+            "profile": active, "service": "mcp:e2e-env", "destinations": ["https://env.e2e.invalid"],
+            "secret_file": secret_file})
+        grant = (added or {}).get("added")
+        _, listed = host.fetch("GET", f"{API}/remote-credentials?profile={active}")
+        by_cli = cli_json("remote-credential", "list", "--profile", active)
+        row = next((g for g in by_cli.get("credentials", []) if g.get("id") == grant), {})
+        _, after = host.fetch("GET", f"{API}/remote-credentials/vault")
+        check.expect("a grant sealed through the host with that key is the CLI's, and opens with it",
+                     status == 200 and isinstance(grant, str) and listed == by_cli and row.get("version") == 1
+                     and (after or {}).get("unopenable_with_configured_key") == unopenable,
+                     (status, added, after))
+        answers = json.dumps([added, listed, after])
+        check.expect("no answer holds the secret or the key", secret not in answers and key not in answers)
+        if isinstance(grant, str):
+            host.fetch("POST", f"{API}/remote-credentials/{grant}/revoke")
+        status, dry = host.fetch("POST", f"{API}/import/hermes", {"dry_run": True})
+        check.expect("an import with no folder through the host reads HERMES_HOME, as the CLI's does",
+                     status == 200 and os.path.realpath(str((dry or {}).get("hermes_home"))) == os.path.realpath(hermes)
+                     and (dry or {}).get("profiles") == ["e2e-env-hermes"]
+                     and dry == cli_json("import", "hermes", "--dry-run"), (status, dry))
+        status, applied = host.fetch("POST", f"{API}/import/hermes", {})
+        _, doctor = host.fetch("GET", f"{API}/diagnostics/doctor")
+        check.expect("imported into LIGHTAGENT_HOME, the Hermes home left as it was",
+                     status == 200 and (applied or {}).get("profiles") == ["e2e-env-hermes"]
+                     and "You came from HERMES_HOME." in harness.run_cli(cli, "profile", "show", "e2e-env-hermes")
+                     and os.path.realpath(str((doctor or {}).get("home"))) == os.path.realpath(os.environ["LIGHTAGENT_HOME"])
+                     and snapshot(hermes) == before, (status, applied))
+    finally:
+        host.stop()
+        shutil.rmtree(work, ignore_errors=True)
+    return check
+
+
+def main():
+=== replace desktop/e2e/runs.py
+--- find
+    results["provider"] = provider.log
+--- with
+    # After the first host stops: a second, started with the environment
+    # rows set (LIGHTAGENT_CREDENTIAL_KEY, HERMES_HOME).
+    try:
+        check = scenario_environment(command, env, cli, out)
+        results["environment"] = check.results
+        failures.extend(check.failures)
+    except Exception as error:
+        results["environment"] = {"error": repr(error)}
+        failures.append(f"environment: {error!r}")
+    results["provider"] = provider.log
+=== replace scripts/render-panel.sh
+--- find
+release_pid=""
+--- with
+release_pid=""
+env_pid=""
+=== replace scripts/render-panel.sh
+--- find
+  [ -n "$release_pid" ] && kill "$release_pid" 2>/dev/null || true
+--- with
+  [ -n "$release_pid" ] && kill "$release_pid" 2>/dev/null || true
+  [ -n "$env_pid" ] && kill "$env_pid" 2>/dev/null || true
+=== replace scripts/render-panel.sh
+--- find
+echo "== render in a headless browser =="
+PANEL_BASE="http://127.0.0.1:$AGENT_PORT" OUT_DIR="$OUT_DIR" node e2e/render.mjs
+--- with
+# A second server, started as a user would start one with the vault key
+# itself in LIGHTAGENT_CREDENTIAL_KEY (no key file) and HERMES_HOME naming a
+# Hermes home, in its own home. The key is random for this run and is only
+# ever in the environment; e2e/environment.mjs checks the browser's view.
+ENV_PORT="${ENV_PORT:-8736}"
+env_home="$work_dir/env-home"
+export RENDER_ENV_HERMES_HOME="$work_dir/env-hermes"
+mkdir -p "$RENDER_ENV_HERMES_HOME/profiles/render-env-hermes"
+printf 'You came from HERMES_HOME in the render.\n' \
+  >"$RENDER_ENV_HERMES_HOME/profiles/render-env-hermes/SOUL.md"
+LIGHTAGENT_HOME="$env_home" ./target/debug/lightagent init --base-url http://127.0.0.1:0 >/dev/null
+RENDER_ENV_CREDENTIAL_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+export RENDER_ENV_CREDENTIAL_KEY
+echo "== start the environment server (port $ENV_PORT) =="
+env -u LIGHTAGENT_CREDENTIAL_KEY_FILE LIGHTAGENT_HOME="$env_home" \
+  LIGHTAGENT_CREDENTIAL_KEY="$RENDER_ENV_CREDENTIAL_KEY" HERMES_HOME="$RENDER_ENV_HERMES_HOME" \
+  ./target/debug/lightagent serve --host 127.0.0.1 --port "$ENV_PORT" \
+  --web-root frontend/dist >"$work_dir/env-agent.log" 2>&1 &
+env_pid=$!
+wait_for "http://127.0.0.1:$ENV_PORT/health" "the environment server" "$env_pid"
+
+echo "== render in a headless browser =="
+PANEL_BASE="http://127.0.0.1:$AGENT_PORT" PANEL_ENV_BASE="http://127.0.0.1:$ENV_PORT" OUT_DIR="$OUT_DIR" \
+  node e2e/render.mjs
+=== replace e2e/render.mjs
+--- find
+import { checkRemoteCredentials } from "./credentials.mjs";
+--- with
+import { checkRemoteCredentials } from "./credentials.mjs";
+import { checkEnvironment } from "./environment.mjs";
+=== replace e2e/render.mjs
+--- find
+const BASE = (process.env.PANEL_BASE ?? "http://127.0.0.1:8735").replace(/\/+$/, "");
+--- with
+const BASE = (process.env.PANEL_BASE ?? "http://127.0.0.1:8735").replace(/\/+$/, "");
+// The second server render-panel.sh starts with LIGHTAGENT_CREDENTIAL_KEY and HERMES_HOME.
+const ENV_BASE = (process.env.PANEL_ENV_BASE ?? "").replace(/\/+$/, "");
+=== replace e2e/render.mjs
+--- find
+  // Imports and removes a skills pack: after the routes above have rendered.
+--- with
+  // The environment rows, against the second server (its own home).
+  try {
+    failures.push(...(await checkEnvironment(browser, ENV_BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`environment: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Imports and removes a skills pack: after the routes above have rendered.
+=== write e2e/environment.mjs
+// The environment rows in the browser (D7, row 56): a second server that
+// scripts/render-panel.sh starts as a user would, with the vault key itself
+// in LIGHTAGENT_CREDENTIAL_KEY (no key file) and HERMES_HOME naming a Hermes
+// home, in its own home. The Remote credentials screen names the key's
+// source, and a grant sealed with that key opens with it; the Setup
+// screen's preview with no folder reads HERMES_HOME. No JSON answer the
+// page receives holds the key. desktop/e2e/runs.py `environment` covers the
+// host and the CLI.
+
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const API = "/api/lightagent/v1";
+
+async function api(base, path, init = {}) {
+  const response = await fetch(`${base}${API}${path}`, { headers: { "content-type": "application/json" }, ...init });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`${init.method ?? "GET"} ${path} → ${response.status}`);
+  return text ? JSON.parse(text) : null;
+}
+
+export async function checkEnvironment(browser, base, outDir) {
+  const key = process.env.RENDER_ENV_CREDENTIAL_KEY ?? "";
+  const hermes = process.env.RENDER_ENV_HERMES_HOME ?? "";
+  if (!base || !/^[0-9a-f]{64}$/.test(key) || !hermes) {
+    return ["environment: the harness did not start the second server (PANEL_ENV_BASE, its key and its Hermes home)"];
+  }
+  const failures = [];
+  const dir = await mkdtemp(join(tmpdir(), "lightagent-render-env-"));
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1400 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  // Every JSON answer the page receives, to look for the key in afterwards.
+  const received = [];
+  page.on("response", (response) => {
+    if (response.url().includes(API) && (response.headers()["content-type"] ?? "").includes("application/json")) {
+      received.push(response.text().catch(() => ""));
+    }
+  });
+  const step = async (name, body) => {
+    try {
+      await body();
+      console.log(`  [ok] environment: ${name}`);
+    } catch (err) {
+      failures.push(`environment: ${name}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+      await page.screenshot({ path: `${outDir}/environment-failed-${name.replace(/\W+/g, "-")}.png`, fullPage: true })
+        .catch(() => {});
+    }
+  };
+  const credentials = async () => {
+    await page.goto("about:blank");
+    await page.goto(`${base}/#/admin/credentials`, { waitUntil: "domcontentloaded" });
+  };
+  try {
+    const status = page.getByTestId("credentials-status");
+    await step("Remote credentials names LIGHTAGENT_CREDENTIAL_KEY as the key's source", async () => {
+      await credentials();
+      await status.getByText("from the environment (LIGHTAGENT_CREDENTIAL_KEY)", { exact: false }).waitFor({ timeout: 15000 });
+      await page.screenshot({ path: `${outDir}/environment-credential-key.png`, fullPage: true });
+    });
+    await step("a grant sealed with that key opens with it", async () => {
+      const secretFile = join(dir, "env.secret");
+      await writeFile(secretFile, "render-env-secret-2b3c4d5e\n", { mode: 0o600 });
+      const { active_profile: profile } = await api(base, "/profiles");
+      const added = await api(base, "/remote-credentials", {
+        method: "POST",
+        body: JSON.stringify({
+          profile,
+          service: "mcp:render-env",
+          destinations: ["https://env.render.invalid"],
+          secret_file: secretFile,
+        }),
+      });
+      if (typeof added?.added !== "string") throw new Error(`not added: ${JSON.stringify(added)}`);
+      await credentials();
+      await status.getByText("Grants: 1 active", { exact: false }).waitFor({ timeout: 15000 });
+      if (await page.getByTestId("credentials-unopenable").count()) {
+        throw new Error("the grant does not open with the key that sealed it");
+      }
+      await page.screenshot({ path: `${outDir}/environment-credential-grant.png`, fullPage: true });
+    });
+    await step("the Setup preview with no folder reads HERMES_HOME", async () => {
+      await page.goto("about:blank");
+      await page.goto(`${base}/#/setup`, { waitUntil: "domcontentloaded" });
+      const screen = page.getByTestId("setup-screen");
+      await page.locator("#setup-hermes-from").fill("");
+      await screen.getByRole("button", { name: "Preview" }).click();
+      const result = page.getByTestId("setup-hermes-result");
+      await result.getByText(`Would import 1 profile(s) and 0 skill(s) from ${hermes}.`, { exact: false })
+        .waitFor({ timeout: 10000 });
+      await result.getByText("Profiles: render-env-hermes", { exact: false }).waitFor({ timeout: 10000 });
+      if ((await api(base, "/profiles")).profiles.some((p) => p.id === "render-env-hermes")) {
+        throw new Error("the preview wrote");
+      }
+      await page.screenshot({ path: `${outDir}/environment-hermes-home.png`, fullPage: true });
+    });
+    const answers = (await Promise.all(received)).join("\n");
+    if (answers.includes(key)) failures.push("environment: a JSON answer the page received holds the credential key");
+    if (errors.length) failures.push(`environment: page errors: ${errors.join("; ")}`);
+  } finally {
+    await page.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+  return failures;
+}
+=== end
