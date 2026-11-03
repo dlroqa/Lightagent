@@ -8,7 +8,38 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
-const LATEST_RELEASE_API: &str = "https://api.github.com/repos/dlroqa/Lightagent/releases/latest";
+pub(crate) const LATEST_RELEASE_API: &str =
+    "https://api.github.com/repos/dlroqa/Lightagent/releases/latest";
+
+/// How long a request for the release metadata may take.
+pub(crate) const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Test-only: a loopback release API that replaces GitHub's for `update
+/// --check`, so hosted tests can serve controlled answers. Installing never
+/// reads it, and anything but a loopback `http://` URL is refused.
+const TEST_RELEASE_API_ENV: &str = "LIGHTAGENT_TEST_RELEASE_API";
+/// Test-only, with [`TEST_RELEASE_API_ENV`]: the check's timeout.
+const TEST_RELEASE_TIMEOUT_ENV: &str = "LIGHTAGENT_TEST_RELEASE_TIMEOUT_MS";
+
+/// The release API and timeout `update --check` uses.
+pub(crate) fn check_source() -> Result<(String, Duration), String> {
+    match std::env::var(TEST_RELEASE_API_ENV) {
+        Ok(url) if !url.is_empty() => {
+            if !(url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:")) {
+                return Err(format!(
+                    "{TEST_RELEASE_API_ENV} must be a loopback http:// URL"
+                ));
+            }
+            let timeout = std::env::var(TEST_RELEASE_TIMEOUT_ENV)
+                .ok()
+                .and_then(|ms| ms.parse().ok())
+                .map(Duration::from_millis)
+                .unwrap_or(CHECK_TIMEOUT);
+            Ok((url, timeout))
+        }
+        _ => Ok((LATEST_RELEASE_API.to_owned(), CHECK_TIMEOUT)),
+    }
+}
 
 /// The checksum manifest every release publishes beside its archives.
 pub(crate) const CHECKSUMS_ASSET: &str = "SHA256SUMS";
@@ -52,24 +83,71 @@ pub(crate) fn client(user_agent: &str) -> Result<reqwest::Client, String> {
         .map_err(|error| format!("could not create the update client: {error}"))
 }
 
-pub(crate) async fn latest(client: &reqwest::Client) -> Result<Release, String> {
+/// The latest release from `api`, within `timeout`. A failed, rate-limited,
+/// timed-out, malformed or tagless answer is an error that says which.
+pub(crate) async fn latest_from(
+    client: &reqwest::Client,
+    api: &str,
+    timeout: Duration,
+) -> Result<Release, String> {
+    let timed_out = || {
+        format!(
+            "checking for updates timed out after {} ms",
+            timeout.as_millis()
+        )
+    };
     let response = client
-        .get(LATEST_RELEASE_API)
+        .get(api)
         .header("Accept", "application/vnd.github+json")
-        .timeout(Duration::from_secs(30))
+        .timeout(timeout)
         .send()
         .await
-        .map_err(|error| format!("could not check for updates: {error}"))?;
-    if !response.status().is_success() {
+        .map_err(|error| {
+            if error.is_timeout() {
+                timed_out()
+            } else {
+                format!("could not check for updates: {error}")
+            }
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        if matches!(status.as_u16(), 403 | 429)
+            && header("x-ratelimit-remaining").as_deref() == Some("0")
+        {
+            return Err(match header("x-ratelimit-reset") {
+                Some(reset) => format!(
+                    "GitHub's API rate limit is used up (HTTP {}); it resets at Unix time {reset}",
+                    status.as_u16()
+                ),
+                None => format!(
+                    "GitHub's API rate limit is used up (HTTP {})",
+                    status.as_u16()
+                ),
+            });
+        }
         return Err(format!(
             "GitHub answered HTTP {} while checking for updates",
-            response.status().as_u16()
+            status.as_u16()
         ));
     }
-    response
-        .json::<Release>()
-        .await
-        .map_err(|error| format!("could not read the latest release: {error}"))
+    let release = response.json::<Release>().await.map_err(|error| {
+        if error.is_timeout() {
+            timed_out()
+        } else {
+            format!("could not read the latest release: {error}")
+        }
+    })?;
+    if release.version().is_empty() {
+        return Err("could not read the latest release: it names no version".to_owned());
+    }
+    Ok(release)
 }
 
 /// Fetch a small text asset, such as the checksum manifest.

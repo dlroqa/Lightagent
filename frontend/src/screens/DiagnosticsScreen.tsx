@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { agentApi } from "../api/agent";
+import { agentApi, type UpdateCheck } from "../api/agent";
 import { Card } from "../components/Card";
 import { TopBar } from "../components/Shell";
 
@@ -65,6 +65,22 @@ export function DiagnosticsScreen() {
   const [bundleError, setBundleError] = useState<string | null>(null);
   const [preparing, setPreparing] = useState(false);
   const [saved, setSaved] = useState<string | null>(null);
+  const [update, setUpdate] = useState<UpdateCheck | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  async function checkForUpdates() {
+    setChecking(true);
+    setUpdateError(null);
+    try {
+      setUpdate(await agentApi.updateCheck());
+    } catch (cause) {
+      setUpdate(null);
+      setUpdateError(errorText(cause));
+    } finally {
+      setChecking(false);
+    }
+  }
 
   async function load() {
     try {
@@ -127,6 +143,27 @@ export function DiagnosticsScreen() {
           {architecture
             ? <Rows labels={ARCHITECTURE_LABELS} report={architecture} testId="diagnostics-architecture" />
             : !loadError && <span className="muted">Loading…</span>}
+        </Card>
+
+        <Card title="Updates">
+          <p className="card__note">
+            Compares this Lightagent with the latest published release. Checking installs nothing; the desktop app is
+            updated by installing a new version of it.
+          </p>
+          <button type="button" className="btn" disabled={checking} aria-busy={checking || undefined}
+            onClick={() => void checkForUpdates()}>Check for updates</button>
+          {updateError && <div role="alert" style={{ fontSize: 11.5, color: "var(--danger)", marginTop: 4 }}>{updateError}</div>}
+          {update && (
+            <div data-testid="diagnostics-update" role="status" style={{ marginTop: 10, display: "grid", gap: 4 }}>
+              <div>
+                {update.update_available
+                  ? `Lightagent ${update.latest} is available; this is ${update.current ?? "an unknown version"}.`
+                  : `Lightagent ${update.current ?? update.latest} is up to date (the latest release is ${update.latest}).`}
+              </div>
+              {update.blocked && <div className="muted">Not updated from here: {update.blocked}.</div>}
+              <div className="muted" style={{ overflowWrap: "anywhere" }}>Release: {update.release}</div>
+            </div>
+          )}
         </Card>
 
         <Card title="Diagnostics bundle">

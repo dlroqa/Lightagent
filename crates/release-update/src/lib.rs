@@ -86,44 +86,23 @@ pub async fn run(invoker: Cli, current: &str, request: Request) -> Result<(), St
         ));
     }
 
-    let executable = std::env::current_exe()
-        .and_then(|path| path.canonicalize())
-        .map_err(|error| format!("could not locate the running executable: {error}"))?;
-    let install_dir = install::install_dir(&executable)?;
-
-    let client = release::client(&format!("{}/{current}", invoker.binary()))?;
-    let release = release::latest(&client).await?;
-    let latest = release.version().to_owned();
-
-    let mut targets = Vec::new();
-    for cli in [invoker] {
-        let path = install::binary_path(&install_dir, cli);
-        let installed = path.is_file();
-        let version = if same_file(&path, &executable) {
-            Some(current.to_owned())
-        } else if installed {
-            install::installed_version(&path, cli).await
-        } else {
-            None
-        };
-        let needs_update = request.force
-            || version.as_deref().is_none_or(|version| {
-                version::compare_versions(&latest, version) == Ordering::Greater
-            });
-        targets.push(Target {
-            cli,
-            path,
-            version,
-            installed,
-            needs_update,
-        });
-    }
-
-    let blocked = targets
-        .iter()
-        .filter(|target| target.installed)
-        .find_map(|target| install::managed_install(&target.path));
-    let method = method(&release, &latest, &targets)?;
+    let (api, timeout) = if request.check {
+        release::check_source()?
+    } else {
+        (
+            release::LATEST_RELEASE_API.to_owned(),
+            release::CHECK_TIMEOUT,
+        )
+    };
+    let Inspection {
+        client,
+        release,
+        latest,
+        targets,
+        blocked,
+        method,
+        install_dir,
+    } = inspect(invoker, current, request.force, &api, timeout).await?;
 
     if request.check {
         report_check(
@@ -198,6 +177,89 @@ pub async fn run(invoker: Cli, current: &str, request: Request) -> Result<(), St
     }
     println!("Restart running `lightagent` processes to use {latest}.");
     Ok(())
+}
+
+/// `update --check` as data: the report `update --check --json` prints.
+/// Read-only: only the release metadata is fetched, never an archive, and
+/// nothing is installed or changed.
+pub async fn check(invoker: Cli, current: &str) -> Result<serde_json::Value, String> {
+    let (api, timeout) = release::check_source()?;
+    let inspection = inspect(invoker, current, false, &api, timeout).await?;
+    Ok(check_report(
+        invoker,
+        &inspection.release,
+        &inspection.targets,
+        inspection.method,
+        inspection.blocked.as_deref(),
+    ))
+}
+
+/// What an update would do, found without changing anything.
+struct Inspection {
+    client: reqwest::Client,
+    release: Release,
+    latest: String,
+    targets: Vec<Target>,
+    blocked: Option<String>,
+    method: Method,
+    install_dir: PathBuf,
+}
+
+/// Read the latest release from `api` and compare it with what is installed.
+async fn inspect(
+    invoker: Cli,
+    current: &str,
+    force: bool,
+    api: &str,
+    timeout: std::time::Duration,
+) -> Result<Inspection, String> {
+    let executable = std::env::current_exe()
+        .and_then(|path| path.canonicalize())
+        .map_err(|error| format!("could not locate the running executable: {error}"))?;
+    let install_dir = install::install_dir(&executable)?;
+
+    let client = release::client(&format!("{}/{current}", invoker.binary()))?;
+    let release = release::latest_from(&client, api, timeout).await?;
+    let latest = release.version().to_owned();
+
+    let mut targets = Vec::new();
+    for cli in [invoker] {
+        let path = install::binary_path(&install_dir, cli);
+        let installed = path.is_file();
+        let version = if same_file(&path, &executable) {
+            Some(current.to_owned())
+        } else if installed {
+            install::installed_version(&path, cli).await
+        } else {
+            None
+        };
+        let needs_update = force
+            || version.as_deref().is_none_or(|version| {
+                version::compare_versions(&latest, version) == Ordering::Greater
+            });
+        targets.push(Target {
+            cli,
+            path,
+            version,
+            installed,
+            needs_update,
+        });
+    }
+
+    let blocked = targets
+        .iter()
+        .filter(|target| target.installed)
+        .find_map(|target| install::managed_install(&target.path));
+    let method = method(&release, &latest, &targets)?;
+    Ok(Inspection {
+        client,
+        release,
+        latest,
+        targets,
+        blocked,
+        method,
+        install_dir,
+    })
 }
 
 /// Choose the published archive when present, otherwise build the same tag.
@@ -305,34 +367,10 @@ fn report_check(
 ) {
     let latest = release.version();
     let update_available = targets.iter().any(|target| target.needs_update);
-    let current = targets
-        .iter()
-        .find(|target| target.cli == invoker)
-        .and_then(|target| target.version.as_deref());
     if json {
-        let binaries: Vec<serde_json::Value> = targets
-            .iter()
-            .map(|target| {
-                serde_json::json!({
-                    "name": target.cli.binary(),
-                    "path": target.path,
-                    "installed": target.installed,
-                    "version": target.version,
-                    "update_available": target.needs_update,
-                })
-            })
-            .collect();
         println!(
             "{}",
-            serde_json::json!({
-                "current": current,
-                "latest": latest,
-                "update_available": update_available,
-                "release": release.html_url,
-                "method": method.as_str(),
-                "binaries": binaries,
-                "blocked": blocked,
-            })
+            check_report(invoker, release, targets, method, blocked)
         );
         return;
     }
@@ -360,6 +398,41 @@ fn report_check(
     } else if update_available {
         println!("Run `{} update` to install it.", invoker.binary());
     }
+}
+
+/// The `--check --json` report.
+fn check_report(
+    invoker: Cli,
+    release: &Release,
+    targets: &[Target],
+    method: Method,
+    blocked: Option<&str>,
+) -> serde_json::Value {
+    let current = targets
+        .iter()
+        .find(|target| target.cli == invoker)
+        .and_then(|target| target.version.as_deref());
+    let binaries: Vec<serde_json::Value> = targets
+        .iter()
+        .map(|target| {
+            serde_json::json!({
+                "name": target.cli.binary(),
+                "path": target.path,
+                "installed": target.installed,
+                "version": target.version,
+                "update_available": target.needs_update,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "current": current,
+        "latest": release.version(),
+        "update_available": targets.iter().any(|target| target.needs_update),
+        "release": release.html_url,
+        "method": method.as_str(),
+        "binaries": binaries,
+        "blocked": blocked,
+    })
 }
 
 /// A human-readable installed version summary.

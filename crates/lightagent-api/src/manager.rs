@@ -467,6 +467,12 @@ pub trait RunFactory: Send + Sync + 'static {
         Err(crate::ops::OpError::unavailable())
     }
 
+    /// `lightagent update --check`: read-only, it installs nothing. The
+    /// default refuses.
+    async fn update_check(&self) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
     /// Tools currently visible to the factory's active target.
     async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
         let registry = lightagent_tools::ToolRegistry::builtin();
@@ -1360,6 +1366,11 @@ impl RunManager {
         request: crate::ops::SetupRequest,
     ) -> Result<serde_json::Value, crate::ops::OpError> {
         self.factory.setup(request).await
+    }
+
+    /// Check for updates through the factory (read-only).
+    pub async fn update_check(&self) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.update_check().await
     }
 
     /// Perform a worker-assignment change through the factory.

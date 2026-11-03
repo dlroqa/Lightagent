@@ -559,6 +559,16 @@ export interface RemoteCredentialGrant {
   key_fingerprint: string;
 }
 
+/** `lightagent update --check --json`: read-only; nothing is installed. */
+export interface UpdateCheck {
+  current: string | null;
+  latest: string;
+  update_available: boolean;
+  release: string;
+  method: string;
+  blocked: string | null;
+}
+
 export interface ApprovalRow {
   run: string;
   pending: PendingApproval | null;
@@ -878,6 +888,7 @@ export const agentApi = {
   /** `lightagent doctor|architecture --json`, and the diagnostics bundle (allowlisted fields only; never uploaded). */
   doctor: () => jsonRequest<Record<string, unknown>>("/diagnostics/doctor"),
   architecture: () => jsonRequest<Record<string, unknown>>("/diagnostics/architecture"),
+  updateCheck: () => jsonRequest<UpdateCheck>("/update/check"),
   diagnosticsBundle: () =>
     jsonRequest<Record<string, unknown> & { about: string; included: string[]; excluded: string[] }>(
       "/diagnostics/bundle",

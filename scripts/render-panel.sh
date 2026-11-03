@@ -14,10 +14,12 @@ work_dir="$(mktemp -d)"
 export LIGHTAGENT_HOME="$work_dir/agent-home"
 agent_log="$work_dir/agent.log"
 agent_pid=""
+release_pid=""
 
 cleanup() {
   local status=$?
   [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null || true
+  [ -n "$release_pid" ] && kill "$release_pid" 2>/dev/null || true
   wait 2>/dev/null || true
   if [ "$status" -ne 0 ]; then
     echo "== agent server log =="
@@ -68,6 +70,15 @@ LIGHTAGENT_CREDENTIAL_KEY_FILE="$RENDER_PREVIOUS_CREDENTIAL_KEY" ./target/debug/
 rm -f -- "$work_dir/previous.secret"
 ./target/debug/lightagent remote-credential keygen "$work_dir/credential.key" >/dev/null
 export LIGHTAGENT_CREDENTIAL_KEY_FILE="$work_dir/credential.key"
+
+# A controlled release API for `update --check` (read-only), on loopback.
+mkdir -p "$work_dir/releases"
+printf '%s\n' '{"tag_name":"v99.0.0","html_url":"https://github.com/dlroqa/Lightagent/releases/tag/v99.0.0","assets":[]}' \
+  >"$work_dir/releases/latest"
+python3 -m http.server 8737 --bind 127.0.0.1 --directory "$work_dir/releases" >"$work_dir/releases.log" 2>&1 &
+release_pid=$!
+wait_for "http://127.0.0.1:8737/latest" "the release fixture" "$release_pid"
+export LIGHTAGENT_TEST_RELEASE_API="http://127.0.0.1:8737/latest"
 
 echo "== start standalone Lightagent (port $AGENT_PORT) =="
 ./target/debug/lightagent serve --host 127.0.0.1 --port "$AGENT_PORT" \

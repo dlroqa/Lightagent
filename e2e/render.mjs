@@ -23,6 +23,7 @@ import { checkWorkers } from "./workers.mjs";
 import { checkIdentity } from "./identity.mjs";
 import { checkSetup } from "./setup.mjs";
 import { checkDiagnostics } from "./diagnostics.mjs";
+import { checkUpdate } from "./update.mjs";
 import { checkRemoteCredentials } from "./credentials.mjs";
 
 const BASE = (process.env.PANEL_BASE ?? "http://127.0.0.1:8735").replace(/\/+$/, "");
@@ -407,6 +408,12 @@ async function main() {
     failures.push(...(await checkIdentity(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`identity: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  }
+  // Checks for updates against the harness's release fixture (read-only).
+  try {
+    failures.push(...(await checkUpdate(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`update: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
   }
   // Prepares and saves the diagnostics bundle, after identity and credentials exist.
   try {

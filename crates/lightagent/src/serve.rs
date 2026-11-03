@@ -156,6 +156,17 @@ impl RunFactory for LightweightRunFactory {
         }
     }
 
+    async fn update_check(&self) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        release_update::check(release_update::Cli::Lightagent, crate::VERSION)
+            .await
+            .map_err(|error| {
+                lightagent_api::ops::OpError::new(
+                    lightagent_api::ops::OpCategory::Unavailable,
+                    error,
+                )
+            })
+    }
+
     async fn workers_change(
         &self,
         request: lightagent_api::ops::WorkerRequest,

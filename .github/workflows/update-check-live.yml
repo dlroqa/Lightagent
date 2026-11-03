@@ -1,0 +1,61 @@
+name: update check (live, read-only)
+
+# The live counterpart of the fixture evidence in
+# crates/lightagent/tests/desktop_update_check.rs: `lightagent update
+# --check --json` against GitHub's real release API. Read-only: it fetches
+# release metadata only, never downloads an archive, installs or publishes
+# anything; the binary's hash is checked before and after. Its result is
+# reported on its own, apart from the deterministic tests.
+
+on:
+  pull_request:
+    paths:
+      - crates/release-update/**
+      - crates/lightagent/src/**
+      - .github/workflows/update-check-live.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-check-live-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live:
+    name: update --check against GitHub (read-only)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build lightagent
+        run: cargo build -p lightagent --bin lightagent
+      - name: Check for updates (read-only)
+        env:
+          LIGHTAGENT_TEST_RELEASE_API: ""
+        run: |
+          set -euo pipefail
+          bin=target/debug/lightagent
+          before=$(sha256sum "$bin" | cut -d' ' -f1)
+          "$bin" --json update --check > "$RUNNER_TEMP/update-check-live.json"
+          after=$(sha256sum "$bin" | cut -d' ' -f1)
+          test "$before" = "$after" || { echo "::error::the binary changed during a check"; exit 1; }
+          cat "$RUNNER_TEMP/update-check-live.json"
+          python3 - "$RUNNER_TEMP/update-check-live.json" <<'PY'
+          import json, re, sys
+          report = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert re.fullmatch(r"\d+\.\d+\.\d+\S*", report["latest"]), report
+          assert report["release"].startswith("https://github.com/dlroqa/Lightagent/releases/"), report
+          assert isinstance(report["update_available"], bool), report
+          print(f"live: latest {report['latest']}, current {report['current']}, update available {report['update_available']}")
+          PY
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: update-check-live
+          path: ${{ runner.temp }}/update-check-live.json
+          if-no-files-found: warn
+          retention-days: 30

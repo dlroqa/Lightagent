@@ -141,6 +141,11 @@
    "path": "/api/lightagent/v1/skills/imports"
   },
   {
+   "id": "update.check",
+   "method": "GET",
+   "path": "/api/lightagent/v1/update/check"
+  },
+  {
    "id": "setup.init",
    "method": "POST",
    "path": "/api/lightagent/v1/setup/init"
