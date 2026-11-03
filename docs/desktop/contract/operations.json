@@ -125,6 +125,61 @@
    "path": "/api/lightagent/v1/skills/imports"
   },
   {
+   "id": "memory.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/memories"
+  },
+  {
+   "id": "memory.add",
+   "method": "POST",
+   "path": "/api/lightagent/v1/memories"
+  },
+  {
+   "id": "memory.clear",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/memories"
+  },
+  {
+   "id": "memory.search",
+   "method": "GET",
+   "path": "/api/lightagent/v1/memories/search",
+   "query": [
+    "q",
+    "top_k"
+   ]
+  },
+  {
+   "id": "memory.reflect",
+   "method": "GET",
+   "path": "/api/lightagent/v1/memories/reflect",
+   "query": [
+    "topic"
+   ]
+  },
+  {
+   "id": "memory.candidates",
+   "method": "GET",
+   "path": "/api/lightagent/v1/memories/candidates",
+   "query": [
+    "session"
+   ]
+  },
+  {
+   "id": "memory.promote",
+   "method": "POST",
+   "path": "/api/lightagent/v1/memories/promote"
+  },
+  {
+   "id": "memory.update",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/memories/items/{id}"
+  },
+  {
+   "id": "memory.forget",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/memories/items/{id}"
+  },
+  {
    "id": "extensions.list",
    "method": "GET",
    "path": "/api/lightagent/v1/extensions"
