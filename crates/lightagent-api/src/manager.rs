@@ -428,6 +428,16 @@ pub trait RunFactory: Send + Sync + 'static {
         Err(crate::ops::OpError::unavailable())
     }
 
+    /// An identity command (`lightagent identity …`), performed by the
+    /// embedder that owns the home's identity store, answered with the JSON
+    /// the CLI prints. The default refuses.
+    async fn identity(
+        &self,
+        _request: crate::ops::IdentityRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
     /// Tools currently visible to the factory's active target.
     async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
         let registry = lightagent_tools::ToolRegistry::builtin();
@@ -1289,6 +1299,14 @@ impl RunManager {
         request: crate::ops::ProfileRequest,
     ) -> Result<serde_json::Value, crate::ops::OpError> {
         self.factory.profiles(request).await
+    }
+
+    /// Perform an identity command through the factory.
+    pub async fn identity(
+        &self,
+        request: crate::ops::IdentityRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.identity(request).await
     }
 
     /// Perform a worker-assignment change through the factory.

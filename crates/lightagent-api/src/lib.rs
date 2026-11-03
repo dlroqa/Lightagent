@@ -134,6 +134,44 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/lightagent/v1/skills", get(list_skills))
         .route("/api/lightagent/v1/skills/imports", post(import_skills))
+        .route("/api/lightagent/v1/identity", get(identity_status))
+        .route(
+            "/api/lightagent/v1/identity/users",
+            get(list_identity_users).post(create_identity_user),
+        )
+        .route(
+            "/api/lightagent/v1/identity/users/{id}/suspend",
+            post(suspend_identity_user),
+        )
+        .route(
+            "/api/lightagent/v1/identity/credentials",
+            get(list_identity_credentials).post(issue_identity_credential),
+        )
+        .route(
+            "/api/lightagent/v1/identity/credentials/{key_id}/rotate",
+            post(rotate_identity_credential),
+        )
+        .route(
+            "/api/lightagent/v1/identity/credentials/{key_id}/revoke",
+            post(revoke_identity_credential),
+        )
+        .route(
+            "/api/lightagent/v1/identity/owners/{profile}",
+            axum::routing::put(assign_identity_owner).delete(remove_identity_owner),
+        )
+        .route(
+            "/api/lightagent/v1/identity/owners/{profile}/reassign",
+            post(reassign_identity_owner),
+        )
+        .route(
+            "/api/lightagent/v1/identity/grants",
+            get(list_identity_grants),
+        )
+        .route(
+            "/api/lightagent/v1/identity/grants/revoke",
+            post(revoke_identity_grant),
+        )
+        .route("/api/lightagent/v1/identity/audit", get(identity_audit))
         .route(
             "/api/lightagent/v1/memories",
             get(list_memories).post(add_memory).delete(clear_memories),
@@ -2355,6 +2393,258 @@ async fn promote_memory(
         tags: body.tags,
     };
     memory_operation(&state, &headers, request).await
+}
+
+/// Identity administration belongs to the local operator (decision C4):
+/// the desktop host's own runtime, or a server on an open loopback bind. A
+/// keyed server may be reached from elsewhere, and multi-user mode serves
+/// users, so both refuse whatever the caller holds.
+fn local_operator(state: &AppState, headers: &HeaderMap, admitted: bool) -> Option<Response> {
+    if let Some(rejection) = deny(state, headers, Scope::Admin) {
+        return Some(rejection);
+    }
+    let local = state.auth.identity().is_none() && (admitted || !state.auth.requires_key());
+    (!local).then(|| {
+        ops::OpError::new(
+            ops::OpCategory::Denied,
+            "identity is managed only by the local operator: use `lightagent identity`, or the desktop app",
+        )
+        .into_response()
+    })
+}
+
+/// Present when the desktop guard admitted the request.
+type FromDesktop = Option<axum::Extension<desktop::Admitted>>;
+
+/// A `lightagent identity …` command through the embedder (see
+/// [`ops::IdentityRequest`]), for the local operator only. No answer
+/// carries a credential's secret.
+async fn identity_operation(
+    state: &AppState,
+    headers: &HeaderMap,
+    admitted: FromDesktop,
+    request: ops::IdentityRequest,
+) -> Response {
+    if let Some(rejection) = local_operator(state, headers, admitted.is_some()) {
+        return rejection;
+    }
+    match state.manager.identity(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn identity_status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+) -> Response {
+    identity_operation(&state, &headers, admitted, ops::IdentityRequest::Status).await
+}
+
+async fn list_identity_users(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+) -> Response {
+    identity_operation(&state, &headers, admitted, ops::IdentityRequest::UserList).await
+}
+
+#[derive(Deserialize)]
+struct IdentityUserBody {
+    id: String,
+}
+
+async fn create_identity_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Json(body): Json<IdentityUserBody>,
+) -> Response {
+    let request = ops::IdentityRequest::UserCreate(body.id);
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+async fn suspend_identity_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(id): Path<String>,
+) -> Response {
+    let request = ops::IdentityRequest::UserSuspend(id);
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct PrincipalQuery {
+    #[serde(default)]
+    principal: Option<String>,
+}
+
+async fn list_identity_credentials(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Query(query): Query<PrincipalQuery>,
+) -> Response {
+    let request = ops::IdentityRequest::CredentialList {
+        principal: query.principal,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct IssueCredentialBody {
+    principal: String,
+    #[serde(default)]
+    expires_in: Option<u64>,
+    #[serde(default)]
+    capabilities: Vec<String>,
+    #[serde(default)]
+    profiles: Vec<String>,
+    #[serde(default)]
+    secret_file: Option<String>,
+}
+
+async fn issue_identity_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Json(body): Json<IssueCredentialBody>,
+) -> Response {
+    let request = ops::IdentityRequest::CredentialIssue {
+        principal: body.principal,
+        expires_in: body.expires_in,
+        capabilities: body.capabilities,
+        profiles: body.profiles,
+        secret_file: body.secret_file,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct RotateCredentialBody {
+    #[serde(default)]
+    expires_in: Option<u64>,
+    #[serde(default)]
+    secret_file: Option<String>,
+}
+
+async fn rotate_identity_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(key_id): Path<String>,
+    Json(body): Json<RotateCredentialBody>,
+) -> Response {
+    let request = ops::IdentityRequest::CredentialRotate {
+        key_id,
+        expires_in: body.expires_in,
+        secret_file: body.secret_file,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+async fn revoke_identity_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(key_id): Path<String>,
+) -> Response {
+    let request = ops::IdentityRequest::CredentialRevoke(key_id);
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct OwnerBody {
+    principal: String,
+}
+
+async fn assign_identity_owner(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(profile): Path<String>,
+    Json(body): Json<OwnerBody>,
+) -> Response {
+    let request = ops::IdentityRequest::OwnerAssign {
+        profile,
+        principal: body.principal,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+async fn reassign_identity_owner(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(profile): Path<String>,
+    Json(body): Json<OwnerBody>,
+) -> Response {
+    let request = ops::IdentityRequest::OwnerReassign {
+        profile,
+        principal: body.principal,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+async fn remove_identity_owner(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(profile): Path<String>,
+) -> Response {
+    let request = ops::IdentityRequest::OwnerRemove(profile);
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+async fn list_identity_grants(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Query(query): Query<ProfileQuery>,
+) -> Response {
+    let request = ops::IdentityRequest::GrantsList {
+        profile: query.profile,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct RevokeGrantBody {
+    profile: String,
+    principal: String,
+    capability: String,
+}
+
+async fn revoke_identity_grant(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Json(body): Json<RevokeGrantBody>,
+) -> Response {
+    let request = ops::IdentityRequest::GrantsRevoke {
+        profile: body.profile,
+        principal: body.principal,
+        capability: body.capability,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct AuditQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn identity_audit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Query(query): Query<AuditQuery>,
+) -> Response {
+    let request = ops::IdentityRequest::Audit { limit: query.limit };
+    identity_operation(&state, &headers, admitted, request).await
 }
 
 /// An import of skills from a repository or folder (new scope).

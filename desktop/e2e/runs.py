@@ -520,6 +520,75 @@ def scenario_workers(host, cli):
     return check
 
 
+def scenario_identity(host, cli):
+    """D7 through the host transport: identity status, a user, a credential
+    issued to a new file (its secret never in an answer), credentials,
+    revocation, ownership and the audit through the host equal the CLI's;
+    an issue without a secret file is refused and issues nothing."""
+    import shutil
+    import tempfile
+
+    check = Checks("identity")
+    work = tempfile.mkdtemp(prefix="lightagent-e2e-identity-")
+
+    def cli_json(*args):
+        return json.loads(harness.run_cli(cli, "--json", *args))
+
+    try:
+        status, shown = host.fetch("GET", f"{API}/identity")
+        check.expect("status through the host equals the CLI's",
+                     status == 200 and shown == cli_json("identity", "status"), (status, shown))
+        status, created = host.fetch("POST", f"{API}/identity/users", {"id": "e2e-alice"})
+        _, users = host.fetch("GET", f"{API}/identity/users")
+        check.expect("a user created through the host, listed alike",
+                     status == 200 and (created or {}).get("created") == "e2e-alice"
+                     and users == cli_json("identity", "user", "list"), (status, created, users))
+        status, refused = host.fetch("POST", f"{API}/identity/credentials", {"principal": "e2e-alice"})
+        listed = cli_json("identity", "credential", "list", "--principal", "e2e-alice")
+        check.expect("an issue without a secret file is refused and issues nothing",
+                     status == 400 and listed.get("credentials") == [], (status, refused, listed))
+        secret_file = os.path.join(work, "e2e-alice.key")
+        status, issued = host.fetch("POST", f"{API}/identity/credentials", {
+            "principal": "e2e-alice", "expires_in": 600, "capabilities": ["runs_read"], "secret_file": secret_file})
+        key_id = (issued or {}).get("issued")
+        token = ""
+        if os.path.exists(secret_file):
+            with open(secret_file, encoding="utf-8") as handle:
+                token = handle.read().strip()
+        secret = token.rsplit("_", 1)[-1] if token else "<no secret was delivered>"
+        check.expect("issued through the host: the secret only in the new file",
+                     status == 200 and isinstance(key_id, str) and token.startswith(f"la_{key_id}_")
+                     and secret not in json.dumps(issued), (status, issued))
+        _, listed = host.fetch("GET", f"{API}/identity/credentials?principal=e2e-alice")
+        check.expect("credentials through the host equal the CLI's, with no secret",
+                     listed == cli_json("identity", "credential", "list", "--principal", "e2e-alice")
+                     and secret not in json.dumps(listed), listed)
+        status, revoked = host.fetch("POST", f"{API}/identity/credentials/{key_id}/revoke")
+        states = [c.get("state") for c in
+                  cli_json("identity", "credential", "list", "--principal", "e2e-alice").get("credentials", [])]
+        check.expect("revoked through the host, revoked for the CLI",
+                     status == 200 and states == ["revoked"], (status, revoked, states))
+        _, catalog = host.fetch("GET", f"{API}/profiles")
+        active = (catalog or {}).get("active_profile")
+        status, owned = host.fetch("PUT", f"{API}/identity/owners/{active}", {"principal": "e2e-alice"})
+        _, grants = host.fetch("GET", f"{API}/identity/grants?profile={active}")
+        check.expect("ownership through the host equals the CLI's",
+                     status == 200 and (owned or {}).get("owner") == "e2e-alice"
+                     and grants == cli_json("identity", "grants", "list", "--profile", active),
+                     (status, owned, grants))
+        status, removed = host.fetch("DELETE", f"{API}/identity/owners/{active}")
+        check.expect("ownership removed through the host",
+                     status == 200 and cli_json("identity", "grants", "list", "--profile", active).get("profiles") == [],
+                     (status, removed))
+        status, audit = host.fetch("GET", f"{API}/identity/audit?limit=4")
+        check.expect("the audit through the host equals the CLI's, and holds no secret",
+                     status == 200 and audit == cli_json("identity", "audit", "--limit", "4")
+                     and secret not in json.dumps(audit), (status, audit))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return check
+
+
 def scenario_sessions(host, cli):
     """D7 through the host transport: the session list and a saved session
     through the host equal the CLI's; a delete through the host is seen by
@@ -817,6 +886,7 @@ def main():
             ("knowledge", lambda: scenario_knowledge(host, cli)),
             ("sessions", lambda: scenario_sessions(host, cli)),
             ("workers", lambda: scenario_workers(host, cli)),
+            ("identity", lambda: scenario_identity(host, cli)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]

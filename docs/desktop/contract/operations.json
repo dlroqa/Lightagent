@@ -141,6 +141,89 @@
    "path": "/api/lightagent/v1/skills/imports"
   },
   {
+   "id": "identity.status",
+   "method": "GET",
+   "path": "/api/lightagent/v1/identity"
+  },
+  {
+   "id": "identity.users.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/identity/users"
+  },
+  {
+   "id": "identity.users.create",
+   "method": "POST",
+   "path": "/api/lightagent/v1/identity/users"
+  },
+  {
+   "id": "identity.users.suspend",
+   "method": "POST",
+   "path": "/api/lightagent/v1/identity/users/{id}/suspend",
+   "destructive": true
+  },
+  {
+   "id": "identity.credentials.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/identity/credentials",
+   "query": [
+    "principal"
+   ]
+  },
+  {
+   "id": "identity.credentials.issue",
+   "method": "POST",
+   "path": "/api/lightagent/v1/identity/credentials"
+  },
+  {
+   "id": "identity.credentials.rotate",
+   "method": "POST",
+   "path": "/api/lightagent/v1/identity/credentials/{key_id}/rotate"
+  },
+  {
+   "id": "identity.credentials.revoke",
+   "method": "POST",
+   "path": "/api/lightagent/v1/identity/credentials/{key_id}/revoke",
+   "destructive": true
+  },
+  {
+   "id": "identity.owners.assign",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/identity/owners/{profile}"
+  },
+  {
+   "id": "identity.owners.remove",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/identity/owners/{profile}",
+   "destructive": true
+  },
+  {
+   "id": "identity.owners.reassign",
+   "method": "POST",
+   "path": "/api/lightagent/v1/identity/owners/{profile}/reassign"
+  },
+  {
+   "id": "identity.grants.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/identity/grants",
+   "query": [
+    "profile"
+   ]
+  },
+  {
+   "id": "identity.grants.revoke",
+   "method": "POST",
+   "path": "/api/lightagent/v1/identity/grants/revoke",
+   "destructive": true
+  },
+  {
+   "id": "identity.audit",
+   "method": "GET",
+   "path": "/api/lightagent/v1/identity/audit",
+   "query": [
+    "limit"
+   ]
+  },
+  {
    "id": "memory.list",
    "method": "GET",
    "path": "/api/lightagent/v1/memories"

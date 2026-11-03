@@ -106,6 +106,53 @@ pub enum WorkerRequest {
     },
 }
 
+/// One `lightagent identity …` command, performed as the local operator.
+/// A credential's secret goes only to `secret_file`: a new, owner-only file
+/// named by an absolute path. No answer carries it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IdentityRequest {
+    Status,
+    UserCreate(String),
+    UserList,
+    UserSuspend(String),
+    CredentialIssue {
+        principal: String,
+        expires_in: Option<u64>,
+        capabilities: Vec<String>,
+        profiles: Vec<String>,
+        secret_file: Option<String>,
+    },
+    CredentialRotate {
+        key_id: String,
+        expires_in: Option<u64>,
+        secret_file: Option<String>,
+    },
+    CredentialRevoke(String),
+    CredentialList {
+        principal: Option<String>,
+    },
+    OwnerAssign {
+        profile: String,
+        principal: String,
+    },
+    OwnerReassign {
+        profile: String,
+        principal: String,
+    },
+    OwnerRemove(String),
+    GrantsList {
+        profile: Option<String>,
+    },
+    GrantsRevoke {
+        profile: String,
+        principal: String,
+        capability: String,
+    },
+    Audit {
+        limit: Option<usize>,
+    },
+}
+
 /// A stable error category, for the UI to act on without parsing messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpCategory {
