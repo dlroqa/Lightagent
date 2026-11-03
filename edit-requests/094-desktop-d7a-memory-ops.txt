@@ -1,0 +1,1567 @@
+=== base dd830014c7a6622f5801363a5d4c19811a2fb7ec
+=== message
+D7-1: memory through one shared operation set for the CLI, the API and the desktop
+
+`lightagent memory` worked on the active profile's memory file directly,
+and nothing else could: the API had no memory route.
+
+- crate lightagent memory: one implementation of list, add, update,
+  forget, clear, search (hybrid recall with the configured semantic
+  embedder), reflect, candidates and promote, returning typed results.
+  The CLI prints them as before (text and --json unchanged), and
+  memory::perform answers the API with exactly the CLI's --json. Writes go
+  through MemoryStore, which locks and re-reads before each change, so the
+  CLI and the API never overwrite each other. New: an empty text is
+  refused for add and update.
+- ops::MemoryRequest and RunFactory::memory (default: unavailable), as
+  profiles do; `lightagent serve` performs it.
+- API (operator): GET|POST|DELETE /memories, GET /memories/search
+  (`q`, `top_k`), GET /memories/reflect (`topic`), GET
+  /memories/candidates (`session`), POST /memories/promote,
+  PUT|DELETE /memories/items/{id}. Contract memory.* with each query
+  listed; the host refuses the writes during a profile switch (memory
+  belongs to the active profile). Nine backend inventory rows (not
+  counted; the CLI rows are counted with the UI slice).
+- Tests (separate processes): what the API writes the CLI lists and the
+  reverse; list, search and reflect over the API equal the CLI's --json;
+  update and forget across both; candidates and a refused promote on a
+  saved session equal; empty text refused; clear over the API empties the
+  CLI's list.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-api/src/ops.rs
+--- find
+    Delete(String),
+}
+
+/// A stable error category, for the UI to act on without parsing messages.
+--- with
+    Delete(String),
+}
+
+/// One memory operation (`lightagent memory …`) on the active profile's
+/// memories.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MemoryRequest {
+    List,
+    Add {
+        text: String,
+        kind: Option<String>,
+        tags: Vec<String>,
+    },
+    Update {
+        id: String,
+        text: String,
+    },
+    Forget(String),
+    Clear,
+    Search {
+        query: String,
+        top_k: Option<usize>,
+    },
+    Reflect(Option<String>),
+    /// Durable-looking user statements of a saved session.
+    Candidates(String),
+    /// Save one user message of a saved session, optionally edited.
+    Promote {
+        session: String,
+        message: usize,
+        text: Option<String>,
+        kind: Option<String>,
+        tags: Vec<String>,
+    },
+}
+
+/// A stable error category, for the UI to act on without parsing messages.
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    /// Tools currently visible to the factory's active target.
+    async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
+--- with
+    /// A memory operation on the active profile's memories, performed by
+    /// the embedder that owns them (`lightagent serve`), answered with the
+    /// JSON `lightagent memory … --json` prints. The default refuses.
+    async fn memory(
+        &self,
+        _request: crate::ops::MemoryRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
+    /// Tools currently visible to the factory's active target.
+    async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
+=== replace crates/lightagent-api/src/manager.rs
+--- find
+    /// The active revocable runs an identity change described by `scope`
+--- with
+    /// Perform a memory operation through the factory (see [`crate::ops`]).
+    pub async fn memory(
+        &self,
+        request: crate::ops::MemoryRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.memory(request).await
+    }
+
+    /// The active revocable runs an identity change described by `scope`
+=== replace crates/lightagent/src/serve.rs
+--- find
+    async fn tools(&self) -> Result<Vec<ToolDefinition>, String> {
+--- with
+    async fn memory(
+        &self,
+        request: lightagent_api::ops::MemoryRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        crate::memory::perform(&LightagentPaths::rooted_at(&self.root), request).await
+    }
+
+    async fn tools(&self) -> Result<Vec<ToolDefinition>, String> {
+=== replace crates/lightagent/src/memory.rs
+--- find
+fn active_memory() -> Result<(PathBuf, Config), String> {
+    let paths = LightagentPaths::resolve().map_err(|error| error.to_string())?;
+    let config = ConfigStore::at(&paths)
+        .load()
+        .map_err(|error| error.to_string())?;
+    let store = ProfileStore::new(paths.root());
+    let active = store
+        .active()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "no active profile — run `lightagent init` first".to_owned())?;
+    let dir = store.handle(&active).dir().to_path_buf();
+    Ok((memory_path(&dir), config))
+}
+
+fn saved_session(raw_id: &str) -> Result<Session, String> {
+    let paths = LightagentPaths::resolve().map_err(|error| error.to_string())?;
+    let profiles = ProfileStore::new(paths.root());
+    let active = profiles
+        .active()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "no active profile".to_owned())?;
+    let id = SessionId::parse(raw_id).map_err(|error| error.to_string())?;
+    SessionStore::at_profile(&profiles.handle(&active))
+        .load(&id)
+        .map_err(|error| error.to_string())
+}
+
+/// Show user statements that look durable; nothing is saved until `promote`.
+pub fn candidates(session_id: String, json: bool) -> Result<(), String> {
+    let session = saved_session(&session_id)?;
+    let candidates: Vec<_> = session
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| {
+            if message.role != "user" {
+                return false;
+            }
+            let text = message.content.to_lowercase();
+            [
+                "prefer",
+                "remember",
+                "we decided",
+                "always",
+                "never",
+                "my ",
+                "our project",
+                "uses ",
+            ]
+            .iter()
+            .any(|marker| text.contains(marker))
+        })
+        .map(|(index, message)| (index + 1, message.content.as_str()))
+        .collect();
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"session_id": session_id, "candidates": candidates.iter().map(|(index, text)| serde_json::json!({"message": index, "text": text})).collect::<Vec<_>>()})
+        );
+    } else if candidates.is_empty() {
+        println!("No suggested facts. Any user message can still be promoted by its number.");
+    } else {
+        for (index, text) in candidates {
+            println!("{index}: {}", text.replace('\n', " "));
+        }
+    }
+    Ok(())
+}
+
+/// Save exactly one user-selected message, optionally edited, with provenance.
+pub fn promote(
+    session_id: String,
+    message_number: usize,
+    text: Option<String>,
+    kind: Option<String>,
+    tags: Vec<String>,
+    json: bool,
+) -> Result<(), String> {
+    let session = saved_session(&session_id)?;
+    let message = session
+        .messages
+        .get(message_number.saturating_sub(1))
+        .filter(|message| message_number > 0 && message.role == "user")
+        .ok_or_else(|| "choose a user message number from the saved session".to_owned())?;
+    let fact = text.as_deref().unwrap_or(&message.content);
+    let (path, _) = active_memory()?;
+    let mut store = MemoryStore::open(&path).map_err(|error| error.to_string())?;
+    let id = store
+        .write_sourced(
+            fact,
+            kind.as_deref().unwrap_or("fact"),
+            tags,
+            Some(MemorySource {
+                session_id,
+                message_index: message_number,
+            }),
+            &HashingEmbedder,
+            now_secs(),
+        )
+        .map_err(|error| error.to_string())?;
+    if json {
+        println!("{}", serde_json::json!({"id": id}));
+    } else {
+        println!("remembered ({id})");
+    }
+    Ok(())
+}
+
+pub fn update(id: String, text: String, json: bool) -> Result<(), String> {
+    let (path, _) = active_memory()?;
+    let mut store = MemoryStore::open(&path).map_err(|error| error.to_string())?;
+    let updated = store
+        .update(&id, &text, &HashingEmbedder, now_secs())
+        .map_err(|error| error.to_string())?;
+    if json {
+        println!("{}", serde_json::json!({"updated": updated}));
+    } else if updated {
+        println!("updated {id}");
+    } else {
+        println!("no memory with id {id}");
+    }
+    Ok(())
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+/// `memory add <text>` — remember a fact.
+pub fn add(
+    text: String,
+    kind: Option<String>,
+    tags: Vec<String>,
+    json: bool,
+) -> Result<(), String> {
+    let (path, _) = active_memory()?;
+    let mut store = MemoryStore::open(&path).map_err(|error| error.to_string())?;
+    let id = store
+        .write(
+            &text,
+            kind.as_deref().unwrap_or("fact"),
+            tags,
+            &HashingEmbedder,
+            now_secs(),
+        )
+        .map_err(|error| error.to_string())?;
+    if json {
+        println!("{}", serde_json::json!({ "id": id }));
+    } else {
+        println!("remembered ({id})");
+    }
+    Ok(())
+}
+
+/// `memory list` — every memory.
+pub fn list(json: bool) -> Result<(), String> {
+    let (path, _) = active_memory()?;
+    let store = MemoryStore::open(&path).map_err(|error| error.to_string())?;
+    if json {
+        let value = serde_json::json!({
+            "memories": store.all().iter().map(|m| serde_json::json!({
+                "id": m.id, "kind": m.kind, "tags": m.tags, "created_at": m.created_at,
+                "updated_at": m.updated_at, "source": m.source, "text": m.text,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{value:#}");
+        return Ok(());
+    }
+    if store.is_empty() {
+        println!("No memories. Add one with `lightagent memory add <text>`.");
+        return Ok(());
+    }
+    for memory in store.all() {
+        let source = memory
+            .source
+            .as_ref()
+            .map(|source| format!("  from {}#{}", source.session_id, source.message_index))
+            .unwrap_or_default();
+        println!("{}  ({})  {}{source}", memory.id, memory.kind, memory.text);
+    }
+    Ok(())
+}
+
+/// Render the structured working knowledge derived from the bank.
+pub fn reflect(topic: Option<String>, json: bool) -> Result<(), String> {
+    let (path, _) = active_memory()?;
+    let store = MemoryStore::open(&path).map_err(|e| e.to_string())?;
+    let page = store.knowledge_page(topic.as_deref(), 32_000);
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "topic": topic, "knowledge": page })
+        );
+    } else {
+        println!("{page}");
+    }
+    Ok(())
+}
+
+/// `memory search <query>` — the most relevant memories.
+pub async fn search(query: String, top_k: Option<usize>, json: bool) -> Result<(), String> {
+    let (path, config) = active_memory()?;
+    let store = MemoryStore::open(&path).map_err(|error| error.to_string())?;
+    let k = top_k.unwrap_or(config.memory.top_k).max(1);
+    let semantic = crate::rag::semantic_embedder(&config);
+    let hits = store
+        .search_hybrid(&query, &HashingEmbedder, semantic.as_deref(), k)
+        .await;
+    if json {
+        let value = serde_json::json!({
+            "query": query,
+            "memories": hits.iter().map(|m| serde_json::json!({
+                "id": m.id, "kind": m.kind, "source": m.source, "text": m.text,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{value:#}");
+        return Ok(());
+    }
+    if hits.is_empty() {
+        println!("No relevant memories.");
+        return Ok(());
+    }
+    for memory in hits {
+        let source = memory
+            .source
+            .as_ref()
+            .map(|source| format!(" [from {}#{}]", source.session_id, source.message_index))
+            .unwrap_or_default();
+        println!("({}) {}{source}", memory.kind, memory.text);
+    }
+    Ok(())
+}
+
+/// `memory forget <id>` — remove one memory.
+pub fn forget(id: String, json: bool) -> Result<(), String> {
+    let (path, _) = active_memory()?;
+    let mut store = MemoryStore::open(&path).map_err(|error| error.to_string())?;
+    let removed = store.forget(&id).map_err(|error| error.to_string())?;
+    if json {
+        println!("{}", serde_json::json!({ "removed": removed }));
+    } else if removed {
+        println!("forgot {id}");
+    } else {
+        println!("no memory with id {id}");
+    }
+    Ok(())
+}
+
+/// `memory clear` — forget everything.
+pub fn clear(json: bool) -> Result<(), String> {
+    let (path, _) = active_memory()?;
+    let mut store = MemoryStore::open(&path).map_err(|error| error.to_string())?;
+    store.clear().map_err(|error| error.to_string())?;
+    if json {
+        println!("{}", serde_json::json!({ "cleared": true }));
+    } else {
+        println!("Memory cleared.");
+    }
+    Ok(())
+}
+--- with
+use lightagent_api::ops::{MemoryRequest, OpCategory, OpError};
+
+/// The active profile's memory file and saved sessions, and the config.
+struct Active {
+    path: PathBuf,
+    sessions: SessionStore,
+    config: Config,
+}
+
+fn internal(error: impl std::fmt::Display) -> OpError {
+    OpError::new(OpCategory::Internal, error.to_string())
+}
+
+fn active_at(paths: &LightagentPaths) -> Result<Active, OpError> {
+    let config = ConfigStore::at(paths).load().map_err(internal)?;
+    let store = ProfileStore::new(paths.root());
+    let active = store.active().map_err(internal)?.ok_or_else(|| {
+        OpError::new(
+            OpCategory::Invalid,
+            "no active profile — run `lightagent init` first",
+        )
+    })?;
+    let handle = store.handle(&active);
+    Ok(Active {
+        path: memory_path(handle.dir()),
+        sessions: SessionStore::at_profile(&handle),
+        config,
+    })
+}
+
+fn cli_active() -> Result<Active, String> {
+    let paths = LightagentPaths::resolve().map_err(|error| error.to_string())?;
+    active_at(&paths).map_err(|error| error.to_string())
+}
+
+fn open(active: &Active) -> Result<MemoryStore, OpError> {
+    MemoryStore::open(&active.path).map_err(internal)
+}
+
+fn saved_session(active: &Active, raw_id: &str) -> Result<Session, OpError> {
+    let id = SessionId::parse(raw_id)
+        .map_err(|error| OpError::new(OpCategory::Invalid, error.to_string()))?;
+    active
+        .sessions
+        .load(&id)
+        .map_err(|error| OpError::new(OpCategory::NotFound, error.to_string()))
+}
+
+fn require_text(text: &str) -> Result<(), OpError> {
+    if text.trim().is_empty() {
+        return Err(OpError::new(OpCategory::Invalid, "a memory needs text"));
+    }
+    Ok(())
+}
+
+fn op_candidates(active: &Active, session_id: &str) -> Result<Vec<(usize, String)>, OpError> {
+    let session = saved_session(active, session_id)?;
+    Ok(session
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| {
+            if message.role != "user" {
+                return false;
+            }
+            let text = message.content.to_lowercase();
+            [
+                "prefer",
+                "remember",
+                "we decided",
+                "always",
+                "never",
+                "my ",
+                "our project",
+                "uses ",
+            ]
+            .iter()
+            .any(|marker| text.contains(marker))
+        })
+        .map(|(index, message)| (index + 1, message.content.clone()))
+        .collect())
+}
+
+fn op_promote(
+    active: &Active,
+    session_id: &str,
+    message_number: usize,
+    text: Option<&str>,
+    kind: Option<&str>,
+    tags: Vec<String>,
+) -> Result<String, OpError> {
+    let session = saved_session(active, session_id)?;
+    let message = session
+        .messages
+        .get(message_number.saturating_sub(1))
+        .filter(|message| message_number > 0 && message.role == "user")
+        .ok_or_else(|| {
+            OpError::new(
+                OpCategory::Invalid,
+                "choose a user message number from the saved session",
+            )
+        })?;
+    let fact = text.unwrap_or(&message.content);
+    require_text(fact)?;
+    let mut store = open(active)?;
+    store
+        .write_sourced(
+            fact,
+            kind.unwrap_or("fact"),
+            tags,
+            Some(MemorySource {
+                session_id: session_id.to_owned(),
+                message_index: message_number,
+            }),
+            &HashingEmbedder,
+            now_secs(),
+        )
+        .map_err(internal)
+}
+
+fn op_update(active: &Active, id: &str, text: &str) -> Result<bool, OpError> {
+    require_text(text)?;
+    let mut store = open(active)?;
+    store
+        .update(id, text, &HashingEmbedder, now_secs())
+        .map_err(internal)
+}
+
+fn op_add(
+    active: &Active,
+    text: &str,
+    kind: Option<&str>,
+    tags: Vec<String>,
+) -> Result<String, OpError> {
+    require_text(text)?;
+    let mut store = open(active)?;
+    store
+        .write(
+            text,
+            kind.unwrap_or("fact"),
+            tags,
+            &HashingEmbedder,
+            now_secs(),
+        )
+        .map_err(internal)
+}
+
+fn op_list(active: &Active) -> Result<Vec<lightagent_memory::Memory>, OpError> {
+    Ok(open(active)?.all().to_vec())
+}
+
+fn op_reflect(active: &Active, topic: Option<&str>) -> Result<String, OpError> {
+    Ok(open(active)?.knowledge_page(topic, 32_000))
+}
+
+async fn op_search(
+    active: &Active,
+    query: &str,
+    top_k: Option<usize>,
+) -> Result<Vec<lightagent_memory::Memory>, OpError> {
+    let store = open(active)?;
+    let k = top_k.unwrap_or(active.config.memory.top_k).max(1);
+    let semantic = crate::rag::semantic_embedder(&active.config);
+    Ok(store
+        .search_hybrid(query, &HashingEmbedder, semantic.as_deref(), k)
+        .await
+        .into_iter()
+        .cloned()
+        .collect())
+}
+
+fn op_forget(active: &Active, id: &str) -> Result<bool, OpError> {
+    open(active)?.forget(id).map_err(internal)
+}
+
+fn op_clear(active: &Active) -> Result<(), OpError> {
+    open(active)?.clear().map_err(internal)
+}
+
+fn list_value(memories: &[lightagent_memory::Memory]) -> serde_json::Value {
+    serde_json::json!({
+        "memories": memories.iter().map(|m| serde_json::json!({
+            "id": m.id, "kind": m.kind, "tags": m.tags, "created_at": m.created_at,
+            "updated_at": m.updated_at, "source": m.source, "text": m.text,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn search_value(query: &str, hits: &[lightagent_memory::Memory]) -> serde_json::Value {
+    serde_json::json!({
+        "query": query,
+        "memories": hits.iter().map(|m| serde_json::json!({
+            "id": m.id, "kind": m.kind, "source": m.source, "text": m.text,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn candidates_value(session_id: &str, candidates: &[(usize, String)]) -> serde_json::Value {
+    serde_json::json!({
+        "session_id": session_id,
+        "candidates": candidates.iter().map(|(index, text)| serde_json::json!({"message": index, "text": text})).collect::<Vec<_>>(),
+    })
+}
+
+/// One memory operation for the HTTP API (`RunFactory::memory`), on the
+/// active profile's memories, answered with the JSON
+/// `lightagent memory … --json` prints.
+pub(crate) async fn perform(
+    paths: &LightagentPaths,
+    request: MemoryRequest,
+) -> Result<serde_json::Value, OpError> {
+    let active = active_at(paths)?;
+    Ok(match request {
+        MemoryRequest::List => list_value(&op_list(&active)?),
+        MemoryRequest::Add { text, kind, tags } => {
+            serde_json::json!({ "id": op_add(&active, &text, kind.as_deref(), tags)? })
+        }
+        MemoryRequest::Update { id, text } => {
+            serde_json::json!({ "updated": op_update(&active, &id, &text)? })
+        }
+        MemoryRequest::Forget(id) => serde_json::json!({ "removed": op_forget(&active, &id)? }),
+        MemoryRequest::Clear => {
+            op_clear(&active)?;
+            serde_json::json!({ "cleared": true })
+        }
+        MemoryRequest::Search { query, top_k } => {
+            search_value(&query, &op_search(&active, &query, top_k).await?)
+        }
+        MemoryRequest::Reflect(topic) => serde_json::json!({
+            "topic": topic,
+            "knowledge": op_reflect(&active, topic.as_deref())?,
+        }),
+        MemoryRequest::Candidates(session) => {
+            candidates_value(&session, &op_candidates(&active, &session)?)
+        }
+        MemoryRequest::Promote {
+            session,
+            message,
+            text,
+            kind,
+            tags,
+        } => serde_json::json!({
+            "id": op_promote(&active, &session, message, text.as_deref(), kind.as_deref(), tags)?
+        }),
+    })
+}
+
+/// Show user statements that look durable; nothing is saved until `promote`.
+pub fn candidates(session_id: String, json: bool) -> Result<(), String> {
+    let active = cli_active()?;
+    let candidates = op_candidates(&active, &session_id).map_err(|error| error.to_string())?;
+    if json {
+        println!("{}", candidates_value(&session_id, &candidates));
+    } else if candidates.is_empty() {
+        println!("No suggested facts. Any user message can still be promoted by its number.");
+    } else {
+        for (index, text) in candidates {
+            println!("{index}: {}", text.replace('\n', " "));
+        }
+    }
+    Ok(())
+}
+
+/// Save exactly one user-selected message, optionally edited, with provenance.
+pub fn promote(
+    session_id: String,
+    message_number: usize,
+    text: Option<String>,
+    kind: Option<String>,
+    tags: Vec<String>,
+    json: bool,
+) -> Result<(), String> {
+    let active = cli_active()?;
+    let id = op_promote(
+        &active,
+        &session_id,
+        message_number,
+        text.as_deref(),
+        kind.as_deref(),
+        tags,
+    )
+    .map_err(|error| error.to_string())?;
+    if json {
+        println!("{}", serde_json::json!({"id": id}));
+    } else {
+        println!("remembered ({id})");
+    }
+    Ok(())
+}
+
+pub fn update(id: String, text: String, json: bool) -> Result<(), String> {
+    let active = cli_active()?;
+    let updated = op_update(&active, &id, &text).map_err(|error| error.to_string())?;
+    if json {
+        println!("{}", serde_json::json!({"updated": updated}));
+    } else if updated {
+        println!("updated {id}");
+    } else {
+        println!("no memory with id {id}");
+    }
+    Ok(())
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+/// `memory add <text>` — remember a fact.
+pub fn add(
+    text: String,
+    kind: Option<String>,
+    tags: Vec<String>,
+    json: bool,
+) -> Result<(), String> {
+    let active = cli_active()?;
+    let id = op_add(&active, &text, kind.as_deref(), tags).map_err(|error| error.to_string())?;
+    if json {
+        println!("{}", serde_json::json!({ "id": id }));
+    } else {
+        println!("remembered ({id})");
+    }
+    Ok(())
+}
+
+/// `memory list` — every memory.
+pub fn list(json: bool) -> Result<(), String> {
+    let active = cli_active()?;
+    let memories = op_list(&active).map_err(|error| error.to_string())?;
+    if json {
+        println!("{:#}", list_value(&memories));
+        return Ok(());
+    }
+    if memories.is_empty() {
+        println!("No memories. Add one with `lightagent memory add <text>`.");
+        return Ok(());
+    }
+    for memory in &memories {
+        let source = memory
+            .source
+            .as_ref()
+            .map(|source| format!("  from {}#{}", source.session_id, source.message_index))
+            .unwrap_or_default();
+        println!("{}  ({})  {}{source}", memory.id, memory.kind, memory.text);
+    }
+    Ok(())
+}
+
+/// Render the structured working knowledge derived from the bank.
+pub fn reflect(topic: Option<String>, json: bool) -> Result<(), String> {
+    let active = cli_active()?;
+    let page = op_reflect(&active, topic.as_deref()).map_err(|error| error.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "topic": topic, "knowledge": page })
+        );
+    } else {
+        println!("{page}");
+    }
+    Ok(())
+}
+
+/// `memory search <query>` — the most relevant memories.
+pub async fn search(query: String, top_k: Option<usize>, json: bool) -> Result<(), String> {
+    let active = cli_active()?;
+    let hits = op_search(&active, &query, top_k)
+        .await
+        .map_err(|error| error.to_string())?;
+    if json {
+        println!("{:#}", search_value(&query, &hits));
+        return Ok(());
+    }
+    if hits.is_empty() {
+        println!("No relevant memories.");
+        return Ok(());
+    }
+    for memory in &hits {
+        let source = memory
+            .source
+            .as_ref()
+            .map(|source| format!(" [from {}#{}]", source.session_id, source.message_index))
+            .unwrap_or_default();
+        println!("({}) {}{source}", memory.kind, memory.text);
+    }
+    Ok(())
+}
+
+/// `memory forget <id>` — remove one memory.
+pub fn forget(id: String, json: bool) -> Result<(), String> {
+    let active = cli_active()?;
+    let removed = op_forget(&active, &id).map_err(|error| error.to_string())?;
+    if json {
+        println!("{}", serde_json::json!({ "removed": removed }));
+    } else if removed {
+        println!("forgot {id}");
+    } else {
+        println!("no memory with id {id}");
+    }
+    Ok(())
+}
+
+/// `memory clear` — forget everything.
+pub fn clear(json: bool) -> Result<(), String> {
+    let active = cli_active()?;
+    op_clear(&active).map_err(|error| error.to_string())?;
+    if json {
+        println!("{}", serde_json::json!({ "cleared": true }));
+    } else {
+        println!("Memory cleared.");
+    }
+    Ok(())
+}
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+        .route("/api/lightagent/v1/skills/imports", post(import_skills))
+--- with
+        .route("/api/lightagent/v1/skills/imports", post(import_skills))
+        .route(
+            "/api/lightagent/v1/memories",
+            get(list_memories).post(add_memory).delete(clear_memories),
+        )
+        .route("/api/lightagent/v1/memories/search", get(search_memories))
+        .route("/api/lightagent/v1/memories/reflect", get(reflect_memories))
+        .route("/api/lightagent/v1/memories/candidates", get(memory_candidates))
+        .route("/api/lightagent/v1/memories/promote", post(promote_memory))
+        .route(
+            "/api/lightagent/v1/memories/items/{id}",
+            axum::routing::put(update_memory).delete(forget_memory),
+        )
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+/// An import of skills from a repository or folder (new scope).
+--- with
+/// A memory operation through the embedder (`lightagent memory …`, see
+/// [`ops::MemoryRequest`]), on the active profile's memories. Operator only.
+async fn memory_operation(
+    state: &AppState,
+    headers: &HeaderMap,
+    request: ops::MemoryRequest,
+) -> Response {
+    if let Some(rejection) = deny(state, headers, Scope::Admin) {
+        return rejection;
+    }
+    match state.manager.memory(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn list_memories(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    memory_operation(&state, &headers, ops::MemoryRequest::List).await
+}
+
+#[derive(Deserialize)]
+struct AddMemoryBody {
+    text: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+async fn add_memory(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<AddMemoryBody>,
+) -> Response {
+    let request = ops::MemoryRequest::Add {
+        text: body.text,
+        kind: body.kind,
+        tags: body.tags,
+    };
+    memory_operation(&state, &headers, request).await
+}
+
+async fn clear_memories(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    memory_operation(&state, &headers, ops::MemoryRequest::Clear).await
+}
+
+#[derive(Deserialize)]
+struct UpdateMemoryBody {
+    text: String,
+}
+
+async fn update_memory(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateMemoryBody>,
+) -> Response {
+    let request = ops::MemoryRequest::Update {
+        id,
+        text: body.text,
+    };
+    memory_operation(&state, &headers, request).await
+}
+
+async fn forget_memory(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    memory_operation(&state, &headers, ops::MemoryRequest::Forget(id)).await
+}
+
+#[derive(Deserialize)]
+struct MemorySearchQuery {
+    q: String,
+    #[serde(default)]
+    top_k: Option<usize>,
+}
+
+async fn search_memories(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<MemorySearchQuery>,
+) -> Response {
+    let request = ops::MemoryRequest::Search {
+        query: query.q,
+        top_k: query.top_k,
+    };
+    memory_operation(&state, &headers, request).await
+}
+
+#[derive(Deserialize)]
+struct ReflectQuery {
+    #[serde(default)]
+    topic: Option<String>,
+}
+
+async fn reflect_memories(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ReflectQuery>,
+) -> Response {
+    memory_operation(&state, &headers, ops::MemoryRequest::Reflect(query.topic)).await
+}
+
+#[derive(Deserialize)]
+struct CandidatesQuery {
+    session: String,
+}
+
+async fn memory_candidates(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<CandidatesQuery>,
+) -> Response {
+    memory_operation(
+        &state,
+        &headers,
+        ops::MemoryRequest::Candidates(query.session),
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+struct PromoteMemoryBody {
+    session: String,
+    message: usize,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+async fn promote_memory(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<PromoteMemoryBody>,
+) -> Response {
+    let request = ops::MemoryRequest::Promote {
+        session: body.session,
+        message: body.message,
+        text: body.text,
+        kind: body.kind,
+        tags: body.tags,
+    };
+    memory_operation(&state, &headers, request).await
+}
+
+/// An import of skills from a repository or folder (new scope).
+=== replace docs/desktop/contract/operations.json
+--- find
+  {
+   "id": "skills.import",
+   "method": "POST",
+   "path": "/api/lightagent/v1/skills/imports"
+  },
+--- with
+  {
+   "id": "skills.import",
+   "method": "POST",
+   "path": "/api/lightagent/v1/skills/imports"
+  },
+  {
+   "id": "memory.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/memories"
+  },
+  {
+   "id": "memory.add",
+   "method": "POST",
+   "path": "/api/lightagent/v1/memories"
+  },
+  {
+   "id": "memory.clear",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/memories"
+  },
+  {
+   "id": "memory.search",
+   "method": "GET",
+   "path": "/api/lightagent/v1/memories/search",
+   "query": [
+    "q",
+    "top_k"
+   ]
+  },
+  {
+   "id": "memory.reflect",
+   "method": "GET",
+   "path": "/api/lightagent/v1/memories/reflect",
+   "query": [
+    "topic"
+   ]
+  },
+  {
+   "id": "memory.candidates",
+   "method": "GET",
+   "path": "/api/lightagent/v1/memories/candidates",
+   "query": [
+    "session"
+   ]
+  },
+  {
+   "id": "memory.promote",
+   "method": "POST",
+   "path": "/api/lightagent/v1/memories/promote"
+  },
+  {
+   "id": "memory.update",
+   "method": "PUT",
+   "path": "/api/lightagent/v1/memories/items/{id}"
+  },
+  {
+   "id": "memory.forget",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/memories/items/{id}"
+  },
+=== replace desktop/src-tauri/src/switch.rs
+--- find
+            | "extensions.set_enabled"
+    )
+}
+--- with
+            | "extensions.set_enabled"
+            | "memory.add"
+            | "memory.update"
+            | "memory.forget"
+            | "memory.clear"
+            | "memory.promote"
+    )
+}
+=== replace desktop/src-tauri/src/switch.rs
+--- find
+        assert!(blocked_while_switching("extensions.set_enabled"));
+--- with
+        assert!(blocked_while_switching("extensions.set_enabled"));
+        assert!(blocked_while_switching("memory.add"));
+        assert!(blocked_while_switching("memory.clear"));
+        assert!(blocked_while_switching("memory.promote"));
+=== write crates/lightagent/tests/desktop_memory.rs
+//! Memory through one shared operation set (D7-1): the desktop runtime's
+//! API and `lightagent memory` act on the active profile's memories alike.
+//! What one writes the other lists, and the API answers each read with the
+//! JSON the CLI prints. Every process here is separate.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+
+const KEY: &str = "92a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081";
+const MEMORIES: &str = "/api/lightagent/v1/memories";
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-memory-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+/// One authenticated request: the status and the raw body.
+fn call(runtime: &Runtime, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, raw)
+}
+
+fn cli_ok(home: &Path, args: &[&str]) {
+    let output: Output = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent");
+    assert!(
+        output.status.success(),
+        "lightagent {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn parsed(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|error| panic!("not JSON ({error}): {raw}"))
+}
+
+fn cli_output(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(args)
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent")
+}
+
+fn cli_json(home: &Path, args: &[&str]) -> Value {
+    let mut all = vec!["--json"];
+    all.extend_from_slice(args);
+    let output = cli_output(home, &all);
+    assert!(
+        output.status.success(),
+        "lightagent {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("JSON output")
+}
+
+fn get(runtime: &Runtime, path: &str) -> Value {
+    let (status, raw) = call(runtime, "GET", path, None);
+    assert_eq!(status, 200, "{path}: {raw}");
+    parsed(&raw)
+}
+
+#[test]
+fn the_cli_and_the_api_keep_one_memory() {
+    let home = scratch_home("one");
+    cli_ok(&home, &["config", "set", "extensions.enabled", "true"]);
+    cli_ok(&home, &["profile", "create", "work"]);
+    cli_ok(&home, &["profile", "use", "work"]);
+    let runtime = start(&home);
+
+    // Written over the API: the CLI lists it, and the API lists the same.
+    let (status, raw) = call(
+        &runtime,
+        "POST",
+        MEMORIES,
+        Some(r#"{"text":"Prefers dark mode","kind":"preference","tags":["ui"]}"#),
+    );
+    assert_eq!(status, 200, "{raw}");
+    let id = parsed(&raw)["id"].as_str().expect("id").to_owned();
+    let by_cli = cli_json(&home, &["memory", "list"]);
+    assert_eq!(get(&runtime, MEMORIES), by_cli);
+    assert_eq!(by_cli["memories"][0]["id"], id.as_str(), "{by_cli}");
+    assert_eq!(by_cli["memories"][0]["kind"], "preference");
+    assert_eq!(by_cli["memories"][0]["tags"], json!(["ui"]));
+
+    // Written by the CLI: the API lists it.
+    cli_json(&home, &["memory", "add", "Uses Rust for the backend"]);
+    assert_eq!(
+        get(&runtime, MEMORIES)["memories"].as_array().map(Vec::len),
+        Some(2)
+    );
+
+    // Search and reflect: the API answers what the CLI prints.
+    assert_eq!(
+        get(&runtime, &format!("{MEMORIES}/search?q=dark%20mode&top_k=3")),
+        cli_json(&home, &["memory", "search", "dark mode", "--top-k", "3"])
+    );
+    assert_eq!(
+        get(&runtime, &format!("{MEMORIES}/reflect")),
+        cli_json(&home, &["memory", "reflect"])
+    );
+
+    // Updated over the API, forgotten by the CLI.
+    let (status, raw) = call(
+        &runtime,
+        "PUT",
+        &format!("{MEMORIES}/items/{id}"),
+        Some(r#"{"text":"Prefers dark mode everywhere"}"#),
+    );
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(parsed(&raw)["updated"], true, "{raw}");
+    assert!(cli_json(&home, &["memory", "list"])
+        .to_string()
+        .contains("Prefers dark mode everywhere"));
+    let (_, raw) = call(
+        &runtime,
+        "PUT",
+        &format!("{MEMORIES}/items/no-such-memory"),
+        Some(r#"{"text":"x"}"#),
+    );
+    assert_eq!(parsed(&raw)["updated"], false, "{raw}");
+    assert_eq!(
+        call(&runtime, "POST", MEMORIES, Some(r#"{"text":"   "}"#)).0,
+        400,
+        "an empty memory is refused"
+    );
+    assert_eq!(
+        call(
+            &runtime,
+            "PUT",
+            &format!("{MEMORIES}/items/{id}"),
+            Some(r#"{"text":""}"#)
+        )
+        .0,
+        400
+    );
+    assert_eq!(
+        cli_json(&home, &["memory", "forget", &id])["removed"],
+        true
+    );
+    assert!(!get(&runtime, MEMORIES).to_string().contains(&id));
+
+    // A saved session: the same candidates; promoting a message it lacks is
+    // refused by both.
+    let (status, raw) = call(&runtime, "POST", "/api/lightagent/v1/sessions", Some("{}"));
+    assert_eq!(status, 201, "{raw}");
+    let session = parsed(&raw)["id"].as_str().expect("session id").to_owned();
+    assert_eq!(
+        get(&runtime, &format!("{MEMORIES}/candidates?session={session}")),
+        cli_json(&home, &["memory", "candidates", &session])
+    );
+    let body = json!({ "session": session, "message": 1 }).to_string();
+    assert_eq!(
+        call(&runtime, "POST", &format!("{MEMORIES}/promote"), Some(&body)).0,
+        400
+    );
+    assert!(!cli_output(&home, &["memory", "promote", &session, "1"]).status.success());
+    let (status, raw) = call(
+        &runtime,
+        "DELETE",
+        &format!("/api/lightagent/v1/sessions/{session}"),
+        None,
+    );
+    assert!(status == 200 || status == 204, "{status}: {raw}");
+    assert_eq!(
+        call(
+            &runtime,
+            "GET",
+            &format!("{MEMORIES}/candidates?session={session}"),
+            None
+        )
+        .0,
+        404,
+        "a session that is gone"
+    );
+
+    // Cleared over the API: the CLI lists nothing.
+    let (status, raw) = call(&runtime, "DELETE", MEMORIES, None);
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(cli_json(&home, &["memory", "list"])["memories"], json!([]));
+}
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  {
+   "id": "api.get.sessions",
+--- with
+  {
+   "id": "api.get.memories",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/memories",
+   "source": "crates/lightagent-api/src/lib.rs:133",
+   "behavior": "Every memory of the active profile (D7-1)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/memories"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.memory.list)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: crate lightagent memory::perform via RunFactory::memory",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.post.memories",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/memories",
+   "source": "crates/lightagent-api/src/lib.rs:133",
+   "behavior": "Remember a fact (D7-1)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/memories"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.memory.add)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: crate lightagent memory::perform via RunFactory::memory",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.delete.memories",
+   "kind": "api",
+   "surface": "DELETE /api/lightagent/v1/memories",
+   "source": "crates/lightagent-api/src/lib.rs:133",
+   "behavior": "Forget every memory (D7-1)",
+   "tree_key": null,
+   "tokens": [
+    "DELETE /api/lightagent/v1/memories"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.memory.clear)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: crate lightagent memory::perform via RunFactory::memory",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.memories.search",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/memories/search",
+   "source": "crates/lightagent-api/src/lib.rs:133",
+   "behavior": "The most relevant memories (hybrid recall) (D7-1)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/memories/search"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.memory.search)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: crate lightagent memory::perform via RunFactory::memory",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.memories.reflect",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/memories/reflect",
+   "source": "crates/lightagent-api/src/lib.rs:133",
+   "behavior": "The working-knowledge page (D7-1)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/memories/reflect"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.memory.reflect)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: crate lightagent memory::perform via RunFactory::memory",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.memories.candidates",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/memories/candidates",
+   "source": "crates/lightagent-api/src/lib.rs:133",
+   "behavior": "Durable-looking statements of a saved session (D7-1)",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/memories/candidates"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.memory.candidates)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: crate lightagent memory::perform via RunFactory::memory",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.post.memories.promote",
+   "kind": "api",
+   "surface": "POST /api/lightagent/v1/memories/promote",
+   "source": "crates/lightagent-api/src/lib.rs:133",
+   "behavior": "Save one session message as a sourced memory (D7-1)",
+   "tree_key": null,
+   "tokens": [
+    "POST /api/lightagent/v1/memories/promote"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.memory.promote)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: crate lightagent memory::perform via RunFactory::memory",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.put.memories.items.id",
+   "kind": "api",
+   "surface": "PUT /api/lightagent/v1/memories/items/{id}",
+   "source": "crates/lightagent-api/src/lib.rs:133",
+   "behavior": "Edit a memory's text (D7-1)",
+   "tree_key": null,
+   "tokens": [
+    "PUT /api/lightagent/v1/memories/items/{id}"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.memory.update)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: crate lightagent memory::perform via RunFactory::memory",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.delete.memories.items.id",
+   "kind": "api",
+   "surface": "DELETE /api/lightagent/v1/memories/items/{id}",
+   "source": "crates/lightagent-api/src/lib.rs:133",
+   "behavior": "Forget one memory (D7-1)",
+   "tree_key": null,
+   "tokens": [
+    "DELETE /api/lightagent/v1/memories/items/{id}"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Backend operation; counted through the CLI capability it serves (cli.memory.forget)",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(backend reuse)",
+   "backend": "shared: crate lightagent memory::perform via RunFactory::memory",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.sessions",
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.post.skills.imports` | `POST /api/lightagent/v1/skills/imports` | applicable | no | Tools: Installed skills, Import | shared: lightagent_extensions::skill_import::import (new scope) | not-started | `crates/lightagent-api/src/lib.rs:132` |
+--- with
+| `api.post.skills.imports` | `POST /api/lightagent/v1/skills/imports` | applicable | no | Tools: Installed skills, Import | shared: lightagent_extensions::skill_import::import (new scope) | not-started | `crates/lightagent-api/src/lib.rs:132` |
+| `api.get.memories` | `GET /api/lightagent/v1/memories` | applicable | no | (backend reuse) | shared: memory::perform via RunFactory::memory | not-started | `crates/lightagent-api/src/lib.rs:133` |
+| `api.post.memories` | `POST /api/lightagent/v1/memories` | applicable | no | (backend reuse) | shared: memory::perform via RunFactory::memory | not-started | `crates/lightagent-api/src/lib.rs:133` |
+| `api.delete.memories` | `DELETE /api/lightagent/v1/memories` | applicable | no | (backend reuse) | shared: memory::perform via RunFactory::memory | not-started | `crates/lightagent-api/src/lib.rs:133` |
+| `api.get.memories.search` | `GET /api/lightagent/v1/memories/search` | applicable | no | (backend reuse) | shared: memory::perform via RunFactory::memory | not-started | `crates/lightagent-api/src/lib.rs:133` |
+| `api.get.memories.reflect` | `GET /api/lightagent/v1/memories/reflect` | applicable | no | (backend reuse) | shared: memory::perform via RunFactory::memory | not-started | `crates/lightagent-api/src/lib.rs:133` |
+| `api.get.memories.candidates` | `GET /api/lightagent/v1/memories/candidates` | applicable | no | (backend reuse) | shared: memory::perform via RunFactory::memory | not-started | `crates/lightagent-api/src/lib.rs:133` |
+| `api.post.memories.promote` | `POST /api/lightagent/v1/memories/promote` | applicable | no | (backend reuse) | shared: memory::perform via RunFactory::memory | not-started | `crates/lightagent-api/src/lib.rs:133` |
+| `api.put.memories.items.id` | `PUT /api/lightagent/v1/memories/items/{id}` | applicable | no | (backend reuse) | shared: memory::perform via RunFactory::memory | not-started | `crates/lightagent-api/src/lib.rs:133` |
+| `api.delete.memories.items.id` | `DELETE /api/lightagent/v1/memories/items/{id}` | applicable | no | (backend reuse) | shared: memory::perform via RunFactory::memory | not-started | `crates/lightagent-api/src/lib.rs:133` |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Total rows: 346
+--- with
+- Total rows: 355
+=== end
