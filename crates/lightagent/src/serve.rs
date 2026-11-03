@@ -71,6 +71,13 @@ impl RunFactory for LightweightRunFactory {
         let paths = LightagentPaths::rooted_at(&self.root);
         crate::ops::Profiles::open(&paths)?.perform(request)
     }
+    async fn rag(
+        &self,
+        request: lightagent_api::ops::RagRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        crate::rag::perform(&LightagentPaths::rooted_at(&self.root), request).await
+    }
+
     async fn memory(
         &self,
         request: lightagent_api::ops::MemoryRequest,

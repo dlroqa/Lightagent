@@ -146,6 +146,13 @@ pub fn router(state: AppState) -> Router {
             axum::routing::put(update_memory).delete(forget_memory),
         )
         .route(
+            "/api/lightagent/v1/knowledge",
+            get(list_knowledge)
+                .post(add_knowledge)
+                .delete(clear_knowledge),
+        )
+        .route("/api/lightagent/v1/knowledge/search", get(search_knowledge))
+        .route(
             "/api/lightagent/v1/extensions",
             get(list_extensions).post(install_extension),
         )
@@ -2074,6 +2081,76 @@ async fn check_mcp_server(
             .into_response(),
         Err(error) => internal(&error),
     }
+}
+
+/// A knowledge (RAG) operation through the embedder (`lightagent rag …`),
+/// on the active profile's index. Operator only.
+async fn rag_operation(
+    state: &AppState,
+    headers: &HeaderMap,
+    request: ops::RagRequest,
+) -> Response {
+    if let Some(rejection) = deny(state, headers, Scope::Admin) {
+        return rejection;
+    }
+    match state.manager.rag(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn list_knowledge(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    rag_operation(&state, &headers, ops::RagRequest::List).await
+}
+
+#[derive(Deserialize)]
+struct AddKnowledgeBody {
+    path: String,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// Index a file, or every file in a folder. The server's working folder
+/// means nothing to a client, so the path must be absolute.
+async fn add_knowledge(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<AddKnowledgeBody>,
+) -> Response {
+    if !std::path::Path::new(&body.path).is_absolute() {
+        if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+            return rejection;
+        }
+        return bad_request("the path must be an absolute file or folder path");
+    }
+    let request = ops::RagRequest::Add {
+        path: body.path,
+        source: body.source,
+    };
+    rag_operation(&state, &headers, request).await
+}
+
+async fn clear_knowledge(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    rag_operation(&state, &headers, ops::RagRequest::Clear).await
+}
+
+#[derive(Deserialize)]
+struct KnowledgeSearchQuery {
+    q: String,
+    #[serde(default)]
+    top_k: Option<usize>,
+}
+
+async fn search_knowledge(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<KnowledgeSearchQuery>,
+) -> Response {
+    let request = ops::RagRequest::Search {
+        query: query.q,
+        top_k: query.top_k,
+    };
+    rag_operation(&state, &headers, request).await
 }
 
 /// A memory operation through the embedder (`lightagent memory …`, see

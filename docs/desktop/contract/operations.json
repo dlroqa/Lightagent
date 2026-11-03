@@ -180,6 +180,30 @@
    "path": "/api/lightagent/v1/memories/items/{id}"
   },
   {
+   "id": "knowledge.list",
+   "method": "GET",
+   "path": "/api/lightagent/v1/knowledge"
+  },
+  {
+   "id": "knowledge.add",
+   "method": "POST",
+   "path": "/api/lightagent/v1/knowledge"
+  },
+  {
+   "id": "knowledge.clear",
+   "method": "DELETE",
+   "path": "/api/lightagent/v1/knowledge"
+  },
+  {
+   "id": "knowledge.search",
+   "method": "GET",
+   "path": "/api/lightagent/v1/knowledge/search",
+   "query": [
+    "q",
+    "top_k"
+   ]
+  },
+  {
    "id": "extensions.list",
    "method": "GET",
    "path": "/api/lightagent/v1/extensions"

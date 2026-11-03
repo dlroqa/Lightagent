@@ -73,6 +73,23 @@ pub enum MemoryRequest {
     },
 }
 
+/// One knowledge (RAG) operation (`lightagent rag …`) on the active
+/// profile's index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RagRequest {
+    List,
+    /// Index a file, or every file in a folder.
+    Add {
+        path: String,
+        source: Option<String>,
+    },
+    Search {
+        query: String,
+        top_k: Option<usize>,
+    },
+    Clear,
+}
+
 /// A stable error category, for the UI to act on without parsing messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpCategory {

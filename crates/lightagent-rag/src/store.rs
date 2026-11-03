@@ -211,23 +211,18 @@ impl RagStore {
         max_chars: usize,
         overlap: usize,
     ) -> Result<usize, String> {
-        self.records.retain(|record| record.source != source);
         let chunks = chunk(text, max_chars, overlap);
-        if chunks.is_empty() {
-            self.persist().map_err(|error| error.to_string())?;
-            return Ok(0);
-        }
         // One batched semantic call for the whole document, index-aligned to
         // `chunks`; a failure degrades to lexical-only rather than aborting.
         let semantic_vectors: Option<Vec<Vec<f32>>> = match semantic {
-            Some(embedder) => match embedder.embed(&chunks).await {
+            Some(embedder) if !chunks.is_empty() => match embedder.embed(&chunks).await {
                 Ok(vectors) if vectors.len() == chunks.len() => Some(vectors),
                 _ => None,
             },
-            None => None,
+            _ => None,
         };
 
-        let mut added = 0;
+        let mut fresh = Vec::new();
         for (index, piece) in chunks.iter().enumerate() {
             let vector = lexical.embed(piece);
             let semantic = semantic_vectors
@@ -236,16 +231,22 @@ impl RagStore {
             if vector.iter().all(|value| *value == 0.0) && semantic.is_none() {
                 continue; // nothing to match on
             }
-            self.records.push(Record {
+            fresh.push(Record {
                 source: source.to_owned(),
                 chunk: index,
                 text: piece.clone(),
                 vector,
                 semantic,
             });
-            added += 1;
         }
-        self.persist().map_err(|error| error.to_string())?;
+        let added = fresh.len();
+        // Embedded first; then, under the lock, on the index as it is now, so
+        // a document another writer added meanwhile is kept.
+        self.mutate(|records| {
+            records.retain(|record| record.source != source);
+            records.extend(fresh);
+        })
+        .map_err(|error| error.to_string())?;
         Ok(added)
     }
 
@@ -330,8 +331,30 @@ impl RagStore {
 
     /// Drop every record and persist the empty index.
     pub fn clear(&mut self) -> io::Result<()> {
-        self.records.clear();
-        self.persist()
+        self.mutate(Vec::clear)
+    }
+
+    /// Change the index under its lock file: read it again from disk, apply
+    /// `change`, and write the result atomically. Two writers (the CLI and
+    /// the API) then never drop each other's documents.
+    fn mutate(&mut self, change: impl FnOnce(&mut Vec<Record>)) -> io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let lock = options.open(self.path.with_extension("lock"))?;
+        lock.lock()?;
+        let mut fresh = Self::open(&self.path)?;
+        change(&mut fresh.records);
+        fresh.persist()?;
+        self.records = fresh.records;
+        Ok(())
     }
 
     fn persist(&self) -> io::Result<()> {
@@ -345,7 +368,7 @@ impl RagStore {
             out.push_str(&line);
             out.push('\n');
         }
-        std::fs::write(&self.path, out)
+        lightagent_core::paths::write_private(&self.path, out.as_bytes())
     }
 }
 
@@ -446,6 +469,46 @@ pub fn index_path(profile_dir: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::embed::HashingEmbedder;
+
+    #[tokio::test]
+    async fn two_writers_keep_each_others_documents() {
+        let path = scratch_index();
+        let mut first = RagStore::open(&path).unwrap();
+        let mut second = RagStore::open(&path).unwrap();
+        first
+            .add(
+                "alpha",
+                "alpha document about rivers",
+                &HashingEmbedder,
+                None,
+                400,
+                0,
+            )
+            .await
+            .unwrap();
+        second
+            .add(
+                "beta",
+                "beta document about mountains",
+                &HashingEmbedder,
+                None,
+                400,
+                0,
+            )
+            .await
+            .unwrap();
+        let mut sources: Vec<String> = RagStore::open(&path)
+            .unwrap()
+            .sources()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        sources.sort();
+        assert_eq!(sources, vec!["alpha".to_owned(), "beta".to_owned()]);
+        second.clear().unwrap();
+        assert!(RagStore::open(&path).unwrap().sources().is_empty());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 
     fn scratch_index() -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};

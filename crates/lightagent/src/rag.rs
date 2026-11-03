@@ -562,31 +562,59 @@ pub(crate) fn realtime_rag_tool(config: &Config) -> Option<Arc<dyn Tool>> {
     )))
 }
 
-/// Resolve the active profile's index path and the loaded config.
-fn active_index() -> Result<(PathBuf, Config, String), String> {
-    let paths = LightagentPaths::resolve().map_err(|error| error.to_string())?;
-    let config = ConfigStore::at(&paths)
-        .load()
-        .map_err(|error| error.to_string())?;
-    let store = ProfileStore::new(paths.root());
-    let active = store
-        .active()
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "no active profile — run `lightagent init` first".to_owned())?;
-    let dir = store.handle(&active).dir().to_path_buf();
-    Ok((index_path(&dir), config, active.to_string()))
+use lightagent_api::ops::{OpCategory, OpError, RagRequest};
+
+/// The active profile's index, the config, and the profile's id.
+struct ActiveIndex {
+    index: PathBuf,
+    config: Config,
+    profile: String,
 }
 
-/// `rag add <path>` — index a file, or every file in a directory.
-pub async fn add(path: PathBuf, source: Option<String>, json: bool) -> Result<(), String> {
-    let (index, config, profile) = active_index()?;
-    let mut store = RagStore::open(&index).map_err(|error| error.to_string())?;
+fn op_internal(error: impl std::fmt::Display) -> OpError {
+    OpError::new(OpCategory::Internal, error.to_string())
+}
+
+fn active_index_at(paths: &LightagentPaths) -> Result<ActiveIndex, OpError> {
+    let config = ConfigStore::at(paths).load().map_err(op_internal)?;
+    let store = ProfileStore::new(paths.root());
+    let active = store.active().map_err(op_internal)?.ok_or_else(|| {
+        OpError::new(
+            OpCategory::Invalid,
+            "no active profile — run `lightagent init` first",
+        )
+    })?;
+    let dir = store.handle(&active).dir().to_path_buf();
+    Ok(ActiveIndex {
+        index: index_path(&dir),
+        config,
+        profile: active.to_string(),
+    })
+}
+
+fn cli_index() -> Result<ActiveIndex, String> {
+    let paths = LightagentPaths::resolve().map_err(|error| error.to_string())?;
+    active_index_at(&paths).map_err(|error| error.to_string())
+}
+
+/// What an add did: each indexed source and its chunks, the files that
+/// could not be read, and remote-index notes.
+struct Added {
+    indexed: Vec<(String, usize)>,
+    total: usize,
+    skipped: Vec<(String, String)>,
+    notes: Vec<String>,
+}
+
+async fn op_add(active: &ActiveIndex, path: &Path, source: Option<&str>) -> Result<Added, OpError> {
+    let mut store = RagStore::open(&active.index).map_err(op_internal)?;
     let embedder = HashingEmbedder;
-    let semantic = semantic_embedder(&config);
+    let semantic = semantic_embedder(&active.config);
+    let config = &active.config;
 
     let mut targets = Vec::new();
     if path.is_dir() {
-        let entries = std::fs::read_dir(&path).map_err(|error| error.to_string())?;
+        let entries = std::fs::read_dir(path).map_err(op_internal)?;
         for entry in entries.flatten() {
             if entry.path().is_file() {
                 targets.push(entry.path());
@@ -594,26 +622,32 @@ pub async fn add(path: PathBuf, source: Option<String>, json: bool) -> Result<()
         }
         targets.sort();
     } else {
-        targets.push(path.clone());
+        targets.push(path.to_path_buf());
     }
 
-    let mut total = 0;
-    let mut indexed = Vec::new();
+    let mut added = Added {
+        indexed: Vec::new(),
+        total: 0,
+        skipped: Vec::new(),
+        notes: Vec::new(),
+    };
     for target in targets {
         let text = match std::fs::read_to_string(&target) {
             Ok(text) => text,
             Err(error) => {
-                eprintln!("· skipping {}: {error}", target.display());
+                added
+                    .skipped
+                    .push((target.display().to_string(), error.to_string()));
                 continue;
             }
         };
-        let name = source.clone().unwrap_or_else(|| {
+        let name = source.map(str::to_owned).unwrap_or_else(|| {
             target
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| target.display().to_string())
         });
-        let added = store
+        let count = store
             .add(
                 &name,
                 &text,
@@ -623,10 +657,10 @@ pub async fn add(path: PathBuf, source: Option<String>, json: bool) -> Result<()
                 config.rag.chunk_overlap_chars,
             )
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(op_internal)?;
         // The local write succeeds independently. A remote outage must never
         // make an indexed document disappear from this profile's RAG store.
-        if let Some(remote) = RemoteRag::from_config(&config, &profile)
+        if let Some(remote) = RemoteRag::from_config(config, active.profile.as_str())
             && let Err(error) = remote
                 .upsert(
                     &name,
@@ -636,57 +670,137 @@ pub async fn add(path: PathBuf, source: Option<String>, json: bool) -> Result<()
                 )
                 .await
         {
-            eprintln!("· remote RAG sync skipped for {name}: {error}");
+            added
+                .notes
+                .push(format!("remote RAG sync skipped for {name}: {error}"));
         }
-        total += added;
-        indexed.push((name, added));
+        added.total += count;
+        added.indexed.push((name, count));
     }
+    Ok(added)
+}
 
-    if json {
-        let value = serde_json::json!({
-            "indexed": indexed.iter().map(|(n, c)| serde_json::json!({ "source": n, "chunks": c })).collect::<Vec<_>>(),
-            "total_chunks": total,
-        });
-        println!("{value:#}");
-    } else {
-        for (name, added) in &indexed {
-            println!("indexed {name} ({added} chunks)");
+async fn op_search(
+    active: &ActiveIndex,
+    query: &str,
+    top_k: Option<usize>,
+) -> Result<Vec<Hit>, OpError> {
+    let store = RagStore::open(&active.index).map_err(op_internal)?;
+    let k = top_k.unwrap_or(active.config.rag.top_k).max(1);
+    let semantic = semantic_embedder(&active.config);
+    Ok(
+        match RemoteRag::from_config(&active.config, active.profile.as_str()) {
+            Some(remote) => match remote.search(query, k).await {
+                Ok(hits) if !hits.is_empty() => hits,
+                _ => {
+                    store
+                        .search(query, &HashingEmbedder, semantic.as_deref(), k)
+                        .await
+                }
+            },
+            None => {
+                store
+                    .search(query, &HashingEmbedder, semantic.as_deref(), k)
+                    .await
+            }
+        },
+    )
+}
+
+fn op_list(active: &ActiveIndex) -> Result<(Vec<(String, usize)>, usize), OpError> {
+    let store = RagStore::open(&active.index).map_err(op_internal)?;
+    Ok((store.sources(), store.len()))
+}
+
+fn op_clear(active: &ActiveIndex) -> Result<(), OpError> {
+    RagStore::open(&active.index)
+        .map_err(op_internal)?
+        .clear()
+        .map_err(op_internal)
+}
+
+fn added_value(added: &Added) -> Value {
+    json!({
+        "indexed": added.indexed.iter().map(|(n, c)| json!({ "source": n, "chunks": c })).collect::<Vec<_>>(),
+        "total_chunks": added.total,
+        "skipped": added.skipped.iter().map(|(p, r)| json!({ "path": p, "reason": r })).collect::<Vec<_>>(),
+        "notes": added.notes,
+    })
+}
+
+fn search_value(query: &str, hits: &[Hit]) -> Value {
+    json!({
+        "query": query,
+        "hits": hits.iter().map(|hit| json!({
+            "source": hit.source, "score": hit.score, "text": hit.text,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn list_value(sources: &[(String, usize)], total: usize) -> Value {
+    json!({
+        "sources": sources.iter().map(|(n, c)| json!({ "source": n, "chunks": c })).collect::<Vec<_>>(),
+        "total_chunks": total,
+    })
+}
+
+/// One knowledge operation for the HTTP API (`RunFactory::rag`), on the
+/// active profile's index, answered with the JSON `lightagent rag … --json`
+/// prints.
+pub(crate) async fn perform(
+    paths: &LightagentPaths,
+    request: RagRequest,
+) -> Result<Value, OpError> {
+    let active = active_index_at(paths)?;
+    Ok(match request {
+        RagRequest::List => {
+            let (sources, total) = op_list(&active)?;
+            list_value(&sources, total)
         }
-        println!("{total} chunk(s) added.");
+        RagRequest::Add { path, source } => {
+            added_value(&op_add(&active, Path::new(&path), source.as_deref()).await?)
+        }
+        RagRequest::Search { query, top_k } => {
+            search_value(&query, &op_search(&active, &query, top_k).await?)
+        }
+        RagRequest::Clear => {
+            op_clear(&active)?;
+            json!({ "cleared": true })
+        }
+    })
+}
+
+/// `rag add <path>` — index a file, or every file in a directory.
+pub async fn add(path: PathBuf, source: Option<String>, json: bool) -> Result<(), String> {
+    let active = cli_index()?;
+    let added = op_add(&active, &path, source.as_deref())
+        .await
+        .map_err(|error| error.to_string())?;
+    for (target, reason) in &added.skipped {
+        eprintln!("· skipping {target}: {reason}");
+    }
+    for note in &added.notes {
+        eprintln!("· {note}");
+    }
+    if json {
+        println!("{:#}", added_value(&added));
+    } else {
+        for (name, count) in &added.indexed {
+            println!("indexed {name} ({count} chunks)");
+        }
+        println!("{} chunk(s) added.", added.total);
     }
     Ok(())
 }
 
 /// `rag search <query>` — the best passages for a query.
 pub async fn search(query: String, top_k: Option<usize>, json: bool) -> Result<(), String> {
-    let (index, config, profile) = active_index()?;
-    let store = RagStore::open(&index).map_err(|error| error.to_string())?;
-    let k = top_k.unwrap_or(config.rag.top_k).max(1);
-    let semantic = semantic_embedder(&config);
-    let hits = match RemoteRag::from_config(&config, profile) {
-        Some(remote) => match remote.search(&query, k).await {
-            Ok(hits) if !hits.is_empty() => hits,
-            _ => {
-                store
-                    .search(&query, &HashingEmbedder, semantic.as_deref(), k)
-                    .await
-            }
-        },
-        None => {
-            store
-                .search(&query, &HashingEmbedder, semantic.as_deref(), k)
-                .await
-        }
-    };
-
+    let active = cli_index()?;
+    let hits = op_search(&active, &query, top_k)
+        .await
+        .map_err(|error| error.to_string())?;
     if json {
-        let value = serde_json::json!({
-            "query": query,
-            "hits": hits.iter().map(|hit| serde_json::json!({
-                "source": hit.source, "score": hit.score, "text": hit.text,
-            })).collect::<Vec<_>>(),
-        });
-        println!("{value:#}");
+        println!("{:#}", search_value(&query, &hits));
         return Ok(());
     }
     if hits.is_empty() {
@@ -702,15 +816,10 @@ pub async fn search(query: String, top_k: Option<usize>, json: bool) -> Result<(
 
 /// `rag list` — the indexed sources and their chunk counts.
 pub fn list(json: bool) -> Result<(), String> {
-    let (index, _, _) = active_index()?;
-    let store = RagStore::open(&index).map_err(|error| error.to_string())?;
-    let sources = store.sources();
+    let active = cli_index()?;
+    let (sources, total) = op_list(&active).map_err(|error| error.to_string())?;
     if json {
-        let value = serde_json::json!({
-            "sources": sources.iter().map(|(n, c)| serde_json::json!({ "source": n, "chunks": c })).collect::<Vec<_>>(),
-            "total_chunks": store.len(),
-        });
-        println!("{value:#}");
+        println!("{:#}", list_value(&sources, total));
         return Ok(());
     }
     if sources.is_empty() {
@@ -725,11 +834,10 @@ pub fn list(json: bool) -> Result<(), String> {
 
 /// `rag clear` — empty the index.
 pub fn clear(json: bool) -> Result<(), String> {
-    let (index, _, _) = active_index()?;
-    let mut store = RagStore::open(&index).map_err(|error| error.to_string())?;
-    store.clear().map_err(|error| error.to_string())?;
+    let active = cli_index()?;
+    op_clear(&active).map_err(|error| error.to_string())?;
     if json {
-        println!("{}", serde_json::json!({ "cleared": true }));
+        println!("{}", json!({ "cleared": true }));
     } else {
         println!("Index cleared.");
     }
