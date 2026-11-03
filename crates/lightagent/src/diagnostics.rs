@@ -143,7 +143,7 @@ pub(crate) async fn bundle(root: &Path) -> Result<Value, OpError> {
         .as_deref()
         .filter(|_| config.web.enabled)
         .map_or(Value::Null, origin);
-    Ok(json!({
+    let bundle = json!({
         "schema": "lightagent-diagnostics/1",
         "about": "A diagnostics bundle to share with someone helping you with Lightagent. It holds only what `included` lists; everything `excluded` lists is left out. It is not sent anywhere: you choose where to save it.",
         "included": INCLUDED,
@@ -192,7 +192,15 @@ pub(crate) async fn bundle(root: &Path) -> Result<Value, OpError> {
             "identity": identity,
             "remote_credentials": vault,
         },
-    }))
+    });
+    debug_assert!(
+        bundle
+            .as_object()
+            .is_some_and(|fields| fields.len() == SECTIONS.len()
+                && SECTIONS.iter().all(|section| fields.contains_key(*section))),
+        "the bundle's fields are exactly SECTIONS"
+    );
+    Ok(bundle)
 }
 
 #[cfg(test)]
