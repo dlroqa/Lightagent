@@ -1,0 +1,26 @@
+=== base ee7f2bb024188199fd5bc46e48bfd96b7c2da701
+=== message
+Row 45: the diagnostics test accepts 201 for a created session
+
+check run 41593121258: POST /sessions answers 201 Created (as it always
+has); the test's helper required 200. The session is now created with
+`call`, accepting 201.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent/tests/desktop_diagnostics.rs
+--- find
+    let (session, _) = ok(
+        &runtime,
+        "POST",
+        &format!("{API}/sessions"),
+        Some(json!({})),
+    );
+    let session = session["id"].as_str().expect("session id").to_owned();
+--- with
+    let (status, raw) = call(&runtime, "POST", &format!("{API}/sessions"), Some("{}"));
+    assert!(matches!(status, 200 | 201), "POST /sessions: {raw}");
+    let session = parsed(&raw)["id"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+=== end
