@@ -1,0 +1,382 @@
+=== base e8179a03de86f6bd9686ad419e227c2adaed86df
+=== message
+Row 50: D7-13 — the [security] section, read-only; the approval policy at every level
+
+`config.security` has no key `config set` accepts, but the CLI shows the
+section (`config show`) and `setup` → approvals writes its approval
+policy; the other two fields (remote_tools_default, privacy_mode) have no
+writer. The desktop now shows the section read-only, and the approval
+policy written by Settings is proved to be the CLI's.
+
+- Settings: a Security card shows [security] as `config show` reports it
+  (GET /config, redacted; the section holds no secret), read-only; the
+  approval policy stays editable under Agent runtime, as before.
+- desktop_security.rs: GET /config's [security] equals `config show`'s,
+  every field present; an approval policy saved through PUT /settings is
+  what `config show` and `config get`-free CLI reads report, and the
+  section's other fields are untouched.
+- runs.py `security` (host) and e2e/security.mjs (browser: the card shows
+  what the API reports).
+- Test hardening from the row 41-48 audit (null-safe comparisons):
+  desktop_identity.rs asserts the issued restriction's profiles,
+  desktop_setup.rs that the compared init fields are strings,
+  desktop_knowledge.rs that the compared chunk counts are numbers.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== write frontend/src/components/SecurityCard.tsx
+import { useEffect, useState } from "react";
+
+import { agentApi } from "../api/agent";
+import { Card } from "./Card";
+
+type Security = { approval_policy?: string; remote_tools_default?: boolean; privacy_mode?: boolean };
+
+function yesNo(value: boolean | undefined): string {
+  return value === undefined ? "—" : value ? "yes" : "no";
+}
+
+/**
+ * The configuration's [security] section, read-only, as `lightagent config
+ * show` reports it. The approval policy is set under Agent runtime (as
+ * `lightagent setup` → approvals sets it); the other values have no setting.
+ */
+export function SecurityCard() {
+  const [security, setSecurity] = useState<Security | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    agentApi
+      .config()
+      .then((view) => setSecurity((view.config.security ?? {}) as Security))
+      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  }, []);
+
+  return (
+    <Card title="Security">
+      <p className="card__note">
+        The configuration&apos;s [security] section, read-only, as lightagent config show reports it. The approval
+        policy is set under Agent runtime; the other values have no setting.
+      </p>
+      {error && <div role="alert" style={{ fontSize: 11.5, color: "var(--danger)" }}>{error}</div>}
+      {!security && !error && <span className="muted">Loading…</span>}
+      {security && (
+        <dl data-testid="settings-security"
+          style={{ display: "grid", gridTemplateColumns: "minmax(120px, max-content) 1fr", gap: "4px 16px", margin: 0 }}>
+          <dt className="muted">Approval policy</dt>
+          <dd data-field="approval_policy" style={{ margin: 0 }}>{security.approval_policy ?? "—"}</dd>
+          <dt className="muted">Network tools allowed by default</dt>
+          <dd data-field="remote_tools_default" style={{ margin: 0 }}>{yesNo(security.remote_tools_default)}</dd>
+          <dt className="muted">Privacy mode (user text kept out of logs)</dt>
+          <dd data-field="privacy_mode" style={{ margin: 0 }}>{yesNo(security.privacy_mode)}</dd>
+        </dl>
+      )}
+    </Card>
+  );
+}
+=== replace frontend/src/screens/SettingsScreen.tsx
+--- find
+import { ProvidersCard } from "../components/Providers";
+--- with
+import { ProvidersCard } from "../components/Providers";
+import { SecurityCard } from "../components/SecurityCard";
+=== replace frontend/src/screens/SettingsScreen.tsx
+--- find
+          <Card title="Profiles">
+--- with
+          <SecurityCard />
+
+          <Card title="Profiles">
+=== write crates/lightagent/tests/desktop_security.rs
+//! The [security] configuration section (D7-13): it has no key `config
+//! set` accepts, so the desktop shows it read-only. GET /config reports it
+//! as `lightagent config show` does, and the approval policy the Settings
+//! screen saves (PUT /settings, the field `lightagent setup` → approvals
+//! writes) is what the CLI then reports, with the section's other fields
+//! untouched. Every process here is separate.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::Value;
+
+const KEY: &str = "091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8";
+
+struct Runtime {
+    child: Child,
+    _lifeline: ChildStdin,
+    addr: String,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scratch_home(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let home = std::env::temp_dir().join(format!(
+        "lightagent-desktop-security-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("home");
+    home
+}
+
+fn start(home: &Path) -> Runtime {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start lightagent serve --desktop");
+    let mut lifeline = child.stdin.take().expect("stdin");
+    writeln!(lifeline, "{KEY}").expect("key");
+    lifeline.flush().expect("flush");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        let _ = reader.read_line(&mut line);
+        let _ = tx.send(line);
+        let mut rest = String::new();
+        while reader.read_line(&mut rest).is_ok_and(|read| read > 0) {
+            rest.clear();
+        }
+    });
+    let line = rx.recv_timeout(Duration::from_secs(60)).expect("handshake");
+    let handshake: Value = serde_json::from_str(&line).expect("handshake JSON");
+    let addr = handshake["addr"].as_str().expect("addr").to_owned();
+    Runtime {
+        child,
+        _lifeline: lifeline,
+        addr,
+    }
+}
+
+fn call(runtime: &Runtime, method: &str, path: &str, body: Option<&str>) -> (u16, Value) {
+    let mut stream = TcpStream::connect(&runtime.addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    let body = body.unwrap_or("");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        runtime.addr,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let raw = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    let value = serde_json::from_str(&raw).unwrap_or_else(|error| panic!("not JSON ({error}): {raw}"));
+    (status, value)
+}
+
+/// `lightagent --json config show`: the configuration itself.
+fn shown(home: &Path) -> Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_lightagent"))
+        .args(["--json", "config", "show"])
+        .env("LIGHTAGENT_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lightagent");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("config show JSON")
+}
+
+#[test]
+fn the_security_section_is_the_clis_and_the_approval_policy_saves_alike() {
+    let home = scratch_home("security");
+    let runtime = start(&home);
+
+    let (status, view) = call(&runtime, "GET", "/api/lightagent/v1/config", None);
+    assert_eq!(status, 200, "{view}");
+    let by_api = view["config"]["security"].clone();
+    let by_cli = shown(&home)["security"].clone();
+    assert_eq!(by_api, by_cli);
+    assert!(by_cli["approval_policy"].is_string(), "{by_cli}");
+    assert!(by_cli["remote_tools_default"].is_boolean(), "{by_cli}");
+    assert!(by_cli["privacy_mode"].is_boolean(), "{by_cli}");
+
+    // The Settings screen's save: the policy changes for the CLI, nothing else.
+    let (status, mut settings) = call(&runtime, "GET", "/api/lightagent/v1/settings", None);
+    assert_eq!(status, 200, "{settings}");
+    for policy in ["strict", "permissive", "balanced"] {
+        settings["approval_policy"] = Value::from(policy);
+        let body = settings.to_string();
+        let (status, saved) = call(&runtime, "PUT", "/api/lightagent/v1/settings", Some(&body));
+        assert_eq!(status, 200, "{policy}: {saved}");
+        assert_eq!(saved["approval_policy"], policy, "{saved}");
+        settings = saved;
+        let after = shown(&home)["security"].clone();
+        assert_eq!(after["approval_policy"], policy, "{after}");
+        assert_eq!(after["remote_tools_default"], by_cli["remote_tools_default"]);
+        assert_eq!(after["privacy_mode"], by_cli["privacy_mode"]);
+        let (_, view) = call(&runtime, "GET", "/api/lightagent/v1/config", None);
+        assert_eq!(view["config"]["security"], after);
+    }
+}
+=== replace desktop/e2e/runs.py
+--- find
+            ("update_check", lambda: scenario_update_check(host, cli)),
+--- with
+            ("update_check", lambda: scenario_update_check(host, cli)),
+            ("security", lambda: scenario_security(host, cli)),
+=== replace desktop/e2e/runs.py
+--- find
+def scenario_update_check(host, cli):
+--- with
+def scenario_security(host, cli):
+    """D7 through the host transport: [security] as GET /config reports it
+    is `config show`'s, every field present; an approval policy saved
+    through PUT /settings is what the CLI reports, and is restored."""
+    check = Checks("security")
+
+    def cli_security():
+        return json.loads(harness.run_cli(cli, "--json", "config", "show")).get("security") or {}
+
+    status, view = host.fetch("GET", f"{API}/config")
+    by_cli = cli_security()
+    check.expect("[security] through the host is the CLI's, every field present",
+                 status == 200 and ((view or {}).get("config") or {}).get("security") == by_cli
+                 and isinstance(by_cli.get("approval_policy"), str)
+                 and isinstance(by_cli.get("remote_tools_default"), bool)
+                 and isinstance(by_cli.get("privacy_mode"), bool), (status, view, by_cli))
+    status, settings = host.fetch("GET", f"{API}/settings")
+    original = (settings or {}).get("approval_policy")
+    target = "strict" if original != "strict" else "permissive"
+    try:
+        status, saved = host.fetch("PUT", f"{API}/settings", dict(settings or {}, approval_policy=target))
+        after = cli_security()
+        check.expect("an approval policy saved through the host is the CLI's",
+                     status == 200 and after.get("approval_policy") == target
+                     and after.get("privacy_mode") == by_cli.get("privacy_mode"), (status, saved, after))
+    finally:
+        _, current = host.fetch("GET", f"{API}/settings")
+        host.fetch("PUT", f"{API}/settings", dict(current or {}, approval_policy=original))
+    return check
+
+
+def scenario_update_check(host, cli):
+=== write e2e/security.mjs
+// The Settings screen's Security card against the real harness (D7-13):
+// it shows the [security] section exactly as GET /config reports it (the
+// section `lightagent config show` prints), read-only. The approval
+// policy's control is covered by e2e/settings.mjs; desktop_security.rs and
+// runs.py `security` prove the values are the CLI's.
+
+export async function checkSecurity(browser, base, outDir) {
+  const failures = [];
+  const page = await browser.newPage({ viewport: { width: 1280, height: 2200 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  try {
+    const security = (await (await fetch(`${base}/api/lightagent/v1/config`)).json()).config.security;
+    if (typeof security?.approval_policy !== "string") throw new Error(`no [security] in GET /config: ${JSON.stringify(security)}`);
+    await page.goto(`${base}/#/settings`);
+    const card = page.getByTestId("settings-security");
+    await card.waitFor({ timeout: 15000 });
+    const field = async (name) => (await card.locator(`[data-field="${name}"]`).innerText()).trim();
+    const yesNo = (value) => (value ? "yes" : "no");
+    const expected = {
+      approval_policy: security.approval_policy,
+      remote_tools_default: yesNo(security.remote_tools_default),
+      privacy_mode: yesNo(security.privacy_mode),
+    };
+    for (const [name, value] of Object.entries(expected)) {
+      const shown = await field(name);
+      if (shown !== value) failures.push(`security: ${name} shows ${JSON.stringify(shown)}, the API reports ${JSON.stringify(value)}`);
+    }
+    if ((await card.locator("input, select, textarea, button").count()) !== 0) {
+      failures.push("security: the [security] card offers a control; it is read-only");
+    }
+    await page.screenshot({ path: `${outDir}/settings-security.png`, fullPage: true });
+    if (errors.length) failures.push(`security: page errors: ${errors.join("; ")}`);
+  } catch (err) {
+    failures.push(`security: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  } finally {
+    await page.close();
+  }
+  return failures;
+}
+=== replace e2e/render.mjs
+--- find
+import { checkUpdate } from "./update.mjs";
+--- with
+import { checkUpdate } from "./update.mjs";
+import { checkSecurity } from "./security.mjs";
+=== replace e2e/render.mjs
+--- find
+  // Changes the config file and saves a test secret: last.
+--- with
+  // Reads the [security] section; changes nothing.
+  try {
+    failures.push(...(await checkSecurity(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`security: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  }
+  // Changes the config file and saves a test secret: last.
+=== replace crates/lightagent/tests/desktop_identity.rs
+--- find
+    assert_eq!(
+        issued["restriction"],
+        cli_json(&home, &["identity", "credential", "list"])["credentials"][0]["restriction"]
+    );
+--- with
+    assert_eq!(
+        issued["restriction"],
+        cli_json(&home, &["identity", "credential", "list"])["credentials"][0]["restriction"]
+    );
+    assert_eq!(issued["restriction"]["profiles"], json!(["work"]), "{issued}");
+    assert_eq!(
+        issued["restriction"]["capabilities"],
+        json!(["runs_read", "sessions_read"]),
+        "{issued}"
+    );
+=== replace crates/lightagent/tests/desktop_setup.rs
+--- find
+    for field in ["active_profile", "base_url"] {
+        assert_eq!(api_report[field], cli_report[field], "{field}");
+    }
+--- with
+    for field in ["active_profile", "base_url"] {
+        assert!(cli_report[field].is_string(), "{field}: {cli_report}");
+        assert_eq!(api_report[field], cli_report[field], "{field}");
+    }
+=== replace crates/lightagent/tests/desktop_knowledge.rs
+--- find
+    assert_eq!(
+        by_api["indexed"][0]["chunks"],
+        by_cli["indexed"][0]["chunks"]
+    );
+--- with
+    assert!(by_cli["indexed"][0]["chunks"].is_u64(), "{by_cli}");
+    assert_eq!(
+        by_api["indexed"][0]["chunks"],
+        by_cli["indexed"][0]["chunks"]
+    );
+=== end
