@@ -90,6 +90,8 @@ export async function checkRemoteCredentials(browser, base, outDir) {
       await page.locator("#rc-add-service").fill("mcp:render-probe");
       await page.locator("#rc-add-destinations").fill("https://probe.render.invalid");
       await page.locator("#rc-add-budget").fill("3");
+      await page.locator("#rc-add-operations").fill("search");
+      await page.locator("#rc-add-expires").fill("600");
       await page.locator("#rc-add-secret-file").fill(join(dir, "missing.secret"));
       await screen.getByRole("button", { name: "Add credential" }).click();
       const refused = page.getByTestId("credentials-error").filter({ hasText: "could not read the secret file" });
@@ -101,7 +103,8 @@ export async function checkRemoteCredentials(browser, base, outDir) {
       const text = await page.getByTestId("credentials-message").innerText();
       id = /Added ([^:]+):/.exec(text)?.[1] ?? "";
       const grant = (await get(base, API)).credentials.find((item) => item.id === id);
-      if (!grant || grant.service !== "mcp:render-probe" || grant.max_requests_per_run !== 3) {
+      if (!grant || grant.service !== "mcp:render-probe" || grant.max_requests_per_run !== 3
+        || JSON.stringify(grant.operations) !== JSON.stringify(["search"]) || typeof grant.expires_unix !== "number") {
         throw new Error(`the grant is ${JSON.stringify(grant)}`);
       }
       await page.getByTestId(`rc-${id}`).waitFor({ timeout: 10000 });

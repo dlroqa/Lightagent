@@ -264,6 +264,8 @@ fn the_cli_and_the_api_manage_one_vault() {
         "service": "web-search",
         "destinations": ["https://search.example.com"],
         "max_requests_per_run": 5,
+        "operations": ["search"],
+        "expires_in": 3600,
         "secret_file": secret_file,
     });
     let (code, raw) = call(&runtime, "POST", CREDENTIALS, Some(&add.to_string()));
@@ -344,6 +346,12 @@ fn the_cli_and_the_api_manage_one_vault() {
     );
     assert!(!listed_raw.contains(secret) && !listed_raw.contains(mcp_secret));
     assert_eq!(grant(&listed, &id)["max_requests_per_run"], 5, "{listed}");
+    assert_eq!(
+        grant(&listed, &id)["operations"],
+        json!(["search"]),
+        "{listed}"
+    );
+    assert!(grant(&listed, &id)["expires_unix"].is_u64(), "{listed}");
 
     // Refused, naming no file: no secret file, a relative one, a missing
     // one, an invalid destination, no destination, an unknown profile.
