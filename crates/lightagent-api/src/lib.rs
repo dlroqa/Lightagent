@@ -82,6 +82,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/lightagent/v1/tools", get(list_tools))
+        .route("/api/lightagent/v1/commands", get(list_commands))
         .route("/api/lightagent/v1/workers", get(list_workers))
         .route(
             "/api/lightagent/v1/workers/{role}",
@@ -3182,6 +3183,18 @@ async fn delete_onboarding(State(state): State<Arc<AppState>>, headers: HeaderMa
         Ok(()) => onboarding_view(None),
         Err(error) => internal(&error),
     }
+}
+
+/// The terminal chat's slash commands, as its `/help` lists them.
+async fn list_commands(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::ToolsRead) {
+        return rejection;
+    }
+    let commands: Vec<Value> = lightagent_core::commands::SLASH_COMMANDS
+        .iter()
+        .map(|command| json!({ "name": command.name, "summary": command.summary }))
+        .collect();
+    Json(json!({ "commands": commands })).into_response()
 }
 
 /// `lightagent extensions list`, from the same shared operation.

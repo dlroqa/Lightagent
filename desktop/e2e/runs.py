@@ -88,6 +88,7 @@ def scripts(provider):
         ),
         "steer-hold": lambda p, turn, index: [("text", "Working"), ("gate", "steer-hold"), ("text", " done."), ("finish", "stop")],
         "convo": lambda p, turn, index: [("text", "Noted."), ("finish", "stop")],
+        "reload": lambda p, turn, index: [("text", "Done."), ("finish", "stop")],
         "regen": lambda p, turn, index: {
             "first": [("text", "First answer."), ("finish", "stop")],
             "second": [("text", "Second answer."), ("finish", "stop")],
@@ -951,6 +952,46 @@ def scenario_setup_sections(host, cli):
     return check
 
 
+def scenario_commands(host, cli):
+    """D7 through the host transport (`/help`): the commands the host lists
+    are the ones the chat's /help prints, in its order."""
+    check = Checks("commands")
+    status, listed = host.fetch("GET", f"{API}/commands")
+    names = [command.get("name") for command in (listed or {}).get("commands", [])]
+    out = harness.run_cli_input(cli, "/help\n/exit\n", "chat")
+    line = next((line for line in out.splitlines() if line.startswith("Commands:")), "")
+    check.expect("the commands through the host are the chat's /help",
+                 status == 200 and bool(names) and line.split()[1:] == [f"/{name}" for name in names],
+                 (status, names, line))
+    return check
+
+
+def scenario_reload(host, provider, cli):
+    """D7 through the host transport (`/reload`): a web setting the CLI
+    changes while the desktop runs is offered in the next run, with no
+    restart, and listed by the host's tool catalog. Restored."""
+    check = Checks("reload")
+    original = harness.run_cli(cli, "config", "get", "web.enabled").strip()
+
+    def web(names):
+        return any("web" in str(name).lower() for name in names)
+
+    try:
+        harness.run_cli(cli, "config", "set", "web.enabled", "false")
+        Stream(host, host.start_run(host.new_session(), "[e2e:reload] One.")).finish()
+        before = provider.requests("reload")[-1]["tools"]
+        harness.run_cli(cli, "config", "set", "web.enabled", "true")
+        status, listed = host.fetch("GET", f"{API}/tools")
+        names = [tool.get("name", "") for tool in (listed or {}).get("tools", [])]
+        Stream(host, host.start_run(host.new_session(), "[e2e:reload] Two.")).finish()
+        after = provider.requests("reload")[-1]["tools"]
+        check.expect("a web setting the CLI changed is in the next run and the catalog, with no restart",
+                     status == 200 and not web(before) and web(after) and web(names), (before, after, names))
+    finally:
+        harness.run_cli(cli, "config", "set", "web.enabled", original or "false")
+    return check
+
+
 def scenario_onboarding(host, cli, workspace):
     """D7 through the host transport: guidance installed through the host is
     what the chat's `/onboard remove` removes, and what the chat's `/onboard
@@ -1458,6 +1499,8 @@ def main():
             ("security", lambda: scenario_security(host, cli)),
             ("setup_sections", lambda: scenario_setup_sections(host, cli)),
             ("onboarding", lambda: scenario_onboarding(host, cli, workspace)),
+            ("commands", lambda: scenario_commands(host, cli)),
+            ("reload", lambda: scenario_reload(host, provider, cli)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]

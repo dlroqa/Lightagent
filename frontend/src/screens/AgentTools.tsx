@@ -211,6 +211,15 @@ export function AgentTools() {
             Permission is what a run&apos;s call does under this profile&apos;s approval policy, as lightagent tools
             list reports it.
           </p>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", margin: "8px 0 12px" }}>
+            <button type="button" className="btn" onClick={() => setAttempt((value) => value + 1)}>
+              Reload tools
+            </button>
+            <span className="card__note" style={{ margin: 0 }}>
+              The chat&apos;s <code>/reload</code>: shows the tools, extensions and settings as they are now. Every run
+              starts with the current settings, so a change applies to the next run without a restart.
+            </span>
+          </div>
           {mcpState === "skipped" && (
             <div className="notice notice--info" role="status">
               MCP server tools are not listed: listing them connects every MCP server agent runs use, which starts

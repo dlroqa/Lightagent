@@ -18,6 +18,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod allocation;
+pub mod commands;
 pub mod config;
 pub mod config_keys;
 pub mod credentials;

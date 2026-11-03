@@ -2796,9 +2796,11 @@ fn handle_slash(command: Slash, skills: &SkillStore, tools: &[String]) -> bool {
     match command {
         Slash::Exit => return true,
         Slash::Help => {
-            println!(
-                "Commands: /help  /tools  /skills  /extensions  /onboard  /reload  /new  /continue  /stop  /update  /exit"
-            );
+            let names: Vec<String> = lightagent_core::commands::SLASH_COMMANDS
+                .iter()
+                .map(|command| format!("/{}", command.name))
+                .collect();
+            println!("Commands: {}", names.join("  "));
             println!("During a run: type a message and press Enter to queue it as the next turn.");
         }
         Slash::Tools => {

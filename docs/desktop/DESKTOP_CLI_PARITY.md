@@ -22,7 +22,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 |---|---|
 | acp-method | 8 |
 | alias | 2 |
-| api | 55 |
+| api | 56 |
 | argument | 47 |
 | command | 86 |
 | config | 14 |
@@ -38,7 +38,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 
 | Applicability | Rows |
 |---|---|
-| applicable | 296 |
+| applicable | 297 |
 | host-owned | 7 |
 | not-applicable | 34 |
 
@@ -563,6 +563,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | `api.post.runs.id.cancel` | `POST /api/lightagent/v1/runs/{id}/cancel` | applicable | no | (backend reuse) | api: POST /runs/{id}/cancel | not-started | `crates/lightagent-api/src/lib.rs:93` |
 | `api.post.runs.id.continue` | `POST /api/lightagent/v1/runs/{id}/continue` | applicable | no | (backend reuse) | api: POST /runs/{id}/continue | not-started | `crates/lightagent-api/src/lib.rs:160` |
 | `api.get.extensions` | `GET /api/lightagent/v1/extensions` | applicable | no | (backend reuse) | shared: lightagent_extensions::manage::list | not-started | `crates/lightagent-api/src/lib.rs:131` |
+| `api.get.commands` | `GET /api/lightagent/v1/commands` | applicable | no | (backend reuse) | shared: lightagent_core::commands::SLASH_COMMANDS | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.get.onboarding` | `GET /api/lightagent/v1/onboarding` | applicable | no | (backend reuse) | shared: lightagent_extensions::onboarding::current | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.put.onboarding` | `PUT /api/lightagent/v1/onboarding` | applicable | no | (backend reuse) | shared: lightagent_extensions::onboarding::install | not-started | `crates/lightagent-api/src/lib.rs` |
 | `api.delete.onboarding` | `DELETE /api/lightagent/v1/onboarding` | applicable | no | (backend reuse) | shared: lightagent_extensions::onboarding::remove | not-started | `crates/lightagent-api/src/lib.rs` |
