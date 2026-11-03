@@ -1,0 +1,605 @@
+=== base 12582a046ba37a7fd59c86c1d4fb3a911fa7564a
+=== message
+Broker: wait for a runner and for the run separately, with diagnostics
+
+actions.status waited for a run with a single deadline that counted the
+time a dispatched run sat queued for a hosted runner. Under load
+(2026-11-03), children of the subagents workflow waited 11-19 minutes for a
+runner. The live broker checks then read them as still_running after 600
+s and failed, though every child, once it ran, passed or failed exactly as
+intended.
+
+The wait now has two bounded phases and an overall cap:
+- queue: until the run leaves requested/queued/pending/waiting, at most
+  ActionsPolicy::queue_wait (config platform.github_actions.queue_wait_secs,
+  default 600, at most 3600);
+- run: from when the run is first seen executing, at most max_wait
+  (max_wait_secs, at most 900, as before);
+- overall: the call's wait_seconds, at most queue_wait + max_wait.
+A run that has not completed is still_queued or still_running, never
+passed. The report adds `wait`: the outcome (completed, queue_timeout,
+run_timeout, overall_timeout, cancelled, not_waited), the milliseconds
+queued, running and in all, and the three limits. A cancelled call stops
+at once and says so.
+
+Tests: a stand-in run whose reads go through staged statuses covers queued
+→ running → passed, a queue that never yields a runner, an execution
+timeout, cancellation, an unexpected failure and a startup failure, no
+wait, and the overall cap.
+
+The live checks allow the observed queue (30 min) and 10 min of execution.
+The coder check dispatches both verifications before waiting, so they queue
+together, and a run the check gave up on is cancelled with its diagnostics
+printed. The broker job's timeout grows to 95 minutes to fit these
+deadlines.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-tools/src/builtins/actions.rs
+--- find
+const LOCATE_WAIT: Duration = Duration::from_secs(60);
+--- with
+const LOCATE_WAIT: Duration = Duration::from_secs(60);
+/// Run statuses before any job has a runner: queued, a pending concurrency
+/// group, or an environment waiting for approval.
+const NOT_STARTED: [&str; 4] = ["requested", "queued", "pending", "waiting"];
+=== replace crates/lightagent-tools/src/builtins/actions.rs
+--- find
+                "wait_seconds": { "type": "integer", "minimum": 0, "description": "Wait up to this long for the run to complete." }
+--- with
+                "wait_seconds": { "type": "integer", "minimum": 0, "description": "Wait up to this long in all for the run to complete. Waiting for a runner and running are each bounded by the broker's policy; a run that has not completed is reported still_queued or still_running, never passed." }
+=== replace crates/lightagent-tools/src/builtins/actions.rs
+--- find
+            .unwrap_or_default()
+            .min(actions.policy.max_wait);
+        match status(actions, run, wait, ctx).await {
+--- with
+            .unwrap_or_default()
+            .min(
+                actions
+                    .policy
+                    .queue_wait
+                    .saturating_add(actions.policy.max_wait),
+            );
+        match status(actions, run, wait, ctx).await {
+=== replace crates/lightagent-tools/src/builtins/actions.rs
+--- find
+async fn status(
+    actions: &ActionsContext,
+    run_id: u64,
+    wait: Duration,
+    ctx: &ToolCtx,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + wait;
+    let mut run = read_run(actions, run_id).await?;
+    let completed = |run: &Value| run.get("status").and_then(Value::as_str) == Some("completed");
+    while !completed(&run) && Instant::now() < deadline {
+        ctx.report(ToolProgress::stage("waiting"));
+        if !pause(ctx, actions.policy.poll_interval).await {
+            break;
+        }
+        run = read_run(actions, run_id).await?;
+    }
+    let jobs = read_jobs(actions, run_id).await?;
+    let conclusion = run.get("conclusion").and_then(Value::as_str);
+    let verdict = match (completed(&run), conclusion) {
+        (true, Some("success")) => "passed",
+        (true, Some("failure")) => "failed",
+        (true, Some("cancelled")) => "cancelled",
+        (true, _) => "not_passed",
+        (false, _) => "still_running",
+    };
+--- with
+/// Read a run, waiting up to `wait` in all for it to complete: at most
+/// `queue_wait` for it to get a runner, and at most `max_wait` from when it
+/// is first seen executing. What was waited for, and why the wait ended, is
+/// reported with the run.
+async fn status(
+    actions: &ActionsContext,
+    run_id: u64,
+    wait: Duration,
+    ctx: &ToolCtx,
+) -> Result<Value, String> {
+    let policy = &actions.policy;
+    let begun = Instant::now();
+    let mut running_since: Option<Instant> = None;
+    let mut run = read_run(actions, run_id).await?;
+    let completed = |run: &Value| run.get("status").and_then(Value::as_str) == Some("completed");
+    let queued = |run: &Value| {
+        run.get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| NOT_STARTED.contains(&status))
+    };
+    let outcome = loop {
+        if completed(&run) {
+            break "completed";
+        }
+        let now = Instant::now();
+        if running_since.is_none() && !queued(&run) {
+            running_since = Some(now);
+        }
+        if wait.is_zero() {
+            break "not_waited";
+        }
+        if now >= begun + wait {
+            break "overall_timeout";
+        }
+        match running_since {
+            None if now >= begun + policy.queue_wait => break "queue_timeout",
+            Some(since) if now >= since + policy.max_wait => break "run_timeout",
+            _ => {}
+        }
+        ctx.report(ToolProgress::stage(if running_since.is_some() {
+            "waiting for the run to finish"
+        } else {
+            "waiting for the run to get a runner"
+        }));
+        if !pause(ctx, policy.poll_interval).await {
+            break "cancelled";
+        }
+        run = read_run(actions, run_id).await?;
+    };
+    let ended = Instant::now();
+    let jobs = read_jobs(actions, run_id).await?;
+    let conclusion = run.get("conclusion").and_then(Value::as_str);
+    let verdict = match (completed(&run), conclusion) {
+        (true, Some("success")) => "passed",
+        (true, Some("failure")) => "failed",
+        (true, Some("cancelled")) => "cancelled",
+        (true, _) => "not_passed",
+        (false, _) if queued(&run) => "still_queued",
+        (false, _) => "still_running",
+    };
+    let millis = |duration: Duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+    let queued_for = running_since.unwrap_or(ended).duration_since(begun);
+    let running_for = running_since
+        .map(|since| ended.duration_since(since))
+        .unwrap_or_default();
+    let waited = json!({
+        "outcome": outcome,
+        "waited_ms": millis(ended.duration_since(begun)),
+        "queued_ms": millis(queued_for),
+        "running_ms": millis(running_for),
+        "limits_ms": {
+            "overall": millis(wait),
+            "queue": millis(policy.queue_wait),
+            "run": millis(policy.max_wait),
+        },
+    });
+=== replace crates/lightagent-tools/src/builtins/actions.rs
+--- find
+        "conclusion": conclusion,
+        "verdict": verdict,
+        "jobs": jobs,
+--- with
+        "conclusion": conclusion,
+        "verdict": verdict,
+        "wait": waited,
+        "jobs": jobs,
+=== replace crates/lightagent-tools/src/context.rs
+--- find
+    pub poll_interval: Duration,
+    pub max_wait: Duration,
+    pub max_log_bytes: usize,
+}
+--- with
+    pub poll_interval: Duration,
+    /// The longest `actions.status` waits for a dispatched run to get a
+    /// runner (GitHub reports it requested, queued, pending or waiting).
+    pub queue_wait: Duration,
+    /// The longest `actions.status` waits for a run once it is executing,
+    /// counted from when it is first seen running.
+    pub max_wait: Duration,
+    pub max_log_bytes: usize,
+}
+=== replace crates/lightagent-tools/src/context.rs
+--- find
+            .field("max_wait", &self.max_wait)
+--- with
+            .field("queue_wait", &self.queue_wait)
+            .field("max_wait", &self.max_wait)
+=== replace crates/lightagent-core/src/config.rs
+--- find
+    /// The longest one tool call waits for a run.
+    pub max_wait_secs: u64,
+--- with
+    /// The longest a tool call waits for a dispatched run to get a runner.
+    /// Hosted runners have held a run queued for 10 to 20 minutes under load.
+    pub queue_wait_secs: u64,
+    /// The longest a tool call waits for a run once it is executing.
+    pub max_wait_secs: u64,
+=== replace crates/lightagent-core/src/config.rs
+--- find
+            poll_interval_secs: 10,
+            max_wait_secs: 120,
+--- with
+            poll_interval_secs: 10,
+            queue_wait_secs: 600,
+            max_wait_secs: 120,
+=== replace crates/lightagent-core/src/config.rs
+--- find
+        if actions.poll_interval_secs == 0 || actions.max_wait_secs > 900 {
+            return invalid(
+                "platform.github_actions polls at least every second and waits at most 900 s"
+                    .to_owned(),
+            );
+        }
+--- with
+        if actions.poll_interval_secs == 0
+            || actions.max_wait_secs > 900
+            || actions.queue_wait_secs > 3600
+        {
+            return invalid(
+                "platform.github_actions polls at least every second and waits at most 900 s \
+                 for a running run and 3600 s for a queued one"
+                    .to_owned(),
+            );
+        }
+=== replace crates/lightagent/src/chat.rs
+--- find
+        max_wait: Duration::from_secs(actions.max_wait_secs),
+--- with
+        queue_wait: Duration::from_secs(actions.queue_wait_secs),
+        max_wait: Duration::from_secs(actions.max_wait_secs),
+=== replace crates/lightagent-tools/tests/coder_workflow.rs
+--- find
+            max_wait: Duration::from_secs(5),
+--- with
+            queue_wait: Duration::from_secs(5),
+            max_wait: Duration::from_secs(5),
+=== replace crates/lightagent-tools/tests/ref_consistency.rs
+--- find
+            max_wait: Duration::from_secs(2),
+--- with
+            queue_wait: Duration::from_secs(2),
+            max_wait: Duration::from_secs(2),
+=== replace crates/lightagent/tests/role_eval.rs
+--- find
+            max_wait: Duration::from_secs(10),
+--- with
+            queue_wait: Duration::from_secs(10),
+            max_wait: Duration::from_secs(10),
+=== replace docs/subagents/specialists.md
+--- find
+max_wait_secs = 120
+--- with
+queue_wait_secs = 600             # waiting for a hosted runner (at most 3600)
+max_wait_secs = 120               # waiting for an executing run (at most 900)
+=== replace crates/lightagent-tools/tests/actions_broker.rs
+--- find
+use std::time::Duration;
+--- with
+use std::time::{Duration, Instant};
+=== replace crates/lightagent-tools/tests/actions_broker.rs
+--- find
+/// The stand-in's state: requests seen and runs created.
+#[derive(Default)]
+struct Api {
+    seen: Vec<Seen>,
+    runs: Vec<Value>,
+}
+--- with
+/// The stand-in's state: requests seen and runs created. A staged run's
+/// reads go through its `phases` (status, conclusion) in turn and stay at
+/// the last; `shown` is the phase its last read showed.
+#[derive(Default)]
+struct Api {
+    seen: Vec<Seen>,
+    runs: Vec<Value>,
+    phases: BTreeMap<u64, VecDeque<(String, Option<String>)>>,
+    shown: BTreeMap<u64, (String, Option<String>)>,
+}
+=== replace crates/lightagent-tools/tests/actions_broker.rs
+--- find
+use std::collections::BTreeMap;
+--- with
+use std::collections::{BTreeMap, VecDeque};
+=== replace crates/lightagent-tools/tests/actions_broker.rs
+--- find
+        let Some(found) = found else {
+            return (
+                404,
+                String::new(),
+                json!({ "message": "Not Found" }).to_string(),
+            );
+        };
+--- with
+        let Some(mut found) = found else {
+            return (
+                404,
+                String::new(),
+                json!({ "message": "Not Found" }).to_string(),
+            );
+        };
+        if let Some(phases) = api.phases.get_mut(&id) {
+            if tail.is_empty() {
+                let phase = if phases.len() > 1 {
+                    phases.pop_front()
+                } else {
+                    phases.front().cloned()
+                };
+                if let Some(phase) = phase {
+                    api.shown.insert(id, phase);
+                }
+            }
+            if let Some((status, conclusion)) = api.shown.get(&id) {
+                found["status"] = json!(status);
+                found["conclusion"] = json!(conclusion);
+            }
+        }
+=== replace crates/lightagent-tools/tests/actions_broker.rs
+--- find
+                "name": "verify",
+                "status": "completed",
+--- with
+                "name": "verify",
+                "status": found["status"].clone(),
+=== replace crates/lightagent-tools/tests/actions_broker.rs
+--- find
+fn broker(github: &GitHub) -> ActionsContext {
+--- with
+fn broker(github: &GitHub) -> ActionsContext {
+    broker_with(github, Duration::from_secs(5), Duration::from_secs(5))
+}
+
+fn broker_with(github: &GitHub, queue_wait: Duration, max_wait: Duration) -> ActionsContext {
+=== replace crates/lightagent-tools/tests/actions_broker.rs
+--- find
+            poll_interval: Duration::from_millis(50),
+            max_wait: Duration::from_secs(5),
+            max_log_bytes: 4096,
+--- with
+            poll_interval: Duration::from_millis(50),
+            queue_wait,
+            max_wait,
+            max_log_bytes: 4096,
+=== replace crates/lightagent-tools/tests/actions_broker.rs
+--- find
+#[tokio::test]
+async fn a_dispatch_is_correlated_to_its_exact_sha_and_never_repeated() {
+--- with
+/// A run of the fixture workflow whose reads go through `phases` in turn.
+fn staged(github: &GitHub, id: u64, phases: &[(&str, Option<&str>)]) {
+    let mut api = github.state.lock().unwrap();
+    api.runs
+        .push(run(id, ".github/workflows/fixture.yml", "success", "staged"));
+    let phases = phases
+        .iter()
+        .map(|(status, conclusion)| ((*status).to_owned(), conclusion.map(str::to_owned)))
+        .collect();
+    api.phases.insert(id, phases);
+}
+
+async fn wait_for(ctx: &ToolCtx, id: u64, seconds: u64) -> Value {
+    let args = json!({ "run_id": id, "wait_seconds": seconds });
+    report(&ActionsStatus::new().call(&args, ctx).await)
+}
+
+fn waiting(github: &GitHub, queue: Duration, run: Duration) -> ToolCtx {
+    ToolCtx::new(CancellationToken::new()).with_actions(broker_with(github, queue, run))
+}
+
+#[tokio::test]
+async fn a_queued_run_that_starts_and_passes_is_waited_for_in_both_phases() {
+    let github = github().await;
+    staged(
+        &github,
+        500,
+        &[
+            ("queued", None),
+            ("queued", None),
+            ("in_progress", None),
+            ("in_progress", None),
+            ("completed", Some("success")),
+        ],
+    );
+    let ctx = waiting(&github, Duration::from_secs(5), Duration::from_secs(5));
+    let status = wait_for(&ctx, 500, 30).await;
+    assert_eq!(status["verdict"], "passed", "{status}");
+    assert_eq!(status["wait"]["outcome"], "completed", "{status}");
+    assert!(
+        status["wait"]["queued_ms"].as_u64().is_some_and(|ms| ms > 0),
+        "{status}"
+    );
+    assert!(
+        status["wait"]["running_ms"].as_u64().is_some_and(|ms| ms > 0),
+        "{status}"
+    );
+    assert_eq!(status["jobs"][0]["conclusion"], "success", "{status}");
+}
+
+#[tokio::test]
+async fn a_run_that_never_gets_a_runner_is_reported_still_queued() {
+    let github = github().await;
+    staged(&github, 501, &[("queued", None)]);
+    let ctx = waiting(&github, Duration::from_millis(300), Duration::from_secs(5));
+    let started = Instant::now();
+    let status = wait_for(&ctx, 501, 30).await;
+    assert_eq!(status["verdict"], "still_queued", "{status}");
+    assert_eq!(status["wait"]["outcome"], "queue_timeout", "{status}");
+    assert_eq!(status["wait"]["running_ms"], 0, "{status}");
+    assert_eq!(status["wait"]["limits_ms"]["queue"], 300, "{status}");
+    assert!(started.elapsed() < Duration::from_secs(3), "{status}");
+}
+
+#[tokio::test]
+async fn a_run_that_outlasts_its_execution_wait_is_reported_still_running() {
+    let github = github().await;
+    staged(&github, 502, &[("queued", None), ("in_progress", None)]);
+    let ctx = waiting(&github, Duration::from_secs(5), Duration::from_millis(300));
+    let status = wait_for(&ctx, 502, 30).await;
+    assert_eq!(status["verdict"], "still_running", "{status}");
+    assert_eq!(status["wait"]["outcome"], "run_timeout", "{status}");
+    assert!(
+        status["wait"]["running_ms"]
+            .as_u64()
+            .is_some_and(|ms| ms >= 300),
+        "{status}"
+    );
+}
+
+#[tokio::test]
+async fn a_cancelled_wait_stops_at_once_and_never_passes() {
+    let github = github().await;
+    staged(&github, 503, &[("in_progress", None)]);
+    let token = CancellationToken::new();
+    let ctx = ToolCtx::new(token.clone()).with_actions(broker_with(
+        &github,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    ));
+    let cancel = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        cancel.cancel();
+    });
+    let started = Instant::now();
+    let status = wait_for(&ctx, 503, 30).await;
+    assert_eq!(status["verdict"], "still_running", "{status}");
+    assert_eq!(status["wait"]["outcome"], "cancelled", "{status}");
+    assert!(started.elapsed() < Duration::from_secs(3), "{status}");
+}
+
+#[tokio::test]
+async fn unexpected_failures_are_reported_as_they_are() {
+    let github = github().await;
+    staged(
+        &github,
+        504,
+        &[
+            ("queued", None),
+            ("in_progress", None),
+            ("completed", Some("failure")),
+        ],
+    );
+    staged(
+        &github,
+        505,
+        &[("in_progress", None), ("completed", Some("startup_failure"))],
+    );
+    let ctx = waiting(&github, Duration::from_secs(5), Duration::from_secs(5));
+    let failed = wait_for(&ctx, 504, 30).await;
+    assert_eq!(failed["verdict"], "failed", "{failed}");
+    assert_eq!(failed["wait"]["outcome"], "completed", "{failed}");
+    let broken = wait_for(&ctx, 505, 30).await;
+    assert_eq!(broken["verdict"], "not_passed", "{broken}");
+}
+
+#[tokio::test]
+async fn without_a_wait_or_past_the_overall_cap_a_run_is_not_passed() {
+    let github = github().await;
+    staged(&github, 506, &[("queued", None)]);
+    staged(&github, 507, &[("queued", None)]);
+    let ctx = waiting(&github, Duration::from_secs(30), Duration::from_secs(30));
+    let unwaited = wait_for(&ctx, 506, 0).await;
+    assert_eq!(unwaited["verdict"], "still_queued", "{unwaited}");
+    assert_eq!(unwaited["wait"]["outcome"], "not_waited", "{unwaited}");
+    let capped = wait_for(&ctx, 507, 1).await;
+    assert_eq!(capped["verdict"], "still_queued", "{capped}");
+    assert_eq!(capped["wait"]["outcome"], "overall_timeout", "{capped}");
+    assert_eq!(capped["wait"]["limits_ms"]["overall"], 1000, "{capped}");
+}
+
+/// In a live check, a run the wait gave up on is cancelled so it does not
+/// hold a runner after the check has failed; its wait is printed.
+async fn cancel_unfinished(ctx: &ToolCtx, status: &Value) {
+    if matches!(
+        status["verdict"].as_str(),
+        Some("still_queued" | "still_running")
+    ) {
+        let args = json!({ "run_id": status["run_id"] });
+        let cancelled = ActionsCancel::new().call(&args, ctx).await;
+        println!(
+            "EVIDENCE cancelled unfinished run {}: {} (wait {})",
+            status["run_id"], cancelled.content, status["wait"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_dispatch_is_correlated_to_its_exact_sha_and_never_repeated() {
+=== replace crates/lightagent-tools/tests/actions_broker.rs count=2
+--- find
+            poll_interval: Duration::from_secs(10),
+            max_wait: Duration::from_secs(600),
+--- with
+            poll_interval: Duration::from_secs(10),
+            // Hosted runners have held a dispatched run queued for up to 19
+            // minutes (2026-11-03); executing, the fixture takes seconds.
+            queue_wait: Duration::from_secs(1800),
+            max_wait: Duration::from_secs(600),
+=== replace crates/lightagent-tools/tests/actions_broker.rs
+--- find
+        let args = json!({ "run_id": run, "wait_seconds": 600 });
+        let outcome = ActionsStatus::new().call(&args, &ctx).await;
+        println!("EVIDENCE status {mode}: {}", outcome.content);
+        let status = report(&outcome);
+--- with
+        let args = json!({ "run_id": run, "wait_seconds": 2400 });
+        let outcome = ActionsStatus::new().call(&args, &ctx).await;
+        println!("EVIDENCE status {mode}: {}", outcome.content);
+        let status = report(&outcome);
+        cancel_unfinished(&ctx, &status).await;
+=== replace crates/lightagent-tools/tests/actions_broker.rs
+--- find
+    let mut verdicts = Vec::new();
+    for (on, at) in [
+        (scratch.as_str(), new_sha.as_str()),
+        (branch.as_str(), sha.as_str()),
+    ] {
+        let args = json!({
+            "workflow": "subagent-fixture.yml",
+            "ref": on,
+            "sha": at,
+            "inputs": { "mode": "verify" },
+        });
+        let dispatched = report(&ActionsDispatch::new().call(&args, &ctx).await);
+        let status_args = json!({ "run_id": dispatched["run_id"], "wait_seconds": 600 });
+        let status = ActionsStatus::new().call(&status_args, &ctx).await;
+        println!("EVIDENCE verify {on} at {at}: {}", status.content);
+        let status = report(&status);
+        assert_eq!(status["head_sha"], at);
+        verdicts.push(status["verdict"].as_str().unwrap_or_default().to_owned());
+    }
+--- with
+    // Both verifications are dispatched first, so they wait for runners
+    // together rather than one after the other.
+    let mut dispatched = Vec::new();
+    for (on, at) in [
+        (scratch.as_str(), new_sha.as_str()),
+        (branch.as_str(), sha.as_str()),
+    ] {
+        let args = json!({
+            "workflow": "subagent-fixture.yml",
+            "ref": on,
+            "sha": at,
+            "inputs": { "mode": "verify" },
+        });
+        dispatched.push((
+            on,
+            at,
+            report(&ActionsDispatch::new().call(&args, &ctx).await),
+        ));
+    }
+    let mut verdicts = Vec::new();
+    for (on, at, run) in dispatched {
+        let status_args = json!({ "run_id": run["run_id"], "wait_seconds": 2400 });
+        let status = ActionsStatus::new().call(&status_args, &ctx).await;
+        println!("EVIDENCE verify {on} at {at}: {}", status.content);
+        let status = report(&status);
+        cancel_unfinished(&ctx, &status).await;
+        assert_eq!(status["head_sha"], at);
+        verdicts.push(status["verdict"].as_str().unwrap_or_default().to_owned());
+    }
+=== replace .github/workflows/subagents.yml
+--- find
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # contents: write only so the live coder check can create, commit to and
+--- with
+    runs-on: ubuntu-24.04
+    # Each live check waits at most 30 minutes for hosted runners and 10 for
+    # the fixture to run (actions_broker.rs), and the two run one after the
+    # other: 80 minutes at worst, plus the build.
+    timeout-minutes: 95
+    # contents: write only so the live coder check can create, commit to and
+=== end
