@@ -175,10 +175,17 @@ export async function checkRegenerateOnBackend(browser, base, outDir) {
     const latest = (await api(`/sessions/${encodeURIComponent(id)}`)).runs.at(-1).run_id;
     await api(`/sessions/${encodeURIComponent(id)}/regenerate`, { method: "POST", body: JSON.stringify({ run_id: latest }) });
     await until("the newer answer to be saved", async () => (await saved()) === JSON.stringify([THIRD]));
-    const before = stub.requests;
+    const runsBefore = JSON.stringify((await api(`/sessions/${encodeURIComponent(id)}`)).runs);
+    const refusal = page.waitForResponse((response) =>
+      response.url().endsWith(`/sessions/${encodeURIComponent(id)}/regenerate`) && response.request().method() === "POST",
+      { timeout: 15000 });
     await tryAgain();
+    const refused = await refusal;
     await page.getByText("only the latest answer can be regenerated", { exact: false }).waitFor({ timeout: 15000 });
-    if (stub.requests !== before) failures.push("regenerate: stale: the refused Try again reached the model");
+    if (refused.status() !== 409) failures.push(`regenerate: stale: the page's Try again was answered ${refused.status()}, not 409`);
+    if (JSON.stringify((await api(`/sessions/${encodeURIComponent(id)}`)).runs) !== runsBefore) {
+      failures.push("regenerate: stale: the refused Try again changed the session's runs");
+    }
     if ((await saved()) !== JSON.stringify([THIRD])) failures.push(`regenerate: stale: the saved answer changed: ${await saved()}`);
     await page.screenshot({ path: `${outDir}/regenerate-backend-stale.png`, fullPage: true });
     await open();
