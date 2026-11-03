@@ -5,7 +5,7 @@
 // none of a memory, a session title, the harness's vault secret, the home
 // path or a profile id seeded or present in the harness.
 
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 
 const API = "/api/lightagent/v1";
 const SECTIONS = ["schema", "about", "included", "excluded", "lightagent", "doctor", "architecture", "settings", "counts", "stores"];
@@ -38,6 +38,12 @@ export async function checkDiagnostics(browser, base, outDir) {
     const screen = page.getByTestId("diagnostics-screen");
     await screen.waitFor({ timeout: 15000 });
     await page.getByTestId("diagnostics-doctor").getByText(String(doctor.home), { exact: true }).waitFor({ timeout: 15000 });
+    // The home shown is the one LIGHTAGENT_HOME names (render-panel.sh exports it).
+    const named = process.env.LIGHTAGENT_HOME;
+    const resolve = (path) => realpath(path).catch(() => path);
+    if (!named || (await resolve(String(doctor.home))) !== (await resolve(named))) {
+      failures.push(`diagnostics: the home shown (${doctor.home}) is not LIGHTAGENT_HOME (${named})`);
+    }
     await page.getByTestId("diagnostics-architecture").waitFor({ timeout: 10000 });
 
     await screen.getByRole("button", { name: "Prepare bundle" }).click();

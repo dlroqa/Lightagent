@@ -36,6 +36,17 @@ export async function checkSetup(browser, base, outDir) {
     const before = await get(base, "/profiles");
     const endpoint = (await get(base, "/config")).config.inference.base_url;
     const originalModel = (await get(base, "/config")).config.inference.model;
+    // What each init request carried (`init --force --profile --base-url --model`).
+    const inits = [];
+    page.on("request", (request) => {
+      if (request.method() === "POST" && new URL(request.url()).pathname === "/api/lightagent/v1/setup/init") {
+        try {
+          inits.push(JSON.parse(request.postData() ?? "{}"));
+        } catch {
+          inits.push({});
+        }
+      }
+    });
     await page.goto(`${base}/#/setup`);
     await screen.waitFor({ timeout: 15000 });
     await page.locator("#setup-profile").and(page.locator(`[value="${before.active_profile}"]`)).waitFor({ timeout: 10000 });
@@ -53,6 +64,11 @@ export async function checkSetup(browser, base, outDir) {
       await screen.getByRole("button", { name: "Reconfigure…" }).click();
       await screen.getByRole("button", { name: /^Confirm: reconfigure / }).click();
       await page.getByTestId("setup-message").filter({ hasText: `active profile ${before.active_profile}` }).waitFor({ timeout: 10000 });
+      const forced = inits.find((sent) => sent.force === true);
+      if (!forced || forced.profile !== before.active_profile || forced.base_url !== endpoint
+        || forced.model !== "render-init-model") {
+        throw new Error(`Reconfigure sent ${JSON.stringify(forced)}`);
+      }
       if ((await get(base, "/profiles")).active_profile !== before.active_profile) throw new Error("the active profile changed");
       if ((await get(base, "/config")).config.inference.base_url !== endpoint) throw new Error("the endpoint changed");
       const model = (await get(base, "/config")).config.inference.model;
