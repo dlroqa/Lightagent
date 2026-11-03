@@ -13,7 +13,8 @@ import { createServer } from "node:http";
 import { seededSession } from "./delivery.mjs";
 
 const API = "/api/lightagent/v1";
-const PROMPT = "Which rivers run through Lyon?";
+// Short enough that the sidebar shows it in full, so it can be clicked by its exact text.
+const PROMPT = "regenerate probe";
 const FIRST = "The Rhône runs through Lyon.";
 const SECOND = "Two rivers: the Rhône and the Saône.";
 const THIRD = "The Rhône and the Saône meet in Lyon.";
