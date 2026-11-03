@@ -77,7 +77,10 @@ jobs:
     # workflow runs here and read contents, nothing else, and ends with the job.
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Each live check waits at most 30 minutes for hosted runners and 10 for
+    # the fixture to run (actions_broker.rs), and the two run one after the
+    # other: 80 minutes at worst, plus the build.
+    timeout-minutes: 95
     # contents: write only so the live coder check can create, commit to and
     # delete its own scratch branch (subagents/live-coder-*).
     permissions:
