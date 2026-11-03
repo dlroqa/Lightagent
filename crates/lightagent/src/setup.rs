@@ -1083,11 +1083,6 @@ fn use_duckduckgo(config: &mut Config) {
     config.web.search.api_key = None;
 }
 
-fn nonempty(value: String) -> Option<String> {
-    let value = value.trim();
-    (!value.is_empty()).then(|| value.to_owned())
-}
-
 fn io_error(error: std::io::Error) -> String {
     error.to_string()
 }

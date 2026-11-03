@@ -329,4 +329,20 @@ fn settings_write_what_each_setup_choice_writes() {
     let (status, raw) = call(&desktop, "PUT", SETTINGS, Some(&settings.to_string()));
     assert_eq!(status, 400, "{raw}");
     assert_eq!(sections(&by_settings), before);
+
+    // A save that leaves the web mode alone keeps what the mode implies:
+    // realtime knowledge turned on with `config set` stays on through an
+    // unrelated change.
+    cli_ok(
+        &by_settings,
+        &["config", "set", "rag.realtime_enabled", "true"],
+    );
+    let (_, raw) = call(&desktop, "GET", SETTINGS, None);
+    let mut settings = parsed(&raw);
+    assert_eq!(settings["web_mode"], "off", "{settings}");
+    let turns = settings["max_turns"].as_u64().expect("max_turns");
+    settings["max_turns"] = json!(turns + 1);
+    let (status, raw) = call(&desktop, "PUT", SETTINGS, Some(&settings.to_string()));
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(sections(&by_settings)["realtime"], true);
 }

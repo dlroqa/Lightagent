@@ -1465,9 +1465,22 @@ fn apply_ui_settings(
     config.agent.max_tool_calls = settings.max_tool_calls;
     config.agent.wall_clock_secs = settings.wall_clock_secs;
     config.security.approval_policy = settings.approval_policy;
+    // The web mode applies only as a change: every save carries the mode it
+    // read, and an unrelated one must not reset what a mode implies
+    // (realtime knowledge, the search key).
+    let web_before = lightagent_core::WebMode::of(config);
     config.web.enabled = settings.web_enabled;
     if let Some(mode) = settings.web_mode {
-        mode.apply(config, settings.web_search_endpoint.as_deref());
+        let endpoint = settings
+            .web_search_endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty());
+        let moved = mode == lightagent_core::WebMode::Custom
+            && endpoint != config.web.search.endpoint.as_deref();
+        if mode != web_before || moved {
+            mode.apply(config, endpoint);
+        }
     }
     config.tools.enabled = settings.filesystem_tools_enabled;
     config.tools.allow_terminal = settings.terminal_enabled;
