@@ -2578,6 +2578,24 @@ textarea {
   white-space: nowrap;
 }
 
+.session-row__rename {
+  flex: 1;
+  min-width: 0;
+  padding: 1px 6px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.session-row__rename:focus-visible {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 0;
+}
+
 .session-row__content.is-active .session-row__open {
   font-weight: 600;
 }

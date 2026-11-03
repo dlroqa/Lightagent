@@ -1523,13 +1523,32 @@ function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete
   const [menuOpen, setMenuOpen] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [draftTitle, setDraftTitle] = useState("");
   const menuButton = useRef<HTMLButtonElement | null>(null);
+  const renameField = useRef<HTMLInputElement | null>(null);
+  const renameDone = useRef(false);
   const label = row.title || "Untitled";
+  // Renamed in place, not with window.prompt: native script dialogs are not
+  // available in every desktop WebView.
   const rename = () => {
-    const title = window.prompt("Rename conversation", label);
-    if (title?.trim() && title.trim() !== label) void onUpdate(row.id, { title: title.trim() });
     setMenuOpen(false);
+    setDraftTitle(label);
+    renameDone.current = false;
+    setRenaming(true);
   };
+  const finishRename = (save: boolean) => {
+    if (renameDone.current) return;
+    renameDone.current = true;
+    setRenaming(false);
+    const title = draftTitle.trim();
+    if (save && title && title !== label) void onUpdate(row.id, { title });
+  };
+  useEffect(() => {
+    if (!renaming) return;
+    renameField.current?.focus();
+    renameField.current?.select();
+  }, [renaming]);
   const assignProject = (project: string | null) => {
     void onUpdate(row.id, { project });
     setProjectPickerOpen(false);
@@ -1542,10 +1561,27 @@ function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete
   return (
     <li className="session-row">
       <div className={`session-row__content${active ? " is-active" : ""}`}>
-        <button type="button" className="session-row__open" onClick={onOpen}
-          aria-current={active ? "true" : undefined}>
-          <span>{label}</span>
-        </button>
+        {renaming ? (
+          <input ref={renameField} className="session-row__rename" value={draftTitle} maxLength={200}
+            aria-label={`Rename ${label}`} autoComplete="off" spellCheck={false}
+            onChange={(event) => setDraftTitle(event.target.value)}
+            onBlur={() => finishRename(true)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                finishRename(true);
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                finishRename(false);
+              }
+            }} />
+        ) : (
+          <button type="button" className="session-row__open" onClick={onOpen}
+            aria-current={active ? "true" : undefined}>
+            <span>{label}</span>
+          </button>
+        )}
         <button ref={menuButton} type="button" className="session-row__action" disabled={disabled && active}
           aria-label={`More actions for ${label}`} aria-haspopup="menu" aria-expanded={menuOpen}
           onClick={(event) => { event.stopPropagation(); setMenuOpen((open) => !open); }}>

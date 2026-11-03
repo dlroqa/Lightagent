@@ -11,6 +11,7 @@ calls the function the UI's IPC command calls, so this is evidence about the
 host and the real runtime behind it, not about the WebView.
 """
 
+import base64
 import json
 import os
 import re
@@ -311,6 +312,16 @@ class Host:
             value = result["body"]
         return result["status"], value
 
+    def upload(self, target, data, filename):
+        """A raw-body POST (an attachment), sent as the WebView sends one."""
+        result = self.call("fetch", method="POST", target=target,
+                           body_base64=base64.b64encode(data).decode("ascii"), filename=filename)
+        try:
+            value = json.loads(result["body"]) if result["body"] else None
+        except ValueError:
+            value = result["body"]
+        return result["status"], value
+
     def try_fetch(self, method, target, body=None):
         """A fetch, or ("refused", message) when the host itself refuses it."""
         try:
@@ -426,6 +437,14 @@ class Checks:
 
 def run_cli(cli, *args):
     out = subprocess.run([cli, *args], capture_output=True, text=True, timeout=60)
+    if out.returncode != 0:
+        raise RuntimeError(f"lightagent {' '.join(args)}: {out.stderr.strip()[:300]}")
+    return out.stdout
+
+
+def run_cli_input(cli, text, *args):
+    """`lightagent` with `text` on its standard input, which is not a terminal."""
+    out = subprocess.run([cli, *args], input=text, capture_output=True, text=True, timeout=120)
     if out.returncode != 0:
         raise RuntimeError(f"lightagent {' '.join(args)}: {out.stderr.strip()[:300]}")
     return out.stdout
