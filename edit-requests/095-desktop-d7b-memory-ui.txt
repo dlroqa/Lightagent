@@ -1,0 +1,663 @@
+=== base f6819807e44638ccfbdc5ea4df24dd7869806a87
+=== message
+D7-2: the Memory screen, over the shared memory operations
+
+The Web UI (and so the desktop) can now do everything `lightagent memory`
+does, for the active profile: list, remember (kind and tags), search
+(with a result count), edit, forget, forget everything, the working
+knowledge page (with a topic), and from a saved conversation, the
+suggested facts and remembering any user message by its number,
+optionally edited, with kind and tags.
+
+- Forget and forget everything ask first; forget everything states the
+  count. Errors are shown next to the action they belong to.
+- Navigation: Memory in the account menus (workspace and chat).
+- Browser (e2e/memory.mjs, real harness): remember with kind and tags;
+  search finds it; edit saves; the knowledge page shows it; a seeded
+  conversation's suggested fact is remembered with its source, kind and
+  tag; forget asks first; "Forget everything" can be cancelled and then
+  removes nothing. Host (desktop/e2e/runs.py `memory`): add, list, search
+  and candidates through the host equal the CLI's, and a forget through
+  the host is seen by the CLI.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace frontend/src/api/agent.ts
+--- find
+  /** Import skills from a repository or folder (new scope); inactive unless `activate`. */
+--- with
+  /** `lightagent memory …` on the active profile, the same operations. */
+  memories: () => jsonRequest<{ memories: MemoryItem[] }>("/memories"),
+  addMemory: (text: string, kind: string | undefined, tags: string[]) =>
+    jsonRequest<{ id: string }>("/memories", {
+      method: "POST",
+      body: JSON.stringify({ text, kind, tags }),
+    }),
+  updateMemory: (id: string, text: string) =>
+    jsonRequest<{ updated: boolean }>(`/memories/items/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ text }),
+    }),
+  forgetMemory: (id: string) =>
+    jsonRequest<{ removed: boolean }>(`/memories/items/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  clearMemories: () => jsonRequest<{ cleared: boolean }>("/memories", { method: "DELETE" }),
+  searchMemories: (query: string, topK?: number) =>
+    jsonRequest<{ query: string; memories: MemoryItem[] }>(
+      topK
+        ? `/memories/search?q=${encodeURIComponent(query)}&top_k=${topK}`
+        : `/memories/search?q=${encodeURIComponent(query)}`,
+    ),
+  reflectMemories: (topic?: string) =>
+    jsonRequest<{ topic: string | null; knowledge: string }>(
+      topic ? `/memories/reflect?topic=${encodeURIComponent(topic)}` : "/memories/reflect",
+    ),
+  memoryCandidates: (session: string) =>
+    jsonRequest<{ session_id: string; candidates: { message: number; text: string }[] }>(
+      `/memories/candidates?session=${encodeURIComponent(session)}`,
+    ),
+  promoteMemory: (request: { session: string; message: number; text?: string; kind?: string; tags: string[] }) =>
+    jsonRequest<{ id: string }>("/memories/promote", { method: "POST", body: JSON.stringify(request) }),
+  /** Import skills from a repository or folder (new scope); inactive unless `activate`. */
+=== replace frontend/src/api/agent.ts
+--- find
+export interface SessionSummary {
+--- with
+/** One remembered fact, as `lightagent memory list --json` shows it. */
+export interface MemoryItem {
+  id: string;
+  kind: string;
+  tags?: string[];
+  created_at?: number;
+  updated_at?: number | null;
+  source?: { session_id: string; message_index: number } | null;
+  text: string;
+}
+
+export interface SessionSummary {
+=== write frontend/src/screens/MemoryScreen.tsx
+import { useEffect, useState } from "react";
+
+import { agentApi, type MemoryItem, type SessionSummary } from "../api/agent";
+import { Empty, Pill } from "../components/Bits";
+import { Card } from "../components/Card";
+import { TopBar } from "../components/Shell";
+
+function errorText(cause: unknown): string {
+  return (cause instanceof Error ? cause.message : String(cause)).replace(/^\d{3}:\s*/, "");
+}
+
+function tagList(text: string): string[] {
+  return text.split(",").map((tag) => tag.trim()).filter(Boolean);
+}
+
+const KINDS = ["fact", "preference", "decision", "project"];
+
+function when(seconds?: number | null): string {
+  return seconds ? new Date(seconds * 1000).toLocaleString() : "";
+}
+
+/** One memory: its text, kind, tags and source, with Edit and Forget. */
+function MemoryRow({ memory, onChanged }: { memory: MemoryItem; onChanged: (message: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(memory.text);
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function act(action: () => Promise<string>) {
+    setBusy(true);
+    setError(null);
+    try {
+      onChanged(await action());
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <li data-testid={`memory-${memory.id}`} style={{ minWidth: 0, display: "grid", gap: 6 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <Pill tone="info">{memory.kind}</Pill>
+        {(memory.tags ?? []).map((tag) => <Pill key={tag} tone="neutral">{tag}</Pill>)}
+        <span className="muted" style={{ fontSize: 12.5 }}>
+          {memory.source ? `From conversation ${memory.source.session_id}, message ${memory.source.message_index} · ` : ""}
+          {when(memory.updated_at ?? memory.created_at)}
+        </span>
+      </div>
+      {editing ? (
+        <div className="field">
+          <label className="field__label" htmlFor={`memory-edit-${memory.id}`}>Text</label>
+          <textarea id={`memory-edit-${memory.id}`} className="input" rows={2} value={text} disabled={busy}
+            onChange={(event) => setText(event.target.value)} />
+        </div>
+      ) : (
+        <div style={{ overflowWrap: "anywhere" }}>{memory.text}</div>
+      )}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {editing ? (
+          <>
+            <button type="button" className="btn" disabled={busy || !text.trim()}
+              onClick={() => void act(async () => {
+                const result = await agentApi.updateMemory(memory.id, text);
+                setEditing(false);
+                return result.updated ? "Saved." : "That memory no longer exists.";
+              })}>Save</button>
+            <button type="button" className="btn" disabled={busy} onClick={() => { setEditing(false); setText(memory.text); }}>
+              Cancel
+            </button>
+          </>
+        ) : confirm ? (
+          <>
+            <button type="button" className="btn btn--danger" disabled={busy}
+              onClick={() => void act(async () => {
+                await agentApi.forgetMemory(memory.id);
+                return "Forgotten.";
+              })}>Confirm: forget it</button>
+            <button type="button" className="btn" disabled={busy} onClick={() => setConfirm(false)}>Keep it</button>
+          </>
+        ) : (
+          <>
+            <button type="button" className="btn" aria-label={`Edit: ${memory.text}`} onClick={() => setEditing(true)}>Edit</button>
+            <button type="button" className="btn" aria-label={`Forget: ${memory.text}`} onClick={() => setConfirm(true)}>Forget</button>
+          </>
+        )}
+      </div>
+      {error && <div role="alert" style={{ fontSize: 11.5, color: "var(--danger)" }}>{error}</div>}
+    </li>
+  );
+}
+
+/**
+ * The active profile's memory, through the operations `lightagent memory`
+ * shares: remember, search, edit, forget, the knowledge page, and facts
+ * from a saved conversation.
+ */
+export function MemoryScreen() {
+  const [memories, setMemories] = useState<MemoryItem[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [text, setText] = useState("");
+  const [kind, setKind] = useState("fact");
+  const [tags, setTags] = useState("");
+  const [addError, setAddError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [query, setQuery] = useState("");
+  const [topK, setTopK] = useState("");
+  const [hits, setHits] = useState<MemoryItem[] | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [topic, setTopic] = useState("");
+  const [knowledge, setKnowledge] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [session, setSession] = useState("");
+  const [candidates, setCandidates] = useState<{ message: number; text: string }[] | null>(null);
+  const [messageNumber, setMessageNumber] = useState("");
+  const [promoteText, setPromoteText] = useState("");
+  const [promoteKind, setPromoteKind] = useState("fact");
+  const [promoteTags, setPromoteTags] = useState("");
+  const [promoteError, setPromoteError] = useState<string | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  async function load() {
+    try {
+      setMemories((await agentApi.memories()).memories);
+      setLoadError(null);
+    } catch (cause) {
+      setLoadError(errorText(cause));
+    }
+  }
+
+  useEffect(() => {
+    void load();
+    agentApi.sessions().then((result) => setSessions(result.sessions)).catch(() => setSessions([]));
+  }, []);
+
+  function changed(done: string) {
+    setMessage(done);
+    void load();
+  }
+
+  async function remember() {
+    setBusy(true);
+    setAddError(null);
+    try {
+      const result = await agentApi.addMemory(text, kind.trim() || undefined, tagList(tags));
+      setText("");
+      setTags("");
+      changed(`Remembered (${result.id}).`);
+    } catch (cause) {
+      setAddError(errorText(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function search() {
+    setSearchError(null);
+    try {
+      setHits((await agentApi.searchMemories(query, Number(topK) > 0 ? Number(topK) : undefined)).memories);
+    } catch (cause) {
+      setSearchError(errorText(cause));
+    }
+  }
+
+  async function promote(number: number) {
+    setPromoteError(null);
+    try {
+      const result = await agentApi.promoteMemory({
+        session,
+        message: number,
+        text: promoteText.trim() || undefined,
+        kind: promoteKind.trim() || undefined,
+        tags: tagList(promoteTags),
+      });
+      setPromoteText("");
+      changed(`Remembered message ${number} (${result.id}).`);
+    } catch (cause) {
+      setPromoteError(errorText(cause));
+    }
+  }
+
+  return (
+    <>
+      <TopBar title="Memory" subtitle="What the agent remembers for this profile" />
+      <div className="page" data-testid="memory-screen">
+        {message && <div className="notice notice--info" role="status">{message}</div>}
+
+        <Card title="Remember something">
+          <p className="card__note">Shared with the terminal CLI (lightagent memory). Runs recall these facts when relevant.</p>
+          <div className="field">
+            <label className="field__label" htmlFor="memory-text">Fact</label>
+            <textarea id="memory-text" className="input" rows={2} value={text} disabled={busy}
+              onChange={(event) => { setText(event.target.value); setAddError(null); }} />
+          </div>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <div className="field">
+              <label className="field__label" htmlFor="memory-kind">Kind</label>
+              <input id="memory-kind" className="input" list="memory-kinds" value={kind} disabled={busy}
+                onChange={(event) => setKind(event.target.value)} />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="memory-tags">Tags (comma-separated)</label>
+              <input id="memory-tags" className="input" value={tags} disabled={busy}
+                onChange={(event) => setTags(event.target.value)} />
+            </div>
+          </div>
+          <datalist id="memory-kinds">{KINDS.map((value) => <option key={value} value={value} />)}</datalist>
+          {addError && <div role="alert" style={{ fontSize: 11.5, color: "var(--danger)", marginTop: 4 }}>{addError}</div>}
+          <button type="button" className="btn" style={{ marginTop: 10 }} disabled={busy || !text.trim()}
+            onClick={() => void remember()}>Remember</button>
+        </Card>
+
+        <Card title="Search">
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+            <div className="field" style={{ flex: "1 1 240px" }}>
+              <label className="field__label" htmlFor="memory-query">Search memories</label>
+              <input id="memory-query" className="input" value={query} onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter" && query.trim()) void search(); }} />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="memory-top-k">Results (optional)</label>
+              <input id="memory-top-k" className="input" type="number" min={1} value={topK} style={{ maxWidth: 110 }}
+                onChange={(event) => setTopK(event.target.value)} />
+            </div>
+            <button type="button" className="btn" disabled={!query.trim()} onClick={() => void search()}>Search</button>
+          </div>
+          {searchError && <div role="alert" style={{ fontSize: 11.5, color: "var(--danger)", marginTop: 4 }}>{searchError}</div>}
+          {hits && (
+            <div data-testid="memory-hits" style={{ marginTop: 10 }}>
+              {hits.length === 0 ? <span className="muted">No relevant memories.</span> : (
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  {hits.map((hit) => <li key={hit.id}>({hit.kind}) {hit.text}</li>)}
+                </ul>
+              )}
+            </div>
+          )}
+        </Card>
+
+        <Card title="Memories">
+          {loadError && (
+            <div className="notice notice--warn" role="alert">
+              Memory is unavailable: {loadError}{" "}
+              <button type="button" className="btn" onClick={() => void load()}>Retry</button>
+            </div>
+          )}
+          {!memories && !loadError && <span className="muted">Loading memories…</span>}
+          {memories && memories.length === 0 && (
+            <Empty title="No memories" hint="Remember a fact above, or keep one from a conversation below." />
+          )}
+          {memories && memories.length > 0 && (
+            <>
+              <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 14 }}>
+                {memories.map((memory) => <MemoryRow key={`${memory.id}-${memory.updated_at ?? 0}`} memory={memory} onChanged={changed} />)}
+              </ul>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
+                {confirmClear ? (
+                  <>
+                    <button type="button" className="btn btn--danger"
+                      onClick={() => void agentApi.clearMemories().then(() => { setConfirmClear(false); changed("Every memory was forgotten."); })
+                        .catch((cause) => setMessage(errorText(cause)))}>
+                      {`Confirm: forget all ${memories.length}`}
+                    </button>
+                    <button type="button" className="btn" onClick={() => setConfirmClear(false)}>Keep my memories</button>
+                  </>
+                ) : (
+                  <button type="button" className="btn" onClick={() => setConfirmClear(true)}>Forget everything…</button>
+                )}
+              </div>
+            </>
+          )}
+        </Card>
+
+        <Card title="Working knowledge">
+          <p className="card__note">What the memories add up to, grouped by kind.</p>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+            <div className="field" style={{ flex: "1 1 240px" }}>
+              <label className="field__label" htmlFor="memory-topic">Topic (optional)</label>
+              <input id="memory-topic" className="input" value={topic} onChange={(event) => setTopic(event.target.value)} />
+            </div>
+            <button type="button" className="btn"
+              onClick={() => void agentApi.reflectMemories(topic.trim() || undefined)
+                .then((result) => setKnowledge(result.knowledge))
+                .catch((cause) => setKnowledge(errorText(cause)))}>
+              Show knowledge
+            </button>
+          </div>
+          {knowledge !== null && (
+            <pre data-testid="memory-knowledge" style={{ whiteSpace: "pre-wrap", marginTop: 10 }}>{knowledge || "Nothing yet."}</pre>
+          )}
+        </Card>
+
+        <Card title="From a conversation">
+          <p className="card__note">Keep a statement from a saved conversation, with where it came from.</p>
+          <div className="field">
+            <label className="field__label" htmlFor="memory-session">Conversation</label>
+            <select id="memory-session" className="input" value={session}
+              onChange={(event) => { setSession(event.target.value); setCandidates(null); }}>
+              <option value="">Choose a conversation</option>
+              {sessions.map((item) => <option key={item.id} value={item.id}>{item.title || item.id}</option>)}
+            </select>
+          </div>
+          <button type="button" className="btn" style={{ marginTop: 8 }} disabled={!session}
+            onClick={() => void agentApi.memoryCandidates(session)
+              .then((result) => setCandidates(result.candidates))
+              .catch((cause) => setPromoteError(errorText(cause)))}>
+            Suggest facts
+          </button>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 10 }}>
+            <div className="field" style={{ flex: "1 1 240px" }}>
+              <label className="field__label" htmlFor="memory-promote-text">Edited text (optional)</label>
+              <input id="memory-promote-text" className="input" value={promoteText}
+                onChange={(event) => setPromoteText(event.target.value)} />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="memory-promote-kind">Kind</label>
+              <input id="memory-promote-kind" className="input" list="memory-kinds" value={promoteKind}
+                onChange={(event) => setPromoteKind(event.target.value)} />
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="memory-promote-tags">Tags</label>
+              <input id="memory-promote-tags" className="input" value={promoteTags}
+                onChange={(event) => setPromoteTags(event.target.value)} />
+            </div>
+          </div>
+          {candidates && (
+            <div data-testid="memory-candidates" style={{ marginTop: 10 }}>
+              {candidates.length === 0 ? (
+                <span className="muted">No suggested facts. Any user message can still be kept by its number.</span>
+              ) : (
+                <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 8 }}>
+                  {candidates.map((candidate) => (
+                    <li key={candidate.message} style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                      <span style={{ flex: "1 1 240px", overflowWrap: "anywhere" }}>
+                        <strong>{candidate.message}.</strong> {candidate.text}
+                      </span>
+                      <button type="button" className="btn" onClick={() => void promote(candidate.message)}>
+                        {`Remember message ${candidate.message}`}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end", marginTop: 10 }}>
+            <div className="field">
+              <label className="field__label" htmlFor="memory-message">Message number</label>
+              <input id="memory-message" className="input" type="number" min={1} value={messageNumber} style={{ maxWidth: 120 }}
+                onChange={(event) => setMessageNumber(event.target.value)} />
+            </div>
+            <button type="button" className="btn" disabled={!session || !(Number(messageNumber) > 0)}
+              onClick={() => void promote(Number(messageNumber))}>Remember that message</button>
+          </div>
+          {promoteError && <div role="alert" style={{ fontSize: 11.5, color: "var(--danger)", marginTop: 4 }}>{promoteError}</div>}
+        </Card>
+      </div>
+    </>
+  );
+}
+=== replace frontend/src/App.tsx
+--- find
+import { ProfilesScreen } from "./screens/ProfilesScreen";
+--- with
+import { MemoryScreen } from "./screens/MemoryScreen";
+import { ProfilesScreen } from "./screens/ProfilesScreen";
+=== replace frontend/src/App.tsx
+--- find
+        <Route path="profiles" element={<ProfilesScreen />} />
+--- with
+        <Route path="memory" element={<MemoryScreen />} />
+        <Route path="profiles" element={<ProfilesScreen />} />
+=== replace frontend/src/components/Shell.tsx
+--- find
+import { ArrowLeft, Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Search, Settings, SquarePen, Users, Wrench } from "lucide-react";
+--- with
+import { ArrowLeft, BookOpen, Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Search, Settings, SquarePen, Users, Wrench } from "lucide-react";
+=== replace frontend/src/components/Shell.tsx
+--- find
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/profiles"); }}><span className="session-menu__item"><Users size={17} /> Profiles</span></MenuItem>
+--- with
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/memory"); }}><span className="session-menu__item"><BookOpen size={17} /> Memory</span></MenuItem>
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/profiles"); }}><span className="session-menu__item"><Users size={17} /> Profiles</span></MenuItem>
+=== replace frontend/src/screens/Agent.tsx
+--- find
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/tools"); }}><span className="session-menu__item"><Wrench size={17} /> Tools</span></MenuItem>
+--- with
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/tools"); }}><span className="session-menu__item"><Wrench size={17} /> Tools</span></MenuItem>
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/memory"); }}><span className="session-menu__item"><BookOpen size={17} /> Memory</span></MenuItem>
+=== write e2e/memory.mjs
+// The Memory screen against the real harness (D7-2): remember with kind
+// and tags; search; edit; the knowledge page; keep a seeded conversation's
+// suggested fact with its source, kind and tag; forget asks first; "Forget
+// everything" can be cancelled. crates/lightagent/tests/desktop_memory.rs
+// proves the API's memory is the CLI's.
+
+import { seededSession } from "./delivery.mjs";
+
+const PROBE = "Render probe prefers tabs for indentation";
+const EDITED = "Render probe prefers tabs for indentation everywhere";
+const SEED = "Remember that I prefer short answers in render probes";
+
+async function memoriesNow(base) {
+  const response = await fetch(`${base}/api/lightagent/v1/memories`);
+  return (await response.json()).memories ?? [];
+}
+
+async function until(probe, timeout = 15000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (await probe()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  return Boolean(await probe());
+}
+
+export async function checkMemory(browser, base, outDir) {
+  const failures = [];
+  const before = new Set((await memoriesNow(base)).map((memory) => memory.id));
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1600 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const step = async (name, body) => {
+    try {
+      await body();
+    } catch (err) {
+      failures.push(`memory: ${name}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+      await page.screenshot({ path: `${outDir}/memory-failed-${name.replace(/\W+/g, "-")}.png` }).catch(() => {});
+    }
+  };
+  const find = async (text) => (await memoriesNow(base)).find((memory) => memory.text === text);
+  try {
+    const sessionId = await seededSession(base, SEED);
+    await page.goto(`${base}/#/memory`);
+    await page.getByTestId("memory-screen").waitFor({ timeout: 15000 });
+
+    await step("remember with kind and tags", async () => {
+      await page.locator("#memory-text").fill(PROBE);
+      await page.locator("#memory-kind").fill("preference");
+      await page.locator("#memory-tags").fill("style, probe");
+      await page.getByRole("button", { name: "Remember", exact: true }).click();
+      if (!(await until(async () => Boolean(await find(PROBE))))) throw new Error("the memory was not saved");
+      const saved = await find(PROBE);
+      if (saved.kind !== "preference" || JSON.stringify(saved.tags) !== '["style","probe"]') {
+        throw new Error(`saved as ${JSON.stringify(saved)}`);
+      }
+      await page.getByTestId(`memory-${saved.id}`).waitFor({ timeout: 10000 });
+      await page.screenshot({ path: `${outDir}/memory-list.png`, fullPage: true });
+    });
+
+    await step("search finds it", async () => {
+      await page.locator("#memory-query").fill("tabs indentation");
+      await page.locator("#memory-top-k").fill("3");
+      await page.getByRole("button", { name: "Search", exact: true }).click();
+      await page.getByTestId("memory-hits").getByText(PROBE, { exact: false }).waitFor({ timeout: 10000 });
+    });
+
+    await step("edit saves", async () => {
+      const saved = await find(PROBE);
+      const row = page.getByTestId(`memory-${saved.id}`);
+      await row.getByRole("button", { name: `Edit: ${PROBE}` }).click();
+      await row.getByRole("textbox", { name: "Text" }).fill(EDITED);
+      await row.getByRole("button", { name: "Save", exact: true }).click();
+      if (!(await until(async () => Boolean(await find(EDITED))))) throw new Error("the edit was not saved");
+    });
+
+    await step("the knowledge page shows it", async () => {
+      await page.getByRole("button", { name: "Show knowledge" }).click();
+      await page.getByTestId("memory-knowledge").getByText("tabs", { exact: false }).waitFor({ timeout: 10000 });
+    });
+
+    await step("a conversation's fact is kept with its source", async () => {
+      await page.locator("#memory-session").selectOption(sessionId);
+      await page.getByRole("button", { name: "Suggest facts" }).click();
+      await page.getByTestId("memory-candidates").getByText(SEED, { exact: false }).waitFor({ timeout: 10000 });
+      await page.locator("#memory-promote-kind").fill("decision");
+      await page.locator("#memory-promote-tags").fill("probe");
+      await page.getByRole("button", { name: "Remember message 1" }).click();
+      const kept = async () => (await memoriesNow(base)).find((memory) => memory.source?.session_id === sessionId);
+      if (!(await until(async () => Boolean(await kept())))) throw new Error("the suggested fact was not kept");
+      const memory = await kept();
+      if (memory.kind !== "decision" || !memory.tags?.includes("probe") || memory.source.message_index !== 1) {
+        throw new Error(`kept as ${JSON.stringify(memory)}`);
+      }
+    });
+
+    await step("forget asks first", async () => {
+      const saved = await find(EDITED);
+      const row = page.getByTestId(`memory-${saved.id}`);
+      await row.getByRole("button", { name: `Forget: ${EDITED}` }).click();
+      await row.getByRole("button", { name: "Keep it" }).click();
+      if (!(await find(EDITED))) throw new Error("Keep it forgot it");
+      await row.getByRole("button", { name: `Forget: ${EDITED}` }).click();
+      await row.getByRole("button", { name: "Confirm: forget it" }).click();
+      if (!(await until(async () => !(await find(EDITED))))) throw new Error("Confirm did not forget it");
+    });
+
+    await step("forget everything can be cancelled", async () => {
+      const count = (await memoriesNow(base)).length;
+      await page.getByRole("button", { name: "Forget everything…" }).click();
+      await page.getByRole("button", { name: /^Confirm: forget all / }).waitFor({ timeout: 5000 });
+      await page.getByRole("button", { name: "Keep my memories" }).click();
+      if ((await memoriesNow(base)).length !== count) throw new Error("cancelling forgot memories");
+    });
+
+    if (errors.length) failures.push(`memory: page errors: ${errors.join("; ")}`);
+  } catch (err) {
+    failures.push(`memory: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  } finally {
+    await page.close();
+    // Leave the harness's memories as they were.
+    for (const memory of await memoriesNow(base).catch(() => [])) {
+      if (!before.has(memory.id)) {
+        await fetch(`${base}/api/lightagent/v1/memories/items/${encodeURIComponent(memory.id)}`, { method: "DELETE" }).catch(() => {});
+      }
+    }
+  }
+  return failures;
+}
+=== replace e2e/render.mjs
+--- find
+import { checkSkillImport } from "./skills.mjs";
+--- with
+import { checkSkillImport } from "./skills.mjs";
+import { checkMemory } from "./memory.mjs";
+=== replace e2e/render.mjs
+--- find
+  { name: "profiles", hash: "#/profiles", agentBacked: true, mustContain: "Saved profiles" },
+--- with
+  { name: "profiles", hash: "#/profiles", agentBacked: true, mustContain: "Saved profiles" },
+  { name: "memory", hash: "#/memory", agentBacked: true, mustContain: "Remember something" },
+=== replace e2e/render.mjs
+--- find
+  // Installs and removes an extension: after the routes above have rendered.
+--- with
+  // Adds and removes memories: after the routes above have rendered.
+  try {
+    failures.push(...(await checkMemory(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`memory: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Installs and removes an extension: after the routes above have rendered.
+=== replace desktop/e2e/runs.py
+--- find
+            ("skills", lambda: scenario_skills(host, cli)),
+--- with
+            ("skills", lambda: scenario_skills(host, cli)),
+            ("memory", lambda: scenario_memory(host, cli)),
+=== replace desktop/e2e/runs.py
+--- find
+def scenario_skills(host, cli):
+--- with
+def scenario_memory(host, cli):
+    """D7 through the host transport: a memory added through the host is
+    listed by the CLI; list, search and candidates through the host equal
+    the CLI's; a forget through the host is seen by the CLI."""
+    check = Checks("memory")
+
+    def cli_json(*args):
+        return json.loads(harness.run_cli(cli, "--json", *args))
+
+    status, added = host.fetch("POST", f"{API}/memories",
+                               {"text": "Host probe prefers tabs", "kind": "preference", "tags": ["host"]})
+    memory = (added or {}).get("id")
+    check.expect("added through the host", status == 200 and bool(memory), (status, added))
+    status, listed = host.fetch("GET", f"{API}/memories")
+    check.expect("the host lists what the CLI lists", status == 200 and listed == cli_json("memory", "list"),
+                 (status, listed))
+    status, hits = host.fetch("GET", f"{API}/memories/search?q=tabs&top_k=3")
+    check.expect("search through the host equals the CLI's",
+                 status == 200 and hits == cli_json("memory", "search", "tabs", "--top-k", "3"), (status, hits))
+    session = host.new_session()
+    status, found = host.fetch("GET", f"{API}/memories/candidates?session={session}")
+    check.expect("candidates through the host equal the CLI's",
+                 status == 200 and found == cli_json("memory", "candidates", session), (status, found))
+    status, gone = host.fetch("DELETE", f"{API}/memories/items/{memory}")
+    left = cli_json("memory", "list").get("memories", [])
+    check.expect("forgotten through the host, gone for the CLI",
+                 status == 200 and (gone or {}).get("removed") is True and all(m.get("id") != memory for m in left),
+                 (status, gone, left))
+    return check
+
+
+def scenario_skills(host, cli):
+=== end
