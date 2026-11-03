@@ -95,6 +95,8 @@ pub fn blocked_while_switching(operation: &str) -> bool {
             | "knowledge.clear"
             | "workers.assign"
             | "workers.revoke"
+            | "onboarding.set"
+            | "onboarding.remove"
     )
 }
 

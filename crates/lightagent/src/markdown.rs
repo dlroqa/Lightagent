@@ -2,11 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use lightagent_core::paths::{create_private_dir, write_private};
-
-const MAX_MARKDOWN_BYTES: u64 = 65_536;
-const ONBOARDING_NAME: &str = "user-onboarding";
-const ONBOARDING_MANIFEST: &str = r#"{"name":"user-onboarding","description":"Profile onboarding guidance","instructions_file":"ONBOARDING.md"}"#;
+use lightagent_extensions::onboarding;
 
 /// Recognize a standalone dropped Markdown path without mistaking an ordinary
 /// question mentioning a `.md` file for a drop.
@@ -121,94 +117,17 @@ fn decode_percent(input: &str) -> Result<String, String> {
 }
 
 pub(crate) fn read(path: &Path) -> Result<String, String> {
-    let metadata = std::fs::metadata(path)
-        .map_err(|e| format!("could not read Markdown file {}: {e}", path.display()))?;
-    if !metadata.is_file() {
-        return Err(format!("{} is not a regular file", path.display()));
-    }
-    if metadata.len() > MAX_MARKDOWN_BYTES {
-        return Err(format!(
-            "{} is too large (maximum {} KiB)",
-            path.display(),
-            MAX_MARKDOWN_BYTES / 1024
-        ));
-    }
-    std::fs::read_to_string(path)
-        .map_err(|e| format!("could not read Markdown file {}: {e}", path.display()))
+    onboarding::read(path)
 }
 
-/// Install or replace the active profile's onboarding bundle. The old bundle
-/// stays available until the new one is fully written and can be renamed in.
+/// Install or replace the active profile's onboarding bundle (the shared
+/// operation the API and the desktop use too).
 pub(crate) fn install_onboarding(source: &Path, profile_dir: &Path) -> Result<(), String> {
-    let body = read(source)?;
-    let root = profile_dir.join("extensions");
-    create_private_dir(&root).map_err(|e| e.to_string())?;
-    let id = lightagent_core::RunId::new();
-    let staging = profile_dir.join(format!(".onboarding-stage-{}", id.as_str()));
-    let backup = profile_dir.join(format!(".onboarding-backup-{}", id.as_str()));
-    let destination = root.join(ONBOARDING_NAME);
-    create_private_dir(&staging).map_err(|e| e.to_string())?;
-    let write_result = (|| {
-        write_private(
-            &staging.join("extension.json"),
-            ONBOARDING_MANIFEST.as_bytes(),
-        )
-        .map_err(|e| e.to_string())?;
-        write_private(&staging.join("ONBOARDING.md"), body.as_bytes())
-            .map_err(|e| e.to_string())?;
-        Ok::<(), String>(())
-    })();
-    if let Err(error) = write_result {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err(error);
-    }
-    let replacing = match std::fs::symlink_metadata(&destination) {
-        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
-            if std::fs::read_to_string(destination.join("extension.json"))
-                .ok()
-                .as_deref()
-                != Some(ONBOARDING_MANIFEST)
-            {
-                let _ = std::fs::remove_dir_all(&staging);
-                return Err("an unrelated extension already uses 'user-onboarding'".to_owned());
-            }
-            true
-        }
-        Ok(_) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err("existing onboarding bundle is not a regular directory".to_owned());
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(format!("could not inspect onboarding bundle: {error}"));
-        }
-    };
-    if replacing && let Err(error) = std::fs::rename(&destination, &backup) {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err(format!("could not prepare onboarding update: {error}"));
-    }
-    if let Err(error) = std::fs::rename(&staging, &destination) {
-        if replacing {
-            let _ = std::fs::rename(&backup, &destination);
-        }
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err(format!("could not install onboarding: {error}"));
-    }
-    if replacing {
-        let _ = std::fs::remove_dir_all(&backup);
-    }
-    Ok(())
+    onboarding::install(source, profile_dir)
 }
 
 pub(crate) fn remove_onboarding(profile_dir: &Path) -> Result<(), String> {
-    let root = profile_dir.join("extensions");
-    let manifest = std::fs::read_to_string(root.join(ONBOARDING_NAME).join("extension.json"))
-        .map_err(|e| format!("profile onboarding is not installed: {e}"))?;
-    if manifest != ONBOARDING_MANIFEST {
-        return Err("an unrelated extension uses 'user-onboarding'".to_owned());
-    }
-    lightagent_extensions::uninstall(ONBOARDING_NAME, &root)
+    onboarding::remove(profile_dir)
 }
 
 #[cfg(test)]

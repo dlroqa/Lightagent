@@ -43,6 +43,7 @@ use lightagent_core::{
     skill_dirs,
 };
 use lightagent_extensions::manage as extension_ops;
+use lightagent_extensions::onboarding;
 use lightagent_store::{
     Session, SessionId, SessionStore, SessionUpdateError, StoreError, StoredMessage, model_history,
 };
@@ -248,6 +249,12 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/lightagent/v1/extensions/{name}/enabled",
             axum::routing::put(set_extension_enabled),
+        )
+        .route(
+            "/api/lightagent/v1/onboarding",
+            get(get_onboarding)
+                .put(put_onboarding)
+                .delete(delete_onboarding),
         )
         .route("/api/lightagent/v1/mcp", get(get_mcp).put(put_mcp))
         .route("/api/lightagent/v1/mcp/servers", post(add_mcp_server))
@@ -3072,6 +3079,109 @@ fn extension_error(error: extension_ops::ManageError) -> Response {
         extension_ops::ManageError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (status, Json(json!({ "error": error.to_string() }))).into_response()
+}
+
+/// The profile this runtime serves: its directory, where its onboarding
+/// guidance lives.
+fn onboarding_dir(state: &AppState) -> Result<std::path::PathBuf, Box<Response>> {
+    let paths = extension_paths(state)?;
+    let profile = ProfileId::new(&state.session_profile)
+        .map_err(|error| Box::new(internal(&error.to_string())))?;
+    Ok(ProfileStore::new(paths.root())
+        .handle(&profile)
+        .dir()
+        .to_path_buf())
+}
+
+fn onboarding_view(text: Option<String>) -> Response {
+    Json(json!({ "installed": text.is_some(), "text": text })).into_response()
+}
+
+fn onboarding_conflict(error: String) -> Response {
+    (StatusCode::CONFLICT, Json(json!({ "error": error }))).into_response()
+}
+
+/// The chat's `/onboard`: the guidance installed for the profile this
+/// runtime serves, if any.
+async fn get_onboarding(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let dir = match onboarding_dir(&state) {
+        Ok(dir) => dir,
+        Err(response) => return *response,
+    };
+    match onboarding::current(&dir) {
+        Ok(text) => onboarding_view(text),
+        Err(error) => onboarding_conflict(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct OnboardingBody {
+    path: String,
+}
+
+/// `/onboard <file.md>`: install or replace the guidance from a Markdown file
+/// on this machine, and turn it on as the chat does. New runs use it.
+async fn put_onboarding(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<OnboardingBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    // The server's working folder means nothing to a client.
+    let source = std::path::Path::new(body.path.trim());
+    if !source.is_absolute() {
+        return bad_request("the guidance file must be an absolute path");
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let dir = match onboarding_dir(&state) {
+        Ok(dir) => dir,
+        Err(response) => return *response,
+    };
+    if let Err(error) = onboarding::current(&dir) {
+        return onboarding_conflict(error);
+    }
+    if let Err(error) = onboarding::install(source, &dir) {
+        return bad_request(&error);
+    }
+    match store.update(None, |config| {
+        onboarding::enable(config);
+        Ok::<(), String>(())
+    }) {
+        Ok(_) => {}
+        Err(UpdateError::Change(error)) => return internal(&error),
+        Err(UpdateError::Store(error)) => return config_error(error),
+    }
+    match onboarding::current(&dir) {
+        Ok(text) => onboarding_view(text),
+        Err(error) => internal(&error),
+    }
+}
+
+/// `/onboard remove`.
+async fn delete_onboarding(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let dir = match onboarding_dir(&state) {
+        Ok(dir) => dir,
+        Err(response) => return *response,
+    };
+    match onboarding::current(&dir) {
+        Ok(None) => return not_found("no guidance is installed for this profile"),
+        Err(error) => return onboarding_conflict(error),
+        Ok(Some(_)) => {}
+    }
+    match onboarding::remove(&dir) {
+        Ok(()) => onboarding_view(None),
+        Err(error) => internal(&error),
+    }
 }
 
 /// `lightagent extensions list`, from the same shared operation.

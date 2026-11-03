@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
 
-import { agentApi, type AgentProfileDetail, type ProfileCatalog } from "../api/agent";
+import { agentApi, type AgentProfileDetail, type Onboarding, type ProfileCatalog } from "../api/agent";
 import { invoke, isDesktop } from "../api/transport";
 import { Card } from "../components/Card";
 import { TopBar } from "../components/Shell";
@@ -92,6 +92,7 @@ export function ProfilesScreen() {
           )}
         </Card>
         {selected && <ProfileDetail id={selected} onChanged={() => void load()} />}
+        <GuidanceCard active={active} />
         <CreateProfile
           onCreated={(id) => {
             setNotice(`Created profile '${id}'.`);
@@ -305,6 +306,137 @@ function ProfileDetail({ id, onChanged }: { id: string; onChanged: () => void })
       {error && (
         <p className="form-error" role="alert">
           {error}
+        </p>
+      )}
+    </Card>
+  );
+}
+
+/**
+ * The terminal chat's `/onboard <file.md>` and `/onboard remove`, for the
+ * profile this runtime serves: a Markdown file on this machine becomes the
+ * profile's onboarding guidance, added to the agent's instructions from the
+ * next run. Remove asks first.
+ */
+function GuidanceCard({ active }: { active: string | null }) {
+  const [guidance, setGuidance] = useState<Onboarding | null>(null);
+  const [path, setPath] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const ids = { path: useId(), hint: useId() };
+
+  const load = useCallback(async () => {
+    try {
+      setGuidance(await agentApi.onboarding());
+      setError(null);
+    } catch (cause) {
+      setError(message(cause));
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load, active]);
+
+  const install = async (event: FormEvent) => {
+    event.preventDefault();
+    const file = path.trim();
+    if (!file) {
+      setError("Enter the absolute path of a Markdown file.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      setGuidance(await agentApi.setOnboarding(file));
+      setNotice("Installed the guidance. New runs use it.");
+      setPath("");
+    } catch (cause) {
+      setError(message(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      setGuidance(await agentApi.removeOnboarding());
+      setNotice("Removed the guidance. New runs no longer use it.");
+    } catch (cause) {
+      setError(message(cause));
+    } finally {
+      setBusy(false);
+      setConfirming(false);
+    }
+  };
+
+  return (
+    <Card title="Guidance">
+      <p className="card__note">
+        The terminal chat&apos;s <code>/onboard</code>: a Markdown file becomes{" "}
+        {active ? <>profile <code>{active}</code>&apos;s</> : "this profile's"} onboarding guidance, added to the
+        agent&apos;s instructions from the next run.
+      </p>
+      {guidance?.installed ? (
+        <details className="profile-guidance" data-testid="guidance-current">
+          <summary>Installed guidance</summary>
+          <pre>{guidance.text}</pre>
+        </details>
+      ) : guidance ? (
+        <p className="muted" data-testid="guidance-none">No guidance is installed.</p>
+      ) : null}
+      <form className="profile-form" onSubmit={(event) => void install(event)} noValidate>
+        <label htmlFor={ids.path}>Markdown file (absolute path on this machine)</label>
+        <input
+          id={ids.path}
+          className="input"
+          value={path}
+          disabled={busy}
+          autoComplete="off"
+          spellCheck={false}
+          aria-describedby={ids.hint}
+          placeholder="/home/me/notes/onboarding.md"
+          onChange={(event) => setPath(event.target.value)}
+        />
+        <p id={ids.hint} className="card__note">
+          At most 64 KiB of UTF-8 Markdown. Installing replaces any guidance already there; the file itself is
+          left where it is.
+        </p>
+        <div className="profile-form__row">
+          <button type="submit" className="btn btn--primary" disabled={busy}>
+            {guidance?.installed ? "Replace guidance" : "Install guidance"}
+          </button>
+          {guidance?.installed && !confirming && (
+            <button type="button" className="btn" disabled={busy} onClick={() => setConfirming(true)}>
+              Remove guidance…
+            </button>
+          )}
+          {confirming && (
+            <>
+              <button type="button" className="btn btn--danger" disabled={busy} onClick={() => void remove()}>
+                Confirm: remove guidance
+              </button>
+              <button type="button" className="btn" disabled={busy} onClick={() => setConfirming(false)}>
+                Keep it
+              </button>
+            </>
+          )}
+        </div>
+      </form>
+      {error && (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      )}
+      {notice && (
+        <p className="notice notice--info" role="status">
+          {notice}
         </p>
       )}
     </Card>

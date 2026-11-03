@@ -1558,11 +1558,7 @@ pub async fn run(
                         if result.is_ok() {
                             ConfigStore::at(&paths)
                                 .update(None, |updated| {
-                                    updated.extensions.enabled = true;
-                                    updated
-                                        .extensions
-                                        .disabled
-                                        .retain(|name| name != "user-onboarding");
+                                    lightagent_extensions::onboarding::enable(updated);
                                     Ok::<(), String>(())
                                 })
                                 .map_err(|e| e.to_string())?;

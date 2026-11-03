@@ -14,6 +14,7 @@ import { checkConfigSections } from "./config-sections.mjs";
 import { checkSetupSections } from "./setup-sections.mjs";
 import { checkSettingsStates } from "./settings.mjs";
 import { checkExtensions } from "./extensions.mjs";
+import { checkOnboarding } from "./onboarding.mjs";
 import { checkMcp } from "./mcp.mjs";
 import { checkToolCatalog } from "./tools.mjs";
 import { checkSkillImport } from "./skills.mjs";
@@ -459,6 +460,12 @@ async function main() {
     failures.push(...(await checkExtensions(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`extensions: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Installs, replaces and removes profile guidance; puts back what was there.
+  try {
+    failures.push(...(await checkOnboarding(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`onboarding: ${err instanceof Error ? err.message : String(err)}`);
   }
   // Imports and removes a skills pack: after the routes above have rendered.
   try {
