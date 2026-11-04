@@ -313,6 +313,7 @@ def scripts(provider):
         "native-stop": hold("native-stop", " never."),
         "native-close": hold("native-close", " and kept working."),
         "native-quit": hold("native-quit", " never."),
+        "remote": lambda p, turn, index: [("text", "Answered remotely."), ("finish", "stop")],
     })
 
 
@@ -735,6 +736,80 @@ def scenario_conversation_profile(view, host, provider, cli):
     return check
 
 
+REMOTE_KEY = "la-native-remote-" + __import__("secrets").token_urlsafe(18)
+
+
+def scenario_remote(view, host, provider, cli):
+    """Remote mode in the rendered window: the Settings card refuses a plain
+    http address elsewhere and says why; connects to a keyed server on this
+    machine (its own home), after which the scope badge names it, the
+    bundled runtime is stopped and a conversation runs there; Disconnect
+    returns to this computer's runtime and the badge goes."""
+    import tempfile
+
+    check = Checks("remote_mode")
+    remote_home = tempfile.mkdtemp(prefix="lightagent-native-remote-")
+    env = dict(os.environ, LIGHTAGENT_HOME=remote_home, LIGHTAGENT_API_KEY=REMOTE_KEY)
+    for name in ("LIGHTAGENT_DESKTOP_E2E_DRIVER", "LIGHTAGENT_DESKTOP_E2E_REPORT"):
+        env.pop(name, None)
+    subprocess.run([cli, "config", "set", "inference.base_url", provider.url], env=env, check=True,
+                   capture_output=True, timeout=60)
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    server = subprocess.Popen([cli, "serve", "--host", "127.0.0.1", "--port", str(port), "--key-env", "LIGHTAGENT_API_KEY"],
+                              env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    origin = f"http://127.0.0.1:{port}"
+
+    def up():
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=1).close()
+            return True
+        except OSError:
+            return False
+
+    try:
+        harness.wait_until(up, timeout=60)
+        view.go("Settings", "#/settings")
+        refused = view.js("""
+          fill(await need("the server address", () => document.querySelector("#remote-url")), "http://192.0.2.10:8787");
+          press(await need("Connect", () => one("button", "Connect")));
+          return await until(() => all("alert").map((el) => nameOf(el)).find((s) => /only for this computer/.test(s)) || null, 20000);""", 30)
+        check.expect("a plain-http address elsewhere is refused before anything is sent, and the card says why", bool(refused), refused)
+        view.js(T('fill(document.querySelector("#remote-url"), $ORIGIN); await sleep(200); press(one("button", "Connect")); return true;', ORIGIN=origin))
+        connected = harness.wait_until(lambda: host.call("status").get("mode") == "remote", timeout=60)
+        time.sleep(1.5)
+        view.wait_ui()
+        badge = view.js('return await until(() => all("status").map((el) => nameOf(el)).find((s) => s.startsWith("Remote ·")) || null, 15000);')
+        view.shot("remote-connected")
+        check.expect("Connect serves the window from the remote and the scope badge names it",
+                     bool(connected) and f"127.0.0.1:{port}" in (badge or ""), (host.call("status").get("remote"), badge))
+        check.expect("the bundled runtime is stopped while remote",
+                     harness.wait_until(lambda: not harness.runtimes(host.process.pid), timeout=20))
+        view.new_chat()
+        view.send("[e2e:remote] Hello from the window.")
+        answered = view.wait_text("Answered remotely.") and view.idle()
+        check.expect("a conversation in the window runs on the remote server",
+                     answered and saved_with(remote_home, "[e2e:remote]") is not None)
+        check.expect("nothing of it is kept on this computer", saved_with(os.environ["LIGHTAGENT_HOME"], "[e2e:remote]") is None)
+        view.go("Settings", "#/settings")
+        view.js('press(await need("Disconnect", () => one("button", "Disconnect and use this computer"))); return true;')
+        back = harness.wait_until(lambda: (lambda s: s.get("mode") == "local" and s["state"] == "ready")(host.call("status")), timeout=90)
+        time.sleep(1.5)
+        view.wait_ui()
+        gone = view.js('return !all("status").some((el) => nameOf(el).startsWith("Remote ·"));')
+        view.shot("remote-disconnected")
+        check.expect("Disconnect returns to this computer's runtime and the badge goes", bool(back) and gone, host.call("status").get("mode"))
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            server.kill()
+    check.seeds = [REMOTE_KEY]
+    return check
+
+
 def scenario_switch(view, host):
     check = Checks("profile_switch")
     original = host.call("status")["profile"]
@@ -899,6 +974,9 @@ def main():
         key_dir = tempfile.mkdtemp(prefix="lightagent-native-credential-key-")
         harness.run_cli(cli, "remote-credential", "keygen", os.path.join(key_dir, "credential.key"))
         os.environ["LIGHTAGENT_CREDENTIAL_KEY_FILE"] = os.path.join(key_dir, "credential.key")
+        # Started with the remote server's key, as a person would start it
+        # (remote mode reads it; the bundled runtime must not get it).
+        os.environ["LIGHTAGENT_API_KEY"] = REMOTE_KEY
     env = dict(os.environ, LIGHTAGENT_DESKTOP_E2E_DRIVER="1",
                LIGHTAGENT_DESKTOP_E2E_REPORT=os.path.join(out, f"report-{mode}.txt"))
     host = harness.Host(command, env, os.path.join(out, f"driver-{mode}.log"))
@@ -929,6 +1007,7 @@ def main():
                 ("secret_input", lambda: scenario_secret_input(view, host, home, notes)),
                 ("narrow", lambda: scenario_narrow(view, host)),
                 ("conversation_profile", lambda: scenario_conversation_profile(view, host, provider, cli)),
+                ("remote_mode", lambda: scenario_remote(view, host, provider, cli)),
                 ("profile_switch", lambda: scenario_switch(view, host)),
                 ("close_with_runs", lambda: scenario_close(view, host, provider)),
                 # Near the end: the host restarts a crashed runtime at most once a minute.

@@ -9,6 +9,7 @@
 mod contract;
 #[cfg(feature = "e2e-hooks")]
 mod e2e_driver;
+mod remote;
 mod secret;
 mod sidecar;
 mod sse;
@@ -56,6 +57,9 @@ enum Runtime {
     /// Another Lightagent Desktop already owns this app's data; this window
     /// starts no runtime of its own.
     Duplicate,
+    /// Remote mode (remote.rs): a server elsewhere serves the window, and the
+    /// bundled runtime is stopped.
+    Remote(remote::Endpoint),
 }
 
 struct Host {
@@ -114,7 +118,13 @@ impl Host {
                 Err("the runtime version does not match this app".to_owned())
             }
             Runtime::Duplicate => Err("another Lightagent window owns this data".to_owned()),
+            Runtime::Remote(endpoint) => Ok((endpoint.origin.clone(), endpoint.authorization())),
         }
+    }
+
+    /// The window is served by a remote server (remote.rs).
+    fn is_remote(&self) -> bool {
+        matches!(&*lock(&self.runtime), Runtime::Remote(_))
     }
 
     fn stop_runtime(&self) {
@@ -171,6 +181,10 @@ struct RuntimeStatus {
     profile: Option<String>,
     capabilities: Vec<String>,
     close_requested: bool,
+    /// `local` (the bundled runtime) or `remote`.
+    mode: &'static str,
+    /// The remote server's origin, in remote mode.
+    remote: Option<String>,
 }
 
 #[tauri::command]
@@ -187,6 +201,8 @@ fn status(host: &Host) -> RuntimeStatus {
         profile: None,
         capabilities: Vec::new(),
         close_requested: host.close_requested.load(Ordering::Acquire),
+        mode: "local",
+        remote: None,
     };
     match &*lock(&host.runtime) {
         Runtime::Starting => {}
@@ -206,6 +222,14 @@ fn status(host: &Host) -> RuntimeStatus {
                 "this app needs runtime {expected}; the bundled runtime reported {found}"
             ));
             status.runtime_version = Some(found.clone());
+        }
+        Runtime::Remote(endpoint) => {
+            status.state = "ready";
+            status.mode = "remote";
+            status.remote = Some(endpoint.origin.clone());
+            status.runtime_version = Some(endpoint.version.clone());
+            status.profile = endpoint.profile.clone();
+            status.capabilities = endpoint.capabilities.clone();
         }
         Runtime::Duplicate => {
             status.state = "duplicate";
@@ -257,6 +281,12 @@ fn runtime_restart(host: tauri::State<'_, Arc<Host>>) -> Result<(), String> {
         .map_err(|_| "a profile switch or runtime restart is already in progress".to_owned())?;
     let previous = {
         let mut runtime = lock(&host.runtime);
+        if matches!(*runtime, Runtime::Remote(_)) {
+            return Err(
+                "connected to a remote server: disconnect to use this computer's runtime"
+                    .to_owned(),
+            );
+        }
         if matches!(*runtime, Runtime::Starting | Runtime::Duplicate) {
             return Err("the runtime cannot be restarted right now".to_owned());
         }
@@ -404,10 +434,14 @@ async fn forward(
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body);
     }
-    let response = request
-        .send()
-        .await
-        .map_err(|error| format!("the runtime did not answer: {}", error.without_url()))?;
+    let response = request.send().await.map_err(|error| {
+        let who = if host.is_remote() {
+            "the remote server"
+        } else {
+            "the runtime"
+        };
+        format!("{who} did not answer: {}", error.without_url())
+    })?;
     let status = response.status().as_u16();
     let content_type = response
         .headers()
@@ -427,6 +461,23 @@ async fn forward(
         content_type,
         body,
     })
+}
+
+/// Serve the window from a remote Lightagent server (see [`remote`]).
+#[tauri::command]
+async fn remote_connect(
+    app: tauri::AppHandle,
+    host: tauri::State<'_, Arc<Host>>,
+    url: String,
+    source: String,
+) -> Result<remote::Outcome, String> {
+    remote::connect(host.inner(), &app, url, source).await
+}
+
+/// Leave remote mode and start this computer's runtime again.
+#[tauri::command]
+async fn remote_disconnect(host: tauri::State<'_, Arc<Host>>) -> Result<(), String> {
+    remote::disconnect(host.inner()).await
 }
 
 /// Add or rotate a remote credential with a secret the host reads from a
@@ -834,8 +885,12 @@ fn main() {
             std::process::exit(1);
         }
     };
-    // Loopback only: never through a proxy from the environment, and never
-    // following a redirect that would carry the credential elsewhere.
+    // TLS for remote mode, as the runtime has it: building any client panics
+    // without a provider, so ring is installed first (no cmake, no OpenSSL).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    // The loopback runtime, or the remote server the person named: never
+    // through a proxy from the environment, and never following a redirect
+    // that would carry the credential elsewhere.
     let http = match reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -878,6 +933,8 @@ fn main() {
         api_events_poll,
         api_unsubscribe,
         remote_credential_secret,
+        remote_connect,
+        remote_disconnect,
         e2e_note,
         e2e_driver::e2e_reply
     ]);
@@ -894,6 +951,8 @@ fn main() {
         api_events_poll,
         api_unsubscribe,
         remote_credential_secret,
+        remote_connect,
+        remote_disconnect,
         e2e_note
     ]);
     let app = builder
@@ -951,7 +1010,8 @@ fn main() {
                 return;
             };
             let host = Arc::clone(host.inner());
-            if host.connection().is_err() {
+            // A remote server's runs continue there; closing stops nothing.
+            if host.connection().is_err() || host.is_remote() {
                 return;
             }
             api.prevent_close();

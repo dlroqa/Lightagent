@@ -377,6 +377,12 @@ jobs:
           export LIGHTAGENT_HOME="$RUNNER_TEMP/runs-home"
           xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- \
             python desktop/e2e/runs.py "$RUNNER_TEMP/runs-e2e" target/debug/lightagent -- desktop/target/debug/lightagent-desktop
+      - name: Remote mode (a keyed server; refusals, no fallback, reconnect, key isolation)
+        if: success() || failure()
+        run: |
+          export LIGHTAGENT_HOME="$RUNNER_TEMP/remote-local-home"
+          xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- \
+            python desktop/e2e/remote.py "$RUNNER_TEMP/remote-e2e" target/debug/lightagent -- desktop/target/debug/lightagent-desktop
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -385,6 +391,7 @@ jobs:
           path: |
             ${{ runner.temp }}/switch-e2e/
             ${{ runner.temp }}/runs-e2e/
+            ${{ runner.temp }}/remote-e2e/
 
   native:
     name: desktop native WebView (${{ matrix.label }}, e2e hooks)

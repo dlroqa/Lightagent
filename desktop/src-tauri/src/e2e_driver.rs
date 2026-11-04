@@ -127,6 +127,13 @@ enum Op {
         #[serde(default = "log_limit")]
         limit: usize,
     },
+    /// The window's `remote_connect` command.
+    RemoteConnect {
+        url: String,
+        source: String,
+    },
+    /// The window's `remote_disconnect` command.
+    RemoteDisconnect,
 }
 
 fn log_limit() -> usize {
@@ -265,6 +272,14 @@ async fn run(host: &Arc<Host>, op: Op) -> Result<Value, String> {
         Op::SecretInput { target, fields } => {
             let app = APP.get().ok_or("the app is not running")?.clone();
             json!(crate::secret::submit(host, &app, target, fields).await?)
+        }
+        Op::RemoteConnect { url, source } => {
+            let app = APP.get().ok_or("the app is not running")?.clone();
+            json!(crate::remote::connect(host, &app, url, source).await?)
+        }
+        Op::RemoteDisconnect => {
+            crate::remote::disconnect(host).await?;
+            Value::Null
         }
     })
 }
