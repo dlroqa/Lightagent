@@ -19,6 +19,8 @@ name: source-edit
 #   --- with
 #   <lines>
 #   === write <path>                    (create or replace the whole file)
+#   === lock <. | desktop>               (resolve that workspace's Cargo.lock on the
+#                                        runner, minimally, after the edits)
 #   <lines>
 #   === end
 
@@ -67,7 +69,7 @@ jobs:
           lines = open(req, encoding="utf-8").read().split("\n")
           if lines and lines[-1] == "":
               lines.pop()
-          ops, message, i = [], None, 0
+          ops, locks, message, i = [], [], None, 0
           def block(stop):
               global i
               out = []
@@ -100,11 +102,16 @@ jobs:
                   ops.append(("replace", path, find, repl, count))
               elif line.startswith("=== write "):
                   ops.append(("write", line[len("=== write "):].strip(), block(["=== "]), None, None))
+              elif line.startswith("=== lock "):
+                  where = line[len("=== lock "):].strip()
+                  if where not in (".", "desktop"):
+                      sys.exit(f"lock: only . or desktop, not {where!r}")
+                  locks.append(where)
               elif line == "=== end":
                   break
               else:
                   sys.exit(f"unknown directive {line!r}")
-          if not message or not ops:
+          if not message or not (ops or locks):
               sys.exit("a request needs a message and at least one edit")
           touched = []
           for kind, path, a, b, count in ops:
@@ -119,10 +126,28 @@ jobs:
                       sys.exit(f"replace in {path}: expected {count} occurrence(s), found {found}")
                   open(full, "w", encoding="utf-8", newline="").write(text.replace(a, b))
               touched.append(path)
+          touched += [os.path.normpath(os.path.join(where, "Cargo.lock")) for where in locks]
+          open(os.environ["RUNNER_TEMP"] + "/locks", "w").write("".join(where + "\n" for where in locks))
           open(os.environ["RUNNER_TEMP"] + "/message", "w", encoding="utf-8").write(message)
           open(os.environ["RUNNER_TEMP"] + "/touched", "w").write("\n".join(sorted(set(touched))) + "\n")
           print("applied", len(ops), "edit(s) to", len(set(touched)), "file(s)")
           PY
+      - name: Resolve the lockfiles the request asks for (minimal update)
+        working-directory: src
+        run: |
+          [ -s "$RUNNER_TEMP/locks" ] || exit 0
+          rustup show >/dev/null
+          while read -r where; do
+            [ -n "$where" ] || continue
+            cargo metadata --format-version 1 --manifest-path "$where/Cargo.toml" > /dev/null
+            {
+              echo "## Lockfile $where/Cargo.lock"
+              echo '```'
+              git diff --stat -- "$where/Cargo.lock"
+              git diff -U0 -- "$where/Cargo.lock" | grep -E '^[+-](name|version|source) = ' || true
+              echo '```'
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+          done < "$RUNNER_TEMP/locks"
       - name: Format the touched Rust files
         working-directory: src
         run: |
