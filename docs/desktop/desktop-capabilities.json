@@ -117,7 +117,7 @@
    "not-applicable": 34
   },
   "parity_denominator": 222,
-  "parity_implemented": 219,
+  "parity_implemented": 222,
   "pending_decision_rows": 0,
   "not_counted_duplicates": 26
  },
@@ -3149,14 +3149,14 @@
    "reason": null,
    "counts_toward_parity": true,
    "duplicate_of": null,
-   "ui": "Backend-only secret channel (host passes bytes to the sidecar; renderer never holds them)",
-   "backend": "extract: remote_credentials",
+   "ui": "Remote credentials: Add with a secret file chosen here (native picker; the host reads the file, the window never holds the secret)",
+   "backend": "api: POST /remote-credentials with a secret accepted only from the desktop host (FromDesktop); host secret.rs",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Host-side secret input (owner decision 2026-11-03): the host opens the OS picker (GTK, NSOpenPanel, IFileOpenDialog), reads the file and sends the secret in the request; the contract marks secret host_only_body, so the window's own request with one is refused; another local operator must name a file. Cancel and unreadable, non-text, empty, multi-line or oversized files store nothing and say why; the chosen file is never deleted or changed. Backend desktop_secret_input.rs, host units, host runs.py secret_input (seeded secrets absent from answers, the home, the diagnostics bundle and the driver log), native native.py secret_input on all four targets, the real picker answered through OS input (row 59)",
+   "tested_sha": "71a929c822cff87ed21fb30aa94d8a45f8feda9f",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41847409624 (desktop); https://github.com/dlroqa/Lightagent/actions/runs/41847409491 (check)"
   },
   {
    "id": "cli.remote-credential.rotate",
@@ -3237,14 +3237,14 @@
    "reason": null,
    "counts_toward_parity": true,
    "duplicate_of": null,
-   "ui": "Backend-only secret channel",
-   "backend": "extract: remote_credentials",
+   "ui": "Remote credentials: Choose a file for <grant> (native picker; the host reads the file)",
+   "backend": "api: POST /remote-credentials/{id}/rotate with a secret accepted only from the desktop host; host secret.rs",
    "permission": "local-operator-only",
    "data_scope": "home",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "As the add row: the rotation's new secret is read by the host from the file the person picks natively; version 2 recorded; the window and every log, answer and file of the home are free of it (backend desktop_secret_input.rs, host runs.py secret_input, native native.py secret_input) (row 59)",
+   "tested_sha": "71a929c822cff87ed21fb30aa94d8a45f8feda9f",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41847409624 (desktop); https://github.com/dlroqa/Lightagent/actions/runs/41847409491 (check)"
   },
   {
    "id": "cli.remote-credential.revoke",
@@ -6255,14 +6255,14 @@
    "reason": null,
    "counts_toward_parity": true,
    "duplicate_of": null,
-   "ui": "Remote mode: endpoint key (stored by host, never in renderer)",
-   "backend": "sidecar process environment",
+   "ui": "Settings: Remote server (address; key from LIGHTAGENT_API_KEY or a key file chosen here); the Remote scope badge",
+   "backend": "host remote.rs against lightagent serve --key-env LIGHTAGENT_API_KEY; GET /api/lightagent/v1/server",
    "permission": "local-operator",
    "data_scope": "process",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Remote mode (row 60): the host holds the key (its own LIGHTAGENT_API_KEY or a key file it reads), never the window or the bundled runtime (removed from its environment); sent only over https or to this computer, no proxy, no redirect followed (trap saw no request); a version, protocol or service mismatch, a wrong key and a closed port are refused naming why, this computer's runtime still in use; connected, the bundled runtime is stopped and runs go to the remote only; the remote down fails requests with its error and nothing runs here; reconnect and disconnect. Backend desktop_server_info.rs, host units, host remote.py, native native.py remote_mode (the Settings card and badge) on all four targets",
+   "tested_sha": "71a929c822cff87ed21fb30aa94d8a45f8feda9f",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41847409624 (desktop); https://github.com/dlroqa/Lightagent/actions/runs/41847409491 (check)"
   },
   {
    "id": "env.LIGHTAGENT_CREDENTIAL_KEY",

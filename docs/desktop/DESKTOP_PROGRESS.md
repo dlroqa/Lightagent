@@ -2071,3 +2071,16 @@ Earlier order (DESKTOP_CLAUDE_PROMPT.md §4), kept for reference:
 2. **D4d–e:** providers, models, protected credentials and endpoint checks;
    then workspaces.
 3. **D5–D10,** in the plan's dependency order.
+
+## Rows 58-63 — D8, D9 and the D10 review (2026-11-04, owner `a0fb357c`)
+
+The results, per target, with every gap: [DESKTOP_D8_D9_REPORT.md](DESKTOP_D8_D9_REPORT.md).
+Heads and the merge strategy: [DESKTOP_MERGE_ORDER.md](DESKTOP_MERGE_ORDER.md) rows 58-63.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-04 | D8a native: first runs drove the real WebViews; found the Settings labels, contrast and the close-question remount (fixed) | `0c75cda` | desktop https://github.com/dlroqa/Lightagent/actions/runs/41846351836, check https://github.com/dlroqa/Lightagent/actions/runs/41846351597 |
+| 2026-11-04 | D8b secret input; the real pickers answered by OS input on every target | `a85d6fa` | check https://github.com/dlroqa/Lightagent/actions/runs/41847402711 |
+| 2026-11-04 | D8c remote mode (host TLS via the source-edit `=== lock` directive; 32 crates added, none removed); D8a-D8c all green, 75 native checks per target | `71a929c` | desktop https://github.com/dlroqa/Lightagent/actions/runs/41847409624, check https://github.com/dlroqa/Lightagent/actions/runs/41847409491 |
+| 2026-11-04 | D8d browser keyboard and axe | `248e1db` | check https://github.com/dlroqa/Lightagent/actions/runs/41847413678 |
+| 2026-11-04 | D9 installers and supply chain; 15 advisories in Cargo.lock updated (`=== update`) | `cf1b2b3` | check https://github.com/dlroqa/Lightagent/actions/runs/41848860574, desktop https://github.com/dlroqa/Lightagent/actions/runs/41848860903 |
