@@ -1083,9 +1083,7 @@ pub async fn run_desktop(host: String, port: u16, profile: Option<String>) -> Re
         "version": crate::VERSION,
         "addr": bound.to_string(),
         "profile": active.as_str(),
-        "capabilities": [
-            "runs", "sessions", "approvals", "settings", "tools", "skills", "workers", "provider", "jev"
-        ],
+        "capabilities": lightagent_api::SERVER_CAPABILITIES,
     });
     {
         use std::io::Write as _;

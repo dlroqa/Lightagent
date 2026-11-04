@@ -411,6 +411,46 @@ fn hermes_home_names_the_source_and_lightagent_home_the_destination() {
         let runtime = start(&home, &empty);
         let (status, refused) = post(&runtime, &import, json!({"dry_run": true}));
         assert_eq!(status, 400, "{refused}");
+        // The error as it reads today: no Hermes home at the empty path.
+        assert!(
+            refused
+                .to_string()
+                .contains("no Hermes home at  (pass --from <dir>)"),
+            "{refused}"
+        );
+        let (succeeded, by_cli) = cli_import(&home, &empty, &["--dry-run"]);
+        assert!(
+            !succeeded,
+            "the CLI refuses an empty HERMES_HOME too: {by_cli}"
+        );
+        // A folder given still comes first, past the unusable variable.
+        let (status, given) = post(
+            &runtime,
+            &import,
+            json!({"from": explicit, "dry_run": true}),
+        );
+        assert_eq!(status, 200, "{given}");
+        assert_eq!(given["hermes_home"], arg(&explicit), "{given}");
         drop(runtime);
     }
+
+    // A HERMES_HOME naming a file, not a folder, is refused as a missing one
+    // is, and a folder given comes first there too.
+    let file = scratch("hermes-file").join("not-a-folder");
+    std::fs::write(&file, "not a Hermes home\n").expect("file");
+    let as_file = [("HERMES_HOME", file.as_path()), ("HOME", user.as_path())];
+    let runtime = start(&home, &as_file);
+    let (status, refused) = post(&runtime, &import, json!({"dry_run": true}));
+    assert_eq!(status, 400, "{refused}");
+    assert!(refused.to_string().contains("no Hermes home"), "{refused}");
+    let (status, given) = post(
+        &runtime,
+        &import,
+        json!({"from": explicit, "dry_run": true}),
+    );
+    assert_eq!(status, 200, "{given}");
+    assert_eq!(given["hermes_home"], arg(&explicit), "{given}");
+    let listed = cli_json(&home, &["profile", "list"]).to_string();
+    assert!(!listed.contains("home-bot"), "{listed}");
+    drop(runtime);
 }

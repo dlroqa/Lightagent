@@ -119,7 +119,7 @@ pub async fn submit(
 
 /// The secret in `path`, checked as the vault checks it, or why it cannot
 /// be used. A reason never quotes the file.
-fn read_secret(path: &Path) -> Result<String, String> {
+pub(crate) fn read_secret(path: &Path) -> Result<String, String> {
     let file = std::fs::File::open(path)
         .map_err(|error| format!("the chosen file could not be opened ({})", error.kind()))?;
     let metadata = file
@@ -181,7 +181,7 @@ fn wipe(mut bytes: Vec<u8>) {
     std::hint::black_box(&bytes);
 }
 
-async fn pick(app: &tauri::AppHandle) -> Result<Option<PathBuf>, String> {
+pub(crate) async fn pick(app: &tauri::AppHandle) -> Result<Option<PathBuf>, String> {
     // A test build may answer for the picker (e2e_driver.rs, `pick_file`).
     #[cfg(feature = "e2e-hooks")]
     if let Some(choice) = crate::e2e_driver::chosen_file() {

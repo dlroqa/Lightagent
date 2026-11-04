@@ -12,6 +12,9 @@ interface RuntimeStatus {
   profile: string | null;
   /** The window was asked to close while runs were working. */
   close_requested?: boolean;
+  /** `remote` when a server elsewhere serves the window (remote mode). */
+  mode?: "local" | "remote";
+  remote?: string | null;
 }
 
 /** How often the gate re-checks the runtime once the app is running. */
@@ -104,6 +107,13 @@ export function DesktopGate({ children }: { children: ReactNode }) {
         <div className="desktop-gate__app" aria-hidden={closing || undefined} inert={closing || undefined}>
           {children}
         </div>
+        {status?.mode === "remote" && (
+          // The scope badge: where this window's work runs, always in view.
+          <div className="desktop-scope" role="status"
+            title={`This window is served by ${status.remote ?? "a remote server"}; nothing runs on this computer.`}>
+            Remote · {(status.remote ?? "").replace(/^https?:\/\//, "")}
+          </div>
+        )}
         {closing && (
           <div className="desktop-gate desktop-gate--overlay" role="presentation">
             <CloseWithRuns onKeep={() => setGeneration((value) => value + 1)} />

@@ -9,6 +9,11 @@
    "path": "/health"
   },
   {
+   "id": "server.info",
+   "method": "GET",
+   "path": "/api/lightagent/v1/server"
+  },
+  {
    "id": "tools.list",
    "method": "GET",
    "path": "/api/lightagent/v1/tools",

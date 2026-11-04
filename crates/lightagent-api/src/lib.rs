@@ -81,6 +81,7 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/api/lightagent/v1/server", get(server_info))
         .route("/api/lightagent/v1/tools", get(list_tools))
         .route("/api/lightagent/v1/commands", get(list_commands))
         .route("/api/lightagent/v1/workers", get(list_workers))
@@ -725,6 +726,38 @@ async fn preset_profile(
 
 async fn health() -> Response {
     Json(json!({ "status": "ok", "service": "lightagent" })).into_response()
+}
+
+/// The protocol a client of this API speaks (the desktop host's contract).
+pub const SERVER_PROTOCOL: u32 = 1;
+/// What this server offers a client: the desktop handshake reports the same.
+pub const SERVER_CAPABILITIES: &[&str] = &[
+    "runs",
+    "sessions",
+    "approvals",
+    "settings",
+    "tools",
+    "skills",
+    "workers",
+    "provider",
+    "jev",
+];
+
+/// What this server is, for a client about to send it work (the desktop's
+/// remote mode): its service, version, protocol and capabilities. Behind
+/// the key, unlike `/health`.
+async fn server_info(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::SessionsRead) {
+        return rejection;
+    }
+    Json(json!({
+        "service": "lightagent",
+        "version": env!("CARGO_PKG_VERSION"),
+        "protocol": SERVER_PROTOCOL,
+        "capabilities": SERVER_CAPABILITIES,
+        "profile": state.session_profile,
+    }))
+    .into_response()
 }
 
 /// `?mcp=skip`: build the catalog without connecting any MCP server.

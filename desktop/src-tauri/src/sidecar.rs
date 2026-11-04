@@ -135,6 +135,9 @@ pub fn launch(
     let mut command = Command::new(binary);
     command
         .args(["serve", "--desktop", "--host", "127.0.0.1", "--port", "0"])
+        // A remote server's key is the host's (remote.rs); the bundled
+        // runtime never gets it, even when this app was started with it.
+        .env_remove("LIGHTAGENT_API_KEY")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

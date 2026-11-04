@@ -565,6 +565,7 @@ Frozen at `12582a046ba37a7fd59c86c1d4fb3a911fa7564a` (tree `59b8f136534d228e328e
 | ID | Surface | Applicability | Counts | UI path | Backend | Status | Source |
 |---|---|---|---|---|---|---|---|
 | `api.get.health` | `GET /health` | applicable | no | (backend reuse) | api: GET /health | not-started | `crates/lightagent-api/src/lib.rs:75` |
+| `api.get.server` | `GET /api/lightagent/v1/server` | applicable | no | (host only: remote mode checks it before connecting) | api: GET /api/lightagent/v1/server | not-started | `crates/lightagent-api/src/lib.rs (server_info)` |
 | `api.get.tools` | `GET /api/lightagent/v1/tools` | applicable | no | (backend reuse) | api: GET /tools | not-started | `crates/lightagent-api/src/lib.rs:76` |
 | `api.get.workers` | `GET /api/lightagent/v1/workers` | applicable | no | (backend reuse) | api: GET /workers | not-started | `crates/lightagent-api/src/lib.rs:77` |
 | `api.get.provider` | `GET /api/lightagent/v1/provider` | applicable | no | (backend reuse) | api: GET /provider | not-started | `crates/lightagent-api/src/lib.rs:78` |

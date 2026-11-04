@@ -93,11 +93,11 @@
   }
  ],
  "summary": {
-  "total_rows": 338,
+  "total_rows": 339,
   "by_kind": {
    "acp-method": 8,
    "alias": 2,
-   "api": 56,
+   "api": 57,
    "argument": 47,
    "command": 86,
    "config": 14,
@@ -112,7 +112,7 @@
    "value": 6
   },
   "by_applicability": {
-   "applicable": 297,
+   "applicable": 298,
    "host-owned": 7,
    "not-applicable": 34
   },
@@ -6499,6 +6499,30 @@
    "backend": "api: GET /health",
    "permission": "local-operator",
    "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+  },
+  {
+   "id": "api.get.server",
+   "kind": "api",
+   "surface": "GET /api/lightagent/v1/server",
+   "source": "crates/lightagent-api/src/lib.rs (server_info)",
+   "behavior": "What the server is (service, version, protocol, capabilities), behind the key",
+   "tree_key": null,
+   "tokens": [
+    "GET /api/lightagent/v1/server"
+   ],
+   "applicability": "applicable",
+   "decision": null,
+   "reason": "Remote-mode negotiation by the desktop host (D8); counted through env.LIGHTAGENT_API_KEY",
+   "counts_toward_parity": false,
+   "duplicate_of": null,
+   "ui": "(host only: remote mode checks it before connecting)",
+   "backend": "api: GET /api/lightagent/v1/server",
+   "permission": "any caller with the key",
+   "data_scope": "server",
    "desktop_status": "not-started",
    "verification": null,
    "tested_sha": null,

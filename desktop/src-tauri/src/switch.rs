@@ -309,6 +309,12 @@ fn discard(runtime: sidecar::Sidecar) {
 
 /// The switch for the UI: an outcome, or an error that says nothing changed.
 pub async fn switch(host: &Arc<Host>, id: String, stop: bool) -> Result<Outcome, String> {
+    if host.is_remote() {
+        return Err(
+            "connected to a remote server: switching profiles applies to this computer's runtime; disconnect first"
+                .to_owned(),
+        );
+    }
     let result = try_switch(host, id, stop).await;
     match &result {
         Ok(outcome) => host.e2e.note_once(

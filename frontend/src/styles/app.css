@@ -2844,6 +2844,21 @@ textarea {
   text-transform: uppercase;
 }
 
+/* Remote mode's scope badge (DesktopGate): always in view, never in the way. */
+.desktop-scope {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  z-index: 900;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #1e3a8a;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
 .chat-sidebar__section--controls {
   display: flex;
   align-items: center;
