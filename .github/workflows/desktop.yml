@@ -13,6 +13,9 @@ name: desktop
 #   D3b crash detection and one restart, and the single-instance policy.
 #   D4b profile switch: all-or-nothing commit, failure paths and concurrency,
 #       through a Linux test build with `--features e2e-hooks` (never bundled).
+#   D8  native WebView: the rendered UI driven in WKWebView, WebView2 and
+#       WebKitGTK through the same test build on every target; the shell
+#       job proves the test-only channel is absent from every package.
 
 on:
   pull_request:
@@ -251,6 +254,24 @@ jobs:
             find bundle -maxdepth 2 -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' \) -print0 \
               | while IFS= read -r -d '' f; do python -c "import os,sys; print('- %s: %.1f MB' % (os.path.basename(sys.argv[1]), os.path.getsize(sys.argv[1])/1048576))" "$f"; done
           } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The test-only driver is absent from the packaged app
+        run: |
+          set -euo pipefail
+          r=desktop/target/release
+          ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
+          bins=("$r/lightagent-desktop$ext")
+          if [ "$(uname -s)" = Darwin ]; then bins+=("$(ls -d $r/bundle/macos/*.app)/Contents/MacOS/lightagent-desktop"); fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            mkdir -p "$RUNNER_TEMP/deb-contents"
+            dpkg-deb -x "$(ls $r/bundle/deb/*.deb | head -1)" "$RUNNER_TEMP/deb-contents"
+            bins+=("$RUNNER_TEMP/deb-contents/usr/bin/lightagent-desktop")
+          fi
+          for bin in "${bins[@]}"; do
+            for marker in E2E_DRIVER e2e_reply LIGHTAGENT_DESKTOP_E2E_DRIVER; do
+              if grep -a -q "$marker" "$bin"; then echo "::error::test-only marker $marker found in $bin"; exit 1; fi
+            done
+          done
+          echo "- test-only driver markers (E2E_DRIVER, e2e_reply, LIGHTAGENT_DESKTOP_E2E_DRIVER) absent from ${#bins[@]} packaged host binaries: ${bins[*]##*/target/}" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: End-to-end (runner, ready and mismatch)
         run: |
           out="$RUNNER_TEMP/desktop-e2e"
@@ -364,3 +385,99 @@ jobs:
           path: |
             ${{ runner.temp }}/switch-e2e/
             ${{ runner.temp }}/runs-e2e/
+
+  native:
+    name: desktop native WebView (${{ matrix.label }}, e2e hooks)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15-intel, label: macos-x64 }
+          - { os: macos-15, label: macos-arm64 }
+          - { os: windows-latest, label: windows-x64 }
+          - { os: ubuntu-22.04, label: linux-x64 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Runner identity and tested commit
+        run: |
+          {
+            echo "### desktop native ${{ matrix.label }}"
+            echo "- head \`$(git rev-parse HEAD)\` tree \`$(git rev-parse 'HEAD^{tree}')\`"
+            echo "- runner: ${ImageOS:-?} ${ImageVersion:-?}, $(uname -sm)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Linux system packages (webview, display, session bus, OS input, clipboard)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf xvfb dbus-x11 imagemagick xdotool xclip
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            desktop -> target
+          key: desktop-native-${{ matrix.label }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install psutil==7.1.0 pillow==11.3.0
+      - name: Desktop frontend, and axe-core for the in-page accessibility scan
+        run: |
+          npm ci --prefix frontend
+          npm run build:desktop --prefix frontend
+          mkdir -p "$RUNNER_TEMP/axe"
+          npm install --prefix "$RUNNER_TEMP/axe" --no-save --no-audit --no-fund axe-core@4.10.3
+      - name: The runtime, and the test-only host (e2e hooks; never bundled)
+        run: |
+          set -euo pipefail
+          ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
+          cargo build --locked -p lightagent
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          mkdir -p desktop/src-tauri/binaries
+          cp "target/debug/lightagent$ext" "desktop/src-tauri/binaries/lightagent-sidecar-$triple$ext"
+          (cd desktop && npx --yes "$TAURI_CLI" icon ../icon/LightagentLogo.png -o src-tauri/icons)
+          cargo clippy --locked --manifest-path desktop/Cargo.toml -p lightagent-desktop --features e2e-hooks -- -D warnings
+          cargo build --locked --manifest-path desktop/Cargo.toml -p lightagent-desktop --features "e2e-hooks tauri/custom-protocol"
+          [ -x "desktop/target/debug/lightagent-sidecar$ext" ] || cp "target/debug/lightagent$ext" "desktop/target/debug/lightagent-sidecar$ext"
+          # Positive control for the package check in the shell job.
+          grep -a -q e2e_reply "desktop/target/debug/lightagent-desktop$ext"
+          echo "- positive control: the test build carries the driver markers the package check looks for" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Native WebView scenarios (full, then offline)
+        env:
+          E2E_AXE: ${{ runner.temp }}/axe/node_modules/axe-core/axe.min.js
+        run: |
+          out="$RUNNER_TEMP/native-e2e"; ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
+          app="desktop/target/debug/lightagent-desktop$ext"; cli="target/debug/lightagent$ext"
+          wrap=(); [ "$RUNNER_OS" = Linux ] && wrap=(xvfb-run -a -s '-screen 0 1280x900x24' dbus-run-session --)
+          status=0
+          LIGHTAGENT_HOME="$RUNNER_TEMP/native-home" "${wrap[@]}" python desktop/e2e/native.py "$out" "$cli" full -- "$app" || status=1
+          LIGHTAGENT_HOME="$RUNNER_TEMP/offline-home" "${wrap[@]}" python desktop/e2e/native.py "$out/offline" "$cli" offline -- "$app" || status=1
+          exit $status
+      - name: Startup with no network at all (Linux network namespace)
+        if: runner.os == 'Linux' && (success() || failure())
+        run: |
+          py=$(command -v python)
+          sudo unshare --net -- bash -c 'ip link set lo up && exec sudo -E -u "$SUDO_USER" env HOME="$1" PATH="$2" E2E_NETNS=1 LIGHTAGENT_HOME="$3" \
+            xvfb-run -a -s "-screen 0 1280x900x24" dbus-run-session -- "$4" desktop/e2e/native.py "$5" target/debug/lightagent offline -- desktop/target/debug/lightagent-desktop' \
+            netns "$HOME" "$PATH" "$RUNNER_TEMP/netns-home" "$py" "$RUNNER_TEMP/native-e2e/netns"
+      - name: Native summary
+        if: always()
+        run: python desktop/e2e/native.py --summary "$RUNNER_TEMP/native-e2e" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: desktop-native-${{ matrix.label }}
+          retention-days: 30
+          path: ${{ runner.temp }}/native-e2e/

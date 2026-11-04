@@ -805,21 +805,39 @@ fn main() {
         lifecycle: Arc::new(tokio::sync::Mutex::new(())),
         close_requested: AtomicBool::new(false),
     });
-    let app = tauri::Builder::default()
-        .manage(Arc::clone(&host))
-        .invoke_handler(tauri::generate_handler![
-            runtime_status,
-            runtime_logs,
-            runtime_restart,
-            profile_switch,
-            app_quit,
-            app_close_cancel,
-            api_fetch,
-            api_subscribe,
-            api_events_poll,
-            api_unsubscribe,
-            e2e_note
-        ])
+    let builder = tauri::Builder::default().manage(Arc::clone(&host));
+    // A test build adds the native driver's reply channel (e2e_driver.rs);
+    // the bundled app never has it.
+    #[cfg(feature = "e2e-hooks")]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        runtime_status,
+        runtime_logs,
+        runtime_restart,
+        profile_switch,
+        app_quit,
+        app_close_cancel,
+        api_fetch,
+        api_subscribe,
+        api_events_poll,
+        api_unsubscribe,
+        e2e_note,
+        e2e_driver::e2e_reply
+    ]);
+    #[cfg(not(feature = "e2e-hooks"))]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        runtime_status,
+        runtime_logs,
+        runtime_restart,
+        profile_switch,
+        app_quit,
+        app_close_cancel,
+        api_fetch,
+        api_subscribe,
+        api_events_poll,
+        api_unsubscribe,
+        e2e_note
+    ]);
+    let app = builder
         .on_page_load(|webview, payload| {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
                 && let Some(host) = webview.try_state::<Arc<Host>>()
@@ -829,6 +847,8 @@ fn main() {
         })
         .setup(|app| {
             let host = Arc::clone(app.state::<Arc<Host>>().inner());
+            #[cfg(feature = "e2e-hooks")]
+            let handle = app.handle().clone();
             match claim_instance(app.path().app_local_data_dir().ok()) {
                 Ok(Some(lock_file)) => *lock(&host.instance) = Some(lock_file),
                 Ok(None) => {
@@ -846,7 +866,7 @@ fn main() {
                     start_runtime(&host, false);
                 }
                 #[cfg(feature = "e2e-hooks")]
-                e2e_driver::start(&host);
+                e2e_driver::start(&host, handle);
                 #[cfg(feature = "e2e-hooks")]
                 switch::run_e2e_switches(&host);
                 watch_runtime(&host);
