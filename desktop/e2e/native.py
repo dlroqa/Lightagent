@@ -267,7 +267,7 @@ def focus_window(host):
             subprocess.run(["osascript", "-e", 'tell application "System Events" to set frontmost of '
                             f"(first process whose unix id is {host.process.pid}) to true"], capture_output=True, timeout=30)
         else:
-            out = subprocess.run(["powershell", "-NoProfile", "-Command", WINDOWS_FOREGROUND],
+            out = subprocess.run(["powershell", "-NoProfile", "-Command", WINDOWS_FOREGROUND.replace("HOST_PID", str(host.process.pid))],
                                  capture_output=True, text=True, timeout=60)
             FOREGROUND.append(out.stdout.strip()[-120:] or out.stderr.strip()[-200:])
     except (OSError, subprocess.SubprocessError) as error:
@@ -290,7 +290,8 @@ public static class Fg {
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
 }
 "@
-$h = [Fg]::FindWindow($null, "Lightagent")
+$h = (Get-Process -Id HOST_PID).MainWindowHandle
+if ($h -eq [IntPtr]::Zero) { $h = [Fg]::FindWindow($null, "Lightagent") }
 [Fg]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
 [Fg]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
 [Fg]::ShowWindow($h, 9) | Out-Null
@@ -705,13 +706,23 @@ def scenario_secret_input(view, host, home, notes):
     time.sleep(1.0)
     view.shot("secret-native-picker")
     why = type_path_into_picker(paths[1])
-    picked = view.js("""return await until(() => {
+    outcome = """return await until(() => {
         const said = [...all("status"), ...all("alert")].map((el) => nameOf(el)).filter((s) => /seed-1\\.secret|No file was chosen|cannot be used/.test(s));
         return said.length ? said.join(" | ") : null;
-      }, 45000);""", 60)
+      }, 20000);"""
+    # A modal panel holds the host's main thread: while it is open the page
+    # cannot answer, so the wait is short and the panel is pressed again.
+    answered, picked = view.try_js(outcome, 25)
+    recovery = []
+    for keys in (["Return"], ["Escape"], ["Escape"]):
+        if answered and picked:
+            break
+        recovery.append({"keys": keys, "sent": os_keys(keys) or "sent"})
+        time.sleep(2)
+        answered, picked = view.try_js(outcome, 25)
+    picked = picked if answered else None
     view.shot("secret-native-done")
-    if not picked:
-        os_keys(["Escape"])
+    notes["native_picker_recovery"] = recovery
     leaked = seeds[1] in page_dump()
     notes["native_picker"] = {"os_input": why or "sent", "outcome": picked}
     if LINUX:
