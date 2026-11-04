@@ -736,9 +736,15 @@ def scenario_secret_input(host, cli):
             check.expect(f"{label}: refused with a reason, nothing stored",
                          outcome["state"] == "invalid" and bool(outcome.get("reason")) and len(grants()) == count
                          and "LA-LINE" not in json.dumps(outcome), outcome)
-        refused = host.try_fetch("POST", target, dict(fields, secret=seeds[0]))
+        # A decoy, never a seed: the harness's own command is logged as sent.
+        decoy = "LA-DECOY-" + secrets.token_urlsafe(12)
+        refused = host.try_fetch("POST", target, dict(fields, secret=decoy))
         check.expect("the window's own request with a secret is refused by the host",
-                     refused[0] == "refused" and "read by the host" in refused[1] and len(grants()) == count, refused)
+                     refused[0] == "refused" and "read by the host" in refused[1] and decoy not in refused[1]
+                     and len(grants()) == count, refused)
+        answers = [line for line in (harness.read(host.log.name) or "").splitlines() if " < " in line[:20]]
+        check.expect("no answer the host wrote to the driver holds the refused decoy",
+                     answers and not any(decoy in line for line in answers), len(answers))
         try:
             host.call("secret_input", target=target, fields=json.dumps(dict(fields, secret_file=add_file)))
             named = None
