@@ -13,6 +13,10 @@ name: desktop
 #   D3b crash detection and one restart, and the single-instance policy.
 #   D4b profile switch: all-or-nothing commit, failure paths and concurrency,
 #       through a Linux test build with `--features e2e-hooks` (never bundled).
+#   D9  installers: each one installed, launched and uninstalled on its
+#       target, with checksums, signature state and declared minimum OS;
+#       the supply-chain job writes the SBOMs and license inventories and
+#       gates on known vulnerabilities.
 #   D8  native WebView: the rendered UI driven in WKWebView, WebView2 and
 #       WebKitGTK through the same test build on every target; the shell
 #       job proves the test-only channel is absent from every package.
@@ -309,6 +313,11 @@ jobs:
               print(f"- {label}: milestones {d['milestones_s']}, missing {d['missing']}, key leaks {d['key_leaks'] or 'none'}, runtime survived host termination: {d['runtime_survived_host_termination']}")
           PY
           exit $status
+      - name: Installers (checksums, then install, launch and uninstall each; D9)
+        if: success() || failure()
+        run: |
+          python desktop/e2e/install_smoke.py "$RUNNER_TEMP/desktop-installers" "${{ matrix.label }}" desktop/target/release/bundle | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -316,11 +325,70 @@ jobs:
           retention-days: 30
           path: |
             ${{ runner.temp }}/desktop-e2e/
+            ${{ runner.temp }}/desktop-installers/
             desktop/target/release/bundle/**/*.dmg
             desktop/target/release/bundle/**/*.msi
             desktop/target/release/bundle/nsis/*.exe
             desktop/target/release/bundle/**/*.deb
             desktop/target/release/bundle/**/*.AppImage
+
+  supply-chain:
+    name: desktop supply chain (SBOMs, licenses, vulnerabilities)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Record the tested commit
+        run: echo "- head \`$(git rev-parse HEAD)\` tree \`$(git rev-parse 'HEAD^{tree}')\`" | tee -a "$GITHUB_STEP_SUMMARY"
+      - run: rustup show
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: The bundled UI's dependencies (for their licenses)
+        run: npm ci --prefix frontend
+      - name: What each target links (cargo metadata, both workspaces)
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/supply-chain/metadata"; mkdir -p "$dir"
+          for t in x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc x86_64-unknown-linux-gnu; do
+            cargo metadata --locked --format-version 1 --filter-platform "$t" > "$dir/root-$t.json"
+            cargo metadata --locked --format-version 1 --filter-platform "$t" --manifest-path desktop/Cargo.toml > "$dir/desktop-$t.json"
+          done
+      - name: SBOM and license inventory per target
+        run: python -I scripts/desktop-sbom.py "$RUNNER_TEMP/supply-chain/metadata" frontend "$RUNNER_TEMP/supply-chain" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Known vulnerabilities in the crates (cargo audit, both lockfiles)
+        if: success() || failure()
+        run: |
+          cargo install --locked cargo-audit
+          echo "- $(cargo audit --version)" | tee -a "$GITHUB_STEP_SUMMARY"
+          status=0
+          for lock in Cargo.lock desktop/Cargo.lock; do
+            report="$RUNNER_TEMP/supply-chain/cargo-audit-$(echo "$lock" | tr / -).json"
+            cargo audit --file "$lock" --json > "$report" || true
+            python -I scripts/desktop-sbom.py --cargo-audit "$report" "$lock" | tee -a "$GITHUB_STEP_SUMMARY"
+            [ "${PIPESTATUS[0]}" = 0 ] || status=1
+          done
+          exit $status
+      - name: Known vulnerabilities in the bundled UI (npm audit, high or critical)
+        if: success() || failure()
+        run: |
+          report="$RUNNER_TEMP/supply-chain/npm-audit.json"
+          (cd frontend && npm audit --omit=dev --json) > "$report" || true
+          python -I scripts/desktop-sbom.py --npm-audit "$report" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: desktop-supply-chain
+          retention-days: 30
+          path: ${{ runner.temp }}/supply-chain/
 
   switch:
     name: desktop profile switch and runs (linux, e2e hooks)
