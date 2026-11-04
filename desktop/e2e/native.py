@@ -267,13 +267,39 @@ def focus_window(host):
             subprocess.run(["osascript", "-e", 'tell application "System Events" to set frontmost of '
                             f"(first process whose unix id is {host.process.pid}) to true"], capture_output=True, timeout=30)
         else:
-            subprocess.run(["powershell", "-NoProfile", "-Command",
-                            f"(New-Object -ComObject WScript.Shell).AppActivate({host.process.pid}) | Out-Null"],
-                           capture_output=True, timeout=30)
+            out = subprocess.run(["powershell", "-NoProfile", "-Command", WINDOWS_FOREGROUND],
+                                 capture_output=True, text=True, timeout=60)
+            FOREGROUND.append(out.stdout.strip()[-120:] or out.stderr.strip()[-200:])
     except (OSError, subprocess.SubprocessError) as error:
         return f"bringing the window to the front: {error}"
     time.sleep(0.5)
     return None
+
+
+# Windows gives the foreground only to a process that has had input: an ALT
+# press first, then SetForegroundWindow on the app's window. It reports the
+# window, the foreground window after, and whether they are the same.
+WINDOWS_FOREGROUND = r'''
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public static class Fg {
+  [DllImport("user32.dll")] public static extern IntPtr FindWindow(string c, string t);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+}
+"@
+$h = [Fg]::FindWindow($null, "Lightagent")
+[Fg]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+[Fg]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
+[Fg]::ShowWindow($h, 9) | Out-Null
+$set = [Fg]::SetForegroundWindow($h)
+Start-Sleep -Milliseconds 300
+$now = [Fg]::GetForegroundWindow()
+"window=$h set=$set foreground=$now same=$($now -eq $h)"
+'''
+FOREGROUND = []
 
 
 def saved_with(home, marker):
@@ -573,7 +599,8 @@ def scenario_keyboard(view, host, notes):
       const el = document.activeElement; const s = getComputedStyle(el);
       return { element: describe(el), focus_visible: el.matches(":focus-visible"), outline: s.outlineStyle + " " + s.outlineWidth, shadow: s.boxShadow };""")
     moved = len(set(path)) > 1
-    notes["keyboard"] = {"os_input": why or "sent", "page_had_focus": start["page_has_focus"], "tab_path": path, "focus": ring}
+    notes["keyboard"] = {"os_input": why or "sent", "page_had_focus": start["page_has_focus"], "tab_path": path, "focus": ring,
+                         "windows_foreground": FOREGROUND[-3:]}
     if LINUX:
         check.expect("OS Tab moves focus through the window's controls", why is None and moved, path)
         check.expect("the focused control shows a visible focus indicator", ring["focus_visible"] and (
@@ -695,6 +722,7 @@ def scenario_secret_input(view, host, home, notes):
 
 def scenario_narrow(view, host):
     check = Checks("narrow")
+    view.new_chat()
     try:
         host.call("resize", width=900, height=600)
         time.sleep(1.2)
@@ -801,6 +829,8 @@ def scenario_reattach(view, provider, home, notes):
     saved = (harness.answers(saved_with(home, "[e2e:native-reload]")) or [""])[-1]
     notes["reload_while_working"] = {"held": held, "stop_shown_after_reload": working, "answer_shown": shown,
                                      "answer_saved": saved.endswith("after the reload.")}
+    check.expect("a run still working is shown again after a reload (Stop shown)", held and working)
+    check.expect("its answer arrives in the reloaded page and is saved", shown and saved.endswith("after the reload."), saved)
     view.idle(30)
     return check
 
