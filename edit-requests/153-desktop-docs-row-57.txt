@@ -1,0 +1,104 @@
+=== base c54b90512568c754670490f4c175ee188604b405
+=== message
+Docs: cli.chat.opt.profile counted, 219 of 222
+
+Row 57 (c54b905) is green: check 41782010579 (the backend tests on all
+four platforms, and the browser) and desktop 41782010641 (the host). The
+row's backend text now names the operation that implements it: a
+conversation bound to its own profile, not POST /runs {profile} in
+multi-user mode only. Three rows remain, all D8: the two --secret-stdin
+rows and LIGHTAGENT_API_KEY. Docs only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "id": "cli.chat.opt.profile",
+   "kind": "option",
+   "surface": "lightagent chat --profile",
+   "source": "crates/lightagent/src/lib.rs:64",
+   "behavior": "Profile to run (default: active)",
+   "tree_key": "arg lightagent chat --profile",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: profile selector",
+   "backend": "api: POST /runs {profile} (honoured only in multi-user mode today; see D1 profile decision)",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "id": "cli.chat.opt.profile",
+   "kind": "option",
+   "surface": "lightagent chat --profile",
+   "source": "crates/lightagent/src/lib.rs:64",
+   "behavior": "Profile to run (default: active)",
+   "tree_key": "arg lightagent chat --profile",
+   "tokens": null,
+   "applicability": "applicable",
+   "decision": null,
+   "reason": null,
+   "counts_toward_parity": true,
+   "duplicate_of": null,
+   "ui": "Conversations: profile selector",
+   "backend": "api: the conversation operations name their profile (?profile= on /sessions, profile in POST /runs and regenerate); the profile's own store and run factory",
+   "permission": "local-operator",
+   "data_scope": "profile",
+   "desktop_status": "implemented",
+   "verification": "Conversation-scoped profile, the persisted active profile unchanged (owner decision 2026-11-04; docs/desktop/DESKTOP_CONVERSATION_PROFILES.md): a conversation is bound to its profile and kept in that profile's store; its runs use that profile's persona and model, as lightagent chat --profile sends them; chat --profile --session and the desktop continue each other; found only under its own profile; a missing or invalid profile finds and creates nothing. Backend desktop_conversation_profile.rs, host runs.py conversation_profile, browser e2e/conversation-profile.mjs (the Profile choice by the conversation list) (row 57)",
+   "tested_sha": "c54b90512568c754670490f4c175ee188604b405",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41782010579 (check); https://github.com/dlroqa/Lightagent/actions/runs/41782010641 (desktop)"
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.chat.opt.profile` | `lightagent chat --profile` | applicable | yes | Conversations: profile selector | api: POST /runs {profile} (honoured only in multi-user mode today; see D1 profile decision) | not-started | `crates/lightagent/src/lib.rs:64` |
+--- with
+| `cli.chat.opt.profile` | `lightagent chat --profile` | applicable | yes | Conversations: profile selector | api: the conversation operations name their profile (the profile's own store and run factory) | implemented | `crates/lightagent/src/lib.rs:64` |
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "parity_implemented": 218,
+--- with
+  "parity_implemented": 219,
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Implemented: 218 of 222
+--- with
+- Implemented: 219 of 222
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `api.post.sessions.id.regenerate` | `0e53dd3` | Browser on the real backend with a local model stub (e2e/regenerate.mjs, row 56c, check at 0e53dd3): a finished answer replaces the saved one; failure, refusal, empty and Stop keep it; a stale Try again is refused 409 with the runs unchanged. Host runs.py regenerate (R1; desktop run at 03f4cfe); backend api.rs and profile_scoped.rs (ownership, write permission, stale ids); the switch gate is switch.rs. Native WebView R2-R5 stay D8 | [check](https://github.com/dlroqa/Lightagent/actions/runs/41651923887), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41643110546) |
+--- with
+| `api.post.sessions.id.regenerate` | `0e53dd3` | Browser on the real backend with a local model stub (e2e/regenerate.mjs, row 56c, check at 0e53dd3): a finished answer replaces the saved one; failure, refusal, empty and Stop keep it; a stale Try again is refused 409 with the runs unchanged. Host runs.py regenerate (R1; desktop run at 03f4cfe); backend api.rs and profile_scoped.rs (ownership, write permission, stale ids); the switch gate is switch.rs. Native WebView R2-R5 stay D8 | [check](https://github.com/dlroqa/Lightagent/actions/runs/41651923887), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41643110546) |
+| `cli.chat.opt.profile` | `c54b905` | Conversation-scoped profile, the persisted active profile unchanged (owner decision 2026-11-04; docs/desktop/DESKTOP_CONVERSATION_PROFILES.md): a conversation is bound to its profile and kept in that profile's store; its runs use that profile's persona and model, as lightagent chat --profile sends them; chat --profile --session and the desktop continue each other; found only under its own profile; a missing or invalid profile finds and creates nothing. Backend desktop_conversation_profile.rs, host runs.py conversation_profile, browser e2e/conversation-profile.mjs (the Profile choice by the conversation list) (row 57) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41782010579), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41782010641) |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- D7 note (2026-11-03, rows 53-56, owner `a0fb357c`): 14 rows implemented with backend, host and browser evidence (table below). `api.get.jev` and `api.post.jev.verify` rest on deterministic stub evidence; live Jev is not claimed. `env.HERMES_HOME`: an empty value is refused as a value (current behavior, recorded, not changed). Remaining 4: `cli.remote-credential.add.opt.secret-stdin` and `cli.remote-credential.rotate.opt.secret-stdin` (D8 host-side secret input), `env.LIGHTAGENT_API_KEY` (D8 remote mode), `cli.chat.opt.profile` (owner decision: the desktop's profile switch persists the active profile, which `chat --profile` does not).
+--- with
+- D7 note (2026-11-03, rows 53-56, owner `a0fb357c`): 14 rows implemented with backend, host and browser evidence (table below). `api.get.jev` and `api.post.jev.verify` rest on deterministic stub evidence; live Jev is not claimed. `env.HERMES_HOME`: an empty value is refused as a value (current behavior, recorded, not changed). Remaining 4: `cli.remote-credential.add.opt.secret-stdin` and `cli.remote-credential.rotate.opt.secret-stdin` (D8 host-side secret input), `env.LIGHTAGENT_API_KEY` (D8 remote mode), `cli.chat.opt.profile` (owner decision: the desktop's profile switch persists the active profile, which `chat --profile` does not).
+- D7 note (2026-11-04, row 57): `cli.chat.opt.profile` is implemented as a conversation-scoped profile that never changes the active profile (owner decision 2026-11-04; contract and future account mapping in [DESKTOP_CONVERSATION_PROFILES.md](DESKTOP_CONVERSATION_PROFILES.md)). Remaining 3, all D8: the two `--secret-stdin` rows and `env.LIGHTAGENT_API_KEY`.
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+## Next
+--- with
+## Row 57 (2026-11-04, owner `a0fb357c`)
+
+Owner decision (2026-11-04): `lightagent chat --profile` is matched by a
+conversation-scoped profile, prepared for later account integration;
+the profile switch stays the only way to change the active profile.
+#154 `desktop/d7y-conversation-profile`: request 151 (3583a5a), then 152
+(c54b905). The first check run, 41780671146, found two defects:
+- Product: a run that continues no conversation looked up an operator
+  conversation store, which an embedding without a home refused with
+  500. Thirteen ownership tests showed it.
+- Test: the browser check waited on a hidden element; its screenshot
+  showed the feature working.
+Green at c54b905: check 41782010579, desktop 41782010641. Coverage 219
+of 222. Contract and account mapping:
+DESKTOP_CONVERSATION_PROFILES.md.
+
+## Next
+=== end
