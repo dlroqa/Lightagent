@@ -1,0 +1,139 @@
+=== base 4abc3404f6a577c03ac6900ac7fff18b889ec582
+=== message
+Give the remote server's home an active profile; pin HERMES_HOME's errors and precedence
+
+Desktop run 41832537110 and check run 41832537170 at bfa1570: a plain
+`lightagent serve` on a fresh home exits with "no active profile — run
+`lightagent init` first" (remote-server.log in the run's artifact), so the
+server-info test, remote.py and the native remote scenario never had a
+server. The desktop runtime sets its own home up; a plain server's home is
+now given a profile first, and the backend test starts the desktop
+runtime before the keyed server.
+
+HERMES_HOME (owner decision 2026-11-04: an explicitly empty value stays
+invalid, not unset; document and test, no behavior change): the test now
+also pins the empty value's error as it reads today, the CLI refusing it
+too, a value naming a file refused like a missing folder, and a folder
+given coming first past an unusable HERMES_HOME.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent/tests/desktop_server_info.rs
+--- find
+#[test]
+fn a_server_says_what_it_is_only_to_a_caller_with_its_key() {
+    let home = scratch("home");
+    let keyed = start(&home, false);
+--- with
+#[test]
+fn a_server_says_what_it_is_only_to_a_caller_with_its_key() {
+    let home = scratch("home");
+    // The desktop runtime first: it sets the home up, as a plain `serve`
+    // needs (an active profile).
+    let desktop = start(&home, true);
+    let handshake: Value = serde_json::from_str(&desktop.first).expect("handshake");
+    let (code, raw) = get(&desktop, "/api/lightagent/v1/server", Some(LAUNCH));
+    assert_eq!(code, 200, "{raw}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw).expect("JSON")["version"],
+        handshake["version"]
+    );
+    drop(desktop);
+
+    let keyed = start(&home, false);
+=== replace crates/lightagent/tests/desktop_server_info.rs
+--- find
+    drop(keyed);
+
+    let desktop = start(&home, true);
+    let handshake: Value = serde_json::from_str(&desktop.first).expect("handshake");
+    assert_eq!(
+        handshake["capabilities"], info["capabilities"],
+        "the handshake and the server agree"
+    );
+    let (code, raw) = get(&desktop, "/api/lightagent/v1/server", Some(LAUNCH));
+    assert_eq!(code, 200, "{raw}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw).expect("JSON")["version"],
+        handshake["version"]
+    );
+}
+--- with
+    drop(keyed);
+    assert_eq!(
+        handshake["capabilities"], info["capabilities"],
+        "the handshake and the server agree"
+    );
+}
+=== replace crates/lightagent/tests/desktop_setup.rs
+--- find
+        let runtime = start(&home, &empty);
+        let (status, refused) = post(&runtime, &import, json!({"dry_run": true}));
+        assert_eq!(status, 400, "{refused}");
+        drop(runtime);
+    }
+}
+--- with
+        let runtime = start(&home, &empty);
+        let (status, refused) = post(&runtime, &import, json!({"dry_run": true}));
+        assert_eq!(status, 400, "{refused}");
+        // The error as it reads today: no Hermes home at the empty path.
+        assert!(
+            refused
+                .to_string()
+                .contains("no Hermes home at  (pass --from <dir>)"),
+            "{refused}"
+        );
+        let (succeeded, by_cli) = cli_import(&home, &empty, &["--dry-run"]);
+        assert!(!succeeded, "the CLI refuses an empty HERMES_HOME too: {by_cli}");
+        // A folder given still comes first, past the unusable variable.
+        let (status, given) = post(
+            &runtime,
+            &import,
+            json!({"from": explicit, "dry_run": true}),
+        );
+        assert_eq!(status, 200, "{given}");
+        assert_eq!(given["hermes_home"], arg(&explicit), "{given}");
+        drop(runtime);
+    }
+
+    // A HERMES_HOME naming a file, not a folder, is refused as a missing one
+    // is, and a folder given comes first there too.
+    let file = scratch("hermes-file").join("not-a-folder");
+    std::fs::write(&file, "not a Hermes home\n").expect("file");
+    let as_file = [("HERMES_HOME", file.as_path()), ("HOME", user.as_path())];
+    let runtime = start(&home, &as_file);
+    let (status, refused) = post(&runtime, &import, json!({"dry_run": true}));
+    assert_eq!(status, 400, "{refused}");
+    assert!(refused.to_string().contains("no Hermes home"), "{refused}");
+    let (status, given) = post(
+        &runtime,
+        &import,
+        json!({"from": explicit, "dry_run": true}),
+    );
+    assert_eq!(status, 200, "{given}");
+    assert_eq!(given["hermes_home"], arg(&explicit), "{given}");
+    let listed = cli_json(&home, &["profile", "list"]).to_string();
+    assert!(!listed.contains("home-bot"), "{listed}");
+    drop(runtime);
+}
+=== replace desktop/e2e/remote.py
+--- find
+    for home in (local_home, remote_home):
+        cli_in(cli, home, "config", "set", "inference.base_url", provider.url)
+--- with
+    # A plain `serve` needs an active profile; the desktop runtime sets its
+    # own home up.
+    cli_in(cli, remote_home, "profile", "create", "remote-desk")
+    cli_in(cli, remote_home, "profile", "use", "remote-desk")
+    for home in (local_home, remote_home):
+        cli_in(cli, home, "config", "set", "inference.base_url", provider.url)
+=== replace desktop/e2e/native.py
+--- find
+    subprocess.run([cli, "config", "set", "inference.base_url", provider.url], env=env, check=True,
+--- with
+    # A plain `serve` needs an active profile; the desktop runtime sets its
+    # own home up.
+    for args in (["profile", "create", "remote-desk"], ["profile", "use", "remote-desk"]):
+        subprocess.run([cli, *args], env=env, check=True, capture_output=True, timeout=60)
+    subprocess.run([cli, "config", "set", "inference.base_url", provider.url], env=env, check=True,
+=== end
