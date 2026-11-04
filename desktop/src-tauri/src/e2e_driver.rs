@@ -39,8 +39,10 @@ use crate::{Host, lock};
 static SWITCH_GATE: Notify = Notify::const_new();
 /// The app, for the window commands.
 static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
-/// Scripts evaluated in the page and waiting for their reply: (token, reply).
-static PENDING: Mutex<Vec<(String, oneshot::Sender<(bool, String)>)>> = Mutex::new(Vec::new());
+/// A script evaluated in the page and waiting for its reply: its token, and
+/// where its (ok, JSON value) answer goes.
+type Pending = (String, oneshot::Sender<(bool, String)>);
+static PENDING: Mutex<Vec<Pending>> = Mutex::new(Vec::new());
 /// The largest reply a script may send (a page report or an axe result).
 const MAX_REPLY: usize = 8 << 20;
 

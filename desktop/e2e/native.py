@@ -429,7 +429,7 @@ def scenario_continue(view, host, home):
     try:
         view.new_chat()
         view.send("[e2e:continue-extend] Look it up.")
-        paused = view.js(T("return !!(await until(() => $CARD, 30000));", CARD=None).replace('"null"', card).replace("null", card), 40)
+        paused = view.js(f"return !!(await until(() => {card}, 30000));", 40)
         view.shot("paused")
         view.js(f'press(await need("Continue", () => one("button", "Continue", {card}))); return true;')
         found = view.wait_text("Found it.")

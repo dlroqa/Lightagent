@@ -440,6 +440,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/axe"
           npm install --prefix "$RUNNER_TEMP/axe" --no-save --no-audit --no-fund axe-core@4.10.3
       - name: The runtime, and the test-only host (e2e hooks; never bundled)
+        id: build
         run: |
           set -euo pipefail
           ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
@@ -466,7 +467,7 @@ jobs:
           LIGHTAGENT_HOME="$RUNNER_TEMP/offline-home" "${wrap[@]}" python desktop/e2e/native.py "$out/offline" "$cli" offline -- "$app" || status=1
           exit $status
       - name: Startup with no network at all (Linux network namespace)
-        if: runner.os == 'Linux' && (success() || failure())
+        if: runner.os == 'Linux' && (success() || failure()) && steps.build.outcome == 'success'
         run: |
           py=$(command -v python)
           sudo unshare --net -- bash -c 'ip link set lo up && exec sudo -E -u "$SUDO_USER" env HOME="$1" PATH="$2" E2E_NETNS=1 LIGHTAGENT_HOME="$3" \
