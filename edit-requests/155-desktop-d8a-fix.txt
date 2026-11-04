@@ -1,0 +1,45 @@
+=== base 069ebfecf316224674f52c324b7ab8b6efd8fb10
+=== message
+Name the driver's pending-reply type, and run the namespace step only after a build
+
+clippy's type_complexity refused the inline type of the pending-script
+table. The network-namespace step ran after a failed build and reported
+the missing binary as its own failure; it now needs the test build.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace desktop/src-tauri/src/e2e_driver.rs
+--- find
+/// Scripts evaluated in the page and waiting for their reply: (token, reply).
+static PENDING: Mutex<Vec<(String, oneshot::Sender<(bool, String)>)>> = Mutex::new(Vec::new());
+--- with
+/// A script evaluated in the page and waiting for its reply: its token, and
+/// where its (ok, JSON value) answer goes.
+type Pending = (String, oneshot::Sender<(bool, String)>);
+static PENDING: Mutex<Vec<Pending>> = Mutex::new(Vec::new());
+=== replace desktop/e2e/native.py
+--- find
+        paused = view.js(T("return !!(await until(() => $CARD, 30000));", CARD=None).replace('"null"', card).replace("null", card), 40)
+--- with
+        paused = view.js(f"return !!(await until(() => {card}, 30000));", 40)
+=== replace .github/workflows/desktop.yml
+--- find
+      - name: The runtime, and the test-only host (e2e hooks; never bundled)
+        run: |
+          set -euo pipefail
+          ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
+--- with
+      - name: The runtime, and the test-only host (e2e hooks; never bundled)
+        id: build
+        run: |
+          set -euo pipefail
+          ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
+=== replace .github/workflows/desktop.yml
+--- find
+        if: runner.os == 'Linux' && (success() || failure())
+        run: |
+          py=$(command -v python)
+--- with
+        if: runner.os == 'Linux' && (success() || failure()) && steps.build.outcome == 'success'
+        run: |
+          py=$(command -v python)
+=== end
