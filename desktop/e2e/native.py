@@ -782,6 +782,10 @@ def scenario_remote(view, host, provider, cli):
     env = dict(os.environ, LIGHTAGENT_HOME=remote_home, LIGHTAGENT_API_KEY=REMOTE_KEY)
     for name in ("LIGHTAGENT_DESKTOP_E2E_DRIVER", "LIGHTAGENT_DESKTOP_E2E_REPORT"):
         env.pop(name, None)
+    # A plain `serve` needs an active profile; the desktop runtime sets its
+    # own home up.
+    for args in (["profile", "create", "remote-desk"], ["profile", "use", "remote-desk"]):
+        subprocess.run([cli, *args], env=env, check=True, capture_output=True, timeout=60)
     subprocess.run([cli, "config", "set", "inference.base_url", provider.url], env=env, check=True,
                    capture_output=True, timeout=60)
     with socket.socket() as sock:

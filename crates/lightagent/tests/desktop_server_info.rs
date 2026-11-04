@@ -142,6 +142,18 @@ fn get(runtime: &Runtime, path: &str, key: Option<&str>) -> (u16, String) {
 #[test]
 fn a_server_says_what_it_is_only_to_a_caller_with_its_key() {
     let home = scratch("home");
+    // The desktop runtime first: it sets the home up, as a plain `serve`
+    // needs (an active profile).
+    let desktop = start(&home, true);
+    let handshake: Value = serde_json::from_str(&desktop.first).expect("handshake");
+    let (code, raw) = get(&desktop, "/api/lightagent/v1/server", Some(LAUNCH));
+    assert_eq!(code, 200, "{raw}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw).expect("JSON")["version"],
+        handshake["version"]
+    );
+    drop(desktop);
+
     let keyed = start(&home, false);
     for key in [None, Some("not-the-key")] {
         let (code, raw) = get(&keyed, "/api/lightagent/v1/server", key);
@@ -156,17 +168,8 @@ fn a_server_says_what_it_is_only_to_a_caller_with_its_key() {
     assert_eq!(info["protocol"], 1, "{info}");
     assert!(info["profile"].is_string(), "{info}");
     drop(keyed);
-
-    let desktop = start(&home, true);
-    let handshake: Value = serde_json::from_str(&desktop.first).expect("handshake");
     assert_eq!(
         handshake["capabilities"], info["capabilities"],
         "the handshake and the server agree"
-    );
-    let (code, raw) = get(&desktop, "/api/lightagent/v1/server", Some(LAUNCH));
-    assert_eq!(code, 200, "{raw}");
-    assert_eq!(
-        serde_json::from_str::<Value>(&raw).expect("JSON")["version"],
-        handshake["version"]
     );
 }

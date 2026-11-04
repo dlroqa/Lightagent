@@ -131,6 +131,10 @@ def main():
     report = os.path.join(out, "report-remote.txt")
     provider = harness.FakeProvider()
     provider.scripts["remote"] = lambda p, turn, index: [("text", "Answered remotely."), ("finish", "stop")]
+    # A plain `serve` needs an active profile; the desktop runtime sets its
+    # own home up.
+    cli_in(cli, remote_home, "profile", "create", "remote-desk")
+    cli_in(cli, remote_home, "profile", "use", "remote-desk")
     for home in (local_home, remote_home):
         cli_in(cli, home, "config", "set", "inference.base_url", provider.url)
     port = free_port()
