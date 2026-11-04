@@ -103,11 +103,11 @@ def linux_user():
     return os.path.join(tools, "run.py"), shared
 
 
-def as_smoke_user(out, name, app, run, shared):
+def as_smoke_user(out, name, app, run, shared, orphan_check=True):
     target = os.path.join(shared, name)
     home = f"/home/{SMOKE_USER}"
     code, tail = sh(["sudo", "-u", SMOKE_USER, "-H", "env", f"PATH={os.environ['PATH']}",
-                     f"LIGHTAGENT_HOME={home}/.lightagent", "E2E_REQUIRE_NO_ORPHAN=1", "APPIMAGE_EXTRACT_AND_RUN=1",
+                     f"LIGHTAGENT_HOME={home}/.lightagent", f"E2E_REQUIRE_NO_ORPHAN={1 if orphan_check else 0}", "APPIMAGE_EXTRACT_AND_RUN=1",
                      "xvfb-run", "-a", "-s", "-screen 0 1280x800x24", "dbus-run-session", "--",
                      sys.executable, run, target, "ready", "--", app], timeout=300)
     report = ready_report(target)
@@ -151,7 +151,14 @@ def linux(out, bundle, entries):
         shutil.copy(image, copy)
         os.chmod(copy, 0o755)
         entry["install"] = {"ok": os.access(copy, os.X_OK), "how": "copied and made executable (an AppImage needs no install)"}
-        entry["launch"] = as_smoke_user(out, "appimage", copy, run, shared)
+        # run.py ends the process it started: here the AppImage's wrapper,
+        # not the desktop host, so the host and its runtime keep running by
+        # design. That fact is recorded; the host's own lifeline is the deb's.
+        entry["launch"] = as_smoke_user(out, "appimage", copy, run, shared, orphan_check=False)
+        entry["launch"]["wrapper_ended_host_kept"] = (entry["launch"].get("report") or {}).get("runtime_survived_host_termination")
+        sh(["sudo", "pkill", "-u", SMOKE_USER, "-f", "lightagent"])
+        time.sleep(2)
+        entry["launch"]["left_running_after_cleanup"] = sh(["pgrep", "-u", SMOKE_USER, "-f", "lightagent"])[0] == 0
         os.remove(copy)
         entry["uninstall"] = {"ok": not os.path.exists(copy), "how": "the file deleted"}
         entries.append(entry)
