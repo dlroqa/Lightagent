@@ -1,0 +1,44 @@
+=== base 3583a5a9cbd0fe01ffb8198eae2c57ed93e18820
+=== message
+Row 57: a run with no conversation needs no conversation store
+
+Check run 41780671146 failed for two reasons:
+- Product: start_run resolved the operator's conversation store for
+  every run, including runs that continue no session. An embedding
+  without a Lightagent home (the API crate's ownership tests) then
+  refused those runs with 500. The store is now resolved only for a
+  run that continues a conversation. A run without one is started
+  exactly as before, its named profile going to the run factory as it
+  always did.
+- Test: the browser check waited for the first element with the
+  probe's text, a hidden one, while the sidebar row was shown (the
+  failure screenshot shows the chat run as render-research, listed,
+  with the hint). Both list checks now look in the conversation list
+  itself.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace crates/lightagent-api/src/lib.rs
+--- find
+    let (session_profile, session_store) = match &session_scope {
+        Some(user) => (user.profile.as_str().to_owned(), user.sessions(&state)),
+        None => match operator_conversations(&state, profile.as_deref()) {
+--- with
+    let (session_profile, session_store) = match &session_scope {
+        Some(user) => (user.profile.as_str().to_owned(), user.sessions(&state)),
+        // A run that continues no conversation needs no conversation store.
+        None if body.session_id.is_none() => {
+            (state.session_profile.clone(), state.sessions.clone())
+        }
+        None => match operator_conversations(&state, profile.as_deref()) {
+=== replace e2e/conversation-profile.mjs
+--- find
+    await page.getByText(PROMPT, { exact: true }).first().waitFor({ timeout: 10000 });
+--- with
+    const listed = page.locator(".agent-sessions__list").getByText(PROMPT, { exact: true });
+    await listed.waitFor({ timeout: 10000 });
+=== replace e2e/conversation-profile.mjs
+--- find
+    await until("the list to change", async () => (await page.getByText(PROMPT, { exact: true }).count()) === 0, 10000);
+--- with
+    await until("the list to change", async () => (await listed.count()) === 0, 10000);
+=== end
