@@ -666,6 +666,7 @@ def scenario_secret_input(view, host, home, notes):
 
     def submit(service, wanted):
         return view.js(T("""
+          await need("the profile in the list", () => document.querySelector('#rc-add-profile option[value="' + $PROFILE + '"]'));
           fill(await need("profile", () => document.querySelector("#rc-add-profile")), $PROFILE);
           fill(await need("service", () => document.querySelector("#rc-add-service")), $SERVICE);
           fill(await need("destinations", () => document.querySelector("#rc-add-destinations")), "https://docs.native.invalid");

@@ -28,6 +28,8 @@ use crate::Host;
 const MAX_FILE: u64 = 16 * 1024;
 /// The vault's own limit on a secret (lightagent_core::credentials).
 const MAX_SECRET: usize = 8 * 1024;
+// Windows passes the same title as a wide literal (w!), so it reads none.
+#[cfg_attr(windows, allow(dead_code))]
 const TITLE: &str = "Choose the file that holds the secret";
 
 /// What happened. Never carries the secret.
