@@ -1,0 +1,44 @@
+=== base eb33b85d2e80ffa2f616f6070ee067475dab86ac
+=== message
+Find the app shell by its account button, and reach Profiles through Settings
+
+The first native run showed the app rendered (screenshot in the run's
+artifact) but the readiness probe looked for the rail's class, which the
+chat screen does not render: its sidebar has its own account button with
+the same label. The chat sidebar's account menu has no Profiles item, so a
+screen missing from the open menu is reached from Settings, as a person
+would.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace desktop/e2e/native.py
+--- find
+            ok, value = self.try_js("return document.readyState === 'complete' && !!document.querySelector('.rail__account');", 5)
+--- with
+            ok, value = self.try_js('return document.readyState === "complete" && !!one("button", "Open account menu");', 5)
+=== replace desktop/e2e/native.py
+--- find
+    def go(self, item, route):
+        """Open a screen from the account menu, as a person does."""
+        self.js(T("""
+          press(await need("the account menu", () => one("button", "Open account menu")));
+          press(await need($ITEM, () => all("menuitem").find((el) => nameOf(el) === $ITEM)));
+          await need("the route", () => location.hash.split("?")[0] === $ROUTE);
+          return true;""", ITEM=item, ROUTE=route))
+--- with
+    def go(self, item, route):
+        """Open a screen from the account menu, as a person does. The chat
+        screen's menu lists fewer screens; one it lacks is reached from
+        Settings, whose menu lists them all."""
+        opened = self.js(T("""
+          press(await need("the account menu", () => one("button", "Open account menu")));
+          const entry = await until(() => all("menuitem").find((el) => nameOf(el) === $ITEM), 3000);
+          if (!entry) { key(document.activeElement || document.body, "Escape"); await sleep(300); return false; }
+          press(entry);
+          await need("the route", () => location.hash.split("?")[0] === $ROUTE);
+          return true;""", ITEM=item, ROUTE=route))
+        if not opened:
+            if item == "Settings":
+                raise harness.HostError("Settings is not in the account menu")
+            self.go("Settings", "#/settings")
+            self.go(item, route)
+=== end
