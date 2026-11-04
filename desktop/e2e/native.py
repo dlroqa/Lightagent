@@ -727,7 +727,7 @@ def page_facts(view):
 
 def no_network():
     """True when nothing outside loopback is reachable (checked by connecting out)."""
-    for address in (("1.1.1.1", 443), ("8.8.8.8", 53), ("github.com", 443)):
+    for address in (("github.com", 443), ("one.one.one.one", 443), ("dns.google", 443)):
         try:
             socket.create_connection(address, timeout=3).close()
             return False, f"reached {address}"
