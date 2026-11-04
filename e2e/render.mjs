@@ -33,6 +33,7 @@ import { checkRemoteCredentials } from "./credentials.mjs";
 import { checkEnvironment } from "./environment.mjs";
 import { checkRegenerateOnBackend } from "./regenerate.mjs";
 import { checkConversationProfile } from "./conversation-profile.mjs";
+import { checkAccessibility } from "./accessibility.mjs";
 
 const BASE = (process.env.PANEL_BASE ?? "http://127.0.0.1:8735").replace(/\/+$/, "");
 // The second server render-panel.sh starts with LIGHTAGENT_CREDENTIAL_KEY and HERMES_HOME.
@@ -484,6 +485,12 @@ async function main() {
     failures.push(...(await checkConversationProfile(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`conversation profile: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Keyboard-only navigation of every screen and an axe scan of each (D8).
+  try {
+    failures.push(...(await checkAccessibility(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`accessibility: ${err instanceof Error ? err.message : String(err)}`);
   }
   // Try again against this server, its model a local stub; the endpoint is put back.
   try {
