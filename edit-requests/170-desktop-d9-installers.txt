@@ -1,0 +1,607 @@
+=== base 7be99f3e5d4f6bad9bf63cbf98d3111c250f0bbe
+=== message
+Verify the installers, and report the desktop's supply chain (D9)
+
+Per target, in the shell job, after the bundles are built:
+- SHA-256 of every installer;
+- each installer used as a person would: on Linux the .deb through apt and
+  launched by a new user account with its own home, then removed, and the
+  AppImage run by that user and deleted; on macOS the .dmg mounted and its
+  app copied to /Applications, launched with a fresh home and removed; on
+  Windows the NSIS setup (current user) and the MSI (machine), each
+  installed and uninstalled silently. A launch is run.py's ready check
+  against the installed binary;
+- the signature state (unsigned is expected and reported) and the minimum
+  OS each binary declares (declared only: no older system is tested).
+
+A new supply-chain job: per target, a CycloneDX 1.5 SBOM and a license
+inventory of what ships (crates the host and the bundled runtime link
+through normal dependencies for that target, and the bundled UI's
+production npm packages); cargo audit on both lockfiles and npm audit
+(high or critical) on the UI's dependencies as the vulnerability gate.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== write desktop/e2e/install_smoke.py
+"""Install, launch and uninstall the desktop installers on a GitHub-hosted runner (D9).
+
+Usage: python install_smoke.py <out-dir> <label> <bundle-dir>
+
+Each installer the runner built is used as a person would use it:
+
+  linux    the .deb installed through apt, launched by a new user account
+           (la-smoke, with its own home), and removed; the AppImage run by
+           that user and deleted
+  macos    the .dmg mounted, its app copied to /Applications, launched with
+           a fresh home, and removed (a GUI session for a second account is
+           not available on the runner)
+  windows  the NSIS setup installed silently for the current user and the
+           MSI for the machine, each launched and uninstalled silently (the
+           app's data folder is the runner account's; Windows resolves it
+           through the known-folder API, not the environment)
+
+A launch is run.py's `ready` check against the installed binary: the
+bundled runtime starts, the UI loads and makes its first API call, no launch
+key shows in any process's arguments or environment, and the runtime leaves
+with the app. Also recorded: each installer's SHA-256, the signature state
+(unsigned is expected), and the minimum OS the binaries declare, which is a
+declaration only: no older system is run. Writes installers-<label>.json and
+SHA256SUMS-<label>.txt, prints a Markdown summary, and exits non-zero when
+an install, a launch or an uninstall fails.
+"""
+
+import glob
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+RUN = os.path.join(HERE, "run.py")
+LINUX = sys.platform.startswith("linux")
+MACOS = sys.platform == "darwin"
+SMOKE_USER = "la-smoke"
+
+
+def sh(args, timeout=600, **kw):
+    try:
+        out = subprocess.run(args, capture_output=True, text=True, timeout=timeout, **kw)
+        return out.returncode, (out.stdout or "") + (out.stderr or "")
+    except (OSError, subprocess.SubprocessError) as error:
+        return -1, repr(error)
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def ready_report(directory):
+    try:
+        with open(os.path.join(directory, "e2e-ready.json"), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return {key: data.get(key) for key in ("milestones_s", "missing", "key_leaks", "runtime_survived_host_termination")}
+
+
+def judged(code, report, tail, **extra):
+    ok = code == 0 and report is not None and not report["missing"] and not report["key_leaks"]
+    return {"ok": ok, "exit": code, "report": report, "tail": None if ok else tail[-900:], **extra}
+
+
+def launch(out, name, app, env=None):
+    """run.py ready against an installed app, as this account, with a fresh
+    Lightagent home (and, when given, other environment)."""
+    target = os.path.join(out, f"launch-{name}")
+    os.makedirs(target, exist_ok=True)
+    home = tempfile.mkdtemp(prefix="la-install-home-")
+    run_env = dict(os.environ, LIGHTAGENT_HOME=os.path.join(home, "lightagent"), E2E_REQUIRE_NO_ORPHAN="1")
+    run_env.update(env or {})
+    code, tail = sh([sys.executable, RUN, target, "ready", "--", app], timeout=300, env=run_env)
+    return judged(code, ready_report(target), tail, account="runner")
+
+
+def free_space_note():
+    return None
+
+
+# Linux ----------------------------------------------------------------------
+
+def linux_user():
+    if sh(["id", SMOKE_USER])[0] != 0:
+        sh(["sudo", "useradd", "-m", "-s", "/bin/bash", SMOKE_USER])
+    tools = tempfile.mkdtemp(prefix="la-smoke-tools-")
+    shutil.copy(RUN, tools)
+    os.chmod(tools, 0o755)
+    os.chmod(os.path.join(tools, "run.py"), 0o755)
+    shared = tempfile.mkdtemp(prefix="la-smoke-out-")
+    os.chmod(shared, 0o777)
+    return os.path.join(tools, "run.py"), shared
+
+
+def as_smoke_user(out, name, app, run, shared):
+    target = os.path.join(shared, name)
+    home = f"/home/{SMOKE_USER}"
+    code, tail = sh(["sudo", "-u", SMOKE_USER, "-H", "env", f"PATH={os.environ['PATH']}",
+                     f"LIGHTAGENT_HOME={home}/.lightagent", "E2E_REQUIRE_NO_ORPHAN=1", "APPIMAGE_EXTRACT_AND_RUN=1",
+                     "xvfb-run", "-a", "-s", "-screen 0 1280x800x24", "dbus-run-session", "--",
+                     sys.executable, run, target, "ready", "--", app], timeout=300)
+    report = ready_report(target)
+    if os.path.isdir(target):
+        shutil.copytree(target, os.path.join(out, f"launch-{name}"), dirs_exist_ok=True)
+    return judged(code, report, tail, account=SMOKE_USER)
+
+
+def glibc_needed(paths):
+    found = set()
+    for path in paths:
+        _, text = sh(["objdump", "-T", path])
+        found.update(re.findall(r"GLIBC_([0-9]+(?:\.[0-9]+)+)", text))
+    return max(found, key=lambda v: tuple(int(x) for x in v.split(".")), default=None)
+
+
+def linux(out, bundle, entries):
+    run, shared = linux_user()
+    for deb in sorted(glob.glob(os.path.join(bundle, "deb", "*.deb"))):
+        package = sh(["dpkg-deb", "-f", deb, "Package"])[1].strip()
+        entry = {"installer": os.path.basename(deb), "sha256": sha256(deb), "package": package,
+                 "depends": sh(["dpkg-deb", "-f", deb, "Depends"])[1].strip(), "signature": "unsigned (Debian packages are not signed here)"}
+        app = "/usr/bin/lightagent-desktop"
+        code, tail = sh(["sudo", "apt-get", "install", "-y", os.path.abspath(deb)], timeout=900)
+        entry["install"] = {"ok": code == 0 and os.path.exists(app), "tail": None if code == 0 else tail[-900:]}
+        entry["installed_files"] = [line for line in sh(["dpkg", "-L", package])[1].splitlines() if "/bin/" in line]
+        if entry["install"]["ok"]:
+            entry["launch"] = as_smoke_user(out, "deb", app, run, shared)
+            entry["min_os"] = {"glibc_needed": glibc_needed([app, "/usr/bin/lightagent-sidecar"]),
+                               "declared_by": "the highest GLIBC symbol version the binaries need, and the package's Depends"}
+        code, tail = sh(["sudo", "apt-get", "remove", "-y", package], timeout=600)
+        gone = not os.path.exists(app) and sh(["dpkg", "-s", package])[0] != 0
+        entry["uninstall"] = {"ok": code == 0 and gone, "tail": None if code == 0 else tail[-600:],
+                              "user_data_left": sh(["sudo", "test", "-e", f"/home/{SMOKE_USER}/.lightagent"])[0] == 0}
+        entries.append(entry)
+    for image in sorted(glob.glob(os.path.join(bundle, "appimage", "*.AppImage"))):
+        entry = {"installer": os.path.basename(image), "sha256": sha256(image), "signature": "unsigned"}
+        place = tempfile.mkdtemp(prefix="la-appimage-")
+        os.chmod(place, 0o755)
+        copy = os.path.join(place, os.path.basename(image))
+        shutil.copy(image, copy)
+        os.chmod(copy, 0o755)
+        entry["install"] = {"ok": os.access(copy, os.X_OK), "how": "copied and made executable (an AppImage needs no install)"}
+        entry["launch"] = as_smoke_user(out, "appimage", copy, run, shared)
+        os.remove(copy)
+        entry["uninstall"] = {"ok": not os.path.exists(copy), "how": "the file deleted"}
+        entries.append(entry)
+
+
+# macOS ------------------------------------------------------------------------
+
+def plist_value(app, key):
+    code, text = sh(["/usr/libexec/PlistBuddy", "-c", f"Print :{key}", os.path.join(app, "Contents", "Info.plist")])
+    return text.strip() if code == 0 else None
+
+
+def macos(out, bundle, entries):
+    for dmg in sorted(glob.glob(os.path.join(bundle, "dmg", "*.dmg"))):
+        entry = {"installer": os.path.basename(dmg), "sha256": sha256(dmg)}
+        mount = tempfile.mkdtemp(prefix="la-dmg-")
+        for attempt in (1, 2, 3):
+            code, tail = sh(["hdiutil", "attach", "-nobrowse", "-readonly", "-mountpoint", mount, dmg], timeout=300)
+            if code == 0 or "Resource busy" not in tail:
+                break
+            entry.setdefault("attach_retries", []).append(attempt)
+            time.sleep(15)
+        apps = glob.glob(os.path.join(mount, "*.app"))
+        target = os.path.join("/Applications", os.path.basename(apps[0])) if apps else None
+        if target and os.path.exists(target):
+            entry["install"] = {"ok": False, "tail": f"{target} already exists; it is not overwritten"}
+            sh(["hdiutil", "detach", mount])
+            entries.append(entry)
+            continue
+        copied = sh(["ditto", apps[0], target]) if target else (-1, "no app in the image")
+        sh(["hdiutil", "detach", mount])
+        binary = os.path.join(target or "", "Contents", "MacOS", "lightagent-desktop")
+        entry["install"] = {"ok": code == 0 and copied[0] == 0 and os.path.exists(binary),
+                            "how": "mounted, the app copied to /Applications", "tail": None if copied[0] == 0 else copied[1][-600:]}
+        if entry["install"]["ok"]:
+            entry["signature"] = sh(["codesign", "-dv", "--verbose=2", target])[1].strip()[-500:]
+            entry["gatekeeper"] = sh(["spctl", "--assess", "--type", "execute", "-v", target])[1].strip()[-300:]
+            entry["min_os"] = {"LSMinimumSystemVersion": plist_value(target, "LSMinimumSystemVersion"),
+                               "declared_by": "Info.plist and each binary's minos (declared, not run on older systems)"}
+            fresh = tempfile.mkdtemp(prefix="la-macos-home-")
+            entry["launch"] = launch(out, "dmg", binary, env={"HOME": fresh})
+            shutil.rmtree(target, ignore_errors=True)
+        entry["uninstall"] = {"ok": bool(target) and not os.path.exists(target), "how": "the app removed from /Applications"}
+        entries.append(entry)
+
+
+# Windows ----------------------------------------------------------------------
+
+def pe_versions(path):
+    with open(path, "rb") as handle:
+        data = handle.read(4096)
+    header = int.from_bytes(data[0x3C:0x40], "little")
+    optional = header + 24
+
+    def word(offset):
+        return int.from_bytes(data[optional + offset:optional + offset + 2], "little")
+
+    return {"os_version": f"{word(40)}.{word(42)}", "subsystem_version": f"{word(48)}.{word(50)}"}
+
+
+def authenticode(path):
+    return sh(["powershell", "-NoProfile", "-Command", f"(Get-AuthenticodeSignature -LiteralPath '{path}').Status"])[1].strip()
+
+
+def installed_exe():
+    roots = [os.environ.get("LOCALAPPDATA", ""), os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs"),
+             os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")]
+    for root in filter(None, roots):
+        for found in glob.glob(os.path.join(root, "Lightagent*", "lightagent-desktop.exe")):
+            return found
+    return None
+
+
+def wait_gone(path, seconds=120):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if not os.path.exists(path):
+            return True
+        time.sleep(1)
+    return False
+
+
+def windows(out, bundle, entries):
+    if installed_exe():
+        entries.append({"installer": "(any)", "install": {"ok": False, "tail": f"already installed at {installed_exe()}; not touched"}})
+        return
+    for setup in sorted(glob.glob(os.path.join(bundle, "nsis", "*-setup.exe"))):
+        entry = {"installer": os.path.basename(setup), "sha256": sha256(setup), "signature": authenticode(setup)}
+        code, tail = sh([setup, "/S"], timeout=900)
+        exe = installed_exe()
+        entry["install"] = {"ok": code == 0 and exe is not None, "where": exe, "how": "silent (/S), current user",
+                            "tail": None if code == 0 else tail[-600:]}
+        if exe:
+            entry["min_os"] = {**pe_versions(exe), "declared_by": "the PE header (declared); WebView2 is required"}
+            entry["launch"] = launch(out, "nsis", exe)
+            uninstaller = os.path.join(os.path.dirname(exe), "uninstall.exe")
+            code, tail = sh([uninstaller, "/S"], timeout=600) if os.path.exists(uninstaller) else (-1, "no uninstall.exe")
+            entry["uninstall"] = {"ok": code == 0 and wait_gone(exe), "how": "uninstall.exe /S", "tail": None if code == 0 else tail[-600:]}
+        entries.append(entry)
+    for msi in sorted(glob.glob(os.path.join(bundle, "msi", "*.msi"))):
+        entry = {"installer": os.path.basename(msi), "sha256": sha256(msi), "signature": authenticode(msi)}
+        log = os.path.join(out, "msi-install.log")
+        code, tail = sh(["msiexec", "/i", os.path.abspath(msi), "/qn", "/norestart", "/l*v", log], timeout=900)
+        exe = installed_exe()
+        entry["install"] = {"ok": code == 0 and exe is not None, "where": exe, "how": "msiexec /i /qn, machine", "exit": code}
+        if exe:
+            entry["launch"] = launch(out, "msi", exe)
+            code, tail = sh(["msiexec", "/x", os.path.abspath(msi), "/qn", "/norestart", "/l*v",
+                             os.path.join(out, "msi-uninstall.log")], timeout=900)
+            entry["uninstall"] = {"ok": code == 0 and wait_gone(exe), "how": "msiexec /x /qn", "exit": code}
+        entries.append(entry)
+
+
+def main():
+    out = os.path.abspath(sys.argv[1])
+    label, bundle = sys.argv[2], os.path.abspath(sys.argv[3])
+    os.makedirs(out, exist_ok=True)
+    entries = []
+    if LINUX:
+        linux(out, bundle, entries)
+    elif MACOS:
+        macos(out, bundle, entries)
+    else:
+        windows(out, bundle, entries)
+    with open(os.path.join(out, f"SHA256SUMS-{label}.txt"), "w", encoding="utf-8") as handle:
+        for entry in entries:
+            if entry.get("sha256"):
+                handle.write(f"{entry['sha256']}  {entry['installer']}\n")
+    failures = [f"{entry.get('installer')}: {step}" for entry in entries for step in ("install", "launch", "uninstall")
+                if step in entry and not entry[step].get("ok")]
+    if not entries:
+        failures.append("no installer was found")
+    with open(os.path.join(out, f"installers-{label}.json"), "w", encoding="utf-8") as handle:
+        json.dump({"label": label, "entries": entries, "failures": failures}, handle, indent=1)
+    print(f"### installers {label}")
+    for entry in entries:
+        steps = ", ".join(f"{step} {'ok' if entry[step].get('ok') else 'FAILED'}" for step in ("install", "launch", "uninstall") if step in entry)
+        account = (entry.get("launch") or {}).get("account")
+        print(f"- `{entry.get('installer')}` sha256 `{entry.get('sha256', '?')}`: {steps}"
+              + (f" (launched as {account})" if account else ""))
+        if entry.get("min_os"):
+            print(f"  - minimum OS (declared): {json.dumps(entry['min_os'])}")
+        if entry.get("signature"):
+            print(f"  - signature: {str(entry['signature']).splitlines()[-1][:160] if entry['signature'] else '?'}")
+    for failure in failures:
+        print(f"- FAILED {failure}")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+=== write scripts/desktop-sbom.py
+"""The desktop's SBOM, license inventory and audit report (D9).
+
+  python desktop-sbom.py <metadata-dir> <frontend-dir> <out-dir>
+      <metadata-dir> holds `cargo metadata --filter-platform <triple>`
+      output for both workspaces: root-<triple>.json (the bundled runtime,
+      the `lightagent` binary) and desktop-<triple>.json (the host,
+      `lightagent-desktop`). Per target it writes sbom-<triple>.cdx.json
+      (CycloneDX 1.5) and licenses-<triple>.csv, listing what ships: the
+      crates each binary links through normal dependencies for that
+      target, and the bundled UI's production npm packages. Prints a
+      Markdown summary, with components whose license is unknown and
+      copyleft licenses listed for review.
+  python desktop-sbom.py --cargo-audit <audit.json> <lockfile>
+  python desktop-sbom.py --npm-audit <audit.json>
+      Print an audit's findings; exit 1 when it holds a vulnerability (for
+      npm: of high or critical severity).
+"""
+
+import csv
+import datetime
+import json
+import os
+import re
+import sys
+import uuid
+
+COPYLEFT = re.compile(r"\b(A?GPL|LGPL|MPL|EPL|CDDL|EUPL|OSL|SSPL)", re.I)
+TARGETS = ["x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
+
+
+def load(path):
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def linked(metadata, root_name):
+    """Packages reachable from the workspace package `root_name` through
+    normal (not dev, not build) dependencies."""
+    packages = {package["id"]: package for package in metadata["packages"]}
+    nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
+    stack = [package["id"] for package in metadata["packages"] if package["name"] == root_name and package.get("source") is None]
+    seen = set()
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        for dep in nodes.get(current, {}).get("deps", []):
+            if any(kind.get("kind") is None for kind in dep.get("dep_kinds", [])):
+                stack.append(dep["pkg"])
+    return [packages[key] for key in sorted(seen) if key in packages]
+
+
+def crate_component(package, ships_in):
+    license_ = package.get("license") or (f"see {os.path.basename(package['license_file'])}" if package.get("license_file") else None)
+    first_party = package.get("source") is None
+    return {
+        "ecosystem": "cargo", "name": package["name"], "version": package["version"], "license": license_,
+        "purl": f"pkg:cargo/{package['name']}@{package['version']}", "ships_in": ships_in, "first_party": first_party,
+    }
+
+
+def npm_components(frontend):
+    lock = load(os.path.join(frontend, "package-lock.json"))
+    found = []
+    for path, entry in sorted(lock.get("packages", {}).items()):
+        if not path or entry.get("dev"):
+            continue
+        name = entry.get("name") or path.split("node_modules/")[-1]
+        license_ = entry.get("license")
+        if not license_:
+            try:
+                manifest = load(os.path.join(frontend, path, "package.json"))
+                license_ = manifest.get("license")
+                if isinstance(license_, dict):
+                    license_ = license_.get("type")
+            except (OSError, ValueError):
+                license_ = None
+        purl_name = name.replace("@", "%40", 1) if name.startswith("@") else name
+        found.append({"ecosystem": "npm", "name": name, "version": entry.get("version"), "license": license_,
+                      "purl": f"pkg:npm/{purl_name}@{entry.get('version')}", "ships_in": "bundled UI", "first_party": False})
+    return found
+
+
+def cyclonedx(target, version, components):
+    return {
+        "bomFormat": "CycloneDX", "specVersion": "1.5", "serialNumber": f"urn:uuid:{uuid.uuid4()}", "version": 1,
+        "metadata": {
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "component": {"type": "application", "name": "lightagent-desktop", "version": version, "bom-ref": "lightagent-desktop"},
+            "properties": [{"name": "target", "value": target}],
+        },
+        "components": [
+            {
+                "type": "application" if component["first_party"] else "library",
+                "bom-ref": f"{component['purl']}#{component['ships_in']}",
+                "name": component["name"], "version": component["version"], "purl": component["purl"],
+                "licenses": [{"expression": component["license"]}] if component["license"] and not component["license"].startswith("see ") else [],
+                "properties": [{"name": "ships-in", "value": component["ships_in"]}]
+                + ([{"name": "license-file", "value": component["license"][4:]}] if (component["license"] or "").startswith("see ") else []),
+            }
+            for component in components
+        ],
+    }
+
+
+def inventory(metadata_dir, frontend, out):
+    os.makedirs(out, exist_ok=True)
+    ui = npm_components(frontend)
+    lines = ["### desktop supply chain: SBOM and licenses"]
+    review = {}
+    for target in TARGETS:
+        runtime = load(os.path.join(metadata_dir, f"root-{target}.json"))
+        host = load(os.path.join(metadata_dir, f"desktop-{target}.json"))
+        components = [crate_component(p, "desktop host") for p in linked(host, "lightagent-desktop")]
+        components += [crate_component(p, "bundled runtime") for p in linked(runtime, "lightagent")]
+        components += ui
+        version = next((p["version"] for p in host["packages"] if p["name"] == "lightagent-desktop"), "?")
+        with open(os.path.join(out, f"sbom-{target}.cdx.json"), "w", encoding="utf-8") as handle:
+            json.dump(cyclonedx(target, version, components), handle, indent=1)
+        with open(os.path.join(out, f"licenses-{target}.csv"), "w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["ecosystem", "name", "version", "license", "ships_in", "first_party"])
+            for component in sorted(components, key=lambda c: (c["ships_in"], c["ecosystem"], c["name"], c["version"])):
+                writer.writerow([component[k] for k in ("ecosystem", "name", "version", "license", "ships_in", "first_party")])
+        third = [c for c in components if not c["first_party"]]
+        unknown = sorted({f"{c['name']}@{c['version']}" for c in third if not c["license"]})
+        copyleft = sorted({f"{c['name']}@{c['version']} ({c['license']})" for c in third if c["license"] and COPYLEFT.search(c["license"])})
+        counts = {where: len({(c["name"], c["version"]) for c in components if c["ships_in"] == where})
+                  for where in ("desktop host", "bundled runtime", "bundled UI")}
+        lines.append(f"- `{target}`: {counts}; third-party licenses unknown: {len(unknown)}; with a copyleft option: {len(copyleft)}")
+        review[target] = {"unknown": unknown, "copyleft": copyleft}
+    for target, found in review.items():
+        if found["unknown"]:
+            lines.append(f"  - {target} unknown: {', '.join(found['unknown'][:40])}")
+        if found["copyleft"]:
+            lines.append(f"  - {target} copyleft option, review: {', '.join(found['copyleft'][:40])}")
+    with open(os.path.join(out, "license-review.json"), "w", encoding="utf-8") as handle:
+        json.dump(review, handle, indent=1)
+    print("\n".join(lines))
+    return 0
+
+
+def cargo_audit(path, lockfile):
+    report = load(path)
+    found = (report.get("vulnerabilities") or {}).get("list") or []
+    lines = [f"### cargo audit `{lockfile}`: {len(found)} vulnerabilit{'y' if len(found) == 1 else 'ies'}"]
+    for item in found:
+        advisory, package = item.get("advisory") or {}, item.get("package") or {}
+        lines.append(f"- {advisory.get('id')} {package.get('name')}@{package.get('version')}: {advisory.get('title')} "
+                     f"(patched: {', '.join((item.get('versions') or {}).get('patched') or []) or 'none'})")
+    for kind, items in (report.get("warnings") or {}).items():
+        for item in items or []:
+            advisory, package = item.get("advisory") or {}, item.get("package") or {}
+            lines.append(f"- warning ({kind}) {advisory.get('id', '')} {package.get('name')}@{package.get('version')}: {advisory.get('title', '')}")
+    print("\n".join(lines))
+    return 1 if found else 0
+
+
+def npm_audit(path):
+    report = load(path)
+    counts = (report.get("metadata") or {}).get("vulnerabilities") or {}
+    lines = [f"### npm audit (bundled UI, production dependencies): {json.dumps(counts)}"]
+    for name, item in sorted((report.get("vulnerabilities") or {}).items()):
+        lines.append(f"- {name}: {item.get('severity')} ({item.get('range', '')})")
+    print("\n".join(lines))
+    return 1 if (counts.get("high", 0) or 0) + (counts.get("critical", 0) or 0) else 0
+
+
+def main():
+    if sys.argv[1] == "--cargo-audit":
+        return cargo_audit(sys.argv[2], sys.argv[3])
+    if sys.argv[1] == "--npm-audit":
+        return npm_audit(sys.argv[2])
+    return inventory(sys.argv[1], sys.argv[2], sys.argv[3])
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+=== replace .github/workflows/desktop.yml
+--- find
+#   D8  native WebView: the rendered UI driven in WKWebView, WebView2 and
+--- with
+#   D9  installers: each one installed, launched and uninstalled on its
+#       target, with checksums, signature state and declared minimum OS;
+#       the supply-chain job writes the SBOMs and license inventories and
+#       gates on known vulnerabilities.
+#   D8  native WebView: the rendered UI driven in WKWebView, WebView2 and
+=== replace .github/workflows/desktop.yml
+--- find
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: desktop-shell-${{ matrix.label }}
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/desktop-e2e/
+--- with
+      - name: Installers (checksums, then install, launch and uninstall each; D9)
+        if: success() || failure()
+        run: |
+          python desktop/e2e/install_smoke.py "$RUNNER_TEMP/desktop-installers" "${{ matrix.label }}" desktop/target/release/bundle | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: desktop-shell-${{ matrix.label }}
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/desktop-e2e/
+            ${{ runner.temp }}/desktop-installers/
+=== replace .github/workflows/desktop.yml
+--- find
+  switch:
+    name: desktop profile switch and runs (linux, e2e hooks)
+--- with
+  supply-chain:
+    name: desktop supply chain (SBOMs, licenses, vulnerabilities)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Record the tested commit
+        run: echo "- head \`$(git rev-parse HEAD)\` tree \`$(git rev-parse 'HEAD^{tree}')\`" | tee -a "$GITHUB_STEP_SUMMARY"
+      - run: rustup show
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: The bundled UI's dependencies (for their licenses)
+        run: npm ci --prefix frontend
+      - name: What each target links (cargo metadata, both workspaces)
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/supply-chain/metadata"; mkdir -p "$dir"
+          for t in x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc x86_64-unknown-linux-gnu; do
+            cargo metadata --locked --format-version 1 --filter-platform "$t" > "$dir/root-$t.json"
+            cargo metadata --locked --format-version 1 --filter-platform "$t" --manifest-path desktop/Cargo.toml > "$dir/desktop-$t.json"
+          done
+      - name: SBOM and license inventory per target
+        run: python -I scripts/desktop-sbom.py "$RUNNER_TEMP/supply-chain/metadata" frontend "$RUNNER_TEMP/supply-chain" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Known vulnerabilities in the crates (cargo audit, both lockfiles)
+        if: success() || failure()
+        run: |
+          cargo install --locked cargo-audit
+          echo "- $(cargo audit --version)" | tee -a "$GITHUB_STEP_SUMMARY"
+          status=0
+          for lock in Cargo.lock desktop/Cargo.lock; do
+            report="$RUNNER_TEMP/supply-chain/cargo-audit-$(echo "$lock" | tr / -).json"
+            cargo audit --file "$lock" --json > "$report" || true
+            python -I scripts/desktop-sbom.py --cargo-audit "$report" "$lock" | tee -a "$GITHUB_STEP_SUMMARY"
+            [ "${PIPESTATUS[0]}" = 0 ] || status=1
+          done
+          exit $status
+      - name: Known vulnerabilities in the bundled UI (npm audit, high or critical)
+        if: success() || failure()
+        run: |
+          report="$RUNNER_TEMP/supply-chain/npm-audit.json"
+          (cd frontend && npm audit --omit=dev --json) > "$report" || true
+          python -I scripts/desktop-sbom.py --npm-audit "$report" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: desktop-supply-chain
+          retention-days: 30
+          path: ${{ runner.temp }}/supply-chain/
+
+  switch:
+    name: desktop profile switch and runs (linux, e2e hooks)
+=== end
