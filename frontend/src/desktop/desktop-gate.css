@@ -1,4 +1,9 @@
 /* Desktop start-up gate: semantic tokens only (styles/tokens.css). */
+
+/* The app inside the gate: no box of its own, so the layout is the app's. */
+.desktop-gate__app {
+  display: contents;
+}
 .desktop-gate {
   min-height: 100dvh;
   display: grid;
