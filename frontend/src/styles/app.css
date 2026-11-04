@@ -2896,6 +2896,29 @@ textarea {
   font-size: 11.5px;
 }
 
+.chat-sidebar__profile {
+  display: grid;
+  gap: 4px;
+  padding: 0 6px;
+}
+
+.chat-sidebar__profile-label {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.chat-sidebar__profile-select {
+  width: 100%;
+}
+
+.chat-sidebar__profile-hint {
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
 .shell--chat .chat-history > .btn {
   display: none;
 }

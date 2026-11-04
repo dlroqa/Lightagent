@@ -26,6 +26,26 @@ import { useRunEvents, type Delivery, type RunEvent } from "../hooks/useRunEvent
 import { usePreferences } from "../state/preferences";
 
 const SESSION_KEY = "lightagent.agent.session";
+// The profile the conversation list shows and new chats run as, when it is
+// not the one the runtime serves. A per-viewer convenience.
+const PROFILE_KEY = "lightagent.agent.profile";
+
+function readConversationProfile(): string | null {
+  try {
+    return window.localStorage.getItem(PROFILE_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+
+function keepConversationProfile(profile: string | null) {
+  try {
+    if (profile) window.localStorage.setItem(PROFILE_KEY, profile);
+    else window.localStorage.removeItem(PROFILE_KEY);
+  } catch {
+    // Without storage the choice lasts as long as this page.
+  }
+}
 const WELCOME_PROMPTS = [
   "Where should we begin?",
   "What would you like to make?",
@@ -386,7 +406,28 @@ export function Agent() {
   const navigate = useNavigate();
   const location = useLocation();
   const { preferences, update: updatePreferences } = usePreferences();
-  const sessions = usePoll(() => agentApi.sessions().then((body) => body.sessions), 2000);
+  // The conversations' profile, chosen for them only, as `lightagent chat
+  // --profile` chooses one for a chat; never the active profile. Null: the
+  // profile the runtime serves. Read through a ref by every call below.
+  const [conversationProfile, setConversationProfile] = useState<string | null>(readConversationProfile);
+  const profileScope = useRef<string | undefined>(undefined);
+  profileScope.current = conversationProfile ?? undefined;
+  const sessions = usePoll(() => agentApi.sessions(profileScope.current).then((body) => body.sessions), 2000);
+  const profileCatalog = usePoll(agentApi.profiles, 0);
+  const defaultProfile = profileCatalog.data?.active_profile ?? "";
+  const profileOptions = useMemo(
+    () => (profileCatalog.data?.profiles ?? []).map((profile) => profile.id),
+    [profileCatalog.data],
+  );
+  const scopedProfile = conversationProfile ?? defaultProfile;
+  // A remembered profile that no longer exists: back to the default one.
+  useEffect(() => {
+    if (!conversationProfile || !profileCatalog.data || profileOptions.includes(conversationProfile)) return;
+    keepConversationProfile(null);
+    profileScope.current = undefined;
+    setConversationProfile(null);
+    sessions.refresh();
+  }, [conversationProfile, profileCatalog.data, profileOptions, sessions.refresh]);
   // Runtime facts exposed by this same Lightagent process.
   const toolCatalog = usePoll(() => agentApi.tools().then((body) => body.tools), 0);
   const provider = usePoll(agentApi.provider, 10_000);
@@ -586,7 +627,7 @@ export function Agent() {
   const load = useCallback(async (id: string) => {
     const generation = ++loadGeneration.current;
     try {
-      const loaded = await agentApi.session(id);
+      const loaded = await agentApi.session(id, profileScope.current);
       if (selected.current === id && generation === loadGeneration.current) {
         setSession(loaded);
         setError(null);
@@ -657,7 +698,7 @@ export function Agent() {
         let created: Awaited<ReturnType<typeof agentApi.createRun>> | null = null;
         for (let attempt = 0; attempt < 20; attempt += 1) {
           try {
-            created = await agentApi.createRun(next, undefined, activeId, selectedModel || undefined);
+            created = await agentApi.createRun(next, profileScope.current, activeId, selectedModel || undefined);
             break;
           } catch (cause) {
             const message = cause instanceof Error ? cause.message : String(cause);
@@ -742,7 +783,7 @@ export function Agent() {
     let cancelled = false;
     const timer = window.setTimeout(() => {
       setSearchingTranscripts(true);
-      void agentApi.searchSessions(query)
+      void agentApi.searchSessions(query, profileScope.current)
         .then(({ sessions: matches }) => {
           if (!cancelled) setTranscriptResults(matches);
         })
@@ -795,10 +836,22 @@ export function Agent() {
     setWelcomePromptIndex((current) => (current + 1) % WELCOME_PROMPTS.length);
   }
 
+  /** List `id`'s conversations and start new ones as it; the active profile is untouched. */
+  function chooseProfile(id: string) {
+    if (hasPendingWork) return;
+    const next = id && id !== defaultProfile ? id : null;
+    keepConversationProfile(next);
+    profileScope.current = next ?? undefined;
+    setConversationProfile(next);
+    setTranscriptResults([]);
+    startNew();
+    sessions.refresh();
+  }
+
   async function remove(id: string) {
     if (hasPendingWork && id === activeId) return;
     try {
-      await agentApi.deleteSession(id);
+      await agentApi.deleteSession(id, profileScope.current);
       backgroundRuns.current.delete(id);
       if (id === activeId) {
         window.localStorage.removeItem(SESSION_KEY);
@@ -816,7 +869,7 @@ export function Agent() {
 
   async function updateSession(id: string, patch: SessionPatch) {
     try {
-      await agentApi.updateSession(id, patch);
+      await agentApi.updateSession(id, patch, profileScope.current);
       if (id === activeId && patch.archived) {
         window.localStorage.removeItem(SESSION_KEY);
         selected.current = null;
@@ -837,7 +890,7 @@ export function Agent() {
 
   async function shareSession(row: SessionSummary) {
     try {
-      const transcript = await agentApi.session(row.id);
+      const transcript = await agentApi.session(row.id, profileScope.current);
       const text = transcript.messages.map((message) => `${message.role === "user" ? "You" : "Agent"}: ${message.content}`).join("\n\n");
       if (navigator.share) {
         await navigator.share({ title: row.title || "Lightagent conversation", text });
@@ -872,13 +925,13 @@ export function Agent() {
     try {
       let id = activeId;
       if (!id) {
-        id = (await agentApi.createSession()).id;
+        id = (await agentApi.createSession(profileScope.current)).id;
         window.localStorage.setItem(SESSION_KEY, id);
         selected.current = id;
         loadGeneration.current += 1;
         setActiveId(id);
       }
-      const run = await agentApi.createRun(message, undefined, id, selectedModel || undefined);
+      const run = await agentApi.createRun(message, profileScope.current, id, selectedModel || undefined);
       backgroundRuns.current.set(id, run.id);
       if (selected.current === id) setRunId(run.id);
       setAttachments([]);
@@ -891,7 +944,8 @@ export function Agent() {
       // The session already has a turn this page is not following (a paused
       // run a closed page left): follow it, so it can be continued or stopped.
       if (activeId && text.startsWith("409: session already has an active run")) {
-        const active = await agentApi.session(activeId).then((loaded) => loaded.active_run).catch(() => undefined);
+        const active = await agentApi.session(activeId, profileScope.current)
+          .then((loaded) => loaded.active_run).catch(() => undefined);
         if (active && selected.current === activeId) {
           backgroundRuns.current.set(activeId, active.id);
           setRunId(active.id);
@@ -912,7 +966,7 @@ export function Agent() {
     setBusy(true);
     setError(null);
     try {
-      const run = await agentApi.regenerate(id, latest.run_id, selectedModel || undefined);
+      const run = await agentApi.regenerate(id, latest.run_id, selectedModel || undefined, profileScope.current);
       setReplacing({ sessionId: id, runId: run.id, savedRunId: latest.run_id });
       backgroundRuns.current.set(id, run.id);
       if (selected.current === id) setRunId(run.id);
@@ -932,13 +986,13 @@ export function Agent() {
     try {
       let id = activeId;
       if (!id) {
-        id = (await agentApi.createSession()).id;
+        id = (await agentApi.createSession(profileScope.current)).id;
         window.localStorage.setItem(SESSION_KEY, id);
         selected.current = id;
         loadGeneration.current += 1;
         setActiveId(id);
       }
-      const uploaded = await Promise.all([...files].map((file) => agentApi.uploadAttachment(id!, file)));
+      const uploaded = await Promise.all([...files].map((file) => agentApi.uploadAttachment(id!, file, profileScope.current)));
       setAttachments((current) => [...current, ...uploaded]);
       await load(id);
       sessions.refresh();
@@ -1072,6 +1126,23 @@ export function Agent() {
             <SquarePen size={17} strokeWidth={2} /> New chat
           </button>
           {sidebarNotice && <span className="chat-sidebar__notice" role="status">{sidebarNotice}</span>}
+          {profileOptions.length > 1 && (
+            <div className="chat-sidebar__profile">
+              <label className="chat-sidebar__profile-label" htmlFor="conversation-profile">Profile</label>
+              <select id="conversation-profile" className="select chat-sidebar__profile-select" value={scopedProfile}
+                disabled={hasPendingWork} aria-describedby="conversation-profile-hint"
+                onChange={(event) => chooseProfile(event.target.value)}>
+                {profileOptions.map((id) => (
+                  <option key={id} value={id}>{id === defaultProfile ? `${id} (default)` : id}</option>
+                ))}
+              </select>
+              <span id="conversation-profile-hint" className="chat-sidebar__profile-hint">
+                {scopedProfile === defaultProfile
+                  ? "Chats run as the default profile."
+                  : `These chats run as ${scopedProfile}; the default profile stays ${defaultProfile}.`}
+              </span>
+            </div>
+          )}
           <div className="agent-sessions__list" style={{ flex: 1, overflowY: "auto", margin: "0 -6px" }}>
             {visible.length === 0 ? (
               <div className="empty" style={{ padding: 20 }}>

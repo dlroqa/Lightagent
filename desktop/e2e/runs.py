@@ -88,6 +88,7 @@ def scripts(provider):
         ),
         "steer-hold": lambda p, turn, index: [("text", "Working"), ("gate", "steer-hold"), ("text", " done."), ("finish", "stop")],
         "convo": lambda p, turn, index: [("text", "Noted."), ("finish", "stop")],
+        "profile": lambda p, turn, index: [("text", "Noted."), ("finish", "stop")],
         "reload": lambda p, turn, index: [("text", "Done."), ("finish", "stop")],
         "regen": lambda p, turn, index: {
             "first": [("text", "First answer."), ("finish", "stop")],
@@ -1550,6 +1551,58 @@ def scenario_jev(host):
     return check
 
 
+def scenario_conversation_profile(host, provider, cli):
+    """`lightagent chat --profile` through the host: a conversation created
+    for another profile is kept and listed under that profile only and runs
+    as it (the provider sees its persona), as `chat --profile` runs a chat;
+    `chat --profile --session` continues it; the active profile stays as it
+    was, for the host's runtime and the CLI."""
+    check = Checks("conversation_profile")
+    persona = "You answer as the e2e research desk."
+    harness.run_cli(cli, "profile", "create", "e2e-research", "--persona", persona)
+    active = json.loads(harness.run_cli(cli, "--json", "profile", "list")).get("active")
+    scoped = f"{API}/sessions?profile=e2e-research"
+    status, created = host.fetch("POST", scoped, {})
+    session = (created or {}).get("id")
+    check.expect("a conversation created for e2e-research through the host",
+                 status == 201 and isinstance(session, str), (status, created))
+    if not isinstance(session, str):
+        return check
+    _, listed = host.fetch("GET", scoped)
+    _, default = host.fetch("GET", f"{API}/sessions")
+    check.expect("listed under e2e-research, not under the active profile",
+                 session in [row.get("id") for row in (listed or {}).get("sessions", [])]
+                 and session not in [row.get("id") for row in (default or {}).get("sessions", [])])
+    before = len(provider.requests("profile"))
+    status, run = host.fetch("POST", f"{API}/runs", {
+        "message": "[e2e:profile] Where do herons nest?", "session_id": session, "profile": "e2e-research"})
+    if status == 202:
+        Stream(host, run["id"]).finish()
+    desktop = provider.requests("profile")[before:]
+    check.expect("the run through the host is built from e2e-research (its persona)",
+                 status == 202 and len(desktop) == 1 and persona in (desktop[0].get("system") or ""),
+                 (status, len(desktop)))
+    harness.run_cli_input(cli, "[e2e:profile] And egrets?\n/exit\n", "chat", "--profile", "e2e-research")
+    by_cli = provider.requests("profile")[before + len(desktop):]
+    check.expect("lightagent chat --profile e2e-research sends the same persona and model",
+                 len(desktop) == 1 and len(by_cli) >= 1 and persona in (by_cli[-1].get("system") or "")
+                 and by_cli[-1].get("model") == desktop[0].get("model"),
+                 [request.get("model") for request in desktop + by_cli])
+    harness.run_cli_input(cli, "[e2e:profile] Which ones winter here?\n/exit\n",
+                          "chat", "--profile", "e2e-research", "--session", session)
+    _, saved = host.fetch("GET", f"{API}/sessions/{session}?profile=e2e-research")
+    users = [message.get("content") for message in (saved or {}).get("messages", []) if message.get("role") == "user"]
+    check.expect("chat --profile e2e-research --session continues the host's conversation",
+                 (saved or {}).get("profile") == "e2e-research" and len(users) == 2
+                 and "Which ones winter here?" in str(users[-1]), users)
+    _, catalog = host.fetch("GET", f"{API}/profiles")
+    check.expect("the active profile stays as it was, for the runtime and the CLI",
+                 isinstance(active, str) and (catalog or {}).get("active_profile") == active
+                 and json.loads(harness.run_cli(cli, "--json", "profile", "list")).get("active") == active,
+                 (active, (catalog or {}).get("active_profile")))
+    return check
+
+
 def scenario_environment(command, env, cli, out):
     """The env rows through a second host, started after the first stops, as
     a user would start the app: the vault key itself in
@@ -1706,6 +1759,7 @@ def main():
             ("commands", lambda: scenario_commands(host, cli)),
             ("reload", lambda: scenario_reload(host, provider, cli)),
             ("jev", lambda: scenario_jev(host)),
+            ("conversation_profile", lambda: scenario_conversation_profile(host, provider, cli)),
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]

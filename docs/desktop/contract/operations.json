@@ -550,41 +550,60 @@
   {
    "id": "sessions.list",
    "method": "GET",
-   "path": "/api/lightagent/v1/sessions"
+   "path": "/api/lightagent/v1/sessions",
+   "query": [
+    "profile"
+   ]
   },
   {
    "id": "sessions.create",
    "method": "POST",
-   "path": "/api/lightagent/v1/sessions"
+   "path": "/api/lightagent/v1/sessions",
+   "query": [
+    "profile"
+   ]
   },
   {
    "id": "sessions.search",
    "method": "GET",
    "path": "/api/lightagent/v1/sessions/search",
    "query": [
-    "q"
+    "q",
+    "profile"
    ]
   },
   {
    "id": "sessions.get",
    "method": "GET",
-   "path": "/api/lightagent/v1/sessions/{id}"
+   "path": "/api/lightagent/v1/sessions/{id}",
+   "query": [
+    "profile"
+   ]
   },
   {
    "id": "sessions.update",
    "method": "PATCH",
-   "path": "/api/lightagent/v1/sessions/{id}"
+   "path": "/api/lightagent/v1/sessions/{id}",
+   "query": [
+    "profile"
+   ]
   },
   {
    "id": "sessions.delete",
    "method": "DELETE",
    "path": "/api/lightagent/v1/sessions/{id}",
+   "query": [
+    "profile"
+   ],
    "destructive": true
   },
   {
    "id": "sessions.attach",
    "method": "POST",
    "path": "/api/lightagent/v1/sessions/{id}/attachments",
+   "query": [
+    "profile"
+   ],
    "raw_body": true
   },
   {

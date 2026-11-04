@@ -588,6 +588,42 @@ fn no_session() -> Response {
         .into_response()
 }
 
+/// The local operator's conversations of one profile: the profile a request
+/// names for them, as `lightagent chat --profile` names one for a chat, else
+/// the one this server serves. The active profile is not changed. Naming a
+/// profile grants nothing by itself: this is reached only once the request
+/// is authorized as the local operator, and the profile must exist in this
+/// home. A user in multi-user mode is scoped by `access` instead.
+fn operator_conversations(
+    state: &AppState,
+    requested: Option<&str>,
+) -> Result<(String, SessionStore), Box<Response>> {
+    let Some(raw) = requested.filter(|raw| *raw != state.session_profile) else {
+        return Ok((state.session_profile.clone(), state.sessions.clone()));
+    };
+    let Ok(id) = ProfileId::new(raw) else {
+        return Err(Box::new(bad_request("invalid profile id")));
+    };
+    let Some(root) = home(state) else {
+        return Err(Box::new(internal(
+            "conversations of another profile need the Lightagent home",
+        )));
+    };
+    let profiles = ProfileStore::new(&root);
+    if profiles.load(&id).is_err() {
+        return Err(Box::new(
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "no such profile" })),
+            )
+                .into_response(),
+        ));
+    }
+    let sessions = SessionStore::at_profile(&profiles.handle(&id))
+        .keep_history(state.sessions.is_history_kept());
+    Ok((id.as_str().to_owned(), sessions))
+}
+
 /// The answer when a restricted representation cannot be produced: the
 /// endpoint stays operator-only.
 fn operator_only() -> Response {
@@ -3726,13 +3762,15 @@ async fn start_run(
     let mut session_id = None;
     // The session's run lease, held from admission until the run is recorded.
     let mut run_lease = None;
-    let session_store = match &session_scope {
-        Some(user) => user.sessions(&state),
-        None => state.sessions.clone(),
-    };
-    let session_profile = match &session_scope {
-        Some(user) => user.profile.as_str().to_owned(),
-        None => state.session_profile.clone(),
+    // The conversation's own profile: a user's authorized one, else the one
+    // the operator named for it (as `lightagent chat --profile` does), else
+    // the one this server serves.
+    let (session_profile, session_store) = match &session_scope {
+        Some(user) => (user.profile.as_str().to_owned(), user.sessions(&state)),
+        None => match operator_conversations(&state, profile.as_deref()) {
+            Ok(found) => found,
+            Err(response) => return *response,
+        },
     };
     if let Some(raw) = body.session_id {
         let id = match SessionId::parse(&raw) {
@@ -4212,7 +4250,11 @@ async fn list_sessions(
         }
         Err(response) => return *response,
     }
-    match state.sessions.list() {
+    let (_, sessions) = match operator_conversations(&state, query.profile.as_deref()) {
+        Ok(found) => found,
+        Err(response) => return *response,
+    };
+    match sessions.list() {
         Ok(list) => Json(json!({ "sessions": list })).into_response(),
         Err(error) => internal(&error.to_string()),
     }
@@ -4265,7 +4307,11 @@ async fn search_sessions(
             Err(_) => internal("sessions could not be searched"),
         };
     }
-    match state.sessions.search(term, limit) {
+    let (_, sessions) = match operator_conversations(&state, query.profile.as_deref()) {
+        Ok(found) => found,
+        Err(response) => return *response,
+    };
+    match sessions.search(term, limit) {
         Ok(list) => Json(json!({ "sessions": list })).into_response(),
         Err(error) => internal(&error.to_string()),
     }
@@ -4302,8 +4348,12 @@ async fn create_session(
             Err(_) => internal("the session could not be saved"),
         };
     }
-    let session = Session::new(&state.session_profile, "agent session");
-    match state.sessions.save(&session) {
+    let (profile, sessions) = match operator_conversations(&state, query.profile.as_deref()) {
+        Ok(found) => found,
+        Err(response) => return *response,
+    };
+    let session = Session::new(&profile, "agent session");
+    match sessions.save(&session) {
         Ok(()) => (StatusCode::CREATED, Json(json!({ "id": session.id }))).into_response(),
         Err(error) => internal(&error.to_string()),
     }
@@ -4362,14 +4412,18 @@ async fn upload_attachment(
             _ => no_session(),
         };
     }
-    let session = match state.sessions.load(&id) {
+    let (profile, sessions) = match operator_conversations(&state, query.profile.as_deref()) {
+        Ok(found) => found,
+        Err(response) => return *response,
+    };
+    let session = match sessions.load(&id) {
         Ok(session) => session,
         Err(error) => return not_found(&error.to_string()),
     };
-    if session.profile != state.session_profile {
+    if session.profile != profile {
         return bad_request("session profile does not match");
     }
-    match state.sessions.save_attachment(&id, filename, &body) {
+    match sessions.save_attachment(&id, filename, &body) {
         Ok(path) => Json(json!({ "name": filename, "path": path })).into_response(),
         Err(error) => internal(&error.to_string()),
     }
@@ -4434,8 +4488,12 @@ async fn get_session(
             _ => no_session(),
         };
     }
-    match state.sessions.load(&id) {
-        Ok(session) => session_view(&state, &headers, &state.sessions, &id, session).await,
+    let (_, sessions) = match operator_conversations(&state, query.profile.as_deref()) {
+        Ok(found) => found,
+        Err(response) => return *response,
+    };
+    match sessions.load(&id) {
+        Ok(session) => session_view(&state, &headers, &sessions, &id, session).await,
         Err(error) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": error.to_string() })),
@@ -4532,7 +4590,10 @@ async fn update_session(
     };
     let store = match &user {
         Some(user) => user.sessions(&state),
-        None => state.sessions.clone(),
+        None => match operator_conversations(&state, query.profile.as_deref()) {
+            Ok((_, sessions)) => sessions,
+            Err(response) => return *response,
+        },
     };
     let id = match SessionId::parse(&id) {
         Ok(id) => id,
@@ -4671,7 +4732,11 @@ async fn delete_session(
             Err(_) => internal("the session could not be deleted"),
         };
     }
-    let result = state.sessions.delete(&id);
+    let sessions = match operator_conversations(&state, query.profile.as_deref()) {
+        Ok((_, sessions)) => sessions,
+        Err(response) => return *response,
+    };
+    let result = sessions.delete(&id);
     drop(busy);
     match result {
         Ok(removed) => Json(json!({ "deleted": removed })).into_response(),
