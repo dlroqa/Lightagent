@@ -1,0 +1,15 @@
+=== base de46bd07142c9a418a439ca781bb843d50f21e1b
+=== message
+Probe the outside world by name, not by public address
+
+check.sh's secrets gate refuses committed public IPv4 literals. The
+namespace probe now connects to well-known names: without a network
+neither resolution nor a connection succeeds, which is what it checks.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace desktop/e2e/native.py
+--- find
+    for address in (("1.1.1.1", 443), ("8.8.8.8", 53), ("github.com", 443)):
+--- with
+    for address in (("github.com", 443), ("one.one.one.one", 443), ("dns.google", 443)):
+=== end
