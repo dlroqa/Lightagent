@@ -1,0 +1,24 @@
+=== base cb0883e0a92cd6396e00d85753a62869090ce8f3
+=== message
+Keep the picker title on Windows builds, and choose the profile once it is listed
+
+Desktop run 41827853899: the Windows test build failed clippy (the common
+item dialog takes its title as a wide literal, so TITLE was unused there),
+and the native secret input step chose the profile before the screen had
+listed the profiles, so the button stayed disabled.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace desktop/src-tauri/src/secret.rs
+--- find
+const TITLE: &str = "Choose the file that holds the secret";
+--- with
+// Windows passes the same title as a wide literal (w!), so it reads none.
+#[cfg_attr(windows, allow(dead_code))]
+const TITLE: &str = "Choose the file that holds the secret";
+=== replace desktop/e2e/native.py
+--- find
+          fill(await need("profile", () => document.querySelector("#rc-add-profile")), $PROFILE);
+--- with
+          await need("the profile in the list", () => document.querySelector('#rc-add-profile option[value="' + $PROFILE + '"]'));
+          fill(await need("profile", () => document.querySelector("#rc-add-profile")), $PROFILE);
+=== end
