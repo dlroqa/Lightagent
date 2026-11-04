@@ -376,6 +376,23 @@ pub(crate) fn perform(home: &Path, request: RemoteCredentialRequest) -> Result<V
             secret_stdin: false,
         })
     };
+    // The desktop host's channel: the secret itself, as standard input
+    // carries it to the CLI.
+    let mut inline: Option<String> = None;
+    let source = |raw: Option<String>, carried: bool| {
+        if !carried {
+            return from_file(raw);
+        }
+        if raw.is_some() {
+            return Err(invalid(
+                "name a secret file or send the secret, not both".to_owned(),
+            ));
+        }
+        Ok(SecretInput {
+            secret_file: None,
+            secret_stdin: true,
+        })
+    };
     let action = match request {
         RemoteCredentialRequest::Status => RemoteCredentialAction::Status,
         RemoteCredentialRequest::Keygen { path } => RemoteCredentialAction::Keygen {
@@ -389,10 +406,13 @@ pub(crate) fn perform(home: &Path, request: RemoteCredentialRequest) -> Result<V
             expires_in,
             max_requests_per_run,
             secret_file,
+            secret,
         } => {
             if destinations.is_empty() {
                 return Err(invalid("name at least one destination".to_owned()));
             }
+            let input = source(secret_file, secret.is_some())?;
+            inline = secret.map(|secret| secret.into_inner());
             RemoteCredentialAction::Add {
                 profile,
                 service,
@@ -400,13 +420,18 @@ pub(crate) fn perform(home: &Path, request: RemoteCredentialRequest) -> Result<V
                 operations,
                 expires_in,
                 max_requests_per_run,
-                secret: from_file(secret_file)?,
+                secret: input,
             }
         }
-        RemoteCredentialRequest::Rotate { id, secret_file } => RemoteCredentialAction::Rotate {
+        RemoteCredentialRequest::Rotate {
             id,
-            secret: from_file(secret_file)?,
-        },
+            secret_file,
+            secret,
+        } => {
+            let input = source(secret_file, secret.is_some())?;
+            inline = secret.map(|secret| secret.into_inner());
+            RemoteCredentialAction::Rotate { id, secret: input }
+        }
         RemoteCredentialRequest::Revoke(id) => RemoteCredentialAction::Revoke { id },
         RemoteCredentialRequest::List { profile } => RemoteCredentialAction::List { profile },
         RemoteCredentialRequest::Audit { limit } => RemoteCredentialAction::Audit {
@@ -427,7 +452,10 @@ pub(crate) fn perform(home: &Path, request: RemoteCredentialRequest) -> Result<V
     };
     let secret = match &action {
         RemoteCredentialAction::Add { secret, .. }
-        | RemoteCredentialAction::Rotate { secret, .. } => Some(secret.read().map_err(invalid)?),
+        | RemoteCredentialAction::Rotate { secret, .. } => Some(match inline.take() {
+            Some(text) => ExternalSecret::new(text).map_err(|error| invalid(error.to_string()))?,
+            None => secret.read().map_err(invalid)?,
+        }),
         _ => None,
     };
     execute(home, &operator(), now_unix(), key.as_ref(), &action, secret).map_err(invalid)

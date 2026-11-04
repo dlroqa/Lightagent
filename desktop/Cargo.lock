@@ -1711,12 +1711,17 @@ dependencies = [
  "base64 0.22.1",
  "futures-util",
  "getrandom 0.4.3",
+ "gtk",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "reqwest",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tokio",
+ "windows",
 ]
 
 [[package]]

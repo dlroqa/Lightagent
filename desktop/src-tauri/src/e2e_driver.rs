@@ -26,6 +26,7 @@
 
 use std::fmt::Write as _;
 use std::io::{BufRead as _, Write as _};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -45,6 +46,14 @@ type Pending = (String, oneshot::Sender<(bool, String)>);
 static PENDING: Mutex<Vec<Pending>> = Mutex::new(Vec::new());
 /// The largest reply a script may send (a page report or an axe result).
 const MAX_REPLY: usize = 8 << 20;
+/// What the next secret inputs choose (`pick_file`): unset opens the real
+/// native picker; `Some(None)` is a cancel.
+static CHOICE: Mutex<Option<Option<PathBuf>>> = Mutex::new(None);
+
+/// The harness's answer for the native file picker, when it gave one.
+pub fn chosen_file() -> Option<Option<PathBuf>> {
+    lock(&CHOICE).clone()
+}
 
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -97,6 +106,21 @@ enum Op {
     },
     /// Ask the window to close, as its close button does.
     Close,
+    /// What secret inputs choose from now on: `path`, a cancel (`cancel`,
+    /// or no path), or the real native picker (`native`).
+    PickFile {
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        cancel: bool,
+        #[serde(default)]
+        native: bool,
+    },
+    /// The window's `remote_credential_secret` command.
+    SecretInput {
+        target: String,
+        fields: String,
+    },
 }
 
 fn eval_timeout_ms() -> u64 {
@@ -202,6 +226,24 @@ async fn run(host: &Arc<Host>, op: Op) -> Result<Value, String> {
         Op::Close => {
             main_window()?.close().map_err(|error| error.to_string())?;
             Value::Null
+        }
+        Op::PickFile {
+            path,
+            cancel,
+            native,
+        } => {
+            *lock(&CHOICE) = if native {
+                None
+            } else if cancel {
+                Some(None)
+            } else {
+                Some(path.map(PathBuf::from))
+            };
+            Value::Null
+        }
+        Op::SecretInput { target, fields } => {
+            let app = APP.get().ok_or("the app is not running")?.clone();
+            json!(crate::secret::submit(host, &app, target, fields).await?)
         }
     })
 }
