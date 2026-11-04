@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import { Moon, Sun } from "lucide-react";
 
 import {
@@ -330,10 +330,11 @@ function NumberSetting({ label, value, min = 1, max, disabled, onSave }: {
 }) {
   const [draft, setDraft] = useState("");
   useEffect(() => setDraft(value === undefined ? "" : String(value)), [value]);
+  const id = useId();
   return (
     <div className="field">
-      <label className="field__label">{label}</label>
-      <input className="input tnum" type="number" min={min} max={max} value={draft} disabled={disabled}
+      <label className="field__label" htmlFor={id}>{label}</label>
+      <input id={id} className="input tnum" type="number" min={min} max={max} value={draft} disabled={disabled}
         onChange={(event) => setDraft(event.target.value)}
         onBlur={() => {
           const next = Number(draft);
@@ -352,10 +353,11 @@ function OptionalNumberSetting({ label, value, disabled, onSave }: {
 }) {
   const [draft, setDraft] = useState("");
   useEffect(() => setDraft(value == null ? "" : String(value)), [value]);
+  const id = useId();
   return (
     <div className="field" style={{ marginTop: 10 }}>
-      <label className="field__label">{label}</label>
-      <input className="input tnum" type="number" min={1} placeholder="No limit"
+      <label className="field__label" htmlFor={id}>{label}</label>
+      <input id={id} className="input tnum" type="number" min={1} placeholder="No limit"
         value={draft} disabled={disabled} onChange={(event) => setDraft(event.target.value)}
         onBlur={() => {
           const next = draft.trim() ? Number(draft) : null;
@@ -697,9 +699,10 @@ function TextPlatformSetting({ label, value, disabled, onSave }: {
 }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
+  const id = useId();
   return <div className="field" style={{ marginTop: 10 }}>
-    <label className="field__label">{label}</label>
-    <input className="input" value={draft} disabled={disabled} onChange={(event) => setDraft(event.target.value)}
+    <label className="field__label" htmlFor={id}>{label}</label>
+    <input id={id} className="input" value={draft} disabled={disabled} onChange={(event) => setDraft(event.target.value)}
       onBlur={() => { const next = draft.trim(); if (next !== value) onSave(next); }} />
   </div>;
 }
@@ -715,9 +718,10 @@ function NumberPlatformSetting({ label, value, min, max, step, disabled, onSave 
 }) {
   const [draft, setDraft] = useState(String(value));
   useEffect(() => setDraft(String(value)), [value]);
+  const id = useId();
   return <div className="field" style={{ marginTop: 10 }}>
-    <label className="field__label">{label}</label>
-    <input className="input" type="number" min={min} max={max} step={step} value={draft} disabled={disabled}
+    <label className="field__label" htmlFor={id}>{label}</label>
+    <input id={id} className="input" type="number" min={min} max={max} step={step} value={draft} disabled={disabled}
       onChange={(event) => setDraft(event.target.value)}
       onBlur={() => {
         const next = Number(draft);

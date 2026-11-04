@@ -97,6 +97,16 @@ enum Op {
     },
     /// Ask the window to close, as its close button does.
     Close,
+    /// The runtime's recent output (the running one, else the last that
+    /// stopped), as the diagnostics view shows it.
+    Logs {
+        #[serde(default = "log_limit")]
+        limit: usize,
+    },
+}
+
+fn log_limit() -> usize {
+    60
 }
 
 fn eval_timeout_ms() -> u64 {
@@ -202,6 +212,17 @@ async fn run(host: &Arc<Host>, op: Op) -> Result<Value, String> {
         Op::Close => {
             main_window()?.close().map_err(|error| error.to_string())?;
             Value::Null
+        }
+        Op::Logs { limit } => {
+            let current: Option<Vec<String>> = match &*lock(&host.runtime) {
+                crate::Runtime::Ready(sidecar) => {
+                    Some(lock(&sidecar.logs).iter().cloned().collect())
+                }
+                _ => None,
+            };
+            let lines = current.unwrap_or_else(|| lock(&host.last_logs).clone());
+            let skip = lines.len().saturating_sub(limit.min(500));
+            json!(&lines[skip..])
         }
     })
 }

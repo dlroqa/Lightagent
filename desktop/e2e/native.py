@@ -220,12 +220,20 @@ class View:
           return true;""")
 
     def send(self, message):
-        self.js(T("""
-          const box = await need("the composer", () => one("textbox", "Ask Lightagent"));
-          fill(box, $MESSAGE);
-          const button = await need("Send", () => all("button").filter((el) => /^(Send message|Queue steer)$/.test(nameOf(el)) && !el.disabled).pop());
-          press(button);
-          return true;""", MESSAGE=message))
+        """Type and send `message`, and confirm it reached the conversation;
+        a send pressed before the composer was live is tried once more."""
+        for attempt in (1, 2):
+            reached = self.js(T("""
+              const box = await need("the composer", () => all("textbox", "Ask Lightagent").find((el) => !el.disabled));
+              fill(box, $MESSAGE);
+              const button = await need("Send", () => all("button").filter((el) => /^(Send message|Queue steer)$/.test(nameOf(el)) && !el.disabled).pop());
+              press(button);
+              return !!(await until(() => [...document.querySelectorAll('[aria-label="Your message"]')]
+                .some((el) => el.textContent.includes($MESSAGE)), 10000));""", MESSAGE=message), 40)
+            if reached:
+                return
+            self.shot(f"send-not-shown-{attempt}")
+        raise harness.HostError(f"the message never reached the conversation; the page ends: {self.js('return text().slice(-400);')!r}")
 
     def wait_text(self, wanted, seconds=60):
         return bool(self.js(T("return !!(await until(() => text().includes($WANTED), $MS));", WANTED=wanted, MS=seconds * 1000), seconds + 10))
@@ -250,10 +258,20 @@ def focus_window(host):
         host.call("focus")
     except harness.HostError as error:
         return f"focus: {error}"
-    if LINUX:
-        found = subprocess.run(["xdotool", "search", "--name", "^Lightagent$"], capture_output=True, text=True, timeout=10)
-        for window in found.stdout.split():
-            subprocess.run(["xdotool", "windowfocus", window], capture_output=True, timeout=10)
+    try:
+        if LINUX:
+            found = subprocess.run(["xdotool", "search", "--name", "^Lightagent$"], capture_output=True, text=True, timeout=10)
+            for window in found.stdout.split():
+                subprocess.run(["xdotool", "windowfocus", window], capture_output=True, timeout=10)
+        elif MACOS:
+            subprocess.run(["osascript", "-e", 'tell application "System Events" to set frontmost of '
+                            f"(first process whose unix id is {host.process.pid}) to true"], capture_output=True, timeout=30)
+        else:
+            subprocess.run(["powershell", "-NoProfile", "-Command",
+                            f"(New-Object -ComObject WScript.Shell).AppActivate({host.process.pid}) | Out-Null"],
+                           capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as error:
+        return f"bringing the window to the front: {error}"
     time.sleep(0.5)
     return None
 
@@ -449,8 +467,10 @@ def scenario_continue(view, host, home):
         paused = view.js(f"return !!(await until(() => {card}, 30000));", 40)
         view.reload()
         view.js(T("""
+          // A title is the first message without its closing full stop.
+          const title = $PROMPT.replace(/[.]+$/, "");
           const entry = await need("the conversation in the list", () => [...document.querySelectorAll(".agent-sessions__list *")]
-            .find((el) => visible(el) && el.children.length === 0 && squash(el.textContent) === $PROMPT));
+            .find((el) => visible(el) && el.children.length === 0 && squash(el.textContent).replace(/[.…]+$/, "") === title));
           press(entry);
           return true;""", PROMPT=prompt))
         again = view.js(f"return !!(await until(() => {card}, 30000));", 40)
@@ -617,6 +637,8 @@ def scenario_switch(view, host):
           const row = await need("the row of " + $ID, () => [...document.querySelectorAll(".profile-row")]
             .find((el) => visible(el) && el.textContent.includes($ID + " ·")));
           press(await need("Use", () => one("button", "Use", row)));
+          const blocked = await until(() => text().includes("still working in this profile"), 3000);
+          if (blocked) throw new Error("the switch is blocked: a run is still working (an earlier scenario left it)");
           return true;""", ID=target))
         switched = harness.wait_until(lambda: (lambda s: s["state"] == "ready" and s["profile"] == target)(host.call("status")), timeout=90)
         view.wait_ui()
@@ -637,7 +659,8 @@ def scenario_close(view, host, provider):
     gone = view.js('return !!(await until(() => !one("alertdialog", "Runs are still working"), 10000));')
     alive = host.process.poll() is None and host.call("status")["state"] == "ready"
     provider.open("native-close")
-    finished = view.wait_text("Holding and kept working.") and view.idle()
+    # The text before the pause is shown apart from the rest of the answer.
+    finished = view.wait_text("and kept working.") and view.idle()
     check.expect("closing with a working run asks first", held and asked)
     check.expect("Keep working keeps the window, the runtime and the run", gone and alive and finished, (gone, alive, finished))
     return check
@@ -660,10 +683,13 @@ def scenario_crash(view, host, provider):
     view.new_chat()
     view.send("[e2e:convo] After the crash.")
     after = view.wait_text("Noted.", 90) and view.idle()
-    listed = view.js('return !!(await until(() => (document.querySelector(".agent-sessions__list") || {}).textContent?.includes("Before the crash."), 15000));')
+    seen = None
+    if not after:
+        seen = {"page": view.js("return text().slice(-500);"), "status": host.call("status"), "runtime_output": host.call("logs", limit=40)}
+    listed = view.js('return !!(await until(() => (document.querySelector(".agent-sessions__list") || {}).textContent?.includes("Before the crash"), 15000));')
     check.expect("the first conversation answered before the crash", before)
     check.expect("the host restarted its runtime", victims and restarted is True, restarted)
-    check.expect("the UI runs a new conversation on the restarted runtime", after)
+    check.expect("the UI runs a new conversation on the restarted runtime", after, seen)
     check.expect("the earlier conversation is still listed", listed)
     return check
 
@@ -708,7 +734,7 @@ def scenario_offline(view, host, home):
     check.expect("a model call to an unreachable provider ends with an error shown",
                  ended and bool(re.search(r"fail|error|could not|unreachable|connect|resolve", shown, re.I)), shown[-300:])
     check.expect("the conversation is kept locally", saved_with(home, prompt) is not None)
-    listed = view.js(T('return !!(await until(() => (document.querySelector(".agent-sessions__list") || {}).textContent?.includes($P), 15000));', P=prompt))
+    listed = view.js(T('return !!(await until(() => (document.querySelector(".agent-sessions__list") || {}).textContent?.includes($P), 15000));', P=prompt.rstrip(".")))
     check.expect("the conversation is listed", listed)
     view.go("Settings", "#/settings")
     check.expect("Settings load from the local runtime", view.wait_text("Agent runtime", 20))
