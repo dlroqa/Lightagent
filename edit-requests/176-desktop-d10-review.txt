@@ -1,0 +1,323 @@
+=== base cf1b2b3d98fd4063dc47b510ff710876cc58f1db
+=== message
+D8-D10 review: the last three rows implemented (222 of 222), the report, and the merge strategy
+
+- The two --secret-stdin rows and env.LIGHTAGENT_API_KEY are implemented
+  on evidence at 71a929c (desktop https://github.com/dlroqa/Lightagent/actions/runs/41847409624, check
+  https://github.com/dlroqa/Lightagent/actions/runs/41847409491), which holds D8a-D8c: parity 222 of 222.
+- docs/desktop/DESKTOP_D8_D9_REPORT.md: the native WebView matrix per
+  target with what each WebView offers, host-side secret input and its
+  persistence, remote mode, HERMES_HOME, the browser accessibility gate,
+  the installers and the supply chain, and every remaining gap.
+- DESKTOP_MERGE_ORDER.md: rows 53-63 with their heads, and the proposed
+  answer to the two intermediate defect windows and #147's placement:
+  #147 first, then one integration merge of the validated combined tree,
+  so master never points at a commit inside either window. Nothing is
+  approved; both steps need the owner's separate approval.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "ui": "Backend-only secret channel (host passes bytes to the sidecar; renderer never holds them)",
+   "backend": "extract: remote_credentials",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "ui": "Remote credentials: Add with a secret file chosen here (native picker; the host reads the file, the window never holds the secret)",
+   "backend": "api: POST /remote-credentials with a secret accepted only from the desktop host (FromDesktop); host secret.rs",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "implemented",
+   "verification": "Host-side secret input (owner decision 2026-11-03): the host opens the OS picker (GTK, NSOpenPanel, IFileOpenDialog), reads the file and sends the secret in the request; the contract marks secret host_only_body, so the window's own request with one is refused; another local operator must name a file. Cancel and unreadable, non-text, empty, multi-line or oversized files store nothing and say why; the chosen file is never deleted or changed. Backend desktop_secret_input.rs, host units, host runs.py secret_input (seeded secrets absent from answers, the home, the diagnostics bundle and the driver log), native native.py secret_input on all four targets, the real picker answered through OS input (row 59)",
+   "tested_sha": "71a929c822cff87ed21fb30aa94d8a45f8feda9f",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41847409624 (desktop); https://github.com/dlroqa/Lightagent/actions/runs/41847409491 (check)"
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "ui": "Backend-only secret channel",
+   "backend": "extract: remote_credentials",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "ui": "Remote credentials: Choose a file for <grant> (native picker; the host reads the file)",
+   "backend": "api: POST /remote-credentials/{id}/rotate with a secret accepted only from the desktop host; host secret.rs",
+   "permission": "local-operator-only",
+   "data_scope": "home",
+   "desktop_status": "implemented",
+   "verification": "As the add row: the rotation's new secret is read by the host from the file the person picks natively; version 2 recorded; the window and every log, answer and file of the home are free of it (backend desktop_secret_input.rs, host runs.py secret_input, native native.py secret_input) (row 59)",
+   "tested_sha": "71a929c822cff87ed21fb30aa94d8a45f8feda9f",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41847409624 (desktop); https://github.com/dlroqa/Lightagent/actions/runs/41847409491 (check)"
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+   "ui": "Remote mode: endpoint key (stored by host, never in renderer)",
+   "backend": "sidecar process environment",
+   "permission": "local-operator",
+   "data_scope": "process",
+   "desktop_status": "not-started",
+   "verification": null,
+   "tested_sha": null,
+   "actions_evidence": null
+--- with
+   "ui": "Settings: Remote server (address; key from LIGHTAGENT_API_KEY or a key file chosen here); the Remote scope badge",
+   "backend": "host remote.rs against lightagent serve --key-env LIGHTAGENT_API_KEY; GET /api/lightagent/v1/server",
+   "permission": "local-operator",
+   "data_scope": "process",
+   "desktop_status": "implemented",
+   "verification": "Remote mode (row 60): the host holds the key (its own LIGHTAGENT_API_KEY or a key file it reads), never the window or the bundled runtime (removed from its environment); sent only over https or to this computer, no proxy, no redirect followed (trap saw no request); a version, protocol or service mismatch, a wrong key and a closed port are refused naming why, this computer's runtime still in use; connected, the bundled runtime is stopped and runs go to the remote only; the remote down fails requests with its error and nothing runs here; reconnect and disconnect. Backend desktop_server_info.rs, host units, host remote.py, native native.py remote_mode (the Settings card and badge) on all four targets",
+   "tested_sha": "71a929c822cff87ed21fb30aa94d8a45f8feda9f",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41847409624 (desktop); https://github.com/dlroqa/Lightagent/actions/runs/41847409491 (check)"
+=== replace docs/desktop/desktop-capabilities.json
+--- find
+  "parity_implemented": 219,
+--- with
+  "parity_implemented": 222,
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+- Implemented: 219 of 222
+--- with
+- Implemented: 222 of 222
+- D8 note (2026-11-04, rows 58-63): `cli.remote-credential.add.opt.secret-stdin`, `cli.remote-credential.rotate.opt.secret-stdin` (host-side secret input through the native picker) and `env.LIGHTAGENT_API_KEY` (remote mode) are implemented on evidence at `71a929c`; every applicable row is implemented. What the evidence does and does not cover per target, and every remaining gap, is in [DESKTOP_D8_D9_REPORT.md](DESKTOP_D8_D9_REPORT.md). New non-counted row: `api.get.server` (remote-mode negotiation)
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.remote-credential.add.opt.secret-stdin` | `lightagent remote-credential add --secret-stdin` | applicable | yes | Backend-only secret channel (host passes bytes to the sidecar; renderer never holds them) | extract: remote_credentials | not-started | `crates/lightagent/src/remote_credentials.rs:33` |
+--- with
+| `cli.remote-credential.add.opt.secret-stdin` | `lightagent remote-credential add --secret-stdin` | applicable | yes | Remote credentials: Add with a secret file chosen here (native picker; the host reads the file) | api: POST /remote-credentials, secret from the desktop host only; host secret.rs | implemented | `crates/lightagent/src/remote_credentials.rs:33` |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.remote-credential.rotate.opt.secret-stdin` | `lightagent remote-credential rotate --secret-stdin` | applicable | yes | Backend-only secret channel | extract: remote_credentials | not-started | `crates/lightagent/src/remote_credentials.rs:53` |
+--- with
+| `cli.remote-credential.rotate.opt.secret-stdin` | `lightagent remote-credential rotate --secret-stdin` | applicable | yes | Remote credentials: Choose a file for a grant (native picker; the host reads the file) | api: POST /remote-credentials/{id}/rotate, secret from the desktop host only; host secret.rs | implemented | `crates/lightagent/src/remote_credentials.rs:53` |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `env.LIGHTAGENT_API_KEY` | `LIGHTAGENT_API_KEY` | applicable | yes | Remote mode: endpoint key (stored by host, never in renderer) | sidecar process environment | not-started | `crates (string literal)` |
+--- with
+| `env.LIGHTAGENT_API_KEY` | `LIGHTAGENT_API_KEY` | applicable | yes | Settings: Remote server; the Remote scope badge | host remote.rs against serve --key-env LIGHTAGENT_API_KEY | implemented | `crates (string literal)` |
+=== replace docs/desktop/DESKTOP_CLI_PARITY.md
+--- find
+| `cli.chat.opt.profile` | `c54b905` |
+--- with
+| `cli.remote-credential.add.opt.secret-stdin` | `71a929c` | The host reads the secret from the file the person picks in the OS picker and sends it in the request; secret is host-only in the contract (the window's request with one is refused) and accepted only from the desktop host; cancel and unusable files store nothing; the file is left as it was. Backend desktop_secret_input.rs, host runs.py secret_input (seeded-secret scans), native native.py secret_input on four targets with the real picker (row 59) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41847409491), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41847409624) |
+| `cli.remote-credential.rotate.opt.secret-stdin` | `71a929c` | The rotation's secret through the same host-read file; version 2 recorded; no seeded secret in any answer, log or file (row 59) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41847409491), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41847409624) |
+| `env.LIGHTAGENT_API_KEY` | `71a929c` | Remote mode against serve --key-env LIGHTAGENT_API_KEY: host-held key, https or this computer only, no redirect, explicit mismatch, no local fallback, reconnect, disconnect, the key absent from the bundled runtime and every log. Backend desktop_server_info.rs, host remote.py, native native.py remote_mode (row 60) | [check](https://github.com/dlroqa/Lightagent/actions/runs/41847409491), [desktop](https://github.com/dlroqa/Lightagent/actions/runs/41847409624) |
+| `cli.chat.opt.profile` | `c54b905` |
+=== write docs/desktop/DESKTOP_D8_D9_REPORT.md
+# Lightagent Desktop — D8 and D9 report
+
+Owner of the work: session `a0fb357c`. Nothing here is merged, tagged or
+published. Every result below names the GitHub-hosted run it comes from.
+
+## Where it is
+
+| Row | Slice | PR | Head | Evidence |
+|---|---|---|---|---|
+| 58 | D8a native WebView verification | #155 | `0c75cda` | desktop [41846351836](https://github.com/dlroqa/Lightagent/actions/runs/41846351836), check [41846351597](https://github.com/dlroqa/Lightagent/actions/runs/41846351597) |
+| 59 | D8b host-side secret input | #156 | `a85d6fa` | check [41847402711](https://github.com/dlroqa/Lightagent/actions/runs/41847402711); desktop [41847402725](https://github.com/dlroqa/Lightagent/actions/runs/41847402725) |
+| 60 | D8c remote mode | #157 | `71a929c` | desktop [41847409624](https://github.com/dlroqa/Lightagent/actions/runs/41847409624), check [41847409491](https://github.com/dlroqa/Lightagent/actions/runs/41847409491) |
+| 61 | D8d keyboard and axe in the browser | #159 | `248e1db` | check [41847413678](https://github.com/dlroqa/Lightagent/actions/runs/41847413678); desktop [41853963632](https://github.com/dlroqa/Lightagent/actions/runs/41853963632) |
+| 62 | D9 installers and supply chain | #158 | `cf1b2b3` | check [41848860574](https://github.com/dlroqa/Lightagent/actions/runs/41848860574), desktop [41848860903](https://github.com/dlroqa/Lightagent/actions/runs/41848860903) |
+
+Parity: **222 of 222** applicable rows implemented (rows 59-60 complete it).
+
+## D8: the rendered app on every target
+
+A test-only channel (`--features e2e-hooks`, desktop/src-tauri/src/e2e_driver.rs)
+evaluates scripts in the main window's real page; the page answers through
+`e2e_reply` with a single-use token the host issued. The shell job greps every
+packaged host binary (the bundle, the .app, the unpacked .deb) for the
+channel's markers and fails on any; the native job's test build is the
+positive control. desktop/e2e/native.py drives the UI by role and accessible
+name, as a person sees it, and reads the OS clipboard with the platform's tool.
+
+Covered on every target (full mode, 75 checks at `71a929c`): streaming;
+approvals allowed and denied; Stop; Continue after a time-budget pause and a
+paused run found again after a reload; a working run shown again after a
+reload; every screen opened from the account menu with an axe scan (no
+critical violation); the Memory and MCP forms; response actions R2-R5;
+keyboard; the minimum window size; a conversation-scoped profile; the profile
+switch; closing with a working run (ask, keep working); crash recovery; quit
+with a working run; host-side secret input with the real picker; remote mode.
+Offline mode: the bundled UI, local conversations and Settings work, and a
+model call and an MCP check against unreachable services end with the error
+shown. On Linux the offline run also runs inside a network namespace with
+only loopback, checked first.
+
+| Target | WebView | OS key input reaches the page | Clipboard (R2) | Read aloud (R3) | Share (R4) | Native picker |
+|---|---|---|---|---|---|---|
+| macOS x64 (`macos-15-intel`) | WKWebView | yes (System Events) | OS clipboard holds the answer | speech, 223 voices | share sheet opens | NSOpenPanel answered by OS input |
+| macOS arm64 (`macos-15`) | WKWebView | yes (System Events) | yes | speech, 223 voices | share sheet opens | NSOpenPanel answered by OS input |
+| Windows x64 | WebView2 (Edge 156) | **no**: the window becomes foreground but Tab does not move focus in the page | yes | speech, 3 voices | share sheet opens | common item dialog answered by SendKeys |
+| Linux x64 (Xvfb) | WebKitGTK | yes (xdotool) | yes (xclip) | none: the button shows unsupported | none: copies and says so | GTK dialog answered by xdotool |
+
+Product defects the native runs found, fixed in D8a: four Settings inputs
+whose label named no input (axe critical); the avatar and the chat list's
+section label below 4.5:1; the close question remounting the app so a
+conversation in progress lost its run.
+
+### Host-side secret input (the two `--secret-stdin` rows)
+
+The window sends only the non-secret fields. The host opens the platform's
+picker, reads the chosen file (at most 16 KiB, UTF-8, one line, at most
+8 KiB of secret), and sends the secret to its runtime in the request body,
+as the CLI pipes standard input. The API accepts an inline secret only from
+the desktop host; any other caller must name a secret file. The contract
+marks `secret` host-only, so the window cannot send one through the host.
+What persists: the secret, sealed by the vault, exactly as the CLI stores it.
+The host keeps no copy after the request and writes nothing. **The chosen
+file is never deleted or changed**; the message says so and leaves deleting
+it to the person.
+
+### Remote mode (`LIGHTAGENT_API_KEY`)
+
+Settings → Remote server names an address; the key comes from this app's
+`LIGHTAGENT_API_KEY` or a key file the host reads. The key stays in the
+host's memory for the connection and is overwritten on disconnect; the bundled
+runtime never receives it. It is sent only to that origin over https, or over
+http to this computer only; no proxy; a redirect is refused, not followed.
+The server must describe itself (`GET /api/lightagent/v1/server`) with the same
+version and protocol. Connected, the bundled runtime is stopped and a scope
+badge names the server; a failing server's requests fail with its error and
+nothing runs on this computer. Profile switching and the runtime restart are
+refused while remote. Not implemented: saving a remote endpoint's key in the
+secrets store (DESKTOP_ARCHITECTURE.md §8 "desktop-remote-<id>"); each launch
+names it again. The host's TLS is rustls with ring, as the runtime's.
+
+### HERMES_HOME (owner decision 2026-11-04)
+
+Unchanged behaviour, now pinned by tests (desktop_setup.rs): a folder given
+to the import comes first; else `HERMES_HOME`; else `~/.hermes`. A
+`HERMES_HOME` that is set but empty, names a missing folder or names a file is
+refused ("no Hermes home at <value> (pass --from <dir>)"; for an empty value
+the message reads "no Hermes home at  (pass --from <dir>)"), the CLI refuses
+the same, nothing is written, `~/.hermes` is not tried instead, and a folder
+given still comes first. The empty-value case runs on Unix only: Windows
+cannot set an empty variable.
+
+### Browser tier (D8d)
+
+e2e/accessibility.mjs: every screen opened from the account menu with the
+keyboard only (Tab, Enter), its controls walked with Tab, and an axe scan;
+no critical violation. Moderate findings remain (heading order in the Jev
+section, no level-one heading on the chat screen).
+
+## D9: installers and supply chain
+
+| Target | Installer | Install | Launch (ready check) | Uninstall | Signature | Declared minimum (not run on older systems) |
+|---|---|---|---|---|---|---|
+| Linux x64 | .deb | apt | as a new account `la-smoke`, its own home | apt remove | unsigned | glibc 2.34; libwebkit2gtk-4.1-0, libgtk-3-0 |
+| Linux x64 | AppImage | copied, executable | as `la-smoke` | deleted | unsigned | as the .deb |
+| Windows x64 | NSIS setup | silent, current user | runner account | silent | NotSigned | PE 6.0; WebView2 required |
+| Windows x64 | MSI | silent, machine | runner account | silent | NotSigned | PE 6.0; WebView2 required |
+| macOS x64 | .dmg | app copied to /Applications | fresh home | removed | not signed | LSMinimumSystemVersion 10.14 |
+| macOS arm64 | .dmg | app copied to /Applications | fresh home | removed | not signed | 11.0 |
+
+SHA-256 of each installer is in each shell job's summary and artifact
+(`SHA256SUMS-<target>.txt`). The AppImage's orphan check is recorded, not
+gated: run.py ends the AppImage's wrapper, not the host, which keeps running
+by design; the .deb launch shows the host's lifeline.
+
+Supply chain (job "desktop supply chain"): per target a CycloneDX 1.5 SBOM
+and a license inventory of the crates the host and the bundled runtime link
+through normal dependencies and the UI's production npm packages. No
+third-party license is unknown; five crates carry MPL-2.0 (cssparser,
+cssparser-macros, dtoa-short, option-ext, selectors) for the owner's review.
+Vulnerability gate (cargo audit 0.22.2, npm audit): the first run found 15
+advisories in Cargo.lock (rustls, rustls-webpki, webpki-root-certs, ctutils,
+zstd, zstd-safe, zstd-sys, zip); D9 updates each to its patched release (zip
+to 9). Now: Cargo.lock 0, desktop/Cargo.lock 0, the UI 0; warnings only
+(tokio 1.53.1 unsound `AsyncFd`, proc-macro-error unmaintained, glib 0.18.5).
+
+## Gaps, stated plainly
+
+- Windows: OS key presses do not reach the page (the window is foreground);
+  keyboard use there rests on the browser tier and the page's own handlers.
+- A second user account is used only on Linux; macOS and Windows launch as the
+  runner account (macOS with a fresh home). Windows resolves the app's data
+  folder through the known-folder API, so it is the runner's.
+- Installers are unsigned; Gatekeeper and SmartScreen are not exercised.
+- Minimum OS versions are declarations; no hosted runner runs older systems.
+- Remote mode's key is not persisted (named per launch); remote profile
+  switching is refused.
+- Live Jev, live providers and live MCP services are not used; stubs only.
+=== replace docs/desktop/DESKTOP_MERGE_ORDER.md
+--- find
+| 53+ | D7 continues (the audit's evidence gaps, the remaining slash, Jev, regenerate, chat profile and env rows), then D8-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+--- with
+| 53 | D7 the audit's evidence gaps (test-only) | https://github.com/dlroqa/Lightagent/pull/148 | `desktop/d7s-evidence-gaps-2` | `desktop/d7r-setup-sections` | `67b8124` | `67b8124` |
+| 54 | D7 profile guidance (/onboard) | https://github.com/dlroqa/Lightagent/pull/149 | `desktop/d7t-onboarding` | `desktop/d7s-evidence-gaps-2` | `940b1f5` | `940b1f5` |
+| 55 | D7 /help and /reload | https://github.com/dlroqa/Lightagent/pull/150 | `desktop/d7u-help-reload` | `desktop/d7t-onboarding` (via merge commit `46abd19`) | `46abd19` | `46abd19` |
+| 56a | D7 Jev status and connection check (stubs) | https://github.com/dlroqa/Lightagent/pull/151 | `desktop/d7v-jev` | `desktop/d7u-help-reload` | `4e1aa34` | `4e1aa34` |
+| 56b | D7 LIGHTAGENT_CREDENTIAL_KEY and HERMES_HOME | https://github.com/dlroqa/Lightagent/pull/152 | `desktop/d7w-env-rows` | `desktop/d7v-jev` | `03f4cfe` | `03f4cfe` |
+| 56c | D7 Try again on the real backend | https://github.com/dlroqa/Lightagent/pull/153 | `desktop/d7x-regenerate-backend` | `desktop/d7w-env-rows` | `7e4827f` | `7e4827f` |
+| 57 | D7 conversation-scoped profile (chat --profile) | https://github.com/dlroqa/Lightagent/pull/154 | `desktop/d7y-conversation-profile` | `desktop/d7x-regenerate-backend` | `703196a` | `703196a` |
+| 58 | D8a native WebView verification | https://github.com/dlroqa/Lightagent/pull/155 | `desktop/d8a-native` | `desktop/d7y-conversation-profile` | `0c75cda` | `0c75cda` |
+| 59 | D8b host-side secret input | https://github.com/dlroqa/Lightagent/pull/156 | `desktop/d8b-secret-input` | `desktop/d8a-native` (via merge commits) | `a85d6fa` | `71a929c` (row 60 holds it) |
+| 60 | D8c remote mode | https://github.com/dlroqa/Lightagent/pull/157 | `desktop/d8c-remote-mode` | `desktop/d8b-secret-input` (via merge commits) | `71a929c` | `71a929c` |
+| 61 | D8d keyboard and axe in the browser | https://github.com/dlroqa/Lightagent/pull/159 | `desktop/d8d-accessibility` | `desktop/d8c-remote-mode` (via merge commit) | `248e1db` | see DESKTOP_D8_D9_REPORT.md |
+| 62 | D9 installers and supply chain (and the runtime's advisory updates) | https://github.com/dlroqa/Lightagent/pull/158 | `desktop/d9-installers` | `desktop/d8d-accessibility` (via merge commit) | `cf1b2b3` | see DESKTOP_D8_D9_REPORT.md |
+| 63 | D10 review: the last rows, the report and this merge strategy | opened with this commit | `desktop/d10-review` | `desktop/d9-installers` | this commit | — |
+=== replace docs/desktop/DESKTOP_MERGE_ORDER.md
+--- find
+**D10 decision carried:** rows 21-39 carry the switch rejection race
+(fixed at row 40): with a pending approval, a switch that stops runs may
+cancel the run before it applies the rejection, so no explicit rejection
+is recorded. Backport row 40's change to row 21 (#115) and merge it
+forward before approval, or accept the window.
+
+**D10 decision carried:** rows 15-31 lack `providers.remove`'s
+`expected_revision` in the desktop contract (fixed at row 32), so between
+those rows the desktop app cannot remove a saved provider. Backport the
+one-line contract change to row 15 (#110) and merge it forward before
+approval, or accept the window (no desktop build ships from those states).
+--- with
+**The two intermediate defect windows** (not accepted by the owner): rows
+21-39 carry the switch rejection race (fixed at row 40), and rows 15-31
+lack `providers.remove`'s `expected_revision` in the contract (fixed at
+row 32).
+
+**Proposed strategy (D10, needs the owner's separate approval for each
+step): one validated integration merge instead of merging the rows one by
+one.** Backporting into rows 15 and 21 would change about 30 heads, each to
+be re-validated, and master would still pass through each of them. Instead:
+
+1. Merge #147 (`fix/broker-queue-wait`, base `master`) at its exact head.
+   It changes merged subagents code and its workflow, which the stack does
+   not touch.
+2. Merge one integration branch into `master` with a single merge commit
+   (never a fast-forward, never a squash): the final stack head (row 63)
+   with #147 merged in. Its combined tree, the exact tree `master` would
+   get, is validated beforehand on all four platforms (check, desktop, Jev
+   evaluation, subagents) through a draft pull request into `master` that is
+   never merged by itself.
+
+So `master` goes from `12582a0` to #147's tested head, then to the
+validated combined tree. It never points at a commit inside either window.
+Every slice's commits remain in history behind the merge's second parent,
+and `git bisect --first-parent` walks only validated states. The stacked
+draft PRs are then closed as superseded; #98 shows as merged (its head is in
+the tree), #99 and #91 are closed unmerged, as planned below.
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+3. **D5–D10,** in the plan's dependency order.
+--- with
+3. **D5–D10,** in the plan's dependency order.
+
+## Rows 58-63 — D8, D9 and the D10 review (2026-11-04, owner `a0fb357c`)
+
+The results, per target, with every gap: [DESKTOP_D8_D9_REPORT.md](DESKTOP_D8_D9_REPORT.md).
+Heads and the merge strategy: [DESKTOP_MERGE_ORDER.md](DESKTOP_MERGE_ORDER.md) rows 58-63.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-04 | D8a native: first runs drove the real WebViews; found the Settings labels, contrast and the close-question remount (fixed) | `0c75cda` | desktop https://github.com/dlroqa/Lightagent/actions/runs/41846351836, check https://github.com/dlroqa/Lightagent/actions/runs/41846351597 |
+| 2026-11-04 | D8b secret input; the real pickers answered by OS input on every target | `a85d6fa` | check https://github.com/dlroqa/Lightagent/actions/runs/41847402711 |
+| 2026-11-04 | D8c remote mode (host TLS via the source-edit `=== lock` directive; 32 crates added, none removed); D8a-D8c all green, 75 native checks per target | `71a929c` | desktop https://github.com/dlroqa/Lightagent/actions/runs/41847409624, check https://github.com/dlroqa/Lightagent/actions/runs/41847409491 |
+| 2026-11-04 | D8d browser keyboard and axe | `248e1db` | check https://github.com/dlroqa/Lightagent/actions/runs/41847413678 |
+| 2026-11-04 | D9 installers and supply chain; 15 advisories in Cargo.lock updated (`=== update`) | `cf1b2b3` | check https://github.com/dlroqa/Lightagent/actions/runs/41848860574, desktop https://github.com/dlroqa/Lightagent/actions/runs/41848860903 |
+=== end
