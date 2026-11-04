@@ -1,0 +1,43 @@
+=== base c4792bf9f600826db871837ecb9ea29792aae0c5
+=== message
+Never leave the suite behind an open native picker
+
+Desktop runs 41837688573 and its D8c successor: on macos-x64 the real
+NSOpenPanel opened, System Events typed the path and the file was
+selected, but the confirming Return did not land. A modal panel holds the
+host's main thread, so the page could not answer, and every later scenario
+timed out behind it. The outcome is now read with a short timeout; if none
+shows, Return is pressed again, and as a last resort Escape cancels the
+panel, so later scenarios run. What happened is recorded either way.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace desktop/e2e/native.py
+--- find
+    why = type_path_into_picker(paths[1])
+    picked = view.js("""return await until(() => {
+        const said = [...all("status"), ...all("alert")].map((el) => nameOf(el)).filter((s) => /seed-1\\.secret|No file was chosen|cannot be used/.test(s));
+        return said.length ? said.join(" | ") : null;
+      }, 45000);""", 60)
+    view.shot("secret-native-done")
+    if not picked:
+        os_keys(["Escape"])
+--- with
+    why = type_path_into_picker(paths[1])
+    outcome = """return await until(() => {
+        const said = [...all("status"), ...all("alert")].map((el) => nameOf(el)).filter((s) => /seed-1\\.secret|No file was chosen|cannot be used/.test(s));
+        return said.length ? said.join(" | ") : null;
+      }, 20000);"""
+    # A modal panel holds the host's main thread: while it is open the page
+    # cannot answer, so the wait is short and the panel is pressed again.
+    answered, picked = view.try_js(outcome, 25)
+    recovery = []
+    for keys in (["Return"], ["Escape"], ["Escape"]):
+        if answered and picked:
+            break
+        recovery.append({"keys": keys, "sent": os_keys(keys) or "sent"})
+        time.sleep(2)
+        answered, picked = view.try_js(outcome, 25)
+    picked = picked if answered else None
+    view.shot("secret-native-done")
+    notes["native_picker_recovery"] = recovery
+=== end
