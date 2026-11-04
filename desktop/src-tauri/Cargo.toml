@@ -25,3 +25,16 @@ futures-util = { version = "0.3.34", default-features = false, features = ["std"
 tokio = { version = "1.53.1", features = ["sync", "time"] }
 getrandom = "0.4.3"
 base64 = "0.22.1"
+
+# The native file picker for host-side secret input (src/secret.rs). Each is
+# already in the tree through tauri; these name the APIs the host calls.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "=0.18.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "=0.6.5"
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSApplication", "NSOpenPanel", "NSSavePanel", "NSPanel", "NSWindow", "NSResponder"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSString", "NSURL"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }

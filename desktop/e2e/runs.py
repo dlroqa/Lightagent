@@ -669,6 +669,112 @@ def scenario_diagnostics(host, cli):
     return check
 
 
+def scenario_secret_input(host, cli):
+    """The two `--secret-stdin` rows through the host (D8): the host reads a
+    seeded secret from the file the picker chose (answered by the driver
+    here; the native picker itself is driven in native.py) and adds, then
+    rotates, a grant; the answer, the home, the diagnostics bundle and the
+    driver's log never hold it; the file is left as it was. A cancel and
+    unusable files store nothing and say why; the window's own request
+    with a secret is refused."""
+    import secrets
+    import shutil
+    import tempfile
+
+    check = Checks("secret_input")
+    work = tempfile.mkdtemp(prefix="lightagent-e2e-secret-input-")
+    home = os.environ["LIGHTAGENT_HOME"]
+    seeds = ["LA-SEEDED-ADD-" + secrets.token_urlsafe(15), "LA-SEEDED-ROTATE-" + secrets.token_urlsafe(15)]
+
+    def grants():
+        return json.loads(harness.run_cli(cli, "--json", "remote-credential", "list")).get("credentials") or []
+
+    def source(name, data):
+        path = os.path.join(work, name)
+        with open(path, "wb") as handle:
+            handle.write(data)
+        return path
+
+    try:
+        _, catalog = host.fetch("GET", f"{API}/profiles")
+        active = (catalog or {}).get("active_profile")
+        fields = {"profile": active, "service": "mcp:e2e-secret-input", "destinations": ["https://docs.e2e.invalid"]}
+        target = f"{API}/remote-credentials"
+        before = len(grants())
+        add_file = source("add.secret", (seeds[0] + "\n").encode())
+        host.call("pick_file", path=add_file)
+        added = host.call("secret_input", target=target, fields=json.dumps(fields))
+        answer = json.loads(added.get("body") or "{}")
+        grant = answer.get("added")
+        check.expect("add: stored from the chosen file, the answer without the secret",
+                     added["state"] == "stored" and isinstance(grant, str) and seeds[0] not in json.dumps(added), added)
+        check.expect("add: only the file's name comes back", added.get("file_name") == "add.secret", added.get("file_name"))
+        check.expect("add: one grant more, as the CLI lists", len(grants()) == before + 1, grants())
+        rotate_file = source("rotate.secret", (seeds[1] + "\n").encode())
+        host.call("pick_file", path=rotate_file)
+        rotated = host.call("secret_input", target=f"{target}/{grant}/rotate", fields="{}")
+        rotated_answer = json.loads(rotated.get("body") or "{}")
+        check.expect("rotate: stored, version 2, the answer without the secret",
+                     rotated["state"] == "stored" and rotated_answer.get("version") == 2 and seeds[1] not in json.dumps(rotated), rotated)
+        check.expect("the chosen files are left exactly as they were",
+                     harness.read(add_file) == seeds[0] + "\n" and harness.read(rotate_file) == seeds[1] + "\n")
+        count = len(grants())
+        host.call("pick_file", cancel=True)
+        cancelled = host.call("secret_input", target=target, fields=json.dumps(fields))
+        check.expect("cancel: nothing stored", cancelled["state"] == "cancelled" and len(grants()) == count, cancelled)
+        unusable = {
+            "missing": os.path.join(work, "missing.secret"),
+            "a directory": work,
+            "two lines": source("lines.secret", b"LA-LINE-ONE-secret\nLA-LINE-TWO-secret\n"),
+            "not text": source("binary.secret", b"\xff\xfe\x00LA-BINARY"),
+            "empty": source("empty.secret", b"\n"),
+            "too large": source("large.secret", b"A" * (17 * 1024)),
+        }
+        for label, path in unusable.items():
+            host.call("pick_file", path=path)
+            outcome = host.call("secret_input", target=target, fields=json.dumps(fields))
+            check.expect(f"{label}: refused with a reason, nothing stored",
+                         outcome["state"] == "invalid" and bool(outcome.get("reason")) and len(grants()) == count
+                         and "LA-LINE" not in json.dumps(outcome), outcome)
+        # A decoy, never a seed: the harness's own command is logged as sent.
+        decoy = "LA-DECOY-" + secrets.token_urlsafe(12)
+        refused = host.try_fetch("POST", target, dict(fields, secret=decoy))
+        check.expect("the window's own request with a secret is refused by the host",
+                     refused[0] == "refused" and "read by the host" in refused[1] and decoy not in refused[1]
+                     and len(grants()) == count, refused)
+        answers = [line for line in (harness.read(host.log.name) or "").splitlines() if " < " in line[:20]]
+        check.expect("no answer the host wrote to the driver holds the refused decoy",
+                     answers and not any(decoy in line for line in answers), len(answers))
+        try:
+            host.call("secret_input", target=target, fields=json.dumps(dict(fields, secret_file=add_file)))
+            named = None
+        except harness.HostError as error:
+            named = str(error)
+        check.expect("fields that name a secret or a secret file are refused", named is not None and "host asks" in named, named)
+        try:
+            host.call("secret_input", target=f"{API}/sessions", fields="{}")
+            other = None
+        except harness.HostError as error:
+            other = str(error)
+        check.expect("only the credential operations take a host-read secret", other is not None, other)
+        status, bundle = host.fetch("GET", f"{API}/diagnostics/bundle")
+        seen = {"bundle": json.dumps(bundle)}
+        for root, _dirs, files in os.walk(home):
+            for name in files:
+                try:
+                    with open(os.path.join(root, name), "rb") as handle:
+                        seen[os.path.join(root, name)] = handle.read().decode("utf-8", "replace")
+                except OSError:
+                    pass
+        leaks = sorted(where for where, text in seen.items() for seed in seeds if seed in text)
+        check.expect("no seeded secret in the home's files or the diagnostics bundle", status == 200 and not leaks, (status, leaks))
+        host.call("pick_file", native=True)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    check.seeds = seeds
+    return check
+
+
 def scenario_remote_credentials(host, cli):
     """D7 through the host transport: the vault's status (with its key's
     source), a grant added from a secret file (its secret never in an
@@ -1749,6 +1855,7 @@ def main():
             ("workers", lambda: scenario_workers(host, cli)),
             ("identity", lambda: scenario_identity(host, cli)),
             ("remote_credentials", lambda: scenario_remote_credentials(host, cli)),
+            ("secret_input", lambda: scenario_secret_input(host, cli)),
             ("diagnostics", lambda: scenario_diagnostics(host, cli)),
             ("setup", lambda: scenario_setup(host, cli)),
             ("config_sections", lambda: scenario_config_sections(host, cli)),
@@ -1763,11 +1870,13 @@ def main():
             # Last: it kills the runtime, and the host restarts one at most once a minute.
             ("crash", lambda: scenario_crash(host, provider, workspace, report)),
         ]
+        seeded = []
         for name, scenario in scenarios:
             try:
                 check = scenario()
                 results[name] = check.results
                 failures.extend(check.failures)
+                seeded.extend(getattr(check, "seeds", []))
             except Exception as error:  # a scenario that breaks is a failure, and the rest still run
                 results[name] = {"error": repr(error)}
                 failures.append(f"{name}: {error!r}")
@@ -1776,6 +1885,13 @@ def main():
     finally:
         host.stop()
         provider.close()
+    # The driver's log holds every command and answer, the report every
+    # milestone: neither may hold a seeded secret.
+    logged = [path for path in (os.path.join(out, "driver-runs.log"), report)
+              if any(seed in (harness.read(path) or "") for seed in seeded)]
+    results["seeded_secret_in_logs"] = logged
+    if logged:
+        failures.append(f"secret_input: a seeded secret is in {logged}")
     # After the first host stops: a second, started with the environment
     # rows set (LIGHTAGENT_CREDENTIAL_KEY, HERMES_HOME).
     try:

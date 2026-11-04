@@ -614,6 +614,124 @@ def scenario_keyboard(view, host, notes):
     return check
 
 
+def type_path_into_picker(path):
+    """Answer the open native file picker with `path` through OS input.
+    None when the keys were sent; otherwise why not."""
+    time.sleep(2.0)
+    try:
+        if LINUX:
+            subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+l"], check=True, timeout=10)
+            time.sleep(0.5)
+            subprocess.run(["xdotool", "type", "--delay", "20", path], check=True, timeout=60)
+            time.sleep(0.5)
+            subprocess.run(["xdotool", "key", "Return"], check=True, timeout=10)
+        elif MACOS:
+            script = ('tell application "System Events"\n keystroke "g" using {command down, shift down}\n delay 1\n'
+                      f' keystroke "{path}"\n delay 0.5\n key code 36\n delay 1\n key code 36\nend tell')
+            out = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=60)
+            if out.returncode != 0:
+                return f"System Events refused the key presses: {out.stderr.strip()[:240]}"
+        else:
+            escaped = "".join("{" + ch + "}" if ch in "+^%~(){}[]" else ch for ch in path)
+            sends = f"[System.Windows.Forms.SendKeys]::SendWait('{escaped}'); Start-Sleep -Milliseconds 500; [System.Windows.Forms.SendKeys]::SendWait('{{ENTER}}')"
+            out = subprocess.run(["powershell", "-NoProfile", "-Command", f"Add-Type -AssemblyName System.Windows.Forms; {sends}"],
+                                 capture_output=True, text=True, timeout=60)
+            if out.returncode != 0:
+                return f"SendKeys failed: {out.stderr.strip()[:240]}"
+        return None
+    except Exception as error:
+        return f"{type(error).__name__}: {error}"
+
+
+def scenario_secret_input(view, host, home, notes):
+    """The `--secret-stdin` rows in the rendered window: the Add form's
+    host-read button stores a seeded secret the page never holds; a cancel
+    and an unusable file say so; then the real native picker, answered
+    through OS input where the runner allows it."""
+    import secrets
+    import tempfile
+
+    check = Checks("secret_input")
+    work = tempfile.mkdtemp(prefix="lightagent-native-secret-")
+    seeds = ["LA-NATIVE-SEED-" + secrets.token_urlsafe(15), "LA-NATIVE-PICKER-" + secrets.token_urlsafe(15)]
+    paths = []
+    for index, seed in enumerate(seeds):
+        paths.append(os.path.join(work, f"seed-{index}.secret"))
+        with open(paths[-1], "w", encoding="utf-8") as handle:
+            handle.write(seed + "\n")
+    lines = os.path.join(work, "lines.secret")
+    with open(lines, "w", encoding="utf-8") as handle:
+        handle.write("LA-NATIVE-LINE-one\nLA-NATIVE-LINE-two\n")
+    active = host.call("status")["profile"]
+    view.go("Remote credentials", "#/admin/credentials")
+
+    def submit(service, wanted):
+        return view.js(T("""
+          await need("the profile in the list", () => document.querySelector('#rc-add-profile option[value="' + $PROFILE + '"]'));
+          fill(await need("profile", () => document.querySelector("#rc-add-profile")), $PROFILE);
+          fill(await need("service", () => document.querySelector("#rc-add-service")), $SERVICE);
+          fill(await need("destinations", () => document.querySelector("#rc-add-destinations")), "https://docs.native.invalid");
+          await sleep(200);
+          press(await need("the host-read button", () => all("button").find((el) => nameOf(el) === "Add with a secret file chosen here…" && !el.disabled)));
+          return await until(() => {
+            const said = [...all("status"), ...all("alert")].map((el) => nameOf(el)).filter((s) => $WANTED.test(s));
+            return said.length ? said.join(" | ") : null;
+          }, 90000);""", PROFILE=active, SERVICE=service).replace('"$WANTED"', wanted).replace("$WANTED", wanted), 100)
+
+    def page_dump():
+        return view.js("""return document.documentElement.outerHTML + JSON.stringify(Object.entries(localStorage))
+          + JSON.stringify(Object.entries(sessionStorage)) + document.body.innerText;""")
+
+    host.call("pick_file", path=paths[0])
+    stored = submit("mcp:native-docs", "/^Added /")
+    view.shot("secret-stored")
+    dump = page_dump()
+    check.expect("the host-read button stores the secret and says where it came from", bool(stored) and "seed-0.secret" in stored, stored)
+    check.expect("the page never holds the seeded secret (DOM, storage, text)", seeds[0] not in dump)
+    host.call("pick_file", cancel=True)
+    cancelled = submit("mcp:native-cancel", "/nothing was stored/")
+    check.expect("a cancel says nothing was stored", bool(cancelled) and "No file was chosen" in cancelled, cancelled)
+    host.call("pick_file", path=lines)
+    invalid = submit("mcp:native-lines", "/cannot be used/")
+    check.expect("an unusable file says why, near the form", bool(invalid) and "one line" in invalid and "LA-NATIVE-LINE" not in invalid, invalid)
+    # The real picker: the page asks, the OS dialog opens, OS input answers it.
+    host.call("pick_file", native=True)
+    focus_window(host)
+    view.js(T("""
+      fill(document.querySelector("#rc-add-service"), "mcp:native-picker");
+      await sleep(200);
+      press(all("button").find((el) => nameOf(el) === "Add with a secret file chosen here…"));
+      return true;""", ))
+    time.sleep(1.0)
+    view.shot("secret-native-picker")
+    why = type_path_into_picker(paths[1])
+    outcome = """return await until(() => {
+        const said = [...all("status"), ...all("alert")].map((el) => nameOf(el)).filter((s) => /seed-1\\.secret|No file was chosen|cannot be used/.test(s));
+        return said.length ? said.join(" | ") : null;
+      }, 20000);"""
+    # A modal panel holds the host's main thread: while it is open the page
+    # cannot answer, so the wait is short and the panel is pressed again.
+    answered, picked = view.try_js(outcome, 25)
+    recovery = []
+    for keys in (["Return"], ["Escape"], ["Escape"]):
+        if answered and picked:
+            break
+        recovery.append({"keys": keys, "sent": os_keys(keys) or "sent"})
+        time.sleep(2)
+        answered, picked = view.try_js(outcome, 25)
+    picked = picked if answered else None
+    view.shot("secret-native-done")
+    notes["native_picker_recovery"] = recovery
+    leaked = seeds[1] in page_dump()
+    notes["native_picker"] = {"os_input": why or "sent", "outcome": picked}
+    if LINUX:
+        check.expect("the real GTK picker, answered through OS input, stores the chosen file", why is None and bool(picked) and "seed-1.secret" in picked, notes["native_picker"])
+    check.expect("the page never holds the secret read through the real picker", not leaked)
+    check.expect("the chosen files are left as they were", all(harness.read(p) == s + "\n" for p, s in zip(paths, seeds)))
+    check.seeds = seeds
+    return check
+
+
 def scenario_narrow(view, host):
     check = Checks("narrow")
     view.new_chat()
@@ -849,6 +967,12 @@ def main():
     else:
         harness.prepare_home(cli, home, provider)
         harness.run_cli(cli, "profile", "create", "native-b", "--persona", PERSONA)
+        # The vault's key, outside the home, for the secret input scenario.
+        import tempfile
+
+        key_dir = tempfile.mkdtemp(prefix="lightagent-native-credential-key-")
+        harness.run_cli(cli, "remote-credential", "keygen", os.path.join(key_dir, "credential.key"))
+        os.environ["LIGHTAGENT_CREDENTIAL_KEY_FILE"] = os.path.join(key_dir, "credential.key")
     env = dict(os.environ, LIGHTAGENT_DESKTOP_E2E_DRIVER="1",
                LIGHTAGENT_DESKTOP_E2E_REPORT=os.path.join(out, f"report-{mode}.txt"))
     host = harness.Host(command, env, os.path.join(out, f"driver-{mode}.log"))
@@ -876,6 +1000,7 @@ def main():
                 ("screens", lambda: scenario_screens(view, notes)),
                 ("forms", lambda: scenario_forms(view, home)),
                 ("keyboard", lambda: scenario_keyboard(view, host, notes)),
+                ("secret_input", lambda: scenario_secret_input(view, host, home, notes)),
                 ("narrow", lambda: scenario_narrow(view, host)),
                 ("conversation_profile", lambda: scenario_conversation_profile(view, host, provider, cli)),
                 ("profile_switch", lambda: scenario_switch(view, host)),
@@ -886,11 +1011,13 @@ def main():
                 # Last: it quits the app.
                 ("quit_with_runs", lambda: scenario_quit(view, host, provider, home)),
             ]
+        seeded = []
         for name, scenario in scenarios:
             try:
                 check = scenario()
                 results["checks"][name] = check.results
                 failures.extend(check.failures)
+                seeded.extend(getattr(check, "seeds", []))
             except Exception as error:  # a broken scenario is a failure; the rest still run
                 results["checks"][name] = {"error": repr(error)}
                 failures.append(f"{name}: {error!r}")
@@ -908,6 +1035,12 @@ def main():
             host.stop()
         provider.close()
     results["screenshots"] = view.shots
+    if mode == "full":
+        logs = [os.path.join(out, f"driver-{mode}.log"), os.path.join(out, f"report-{mode}.txt")]
+        held = [path for path in logs if any(seed in (harness.read(path) or "") for seed in seeded)]
+        results["seeded_secret_in_logs"] = held
+        if held:
+            failures.append(f"secret_input: a seeded secret is in {held}")
     with open(os.path.join(out, f"native-{mode}.json"), "w", encoding="utf-8") as handle:
         json.dump(results, handle, indent=1)
     print(json.dumps({"failures": failures}, indent=1))

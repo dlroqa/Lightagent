@@ -9,6 +9,7 @@
 mod contract;
 #[cfg(feature = "e2e-hooks")]
 mod e2e_driver;
+mod secret;
 mod sidecar;
 mod sse;
 mod switch;
@@ -337,6 +338,50 @@ async fn fetch(
             operation.id
         ));
     }
+    if let Some(field) = host_only_field(&operation, body.as_deref()) {
+        return Err(format!(
+            "{field} is read by the host itself, never sent from the window"
+        ));
+    }
+    forward(
+        host,
+        &operation,
+        &method,
+        &target,
+        body,
+        body_base64,
+        filename,
+    )
+    .await
+}
+
+/// The first field of `body` that only the host may send for `operation`,
+/// or the body itself when it cannot be read.
+fn host_only_field(operation: &contract::Operation, body: Option<&str>) -> Option<String> {
+    if operation.host_only_body.is_empty() {
+        return None;
+    }
+    match serde_json::from_str::<serde_json::Value>(body?) {
+        Ok(serde_json::Value::Object(fields)) => operation
+            .host_only_body
+            .iter()
+            .find(|field| fields.contains_key(field.as_str()))
+            .cloned(),
+        Ok(_) => None,
+        Err(_) => Some("the request body".to_owned()),
+    }
+}
+
+/// Send one contract operation, already resolved and checked, to the runtime.
+async fn forward(
+    host: &Host,
+    operation: &contract::Operation,
+    method: &str,
+    target: &str,
+    body: Option<String>,
+    body_base64: Option<String>,
+    filename: Option<String>,
+) -> Result<FetchResult, String> {
     let (base, authorization) = host.connection()?;
     let verb =
         reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| "invalid method".to_owned())?;
@@ -382,6 +427,18 @@ async fn fetch(
         content_type,
         body,
     })
+}
+
+/// Add or rotate a remote credential with a secret the host reads from a
+/// file the person chooses in the native picker (see [`secret`]).
+#[tauri::command]
+async fn remote_credential_secret(
+    app: tauri::AppHandle,
+    host: tauri::State<'_, Arc<Host>>,
+    target: String,
+    fields: String,
+) -> Result<secret::Outcome, String> {
+    secret::submit(host.inner(), &app, target, fields).await
 }
 
 #[tauri::command]
@@ -820,6 +877,7 @@ fn main() {
         api_subscribe,
         api_events_poll,
         api_unsubscribe,
+        remote_credential_secret,
         e2e_note,
         e2e_driver::e2e_reply
     ]);
@@ -835,6 +893,7 @@ fn main() {
         api_subscribe,
         api_events_poll,
         api_unsubscribe,
+        remote_credential_secret,
         e2e_note
     ]);
     let app = builder
@@ -947,5 +1006,39 @@ mod tests {
         assert_eq!(last, Some(3));
         assert!(advance(&mut last, &event(None)));
         assert_eq!(last, Some(3));
+    }
+
+    #[test]
+    fn the_window_cannot_send_a_host_only_secret() {
+        let contract = contract::Contract::load().expect("contract");
+        let add = contract
+            .resolve("POST", "/api/lightagent/v1/remote-credentials")
+            .expect("add")
+            .clone();
+        for body in [
+            r#"{"profile":"work","secret":"x"}"#,
+            r#"{"profile":"work","secret":"x"}"#,
+            r#"{"secret":"a","secret":"b"}"#,
+        ] {
+            assert_eq!(
+                host_only_field(&add, Some(body)).as_deref(),
+                Some("secret"),
+                "{body}"
+            );
+        }
+        assert_eq!(
+            host_only_field(&add, Some(r#"{"profile":"work","secret_file":"/x"}"#)),
+            None
+        );
+        assert_eq!(
+            host_only_field(&add, Some("not json")).as_deref(),
+            Some("the request body")
+        );
+        assert_eq!(host_only_field(&add, None), None);
+        let list = contract
+            .resolve("GET", "/api/lightagent/v1/remote-credentials")
+            .expect("list")
+            .clone();
+        assert_eq!(host_only_field(&list, Some(r#"{"secret":"x"}"#)), None);
     }
 }

@@ -4,6 +4,7 @@ import { agentApi, type ProfileSummary, type RemoteCredentialGrant, type RemoteC
 import { Empty } from "../components/Bits";
 import { Card } from "../components/Card";
 import { TopBar } from "../components/Shell";
+import { hostSecretInput, sealFromChosenFile } from "../desktop/secretInput";
 
 const errorStyle = { fontSize: 11.5, color: "var(--danger)", marginTop: 4 } as const;
 const rowStyle = { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" } as const;
@@ -243,6 +244,27 @@ export function RemoteCredentialsScreen() {
               setSecretFile("");
               return `Added ${added.added}: ${added.service} for ${added.profile}. The secret was read from the file and sealed; delete the file now.`;
             })}>Add credential</button>
+          {hostSecretInput && (
+            <>
+              <button type="button" className="btn" style={{ marginTop: 10, marginLeft: 8 }} aria-busy={busy || undefined}
+                disabled={busy || !profile || !service.trim() || !destinations.trim()}
+                aria-describedby="rc-add-host-note"
+                onClick={() => void act("add", () => sealFromChosenFile(null, {
+                  profile,
+                  service: service.trim(),
+                  destinations: items(destinations),
+                  operations: items(operations),
+                  expires_in: whole(expires),
+                  max_requests_per_run: whole(budget),
+                }, (added) => `Added ${String(added.added)}: ${String(added.service)} for ${String(added.profile)}.`))}>
+                Add with a secret file chosen here…
+              </button>
+              <p id="rc-add-host-note" className="card__note" style={{ marginTop: 6 }}>
+                Opens this computer&apos;s file picker. The app reads the file you choose itself, so the secret never enters
+                this window, and leaves the file as it was.
+              </p>
+            </>
+          )}
         </Card>
 
         <Card title="Credentials">
@@ -293,6 +315,13 @@ export function RemoteCredentialsScreen() {
                           setRotating(null);
                           return `Rotated ${rotated.rotated} (version ${rotated.version}); delete the file now.`;
                         })}>{`Rotate ${item.id}`}</button>
+                      {hostSecretInput && (
+                        <button type="button" className="btn" disabled={busy} aria-busy={busy || undefined}
+                          onClick={() => void act("grants", () => sealFromChosenFile(item.id, {}, (rotated) => {
+                            setRotating(null);
+                            return `Rotated ${String(rotated.rotated)} (version ${String(rotated.version)}).`;
+                          }))}>{`Choose a file for ${item.id}…`}</button>
+                      )}
                       <button type="button" className="btn" disabled={busy} onClick={() => setRotating(null)}>Cancel</button>
                     </div>
                   )}

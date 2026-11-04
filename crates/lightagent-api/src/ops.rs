@@ -153,10 +153,32 @@ pub enum IdentityRequest {
     },
 }
 
+/// A secret the desktop host read itself, from a file the person chose with
+/// a native picker (the `--secret-stdin` channel). It is carried to the
+/// vault and never printed: its `Debug` is redacted.
+#[derive(Clone, PartialEq, Eq)]
+pub struct InlineSecret(String);
+
+impl InlineSecret {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for InlineSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InlineSecret(<redacted>)")
+    }
+}
+
 /// One `lightagent remote-credential …` command, performed as the local
 /// operator with the runtime's configured key. A secret is read by the
-/// runtime from `secret_file`, named by an absolute path; no request or
-/// answer carries it.
+/// runtime from `secret_file`, named by an absolute path, or, from the
+/// desktop host only, carried as `secret`; no answer carries it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteCredentialRequest {
     Status,
@@ -171,10 +193,12 @@ pub enum RemoteCredentialRequest {
         expires_in: Option<u64>,
         max_requests_per_run: Option<u32>,
         secret_file: Option<String>,
+        secret: Option<InlineSecret>,
     },
     Rotate {
         id: String,
         secret_file: Option<String>,
+        secret: Option<InlineSecret>,
     },
     Revoke(String),
     List {
@@ -186,6 +210,22 @@ pub enum RemoteCredentialRequest {
     Rekey {
         previous_key_file: String,
     },
+}
+
+impl RemoteCredentialRequest {
+    /// The request carries the secret itself (the desktop host's channel).
+    pub fn carries_secret(&self) -> bool {
+        matches!(
+            self,
+            Self::Add {
+                secret: Some(_),
+                ..
+            } | Self::Rotate {
+                secret: Some(_),
+                ..
+            }
+        )
+    }
 }
 
 /// A read-only diagnostics report: `lightagent doctor`, `lightagent

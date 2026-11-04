@@ -2780,6 +2780,14 @@ async fn remote_credential_operation(
     if let Some(rejection) = local_operator(state, headers, admitted.is_some()) {
         return rejection;
     }
+    // A secret in the request itself is the desktop host's channel: it read
+    // the secret from a file the person chose natively, and the window
+    // cannot send one (the host refuses the field from it).
+    if request.carries_secret() && admitted.is_none() {
+        return bad_request(
+            "a secret in the request is accepted only from the desktop host; name a secret file instead",
+        );
+    }
     match state.manager.remote_credentials(request).await {
         Ok(value) => Json(value).into_response(),
         Err(error) => error.into_response(),
@@ -2836,6 +2844,9 @@ struct AddRemoteCredentialBody {
     max_requests_per_run: Option<u32>,
     #[serde(default)]
     secret_file: Option<String>,
+    /// From the desktop host only (see `remote_credential_operation`).
+    #[serde(default)]
+    secret: Option<String>,
 }
 
 async fn add_remote_credential(
@@ -2852,6 +2863,7 @@ async fn add_remote_credential(
         expires_in: body.expires_in,
         max_requests_per_run: body.max_requests_per_run,
         secret_file: body.secret_file,
+        secret: body.secret.map(ops::InlineSecret::new),
     };
     remote_credential_operation(&state, &headers, admitted, request).await
 }
@@ -2860,6 +2872,9 @@ async fn add_remote_credential(
 struct SecretFileBody {
     #[serde(default)]
     secret_file: Option<String>,
+    /// From the desktop host only (see `remote_credential_operation`).
+    #[serde(default)]
+    secret: Option<String>,
 }
 
 async fn rotate_remote_credential(
@@ -2872,6 +2887,7 @@ async fn rotate_remote_credential(
     let request = ops::RemoteCredentialRequest::Rotate {
         id,
         secret_file: body.secret_file,
+        secret: body.secret.map(ops::InlineSecret::new),
     };
     remote_credential_operation(&state, &headers, admitted, request).await
 }

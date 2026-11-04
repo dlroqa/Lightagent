@@ -31,6 +31,11 @@ pub struct Operation {
     pub stream: bool,
     #[serde(default)]
     pub raw_body: bool,
+    /// Body fields only the host itself may send (a secret it read with a
+    /// native picker, src/secret.rs); the window's request carrying one is
+    /// refused.
+    #[serde(default)]
+    pub host_only_body: Vec<String>,
 }
 
 impl Contract {
@@ -144,6 +149,22 @@ mod tests {
                 .expect("stream")
                 .stream
         );
+    }
+
+    #[test]
+    fn a_credential_secret_is_host_only() {
+        let contract = contract();
+        for target in [
+            "/api/lightagent/v1/remote-credentials",
+            "/api/lightagent/v1/remote-credentials/rc_1/rotate",
+        ] {
+            let operation = contract.resolve("POST", target).expect(target);
+            assert_eq!(operation.host_only_body, ["secret"], "{target}");
+        }
+        let list = contract
+            .resolve("GET", "/api/lightagent/v1/remote-credentials")
+            .expect("list");
+        assert!(list.host_only_body.is_empty());
     }
 
     #[test]

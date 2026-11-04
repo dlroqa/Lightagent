@@ -191,12 +191,14 @@
   {
    "id": "remote_credentials.add",
    "method": "POST",
-   "path": "/api/lightagent/v1/remote-credentials"
+   "path": "/api/lightagent/v1/remote-credentials",
+   "host_only_body": ["secret"]
   },
   {
    "id": "remote_credentials.rotate",
    "method": "POST",
-   "path": "/api/lightagent/v1/remote-credentials/{id}/rotate"
+   "path": "/api/lightagent/v1/remote-credentials/{id}/rotate",
+   "host_only_body": ["secret"]
   },
   {
    "id": "remote_credentials.revoke",
