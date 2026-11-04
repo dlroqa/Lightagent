@@ -1,0 +1,1429 @@
+=== base 703196a86f595277ea8857834385a37d99d3feb6
+=== message
+Drive the rendered desktop window natively on every target (D8)
+
+A test-only channel lets a harness drive the real WebView (WKWebView,
+WebView2, WebKitGTK) through its own page: the driver's eval command runs
+a script in the main window and the page answers through e2e_reply with a
+single-use token the host issued. geometry, focus, resize and close act on
+the window. All of it is compiled only with --features e2e-hooks; the
+shell job now proves the driver's markers are absent from every package,
+with a positive control in the test build.
+
+desktop/e2e/native.py exercises the rendered UI on macOS x64 and arm64,
+Windows and Linux: streaming, approvals, Stop, Continue and a paused run
+recovered after a reload, conversation-scoped profiles, the profile switch,
+closing with working runs, crash recovery, every screen with an in-page axe
+scan, response actions against the OS clipboard, OS-level keyboard input
+where the runner allows it, a narrow window, and startup without internet
+(a Linux network namespace; unreachable endpoints elsewhere).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== write desktop/src-tauri/src/e2e_driver.rs
+//! A test-only driver for hosted end-to-end runs. Compiled only into test
+//! builds (`--features e2e-hooks`), never into the bundled app: the shell
+//! job in desktop.yml checks every package for this module's markers.
+//!
+//! With `LIGHTAGENT_DESKTOP_E2E_DRIVER=1` the host reads one JSON command
+//! per line on stdin and answers each on stdout as `E2E_DRIVER {json}`,
+//! carrying the command's `id`. Most commands call the function the UI's
+//! IPC command calls (`fetch`, `subscribe`, `poll`, `unsubscribe`, the
+//! switch), so a harness drives the host's own contract check, transport,
+//! relay and switch against the real runtime. Commands run concurrently.
+//!
+//! The native commands (D8) drive the rendered page itself. `eval` runs a
+//! script in the main window's page; the page answers through the
+//! `e2e_reply` IPC command with the single-use token the host gave that
+//! script. `e2e_reply` is registered only in this build, and it accepts only
+//! a token issued for a script still waiting: nothing in the page can obtain
+//! one, and without the driver there are none. `geometry`, `focus`,
+//! `resize` and `close` act on the main window as the OS would.
+//!
+//! Two hooks exist only here: `drop_relay` drops a relay's connection to the
+//! runtime (the relay must resume it); and with
+//! `LIGHTAGENT_DESKTOP_E2E_SWITCH_GATE=1` every switch, once it has raised
+//! its run gate, announces `{"event":"switch_held"}` and waits for
+//! `release_switch`, so operations during a switch are tried at a known
+//! moment.
+
+use std::fmt::Write as _;
+use std::io::{BufRead as _, Write as _};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tauri::Manager as _;
+use tokio::sync::{Notify, oneshot};
+
+use crate::{Host, lock};
+
+static SWITCH_GATE: Notify = Notify::const_new();
+/// The app, for the window commands.
+static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+/// Scripts evaluated in the page and waiting for their reply: (token, reply).
+static PENDING: Mutex<Vec<(String, oneshot::Sender<(bool, String)>)>> = Mutex::new(Vec::new());
+/// The largest reply a script may send (a page report or an axe result).
+const MAX_REPLY: usize = 8 << 20;
+
+#[derive(Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum Op {
+    Status,
+    Fetch {
+        method: String,
+        target: String,
+        #[serde(default)]
+        body: Option<String>,
+        /// A raw body (an attachment) and its file name, as `api_fetch` takes them.
+        #[serde(default)]
+        body_base64: Option<String>,
+        #[serde(default)]
+        filename: Option<String>,
+    },
+    Subscribe {
+        target: String,
+    },
+    Poll {
+        subscription: u64,
+        wait_ms: u64,
+    },
+    Unsubscribe {
+        subscription: u64,
+    },
+    DropRelay {
+        subscription: u64,
+    },
+    Switch {
+        profile: String,
+        cancel_runs: bool,
+    },
+    ReleaseSwitch,
+    /// Run `script` (an async function body) in the main window's page and
+    /// answer with what it returns, as JSON.
+    Eval {
+        script: String,
+        #[serde(default = "eval_timeout_ms")]
+        timeout_ms: u64,
+    },
+    /// Where the window's content is on screen, in physical pixels.
+    Geometry,
+    /// Bring the window to the front with keyboard focus.
+    Focus,
+    /// Resize the window (logical pixels).
+    Resize {
+        width: f64,
+        height: f64,
+    },
+    /// Ask the window to close, as its close button does.
+    Close,
+}
+
+fn eval_timeout_ms() -> u64 {
+    30_000
+}
+
+/// Start reading commands, when the driver is asked for.
+pub fn start(host: &Arc<Host>, app: tauri::AppHandle) {
+    if std::env::var_os("LIGHTAGENT_DESKTOP_E2E_DRIVER").is_none() {
+        return;
+    }
+    let _ = APP.set(app);
+    let host = Arc::clone(host);
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            let command: Value = match serde_json::from_str(&line) {
+                Ok(command) => command,
+                Err(error) => {
+                    say(&json!({ "ok": false, "error": format!("unreadable command: {error}") }));
+                    continue;
+                }
+            };
+            let id = command["id"].clone();
+            let host = Arc::clone(&host);
+            tauri::async_runtime::spawn(async move {
+                let answer = match serde_json::from_value::<Op>(command) {
+                    Ok(op) => run(&host, op).await,
+                    Err(error) => Err(format!("unknown command: {error}")),
+                };
+                say(&match answer {
+                    Ok(result) => json!({ "id": id, "ok": true, "result": result }),
+                    Err(error) => json!({ "id": id, "ok": false, "error": error }),
+                });
+            });
+        }
+    });
+    say(&json!({ "event": "driver_ready" }));
+}
+
+async fn run(host: &Arc<Host>, op: Op) -> Result<Value, String> {
+    Ok(match op {
+        Op::Status => json!(crate::status(host)),
+        Op::Fetch {
+            method,
+            target,
+            body,
+            body_base64,
+            filename,
+        } => json!(crate::fetch(host, method, target, body, body_base64, filename).await?),
+        Op::Subscribe { target } => json!(crate::subscribe(host, target)?),
+        Op::Poll {
+            subscription,
+            wait_ms,
+        } => json!(crate::poll(host, subscription, wait_ms).await?),
+        Op::Unsubscribe { subscription } => {
+            crate::unsubscribe(host, subscription);
+            Value::Null
+        }
+        Op::DropRelay { subscription } => {
+            let entry = lock(&host.subscriptions)
+                .get(&subscription)
+                .cloned()
+                .ok_or("unknown subscription")?;
+            entry.interrupt.notify_one();
+            Value::Null
+        }
+        Op::Switch {
+            profile,
+            cancel_runs,
+        } => json!(crate::switch::switch(host, profile, cancel_runs).await?),
+        Op::ReleaseSwitch => {
+            SWITCH_GATE.notify_one();
+            Value::Null
+        }
+        Op::Eval { script, timeout_ms } => eval(&script, timeout_ms).await?,
+        Op::Geometry => {
+            let window = main_window()?;
+            let position = window.inner_position().map_err(|error| error.to_string())?;
+            let size = window.inner_size().map_err(|error| error.to_string())?;
+            let scale = window.scale_factor().map_err(|error| error.to_string())?;
+            json!({
+                "x": position.x,
+                "y": position.y,
+                "width": size.width,
+                "height": size.height,
+                "scale": scale,
+            })
+        }
+        Op::Focus => {
+            let window = main_window()?;
+            let _ = window.unminimize();
+            window.show().map_err(|error| error.to_string())?;
+            window.set_focus().map_err(|error| error.to_string())?;
+            Value::Null
+        }
+        Op::Resize { width, height } => {
+            main_window()?
+                .set_size(tauri::LogicalSize::new(width, height))
+                .map_err(|error| error.to_string())?;
+            Value::Null
+        }
+        Op::Close => {
+            main_window()?.close().map_err(|error| error.to_string())?;
+            Value::Null
+        }
+    })
+}
+
+fn main_window() -> Result<tauri::WebviewWindow, String> {
+    APP.get()
+        .and_then(|app| app.get_webview_window("main"))
+        .ok_or_else(|| "the main window is not open".to_owned())
+}
+
+fn take_pending(token: &str) -> Option<oneshot::Sender<(bool, String)>> {
+    let mut pending = lock(&PENDING);
+    let index = pending.iter().position(|(issued, _)| issued == token)?;
+    Some(pending.swap_remove(index).1)
+}
+
+/// Evaluate `script` in the page and wait for its answer.
+async fn eval(script: &str, timeout_ms: u64) -> Result<Value, String> {
+    let window = main_window()?;
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| "the OS random source is unavailable".to_owned())?;
+    let mut token = String::with_capacity(32);
+    for byte in bytes {
+        let _ = write!(token, "{byte:02x}");
+    }
+    let (sender, receiver) = oneshot::channel();
+    lock(&PENDING).push((token.clone(), sender));
+    let wrapped = [
+        "(async () => { let ok = true, value = null;\ntry { value = await (async () => {\n",
+        script,
+        "\n})(); } catch (error) { ok = false; value = String((error && error.stack) || error); }\n",
+        "let text; try { text = JSON.stringify(value === undefined ? null : value); }\n",
+        "catch (error) { ok = false; text = JSON.stringify(String(error)); }\n",
+        "window.__TAURI__.core.invoke(\"e2e_reply\", { token: \"",
+        token.as_str(),
+        "\", ok, value: text }); })();",
+    ]
+    .concat();
+    if let Err(error) = window.eval(&wrapped) {
+        take_pending(&token);
+        return Err(format!("the page could not run the script: {error}"));
+    }
+    let answer = tokio::time::timeout(Duration::from_millis(timeout_ms), receiver).await;
+    take_pending(&token);
+    match answer {
+        Ok(Ok((true, text))) => {
+            serde_json::from_str(&text).map_err(|error| format!("unreadable reply: {error}"))
+        }
+        Ok(Ok((false, text))) => Err(format!(
+            "the script failed: {}",
+            serde_json::from_str::<String>(&text).unwrap_or(text)
+        )),
+        Ok(Err(_)) => Err("the reply was refused (too large)".to_owned()),
+        Err(_) => Err(format!(
+            "no reply within {timeout_ms} ms (the page reloaded, or the script hung)"
+        )),
+    }
+}
+
+/// The page's answer to a script the driver evaluated. Registered only in
+/// test builds; a token not issued for a waiting script is refused.
+#[tauri::command]
+pub fn e2e_reply(token: String, ok: bool, value: String) -> Result<(), String> {
+    let sender = take_pending(&token).ok_or("unknown token")?;
+    if value.len() > MAX_REPLY {
+        return Err("reply too large".to_owned());
+    }
+    let _ = sender.send((ok, value));
+    Ok(())
+}
+
+/// Hold a switch, its run gate raised, until `release_switch`, when asked to.
+pub async fn switch_gate(profile: &str) {
+    if std::env::var_os("LIGHTAGENT_DESKTOP_E2E_SWITCH_GATE").is_none() {
+        return;
+    }
+    say(&json!({ "event": "switch_held", "profile": profile }));
+    SWITCH_GATE.notified().await;
+}
+
+fn say(message: &Value) {
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "E2E_DRIVER {message}");
+    let _ = out.flush();
+}
+=== replace desktop/src-tauri/src/main.rs
+--- find
+    let app = tauri::Builder::default()
+        .manage(Arc::clone(&host))
+        .invoke_handler(tauri::generate_handler![
+            runtime_status,
+            runtime_logs,
+            runtime_restart,
+            profile_switch,
+            app_quit,
+            app_close_cancel,
+            api_fetch,
+            api_subscribe,
+            api_events_poll,
+            api_unsubscribe,
+            e2e_note
+        ])
+        .on_page_load(|webview, payload| {
+--- with
+    let builder = tauri::Builder::default().manage(Arc::clone(&host));
+    // A test build adds the native driver's reply channel (e2e_driver.rs);
+    // the bundled app never has it.
+    #[cfg(feature = "e2e-hooks")]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        runtime_status,
+        runtime_logs,
+        runtime_restart,
+        profile_switch,
+        app_quit,
+        app_close_cancel,
+        api_fetch,
+        api_subscribe,
+        api_events_poll,
+        api_unsubscribe,
+        e2e_note,
+        e2e_driver::e2e_reply
+    ]);
+    #[cfg(not(feature = "e2e-hooks"))]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        runtime_status,
+        runtime_logs,
+        runtime_restart,
+        profile_switch,
+        app_quit,
+        app_close_cancel,
+        api_fetch,
+        api_subscribe,
+        api_events_poll,
+        api_unsubscribe,
+        e2e_note
+    ]);
+    let app = builder
+        .on_page_load(|webview, payload| {
+=== replace desktop/src-tauri/src/main.rs
+--- find
+            let host = Arc::clone(app.state::<Arc<Host>>().inner());
+            match claim_instance(app.path().app_local_data_dir().ok()) {
+--- with
+            let host = Arc::clone(app.state::<Arc<Host>>().inner());
+            #[cfg(feature = "e2e-hooks")]
+            let handle = app.handle().clone();
+            match claim_instance(app.path().app_local_data_dir().ok()) {
+=== replace desktop/src-tauri/src/main.rs
+--- find
+                #[cfg(feature = "e2e-hooks")]
+                e2e_driver::start(&host);
+--- with
+                #[cfg(feature = "e2e-hooks")]
+                e2e_driver::start(&host, handle);
+=== write desktop/e2e/native-prelude.js
+// Helpers for native.py, evaluated in the desktop window's own page before
+// each of its scripts (desktop/src-tauri/src/e2e_driver.rs, `eval`). They
+// find controls as a person sees them, by role and accessible name, visible
+// ones only, and act on them through the page's own event handlers.
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const visible = (el) => !!el && el.isConnected && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
+const squash = (value) => (value || "").replace(/\s+/g, " ").trim();
+const nameOf = (el) => {
+  const label = el.getAttribute("aria-label");
+  if (label) return squash(label);
+  const by = el.getAttribute("aria-labelledby");
+  if (by) return squash(by.split(/\s+/).map((id) => (document.getElementById(id) || {}).textContent || "").join(" "));
+  if (el.labels && el.labels.length) return squash([...el.labels].map((item) => item.textContent).join(" "));
+  return squash(el.textContent) || squash(el.getAttribute("title"));
+};
+const IMPLICIT = {
+  BUTTON: "button", A: "link", SELECT: "combobox", TEXTAREA: "textbox", LI: "listitem", UL: "list", OL: "list",
+  H1: "heading", H2: "heading", H3: "heading", H4: "heading", DIALOG: "dialog",
+};
+const roleOf = (el) => {
+  const explicit = el.getAttribute("role");
+  if (explicit) return explicit.split(/\s+/)[0];
+  if (el.tagName === "INPUT") {
+    const type = (el.getAttribute("type") || "text").toLowerCase();
+    if (type === "radio" || type === "checkbox") return type;
+    return ["button", "submit", "reset"].includes(type) ? "button" : "textbox";
+  }
+  return IMPLICIT[el.tagName] || "";
+};
+const matches = (value, want) => want === undefined || (want instanceof RegExp ? want.test(value) : value === want);
+const all = (role, name, root = document) =>
+  [...root.querySelectorAll("*")].filter((el) => roleOf(el) === role && visible(el) && matches(nameOf(el), name));
+const one = (role, name, root) => all(role, name, root)[0] || null;
+const until = async (probe, ms = 15000) => {
+  const end = Date.now() + ms;
+  for (;;) {
+    let value = null;
+    try { value = await probe(); } catch (_) { value = null; }
+    if (value) return value;
+    if (Date.now() > end) return null;
+    await sleep(100);
+  }
+};
+const need = async (what, probe, ms = 15000) => {
+  const value = await until(probe, ms);
+  if (!value) throw new Error("not found within " + ms + " ms: " + what);
+  return value;
+};
+const press = (el) => {
+  el.scrollIntoView({ block: "center", inline: "nearest" });
+  if (typeof el.focus === "function") el.focus();
+  el.click();
+  return true;
+};
+const fill = (el, value) => {
+  const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype
+    : el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+  Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+  return true;
+};
+const key = (el, name) => {
+  el.dispatchEvent(new KeyboardEvent("keydown", { key: name, bubbles: true, cancelable: true }));
+  el.dispatchEvent(new KeyboardEvent("keyup", { key: name, bubbles: true, cancelable: true }));
+};
+const text = () => document.body.innerText;
+const describe = (el) => (el ? el.tagName.toLowerCase() + (el.id ? "#" + el.id : "") + "[" + nameOf(el).slice(0, 48) + "]" : null);
+const lastBar = () => all("toolbar", "Response actions").pop() || null;
+const noticeOf = (bar) => squash(((bar && bar.querySelector("[role=status]")) || {}).textContent);
+=== write desktop/e2e/native.py
+"""Native WebView verification on a GitHub-hosted runner (D8).
+
+Usage: python native.py <out-dir> <lightagent-cli> <full|offline> -- <host command...>
+       python native.py --summary <out-dir>
+
+The host is a test build (`--features e2e-hooks`); its window is the real
+WebView of the target: WKWebView on macOS, WebView2 on Windows, WebKitGTK
+on Linux. Scripts run in that page through the driver's `eval` command
+(desktop/src-tauri/src/e2e_driver.rs) with the helpers in native-prelude.js:
+they find controls by role and accessible name and click, type and choose
+through the page's own event handlers, as the rendered UI receives them.
+Screenshots are captures of the screen. The OS clipboard is read with the
+platform's own tool. Keyboard checks send real key presses through the OS
+where the runner allows it (xdotool; System Events; SendKeys) and say
+exactly what happened where it does not.
+
+  full     streaming, approvals, Stop, Continue and a paused run recovered
+           after a reload, every screen (with an in-page axe scan when
+           E2E_AXE names axe.min.js) plus Memory and MCP forms, response
+           actions (R2-R5), keyboard, a narrow window, a conversation-scoped
+           profile, the profile switch, closing with a working run, crash
+           recovery, and quitting with a working run
+  offline  startup without internet: the bundled UI, local conversations and
+           settings work; a model call and an MCP check against unreachable
+           services show errors. With E2E_NETNS=1 the run is inside a network
+           namespace that has only loopback (Linux), which is checked first
+
+Gated expectations fail the run. Platform facts (what the WebView offers,
+whether OS input reached the window) are recorded, never silently skipped.
+Writes native-<mode>.json.
+"""
+
+import glob
+import json
+import os
+import platform
+import re
+import socket
+import subprocess
+import sys
+import time
+
+import harness
+import runs
+from harness import API, Checks
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(HERE, "native-prelude.js"), encoding="utf-8") as _handle:
+    PRELUDE = _handle.read()
+LINUX = sys.platform.startswith("linux")
+MACOS = sys.platform == "darwin"
+WINDOWS = os.name == "nt"
+OFFLINE_URL = "http://lightagent-offline.invalid/v1"
+ANSWER = "Native answer streamed."
+SENTINEL = "lightagent-native-sentinel"
+PERSONA = "You answer as the native research desk."
+BUNDLED_ORIGINS = ("tauri://localhost", "http://tauri.localhost", "https://tauri.localhost")
+SCREENS = [
+    ("Tools", "#/tools", ["Enabled tools", "Extensions", "MCP servers"]),
+    ("Memory", "#/memory", ["Remember something", "Memories"]),
+    ("Knowledge", "#/knowledge", ["Add documents", "Indexed sources"]),
+    ("Identity", "#/admin/identity", ["Identity store", "Users"]),
+    ("Remote credentials", "#/admin/credentials", ["Vault", "Add a credential"]),
+    ("Diagnostics", "#/diagnostics", ["Doctor", "Architecture"]),
+    ("Setup", "#/setup", ["Initialise or reconfigure", "Import from Hermes"]),
+    ("Profiles", "#/profiles", ["Saved profiles", "Create a profile"]),
+    ("Settings", "#/settings", ["Agent runtime", "Subagents"]),
+]
+
+
+def T(template, **values):
+    """A script with $NAME replaced by the JSON of each value."""
+    for name, value in values.items():
+        template = template.replace("$" + name, json.dumps(value))
+    return template
+
+
+def screenshot(path):
+    try:
+        if MACOS:
+            subprocess.run(["screencapture", "-x", path], check=True, timeout=30)
+        elif LINUX:
+            subprocess.run(["import", "-window", "root", path], check=True, timeout=30)
+        else:
+            from PIL import ImageGrab
+
+            ImageGrab.grab().save(path)
+        return True
+    except Exception as error:
+        print(f"screenshot failed: {error}")
+        return False
+
+
+def clipboard():
+    """The OS clipboard's text, read with the platform's own tool."""
+    try:
+        if MACOS:
+            out = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=10)
+        elif LINUX:
+            out = subprocess.run(["xclip", "-o", "-selection", "clipboard"], capture_output=True, text=True, timeout=10)
+        else:
+            out = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+                                 capture_output=True, text=True, timeout=30)
+        if out.returncode != 0:
+            return f"<unreadable: {out.stderr.strip()[:200]}>"
+        return out.stdout.rstrip("\r\n")
+    except Exception as error:
+        return f"<unreadable: {error}>"
+
+
+def set_clipboard(value):
+    try:
+        if MACOS:
+            subprocess.run(["pbcopy"], input=value, text=True, timeout=10, check=True)
+        elif LINUX:
+            # xclip keeps serving the selection from the background until replaced.
+            subprocess.Popen(["xclip", "-selection", "clipboard"], stdin=subprocess.PIPE, text=True).communicate(value, timeout=10)
+        else:
+            subprocess.run(["powershell", "-NoProfile", "-Command", f"Set-Clipboard -Value '{value}'"], timeout=30, check=True)
+    except Exception as error:
+        print(f"could not set the clipboard: {error}")
+
+
+KEYS = {
+    "Tab": ("Tab", 48, "{TAB}"),
+    "Return": ("Return", 36, "{ENTER}"),
+    "Escape": ("Escape", 53, "{ESC}"),
+    "Right": ("Right", 124, "{RIGHT}"),
+    "Left": ("Left", 123, "{LEFT}"),
+}
+
+
+def os_keys(keys):
+    """Press `keys` through the OS. None when sent; otherwise why not."""
+    try:
+        if LINUX:
+            for name in keys:
+                subprocess.run(["xdotool", "key", "--clearmodifiers", KEYS[name][0]], check=True, timeout=10)
+        elif MACOS:
+            for name in keys:
+                out = subprocess.run(["osascript", "-e", f'tell application "System Events" to key code {KEYS[name][1]}'],
+                                     capture_output=True, text=True, timeout=30)
+                if out.returncode != 0:
+                    return f"System Events refused the key press: {out.stderr.strip()[:240]}"
+        else:
+            sends = "; ".join(f"[System.Windows.Forms.SendKeys]::SendWait('{KEYS[name][2]}')" for name in keys)
+            out = subprocess.run(["powershell", "-NoProfile", "-Command", f"Add-Type -AssemblyName System.Windows.Forms; {sends}"],
+                                 capture_output=True, text=True, timeout=60)
+            if out.returncode != 0:
+                return f"SendKeys failed: {out.stderr.strip()[:240]}"
+        return None
+    except Exception as error:
+        return f"{type(error).__name__}: {error}"
+
+
+class View:
+    """The rendered page of the host's main window."""
+
+    def __init__(self, host, out, mode):
+        self.host, self.out, self.mode = host, out, mode
+        self.shots = []
+        self.axe_source = None
+        axe = os.environ.get("E2E_AXE")
+        if axe and os.path.isfile(axe):
+            with open(axe, encoding="utf-8") as handle:
+                self.axe_source = handle.read()
+
+    def js(self, body, timeout=30):
+        return self.host.call("eval", timeout=timeout + 15, script=PRELUDE + "\n" + body, timeout_ms=int(timeout * 1000))
+
+    def try_js(self, body, timeout=30):
+        try:
+            return True, self.js(body, timeout)
+        except harness.HostError as error:
+            return False, str(error)
+
+    def wait_ui(self, timeout=120):
+        """Until the page answers and shows the app's shell."""
+        deadline, last = time.time() + timeout, None
+        while time.time() < deadline:
+            ok, value = self.try_js("return document.readyState === 'complete' && !!document.querySelector('.rail__account');", 5)
+            if ok and value:
+                return True
+            last = value
+            time.sleep(0.5)
+        raise harness.HostError(f"the page did not show the app ({last})")
+
+    def reload(self):
+        self.js("setTimeout(() => location.reload(), 50); return true;")
+        time.sleep(1.5)
+        self.wait_ui()
+
+    def shot(self, name):
+        path = os.path.join(self.out, f"native-{self.mode}-{name}.png")
+        if screenshot(path):
+            self.shots.append(os.path.basename(path))
+
+    def go(self, item, route):
+        """Open a screen from the account menu, as a person does."""
+        self.js(T("""
+          press(await need("the account menu", () => one("button", "Open account menu")));
+          press(await need($ITEM, () => all("menuitem").find((el) => nameOf(el) === $ITEM)));
+          await need("the route", () => location.hash.split("?")[0] === $ROUTE);
+          return true;""", ITEM=item, ROUTE=route))
+
+    def new_chat(self):
+        self.js("""
+          if (!location.hash.startsWith("#/") || location.hash.split("?")[0] !== "#/") location.hash = "#/";
+          press(await need("New chat", () => one("button", "New chat")));
+          await need("the composer", () => one("textbox", "Ask Lightagent"));
+          return true;""")
+
+    def send(self, message):
+        self.js(T("""
+          const box = await need("the composer", () => one("textbox", "Ask Lightagent"));
+          fill(box, $MESSAGE);
+          const button = await need("Send", () => all("button").filter((el) => /^(Send message|Queue steer)$/.test(nameOf(el)) && !el.disabled).pop());
+          press(button);
+          return true;""", MESSAGE=message))
+
+    def wait_text(self, wanted, seconds=60):
+        return bool(self.js(T("return !!(await until(() => text().includes($WANTED), $MS));", WANTED=wanted, MS=seconds * 1000), seconds + 10))
+
+    def idle(self, seconds=60):
+        return bool(self.js(T('return !!(await until(() => !one("button", "Stop"), $MS));', MS=seconds * 1000), seconds + 10))
+
+    def axe(self):
+        """The page's axe violations, or None when axe-core is not available."""
+        if not self.axe_source:
+            return None
+        if not self.js("return !!window.axe;"):
+            self.host.call("eval", timeout=90, script=self.axe_source + "\nreturn !!window.axe;", timeout_ms=60000)
+        return self.js("""
+          const result = await axe.run(document, { resultTypes: ["violations"] });
+          return result.violations.map((v) => ({ id: v.id, impact: v.impact, help: v.help,
+            nodes: v.nodes.slice(0, 4).map((n) => n.target.join(" ")) }));""", 90)
+
+
+def focus_window(host):
+    try:
+        host.call("focus")
+    except harness.HostError as error:
+        return f"focus: {error}"
+    if LINUX:
+        found = subprocess.run(["xdotool", "search", "--name", "^Lightagent$"], capture_output=True, text=True, timeout=10)
+        for window in found.stdout.split():
+            subprocess.run(["xdotool", "windowfocus", window], capture_output=True, timeout=10)
+    time.sleep(0.5)
+    return None
+
+
+def saved_with(home, marker):
+    """The saved conversation whose user message holds `marker`."""
+    for root, _dirs, files in os.walk(home):
+        if "sessions" not in root:
+            continue
+        for name in files:
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(root, name), encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except (OSError, ValueError):
+                continue
+            messages = data.get("messages") if isinstance(data, dict) else None
+            if isinstance(messages, list) and any(
+                    isinstance(m, dict) and m.get("role") == "user" and marker in harness.content_of(m) for m in messages):
+                return data
+    return None
+
+
+def last_stop(saved):
+    runs_ = (saved or {}).get("runs") or []
+    return runs_[-1].get("stop_reason") if runs_ else None
+
+
+def scripts(provider):
+    runs.scripts(provider)
+
+    def hold(gate, rest):
+        return lambda p, turn, index: [("text", "Holding"), ("gate", gate), ("text", rest), ("finish", "stop")]
+
+    provider.scripts.update({
+        "native-chat": lambda p, turn, index: [("text", "Native "), ("gate", "native-stream"), ("text", "answer "),
+                                               ("text", "streamed."), ("finish", "stop")],
+        "native-stop": hold("native-stop", " never."),
+        "native-close": hold("native-close", " and kept working."),
+        "native-quit": hold("native-quit", " never."),
+    })
+
+
+# Scenarios (full) ------------------------------------------------------------
+
+def scenario_chat(view, provider, home, notes):
+    check = Checks("chat")
+    view.new_chat()
+    view.send("[e2e:native-chat] Say something.")
+    partial = view.js("""return !!(await until(() => text().includes("Native") && !text().includes("answer streamed.")
+      && !!one("button", "Stop"), 30000));""", 40)
+    view.shot("streaming")
+    provider.open("native-stream")
+    whole = view.wait_text(ANSWER)
+    ended = view.idle()
+    view.shot("answer")
+    saved = saved_with(home, "[e2e:native-chat]")
+    check.expect("a partial answer is shown while the run streams (Stop shown)", partial)
+    check.expect("the whole answer is shown", whole)
+    check.expect("the run ends in the UI", ended)
+    check.expect("the answer is saved", (harness.answers(saved) or [""])[-1].endswith(ANSWER), harness.answers(saved))
+    return check
+
+
+def scenario_actions(view, host, notes):
+    """R2-R5 on the answer scenario_chat left on screen."""
+    check = Checks("response_actions")
+    set_clipboard(SENTINEL)
+    before = clipboard()
+    view.js('press(await need("Copy response", () => one("button", "Copy response", lastBar()))); return true;')
+    notice = view.js("return await until(() => noticeOf(lastBar()) || null, 5000);")
+    after = harness.wait_until(lambda: clipboard() == ANSWER, timeout=10, every=0.5) and ANSWER or clipboard()
+    check.expect("R2: the OS clipboard held the sentinel first", before == SENTINEL, before)
+    check.expect("R2: Copy response puts the answer on the OS clipboard", after == ANSWER, {"clipboard": after, "notice": notice})
+    time.sleep(2.6)
+    speech = view.js("""
+      const bar = lastBar();
+      const button = one("button", "Read aloud", bar);
+      const info = { api: "speechSynthesis" in window, unavailable: button.getAttribute("aria-disabled") === "true" };
+      info.voices = info.api ? speechSynthesis.getVoices().length : 0;
+      press(button);
+      await sleep(700);
+      info.notice = noticeOf(bar);
+      info.pressed = button.getAttribute("aria-pressed");
+      if (info.pressed === "true") { press(button); await sleep(300); info.stopped = button.getAttribute("aria-pressed") !== "true"; }
+      return info;""")
+    notes["read_aloud"] = speech
+    consistent = (speech["api"] and "not supported" not in speech["notice"]) or (
+        not speech["api"] and speech["unavailable"] and "not supported" in speech["notice"])
+    check.expect("R3: Read aloud shows the state that matches this WebView's speech support", consistent, speech)
+    time.sleep(2.6)
+    set_clipboard(SENTINEL)
+    share = view.js("""
+      const bar = lastBar();
+      const info = { api: typeof navigator.share === "function" };
+      press(one("button", "Share", bar));
+      await sleep(1500);
+      info.notice = noticeOf(bar);
+      return info;""")
+    view.shot("share")
+    if share["api"]:
+        share["dismissed"] = os_keys(["Escape"]) or "Escape sent through the OS"
+        check.expect("R4: with a share sheet, Share opens it without an error", "Could not share" not in share["notice"], share)
+    else:
+        share["clipboard"] = harness.wait_until(lambda: clipboard() == ANSWER, timeout=10, every=0.5) and ANSWER or clipboard()
+        check.expect("R4: without a share sheet, Share copies the answer and says so",
+                     "copied" in share["notice"] and share["clipboard"] == ANSWER, share)
+    notes["share"] = share
+    keys = view.js("""
+      const bar = lastBar();
+      const buttons = [...bar.querySelectorAll("[data-response-action]")];
+      buttons[0].focus();
+      const seen = [nameOf(document.activeElement)];
+      for (const name of ["ArrowRight", "ArrowRight", "End", "Home", "ArrowLeft"]) { key(document.activeElement, name); seen.push(nameOf(document.activeElement)); }
+      return seen;""")
+    check.expect("R5: the row's arrow, Home and End keys move between its buttons",
+                 keys == ["Copy response", "Rate response", "Read aloud", "More actions", "Copy response", "More actions"], keys)
+    why = focus_window(host)
+    view.js('one("button", "Copy response", lastBar()).focus(); return true;')
+    why = why or os_keys(["Right"])
+    time.sleep(0.4)
+    moved = view.js("return nameOf(document.activeElement);")
+    notes["toolbar_os_arrow"] = {"os_input": why or "sent", "focus_after": moved}
+    if LINUX:
+        check.expect("R5: an OS Right arrow moves from Copy to Rate", why is None and moved == "Rate response", notes["toolbar_os_arrow"])
+    violations = view.axe()
+    if violations is None:
+        check.expect("R5: axe-core is available for the scan", False, os.environ.get("E2E_AXE"))
+    else:
+        check.expect("R5: no critical axe violations on the conversation with its action row",
+                     not [v for v in violations if v["impact"] == "critical"], violations)
+        notes["axe_conversation"] = violations
+    return check
+
+
+def scenario_approvals(view, provider, workspace):
+    check = Checks("approvals")
+    for approve in (True, False):
+        name = "approve" if approve else "deny"
+        path = os.path.join(workspace, "approved.txt" if approve else "denied.txt")
+        view.new_chat()
+        view.send(f"[e2e:{name}] Write the file.")
+        card = view.js('return !!(await until(() => one("alertdialog", "Approve fs.write"), 30000));', 40)
+        before = harness.read(path)
+        view.shot(f"approval-{name}")
+        view.js(T('press(await need($BUTTON, () => one("button", $BUTTON, one("alertdialog", "Approve fs.write")))); return true;',
+                  BUTTON="Allow once" if approve else "Deny"))
+        answered = view.wait_text("Wrote it." if approve else "Not written.")
+        ended = view.idle()
+        after = harness.read(path)
+        check.expect(f"{name}: the approval card is shown and nothing ran before the decision", card and before is None, before)
+        check.expect(f"{name}: the model's next turn is shown", answered and ended)
+        if approve:
+            check.expect("approve: the write ran exactly once", after == "granted\n", after)
+        else:
+            check.expect("deny: the write never ran", after is None, after)
+    return check
+
+
+def scenario_stop(view, provider, home):
+    check = Checks("stop")
+    view.new_chat()
+    view.send("[e2e:native-stop] Work on something long.")
+    held = provider.wait_for("gate", "native-stop", gate="native-stop")
+    stop = view.js('return !!(await until(() => one("button", "Stop"), 15000));')
+    view.js('press(await need("Stop", () => one("button", "Stop"))); return true;')
+    ended = view.idle(30)
+    saved = harness.wait_until(lambda: last_stop(saved_with(home, "[e2e:native-stop]")) == "Cancelled", timeout=20)
+    provider.open("native-stop")
+    check.expect("Stop is shown while the run works", held and stop)
+    check.expect("Stop ends the run in the UI", ended)
+    check.expect("the saved run says cancelled", saved, last_stop(saved_with(home, "[e2e:native-stop]")))
+    return check
+
+
+def scenario_continue(view, host, home):
+    check = Checks("continue")
+    status, _ = host.fetch("PUT", f"{API}/config/agent.wall_clock_secs", {"value": "1"})
+    check.expect("a one-second time budget is set", status == 200, status)
+    card = 'one("alertdialog", "Run paused on its time budget")'
+    try:
+        view.new_chat()
+        view.send("[e2e:continue-extend] Look it up.")
+        paused = view.js(T("return !!(await until(() => $CARD, 30000));", CARD=None).replace('"null"', card).replace("null", card), 40)
+        view.shot("paused")
+        view.js(f'press(await need("Continue", () => one("button", "Continue", {card}))); return true;')
+        found = view.wait_text("Found it.")
+        check.expect("Continue: the paused card is shown and the continued run answers", paused and found and view.idle())
+        prompt = "[e2e:continue-answer] Look it up."
+        view.new_chat()
+        view.send(prompt)
+        paused = view.js(f"return !!(await until(() => {card}, 30000));", 40)
+        view.reload()
+        view.js(T("""
+          const entry = await need("the conversation in the list", () => [...document.querySelectorAll(".agent-sessions__list *")]
+            .find((el) => visible(el) && el.children.length === 0 && squash(el.textContent) === $PROMPT));
+          press(entry);
+          return true;""", PROMPT=prompt))
+        again = view.js(f"return !!(await until(() => {card}, 30000));", 40)
+        view.shot("paused-after-reload")
+        view.js(f'press(await need("Answer now", () => one("button", "Answer now", {card}))); return true;')
+        ended = view.idle()
+        check.expect("a paused run is found again after a reload", paused and again, (paused, again))
+        check.expect("Answer now ends the recovered run", ended)
+    finally:
+        host.fetch("PUT", f"{API}/config/agent.wall_clock_secs", {"value": ""})
+    return check
+
+
+def scenario_screens(view, notes):
+    check = Checks("screens")
+    for item, route, cards in SCREENS:
+        slug = re.sub(r"[^a-z0-9]+", "-", item.lower())
+        try:
+            view.go(item, route)
+            missing = view.js(T("""
+              await until(() => $CARDS.every((c) => text().includes(c)), 15000);
+              return $CARDS.filter((c) => !text().includes(c));""", CARDS=cards), 25)
+            alerts = view.js('return all("alert").map((el) => nameOf(el).slice(0, 200));')
+            view.shot(f"screen-{slug}")
+            check.expect(f"{item}: opens from the account menu and shows its sections", not missing, missing)
+            notes.setdefault("screen_alerts", {})[item] = alerts
+            violations = view.axe()
+            if violations is None:
+                check.expect(f"{item}: axe-core is available for the scan", False, os.environ.get("E2E_AXE"))
+            else:
+                notes.setdefault("axe", {})[item] = violations
+                check.expect(f"{item}: no critical axe violations", not [v for v in violations if v["impact"] == "critical"], violations)
+        except harness.HostError as error:
+            check.expect(f"{item}: opens from the account menu", False, str(error))
+            view.shot(f"failed-screen-{slug}")
+    return check
+
+
+def scenario_forms(view, home):
+    """Memory and MCP forms, filled and submitted in the native page."""
+    check = Checks("forms")
+    fact = "Native probe: herons nest in colonies."
+    view.go("Memory", "#/memory")
+    view.js(T("""
+      fill(await need("the memory text", () => document.querySelector("#memory-text")), $FACT);
+      press(await need("Remember", () => one("button", "Remember")));
+      return true;""", FACT=fact))
+    check.expect("Memory: Remember saves the fact and lists it", view.wait_text(fact, 30))
+    outcome = add_and_check_mcp(view, "native-offline", "http://lightagent-offline.invalid/mcp")
+    check.expect("MCP: an HTTP server added from the typed form is listed", outcome["listed"], outcome)
+    check.expect("MCP: checking an unreachable server shows why it failed", outcome["failed_shown"], outcome)
+    return check
+
+
+def add_and_check_mcp(view, name, url):
+    view.go("Tools", "#/tools")
+    view.js(T("""
+      press(await need("HTTP endpoint", () => one("radio", /^HTTP endpoint/)));
+      fill(await need("the server name", () => document.querySelector("#mcp-name")), $NAME);
+      fill(await need("the server URL", () => document.querySelector("#mcp-url")), $URL);
+      press(await need("Add server", () => one("button", "Add server")));
+      return true;""", NAME=name, URL=url))
+    listed = bool(view.js(T('return !!(await until(() => one("button", "Check " + $NAME), 15000));', NAME=name), 25))
+    result = {"listed": listed, "failed_shown": False, "shown": None}
+    if not listed:
+        return result
+    shown = view.js(T("""
+      const row = () => all("listitem").find((el) => el.textContent.includes($NAME) && one("button", "Check " + $NAME, el));
+      press(one("button", "Check " + $NAME, row()));
+      const confirm = await until(() => all("button").find((el) => nameOf(el).startsWith("Confirm: ") && nameOf(el).includes($NAME)), 3000);
+      if (confirm) press(confirm);
+      return await until(() => {
+        const r = row();
+        const said = r && [...all("alert", undefined, r), ...all("status", undefined, r)].map((el) => nameOf(el)).filter(Boolean).join(" | ");
+        return said && !/checking/i.test(said) ? said : null;
+      }, 60000);""", NAME=name), 75)
+    result["shown"] = shown
+    result["failed_shown"] = bool(shown) and not shown.startswith("Connected")
+    view.shot(f"mcp-{name}")
+    return result
+
+
+def scenario_keyboard(view, host, notes):
+    check = Checks("keyboard")
+    view.new_chat()
+    why = focus_window(host)
+    start = view.js("""
+      const box = await need("the composer", () => one("textbox", "Ask Lightagent"));
+      box.focus();
+      return { focused: describe(document.activeElement), page_has_focus: document.hasFocus() };""")
+    path = [start["focused"]]
+    for _ in range(6):
+        why = why or os_keys(["Tab"])
+        if why:
+            break
+        time.sleep(0.4)
+        path.append(view.js("return describe(document.activeElement);"))
+    ring = view.js("""
+      const el = document.activeElement; const s = getComputedStyle(el);
+      return { element: describe(el), focus_visible: el.matches(":focus-visible"), outline: s.outlineStyle + " " + s.outlineWidth, shadow: s.boxShadow };""")
+    moved = len(set(path)) > 1
+    notes["keyboard"] = {"os_input": why or "sent", "page_had_focus": start["page_has_focus"], "tab_path": path, "focus": ring}
+    if LINUX:
+        check.expect("OS Tab moves focus through the window's controls", why is None and moved, path)
+        check.expect("the focused control shows a visible focus indicator", ring["focus_visible"] and (
+            ring["outline"].split()[0] != "none" or ring["shadow"] != "none"), ring)
+    else:
+        notes["keyboard"]["outcome"] = (
+            "OS key presses reached the window and moved focus" if why is None and moved
+            else "OS key presses were sent but focus did not move (the window did not receive them)" if why is None
+            else f"OS key presses unavailable on this runner: {why}")
+    return check
+
+
+def scenario_narrow(view, host):
+    check = Checks("narrow")
+    try:
+        host.call("resize", width=900, height=600)
+        time.sleep(1.2)
+        layout = view.js("""return { width: innerWidth, height: innerHeight,
+          overflow: document.documentElement.scrollWidth - innerWidth, composer: !!one("textbox", "Ask Lightagent") || !!one("button", "New chat") };""")
+        view.shot("narrow")
+        check.expect("at the minimum window size the page has no horizontal overflow", layout["overflow"] <= 1, layout)
+        check.expect("at the minimum window size the chat controls are reachable", layout["composer"], layout)
+    finally:
+        host.call("resize", width=1280, height=820)
+        time.sleep(0.8)
+    return check
+
+
+def scenario_conversation_profile(view, host, provider, cli):
+    check = Checks("conversation_profile")
+    active = json.loads(harness.run_cli(cli, "--json", "profile", "list")).get("active")
+    runtime = host.call("status")["profile"]
+    view.js('location.hash = "#/"; return true;')
+    view.reload()
+    chosen = view.js("""
+      const select = await need("the conversation profile picker", () => document.querySelector("#conversation-profile"));
+      fill(select, "native-b");
+      await sleep(400);
+      return { value: select.value, hint: text().includes("These chats run as") };""")
+    view.new_chat()
+    before = len(provider.requests("profile"))
+    view.send("[e2e:profile] Where do herons nest?")
+    answered = view.wait_text("Noted.") and view.idle()
+    sent = provider.requests("profile")[before:]
+    view.shot("conversation-profile")
+    check.expect("the picker chooses native-b and says chats run as it", chosen["value"] == "native-b" and chosen["hint"], chosen)
+    check.expect("the conversation runs as native-b (its persona reaches the model)",
+                 answered and len(sent) == 1 and PERSONA in (sent[0].get("system") or ""), sent[-1:] and sent[-1].get("system", "")[:300])
+    after = json.loads(harness.run_cli(cli, "--json", "profile", "list")).get("active")
+    check.expect("the persisted active profile is unchanged", after == active, (active, after))
+    check.expect("the runtime's profile is unchanged", host.call("status")["profile"] == runtime)
+    view.js(T('fill(await need("the picker", () => document.querySelector("#conversation-profile")), $ID); return true;', ID=active))
+    return check
+
+
+def scenario_switch(view, host):
+    check = Checks("profile_switch")
+    original = host.call("status")["profile"]
+    for target in ("native-b", original):
+        view.go("Profiles", "#/profiles")
+        view.js(T("""
+          const row = await need("the row of " + $ID, () => [...document.querySelectorAll(".profile-row")]
+            .find((el) => visible(el) && el.textContent.includes($ID + " ·")));
+          press(await need("Use", () => one("button", "Use", row)));
+          return true;""", ID=target))
+        switched = harness.wait_until(lambda: (lambda s: s["state"] == "ready" and s["profile"] == target)(host.call("status")), timeout=90)
+        view.wait_ui()
+        view.shot(f"switched-{target}")
+        check.expect(f"Use switches the runtime to {target} and the page comes back", switched, host.call("status"))
+    return check
+
+
+def scenario_close(view, host, provider):
+    check = Checks("close_with_runs")
+    view.new_chat()
+    view.send("[e2e:native-close] Keep at it.")
+    held = provider.wait_for("gate", "native-close", gate="native-close")
+    host.call("close")
+    asked = view.js('return !!(await until(() => one("alertdialog", "Runs are still working"), 20000));', 30)
+    view.shot("close-with-runs")
+    view.js('press(await need("Keep working", () => one("button", "Keep working"))); return true;')
+    gone = view.js('return !!(await until(() => !one("alertdialog", "Runs are still working"), 10000));')
+    alive = host.process.poll() is None and host.call("status")["state"] == "ready"
+    provider.open("native-close")
+    finished = view.wait_text("Holding and kept working.") and view.idle()
+    check.expect("closing with a working run asks first", held and asked)
+    check.expect("Keep working keeps the window, the runtime and the run", gone and alive and finished, (gone, alive, finished))
+    return check
+
+
+def scenario_crash(view, host, provider):
+    check = Checks("crash_recovery")
+    view.new_chat()
+    view.send("[e2e:convo] Before the crash.")
+    before = view.wait_text("Noted.") and view.idle()
+    victims = harness.runtimes(host.process.pid)
+    for victim in victims:
+        victim.kill()
+    try:
+        restarted = bool(host.wait_ready(120))
+    except harness.HostError as error:
+        restarted = str(error)
+    view.shot("after-crash")
+    view.wait_ui()
+    view.new_chat()
+    view.send("[e2e:convo] After the crash.")
+    after = view.wait_text("Noted.", 90) and view.idle()
+    listed = view.js('return !!(await until(() => (document.querySelector(".agent-sessions__list") || {}).textContent?.includes("Before the crash."), 15000));')
+    check.expect("the first conversation answered before the crash", before)
+    check.expect("the host restarted its runtime", victims and restarted is True, restarted)
+    check.expect("the UI runs a new conversation on the restarted runtime", after)
+    check.expect("the earlier conversation is still listed", listed)
+    return check
+
+
+def scenario_quit(view, host, provider, home):
+    check = Checks("quit_with_runs")
+    view.new_chat()
+    view.send("[e2e:native-quit] Hold on.")
+    held = provider.wait_for("gate", "native-quit", gate="native-quit")
+    runtime = [p.pid for p in harness.runtimes(host.process.pid)]
+    host.call("close")
+    asked = view.js('return !!(await until(() => one("alertdialog", "Runs are still working"), 20000));', 30)
+    host.send("eval", script=PRELUDE + '\npress(one("button", "Stop runs and quit")); return true;', timeout_ms=5000)
+    try:
+        host.process.wait(timeout=45)
+        exited = True
+    except subprocess.TimeoutExpired:
+        exited = False
+    import psutil
+
+    left = [pid for pid in runtime if psutil.pid_exists(pid) and psutil.Process(pid).status() != psutil.STATUS_ZOMBIE]
+    provider.open("native-quit")
+    stopped = harness.wait_until(lambda: last_stop(saved_with(home, "[e2e:native-quit]")) == "Cancelled", timeout=10)
+    check.expect("quitting with a working run asks first", held and asked)
+    check.expect("Stop runs and quit ends the app and its runtime", exited and not left, (exited, left))
+    check.expect("the stopped run is saved as cancelled", stopped, last_stop(saved_with(home, "[e2e:native-quit]")))
+    return check
+
+
+# Startup without internet ------------------------------------------------------
+
+def scenario_offline(view, host, home):
+    check = Checks("offline")
+    facts = page_facts(view)
+    check.expect("the UI is the bundled one, served by the app itself", facts["origin"] in BUNDLED_ORIGINS, facts)
+    view.new_chat()
+    prompt = "Hello while offline."
+    view.send(prompt)
+    ended = view.idle(150)
+    shown = view.js("return text().slice(-700);")
+    view.shot("offline-run")
+    check.expect("a model call to an unreachable provider ends with an error shown",
+                 ended and bool(re.search(r"fail|error|could not|unreachable|connect|resolve", shown, re.I)), shown[-300:])
+    check.expect("the conversation is kept locally", saved_with(home, prompt) is not None)
+    listed = view.js(T('return !!(await until(() => (document.querySelector(".agent-sessions__list") || {}).textContent?.includes($P), 15000));', P=prompt))
+    check.expect("the conversation is listed", listed)
+    view.go("Settings", "#/settings")
+    check.expect("Settings load from the local runtime", view.wait_text("Agent runtime", 20))
+    view.shot("offline-settings")
+    outcome = add_and_check_mcp(view, "offline-mcp", "http://lightagent-offline.invalid/mcp")
+    check.expect("an MCP server can be added offline", outcome["listed"], outcome)
+    check.expect("checking an unreachable MCP server shows why it failed", outcome["failed_shown"], outcome)
+    return check
+
+
+def page_facts(view):
+    return view.js("""return { origin: location.origin, protocol: location.protocol, user_agent: navigator.userAgent,
+      device_pixel_ratio: devicePixelRatio, speech: "speechSynthesis" in window, share: typeof navigator.share === "function",
+      clipboard: !!(navigator.clipboard && navigator.clipboard.writeText) };""")
+
+
+def no_network():
+    """True when nothing outside loopback is reachable (checked by connecting out)."""
+    for address in (("1.1.1.1", 443), ("8.8.8.8", 53), ("github.com", 443)):
+        try:
+            socket.create_connection(address, timeout=3).close()
+            return False, f"reached {address}"
+        except OSError:
+            continue
+    return True, "no address outside loopback answered"
+
+
+def main():
+    if sys.argv[1] == "--summary":
+        return summary(sys.argv[2])
+    out = os.path.abspath(sys.argv[1])
+    cli, mode = sys.argv[2], sys.argv[3]
+    command = sys.argv[sys.argv.index("--") + 1:]
+    os.makedirs(out, exist_ok=True)
+    home = os.environ["LIGHTAGENT_HOME"]
+    results = {"mode": mode, "checks": {}, "recorded": {}, "failures": [],
+               "runner": {"platform": platform.platform(), "machine": platform.machine(),
+                          "image": f"{os.environ.get('ImageOS', '?')} {os.environ.get('ImageVersion', '?')}"}}
+    failures, notes = results["failures"], results["recorded"]
+    provider = harness.FakeProvider()
+    scripts(provider)
+    if mode == "offline":
+        harness.run_cli(cli, "config", "set", "inference.base_url", OFFLINE_URL)
+        if os.environ.get("E2E_NETNS") == "1":
+            isolated, seen = no_network()
+            results["checks"]["network"] = {"no network outside loopback": {"ok": isolated, "seen": seen}}
+            if not isolated:
+                failures.append(f"network: {seen}")
+    else:
+        harness.prepare_home(cli, home, provider)
+        harness.run_cli(cli, "profile", "create", "native-b", "--persona", PERSONA)
+    env = dict(os.environ, LIGHTAGENT_DESKTOP_E2E_DRIVER="1",
+               LIGHTAGENT_DESKTOP_E2E_REPORT=os.path.join(out, f"report-{mode}.txt"))
+    host = harness.Host(command, env, os.path.join(out, f"driver-{mode}.log"))
+    view = View(host, out, mode)
+    try:
+        status = host.ready()
+        view.wait_ui()
+        notes["page"] = page_facts(view)
+        notes["runtime"] = {k: status.get(k) for k in ("runtime_version", "desktop_version", "profile")}
+        try:
+            notes["window"] = host.call("geometry")
+        except harness.HostError as error:
+            notes["window"] = str(error)
+        view.shot("ready")
+        if mode == "offline":
+            scenarios = [("offline", lambda: scenario_offline(view, host, home))]
+        else:
+            workspace = host.workspace()
+            scenarios = [
+                ("chat", lambda: scenario_chat(view, provider, home, notes)),
+                ("response_actions", lambda: scenario_actions(view, host, notes)),
+                ("approvals", lambda: scenario_approvals(view, provider, workspace)),
+                ("stop", lambda: scenario_stop(view, provider, home)),
+                ("continue", lambda: scenario_continue(view, host, home)),
+                ("screens", lambda: scenario_screens(view, notes)),
+                ("forms", lambda: scenario_forms(view, home)),
+                ("keyboard", lambda: scenario_keyboard(view, host, notes)),
+                ("narrow", lambda: scenario_narrow(view, host)),
+                ("conversation_profile", lambda: scenario_conversation_profile(view, host, provider, cli)),
+                ("profile_switch", lambda: scenario_switch(view, host)),
+                ("close_with_runs", lambda: scenario_close(view, host, provider)),
+                # Near the end: the host restarts a crashed runtime at most once a minute.
+                ("crash_recovery", lambda: scenario_crash(view, host, provider)),
+                # Last: it quits the app.
+                ("quit_with_runs", lambda: scenario_quit(view, host, provider, home)),
+            ]
+        for name, scenario in scenarios:
+            try:
+                check = scenario()
+                results["checks"][name] = check.results
+                failures.extend(check.failures)
+            except Exception as error:  # a broken scenario is a failure; the rest still run
+                results["checks"][name] = {"error": repr(error)}
+                failures.append(f"{name}: {error!r}")
+                view.shot(f"failed-{name}")
+                if host.process.poll() is not None:
+                    failures.append("the host exited; later scenarios were not run")
+                    break
+    except Exception as error:
+        failures.append(f"setup: {error!r}")
+        view.shot("failed-setup")
+    finally:
+        if host.process.poll() is None:
+            host.stop()
+        else:
+            host.stop()
+        provider.close()
+    results["screenshots"] = view.shots
+    with open(os.path.join(out, f"native-{mode}.json"), "w", encoding="utf-8") as handle:
+        json.dump(results, handle, indent=1)
+    print(json.dumps({"failures": failures}, indent=1))
+    return 1 if failures else 0
+
+
+def summary(out):
+    lines = []
+    for path in sorted(glob.glob(os.path.join(out, "**", "native-*.json"), recursive=True)):
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        label = os.path.relpath(path, out)
+        failed = data.get("failures") or []
+        agent = ((data.get("recorded") or {}).get("page") or {}).get("user_agent", "?")
+        lines.append(f"- `{label}`: {'passed' if not failed else f'{len(failed)} failure(s)'}; WebView: {agent[:140]}")
+        for name, checks in (data.get("checks") or {}).items():
+            if "error" in checks:
+                lines.append(f"  - {name}: error {str(checks['error'])[:200]}")
+            else:
+                passed = sum(1 for c in checks.values() if c.get("ok"))
+                lines.append(f"  - {name}: {passed}/{len(checks)}")
+        for name, value in (data.get("recorded") or {}).items():
+            if name.startswith("axe"):
+                value = {k: [f"{v['id']}:{v['impact']}" for v in vs] for k, vs in value.items()} if isinstance(value, dict) else [f"{v['id']}:{v['impact']}" for v in value]
+            lines.append(f"  - recorded {name}: {json.dumps(value)[:400]}")
+        for failure in failed[:25]:
+            lines.append(f"  - FAILED {failure[:300]}")
+    print("\n".join(lines) or "- no native reports")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+=== replace .github/workflows/desktop.yml
+--- find
+#       through a Linux test build with `--features e2e-hooks` (never bundled).
+--- with
+#       through a Linux test build with `--features e2e-hooks` (never bundled).
+#   D8  native WebView: the rendered UI driven in WKWebView, WebView2 and
+#       WebKitGTK through the same test build on every target; the shell
+#       job proves the test-only channel is absent from every package.
+=== replace .github/workflows/desktop.yml
+--- find
+      - name: End-to-end (runner, ready and mismatch)
+--- with
+      - name: The test-only driver is absent from the packaged app
+        run: |
+          set -euo pipefail
+          r=desktop/target/release
+          ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
+          bins=("$r/lightagent-desktop$ext")
+          if [ "$(uname -s)" = Darwin ]; then bins+=("$(ls -d $r/bundle/macos/*.app)/Contents/MacOS/lightagent-desktop"); fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            mkdir -p "$RUNNER_TEMP/deb-contents"
+            dpkg-deb -x "$(ls $r/bundle/deb/*.deb | head -1)" "$RUNNER_TEMP/deb-contents"
+            bins+=("$RUNNER_TEMP/deb-contents/usr/bin/lightagent-desktop")
+          fi
+          for bin in "${bins[@]}"; do
+            for marker in E2E_DRIVER e2e_reply LIGHTAGENT_DESKTOP_E2E_DRIVER; do
+              if grep -a -q "$marker" "$bin"; then echo "::error::test-only marker $marker found in $bin"; exit 1; fi
+            done
+          done
+          echo "- test-only driver markers (E2E_DRIVER, e2e_reply, LIGHTAGENT_DESKTOP_E2E_DRIVER) absent from ${#bins[@]} packaged host binaries: ${bins[*]##*/target/}" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: End-to-end (runner, ready and mismatch)
+=== replace .github/workflows/desktop.yml
+--- find
+            ${{ runner.temp }}/switch-e2e/
+            ${{ runner.temp }}/runs-e2e/
+--- with
+            ${{ runner.temp }}/switch-e2e/
+            ${{ runner.temp }}/runs-e2e/
+
+  native:
+    name: desktop native WebView (${{ matrix.label }}, e2e hooks)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15-intel, label: macos-x64 }
+          - { os: macos-15, label: macos-arm64 }
+          - { os: windows-latest, label: windows-x64 }
+          - { os: ubuntu-22.04, label: linux-x64 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Runner identity and tested commit
+        run: |
+          {
+            echo "### desktop native ${{ matrix.label }}"
+            echo "- head \`$(git rev-parse HEAD)\` tree \`$(git rev-parse 'HEAD^{tree}')\`"
+            echo "- runner: ${ImageOS:-?} ${ImageVersion:-?}, $(uname -sm)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Linux system packages (webview, display, session bus, OS input, clipboard)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf xvfb dbus-x11 imagemagick xdotool xclip
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            desktop -> target
+          key: desktop-native-${{ matrix.label }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install psutil==7.1.0 pillow==11.3.0
+      - name: Desktop frontend, and axe-core for the in-page accessibility scan
+        run: |
+          npm ci --prefix frontend
+          npm run build:desktop --prefix frontend
+          mkdir -p "$RUNNER_TEMP/axe"
+          npm install --prefix "$RUNNER_TEMP/axe" --no-save --no-audit --no-fund axe-core@4.10.3
+      - name: The runtime, and the test-only host (e2e hooks; never bundled)
+        run: |
+          set -euo pipefail
+          ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
+          cargo build --locked -p lightagent
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          mkdir -p desktop/src-tauri/binaries
+          cp "target/debug/lightagent$ext" "desktop/src-tauri/binaries/lightagent-sidecar-$triple$ext"
+          (cd desktop && npx --yes "$TAURI_CLI" icon ../icon/LightagentLogo.png -o src-tauri/icons)
+          cargo clippy --locked --manifest-path desktop/Cargo.toml -p lightagent-desktop --features e2e-hooks -- -D warnings
+          cargo build --locked --manifest-path desktop/Cargo.toml -p lightagent-desktop --features "e2e-hooks tauri/custom-protocol"
+          [ -x "desktop/target/debug/lightagent-sidecar$ext" ] || cp "target/debug/lightagent$ext" "desktop/target/debug/lightagent-sidecar$ext"
+          # Positive control for the package check in the shell job.
+          grep -a -q e2e_reply "desktop/target/debug/lightagent-desktop$ext"
+          echo "- positive control: the test build carries the driver markers the package check looks for" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Native WebView scenarios (full, then offline)
+        env:
+          E2E_AXE: ${{ runner.temp }}/axe/node_modules/axe-core/axe.min.js
+        run: |
+          out="$RUNNER_TEMP/native-e2e"; ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
+          app="desktop/target/debug/lightagent-desktop$ext"; cli="target/debug/lightagent$ext"
+          wrap=(); [ "$RUNNER_OS" = Linux ] && wrap=(xvfb-run -a -s '-screen 0 1280x900x24' dbus-run-session --)
+          status=0
+          LIGHTAGENT_HOME="$RUNNER_TEMP/native-home" "${wrap[@]}" python desktop/e2e/native.py "$out" "$cli" full -- "$app" || status=1
+          LIGHTAGENT_HOME="$RUNNER_TEMP/offline-home" "${wrap[@]}" python desktop/e2e/native.py "$out/offline" "$cli" offline -- "$app" || status=1
+          exit $status
+      - name: Startup with no network at all (Linux network namespace)
+        if: runner.os == 'Linux' && (success() || failure())
+        run: |
+          py=$(command -v python)
+          sudo unshare --net -- bash -c 'ip link set lo up && exec sudo -E -u "$SUDO_USER" env HOME="$1" PATH="$2" E2E_NETNS=1 LIGHTAGENT_HOME="$3" \
+            xvfb-run -a -s "-screen 0 1280x900x24" dbus-run-session -- "$4" desktop/e2e/native.py "$5" target/debug/lightagent offline -- desktop/target/debug/lightagent-desktop' \
+            netns "$HOME" "$PATH" "$RUNNER_TEMP/netns-home" "$py" "$RUNNER_TEMP/native-e2e/netns"
+      - name: Native summary
+        if: always()
+        run: python desktop/e2e/native.py --summary "$RUNNER_TEMP/native-e2e" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: desktop-native-${{ matrix.label }}
+          retention-days: 30
+          path: ${{ runner.temp }}/native-e2e/
+=== end
