@@ -310,7 +310,7 @@ async fn eval(script: &str, timeout_ms: u64) -> Result<Value, String> {
     let wrapped = [
         "(async () => { let ok = true, value = null;\ntry { value = await (async () => {\n",
         script,
-        "\n})(); } catch (error) { ok = false; value = String((error && error.stack) || error); }\n",
+        "\n})(); } catch (error) { ok = false; value = (error && error.message) ? error.message + \" | \" + (error.stack || \"\") : String(error); }\n",
         "let text; try { text = JSON.stringify(value === undefined ? null : value); }\n",
         "catch (error) { ok = false; text = JSON.stringify(String(error)); }\n",
         "window.__TAURI__.core.invoke(\"e2e_reply\", { token: \"",
