@@ -64,7 +64,19 @@ tree are recorded here.
 | 50 | D7 the Security card | https://github.com/dlroqa/Lightagent/pull/144 | `desktop/d7p-security` | `desktop/d7o-update-check` (via merge commit `f17115c`) | `f17115c` | `f17115c` (subagents: hosted queueing) |
 | 51 | D7 conversations | https://github.com/dlroqa/Lightagent/pull/145 | `desktop/d7q-conversations` | `desktop/d7p-security` (`f17115c`) | `9f4dbc5` | `9f4dbc5` |
 | 52 | D7 the setup sections in Settings (shared WebMode) | https://github.com/dlroqa/Lightagent/pull/146 | `desktop/d7r-setup-sections` | `desktop/d7q-conversations` (`9f4dbc5`) | `cc2829d` | `cc2829d` |
-| 53+ | D7 continues (the audit's evidence gaps, the remaining slash, Jev, regenerate, chat profile and env rows), then D8-D10 | opened in dependency order, each based on the previous slice's branch | — | — | — | — |
+| 53 | D7 the audit's evidence gaps (test-only) | https://github.com/dlroqa/Lightagent/pull/148 | `desktop/d7s-evidence-gaps-2` | `desktop/d7r-setup-sections` | `67b8124` | `67b8124` |
+| 54 | D7 profile guidance (/onboard) | https://github.com/dlroqa/Lightagent/pull/149 | `desktop/d7t-onboarding` | `desktop/d7s-evidence-gaps-2` | `940b1f5` | `940b1f5` |
+| 55 | D7 /help and /reload | https://github.com/dlroqa/Lightagent/pull/150 | `desktop/d7u-help-reload` | `desktop/d7t-onboarding` (via merge commit `46abd19`) | `46abd19` | `46abd19` |
+| 56a | D7 Jev status and connection check (stubs) | https://github.com/dlroqa/Lightagent/pull/151 | `desktop/d7v-jev` | `desktop/d7u-help-reload` | `4e1aa34` | `4e1aa34` |
+| 56b | D7 LIGHTAGENT_CREDENTIAL_KEY and HERMES_HOME | https://github.com/dlroqa/Lightagent/pull/152 | `desktop/d7w-env-rows` | `desktop/d7v-jev` | `03f4cfe` | `03f4cfe` |
+| 56c | D7 Try again on the real backend | https://github.com/dlroqa/Lightagent/pull/153 | `desktop/d7x-regenerate-backend` | `desktop/d7w-env-rows` | `7e4827f` | `7e4827f` |
+| 57 | D7 conversation-scoped profile (chat --profile) | https://github.com/dlroqa/Lightagent/pull/154 | `desktop/d7y-conversation-profile` | `desktop/d7x-regenerate-backend` | `703196a` | `703196a` |
+| 58 | D8a native WebView verification | https://github.com/dlroqa/Lightagent/pull/155 | `desktop/d8a-native` | `desktop/d7y-conversation-profile` | `0c75cda` | `0c75cda` |
+| 59 | D8b host-side secret input | https://github.com/dlroqa/Lightagent/pull/156 | `desktop/d8b-secret-input` | `desktop/d8a-native` (via merge commits) | `a85d6fa` | `71a929c` (row 60 holds it) |
+| 60 | D8c remote mode | https://github.com/dlroqa/Lightagent/pull/157 | `desktop/d8c-remote-mode` | `desktop/d8b-secret-input` (via merge commits) | `71a929c` | `71a929c` |
+| 61 | D8d keyboard and axe in the browser | https://github.com/dlroqa/Lightagent/pull/159 | `desktop/d8d-accessibility` | `desktop/d8c-remote-mode` (via merge commit) | `248e1db` | see DESKTOP_D8_D9_REPORT.md |
+| 62 | D9 installers and supply chain (and the runtime's advisory updates) | https://github.com/dlroqa/Lightagent/pull/158 | `desktop/d9-installers` | `desktop/d8d-accessibility` (via merge commit) | `cf1b2b3` | see DESKTOP_D8_D9_REPORT.md |
+| 63 | D10 review: the last rows, the report and this merge strategy | opened with this commit | `desktop/d10-review` | `desktop/d9-installers` | this commit | — |
 
 **Outside the stack: #147** (`fix/broker-queue-wait`, base `master`): the
 broker's separate queue and run waits. It changes merged subagents code
@@ -73,17 +85,32 @@ subagents parents failed only on hosted queueing (their children behaved
 as intended), and rows 51-52, whose trees contain them, passed. The D10
 candidate sequence validates the combined tree with #147.
 
-**D10 decision carried:** rows 21-39 carry the switch rejection race
-(fixed at row 40): with a pending approval, a switch that stops runs may
-cancel the run before it applies the rejection, so no explicit rejection
-is recorded. Backport row 40's change to row 21 (#115) and merge it
-forward before approval, or accept the window.
+**The two intermediate defect windows** (not accepted by the owner): rows
+21-39 carry the switch rejection race (fixed at row 40), and rows 15-31
+lack `providers.remove`'s `expected_revision` in the contract (fixed at
+row 32).
 
-**D10 decision carried:** rows 15-31 lack `providers.remove`'s
-`expected_revision` in the desktop contract (fixed at row 32), so between
-those rows the desktop app cannot remove a saved provider. Backport the
-one-line contract change to row 15 (#110) and merge it forward before
-approval, or accept the window (no desktop build ships from those states).
+**Proposed strategy (D10, needs the owner's separate approval for each
+step): one validated integration merge instead of merging the rows one by
+one.** Backporting into rows 15 and 21 would change about 30 heads, each to
+be re-validated, and master would still pass through each of them. Instead:
+
+1. Merge #147 (`fix/broker-queue-wait`, base `master`) at its exact head.
+   It changes merged subagents code and its workflow, which the stack does
+   not touch.
+2. Merge one integration branch into `master` with a single merge commit
+   (never a fast-forward, never a squash): the final stack head (row 63)
+   with #147 merged in. Its combined tree, the exact tree `master` would
+   get, is validated beforehand on all four platforms (check, desktop, Jev
+   evaluation, subagents) through a draft pull request into `master` that is
+   never merged by itself.
+
+So `master` goes from `12582a0` to #147's tested head, then to the
+validated combined tree. It never points at a commit inside either window.
+Every slice's commits remain in history behind the merge's second parent,
+and `git bisect --first-parent` walks only validated states. The stacked
+draft PRs are then closed as superseded; #98 shows as merged (its head is in
+the tree), #99 and #91 are closed unmerged, as planned below.
 
 Row 27's head is now `5cc2dad` (the uninstall `scope` contract fix, `088`); its last fully tested head is recorded in DESKTOP_PROGRESS.md when its macos-arm64 jobs finish.
 
