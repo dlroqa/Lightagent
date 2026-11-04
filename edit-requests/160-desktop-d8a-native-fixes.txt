@@ -1,0 +1,239 @@
+=== base 94c3b16b3a68c2f3352817f962e388a99b4c77da
+=== message
+Fix what the first native runs found: labels, contrast and the suite's own matching
+
+The first runs on all four targets (desktop run 41822033959) drove the
+real WebViews through most scenarios. They found two product defects and
+several harness mistakes:
+
+- Settings had four number and text inputs whose visible label was not
+  tied to the input (axe `label`, critical, on every target). Each label
+  now names its input through useId.
+- The avatar's white on teal (3.2:1) and the chat list's section label
+  failed contrast (axe `color-contrast`, serious): a darker teal and the
+  muted text token.
+- The suite matched conversation titles with their trailing full stop,
+  which titles drop; read the run's answer as one sentence where the UI
+  shows the text before a pause separately; and could press Send before
+  the composer was live. Sending now confirms the message reached the
+  conversation and tries once more if not.
+- A crash that leaves the next send unanswered now records the page, the
+  host's status and the runtime's recent output (new driver op `logs`),
+  and the window is brought to the front through the OS on Windows and
+  macOS before OS key presses.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace frontend/src/screens/SettingsScreen.tsx
+--- find
+import { useEffect, useState, type ReactNode } from "react";
+--- with
+import { useEffect, useId, useState, type ReactNode } from "react";
+=== replace frontend/src/screens/SettingsScreen.tsx
+--- find
+  useEffect(() => setDraft(value === undefined ? "" : String(value)), [value]);
+  return (
+    <div className="field">
+      <label className="field__label">{label}</label>
+      <input className="input tnum" type="number" min={min} max={max} value={draft} disabled={disabled}
+--- with
+  useEffect(() => setDraft(value === undefined ? "" : String(value)), [value]);
+  const id = useId();
+  return (
+    <div className="field">
+      <label className="field__label" htmlFor={id}>{label}</label>
+      <input id={id} className="input tnum" type="number" min={min} max={max} value={draft} disabled={disabled}
+=== replace frontend/src/screens/SettingsScreen.tsx
+--- find
+  useEffect(() => setDraft(value == null ? "" : String(value)), [value]);
+  return (
+    <div className="field" style={{ marginTop: 10 }}>
+      <label className="field__label">{label}</label>
+      <input className="input tnum" type="number" min={1} placeholder="No limit"
+--- with
+  useEffect(() => setDraft(value == null ? "" : String(value)), [value]);
+  const id = useId();
+  return (
+    <div className="field" style={{ marginTop: 10 }}>
+      <label className="field__label" htmlFor={id}>{label}</label>
+      <input id={id} className="input tnum" type="number" min={1} placeholder="No limit"
+=== replace frontend/src/screens/SettingsScreen.tsx
+--- find
+  useEffect(() => setDraft(value), [value]);
+  return <div className="field" style={{ marginTop: 10 }}>
+    <label className="field__label">{label}</label>
+    <input className="input" value={draft} disabled={disabled} onChange={(event) => setDraft(event.target.value)}
+--- with
+  useEffect(() => setDraft(value), [value]);
+  const id = useId();
+  return <div className="field" style={{ marginTop: 10 }}>
+    <label className="field__label" htmlFor={id}>{label}</label>
+    <input id={id} className="input" value={draft} disabled={disabled} onChange={(event) => setDraft(event.target.value)}
+=== replace frontend/src/screens/SettingsScreen.tsx
+--- find
+  useEffect(() => setDraft(String(value)), [value]);
+  return <div className="field" style={{ marginTop: 10 }}>
+    <label className="field__label">{label}</label>
+    <input className="input" type="number" min={min} max={max} step={step} value={draft} disabled={disabled}
+--- with
+  useEffect(() => setDraft(String(value)), [value]);
+  const id = useId();
+  return <div className="field" style={{ marginTop: 10 }}>
+    <label className="field__label" htmlFor={id}>{label}</label>
+    <input id={id} className="input" type="number" min={min} max={max} step={step} value={draft} disabled={disabled}
+=== replace frontend/src/styles/app.css count=2
+--- find
+  border-radius: 50%;
+  background: #0f9f8e;
+  color: #f4fffd;
+--- with
+  border-radius: 50%;
+  /* 5.7:1 with the light text (WCAG AA for 12px); #0f9f8e was 3.2:1. */
+  background: #0b7468;
+  color: #f4fffd;
+=== replace frontend/src/styles/app.css
+--- find
+.chat-sidebar__section {
+  margin: 12px 6px -2px;
+  color: var(--text-faint);
+--- with
+.chat-sidebar__section {
+  margin: 12px 6px -2px;
+  /* --text-faint is below 4.5:1 on the sidebar for 11px text. */
+  color: var(--text-muted);
+=== replace desktop/src-tauri/src/e2e_driver.rs
+--- find
+    /// Ask the window to close, as its close button does.
+    Close,
+}
+--- with
+    /// Ask the window to close, as its close button does.
+    Close,
+    /// The runtime's recent output (the running one, else the last that
+    /// stopped), as the diagnostics view shows it.
+    Logs {
+        #[serde(default = "log_limit")]
+        limit: usize,
+    },
+}
+
+fn log_limit() -> usize {
+    60
+}
+=== replace desktop/src-tauri/src/e2e_driver.rs
+--- find
+        Op::Close => {
+            main_window()?.close().map_err(|error| error.to_string())?;
+            Value::Null
+        }
+--- with
+        Op::Close => {
+            main_window()?.close().map_err(|error| error.to_string())?;
+            Value::Null
+        }
+        Op::Logs { limit } => {
+            let current: Option<Vec<String>> = match &*lock(&host.runtime) {
+                crate::Runtime::Ready(sidecar) => Some(lock(&sidecar.logs).iter().cloned().collect()),
+                _ => None,
+            };
+            let lines = current.unwrap_or_else(|| lock(&host.last_logs).clone());
+            let skip = lines.len().saturating_sub(limit.min(500));
+            json!(&lines[skip..])
+        }
+=== replace desktop/e2e/native.py
+--- find
+    def send(self, message):
+        self.js(T("""
+          const box = await need("the composer", () => one("textbox", "Ask Lightagent"));
+          fill(box, $MESSAGE);
+          const button = await need("Send", () => all("button").filter((el) => /^(Send message|Queue steer)$/.test(nameOf(el)) && !el.disabled).pop());
+          press(button);
+          return true;""", MESSAGE=message))
+--- with
+    def send(self, message):
+        """Type and send `message`, and confirm it reached the conversation;
+        a send pressed before the composer was live is tried once more."""
+        for attempt in (1, 2):
+            reached = self.js(T("""
+              const box = await need("the composer", () => all("textbox", "Ask Lightagent").find((el) => !el.disabled));
+              fill(box, $MESSAGE);
+              const button = await need("Send", () => all("button").filter((el) => /^(Send message|Queue steer)$/.test(nameOf(el)) && !el.disabled).pop());
+              press(button);
+              return !!(await until(() => [...document.querySelectorAll('[aria-label="Your message"]')]
+                .some((el) => el.textContent.includes($MESSAGE)), 10000));""", MESSAGE=message), 40)
+            if reached:
+                return
+            self.shot(f"send-not-shown-{attempt}")
+        raise harness.HostError(f"the message never reached the conversation; the page ends: {self.js('return text().slice(-400);')!r}")
+=== replace desktop/e2e/native.py
+--- find
+          const entry = await need("the conversation in the list", () => [...document.querySelectorAll(".agent-sessions__list *")]
+            .find((el) => visible(el) && el.children.length === 0 && squash(el.textContent) === $PROMPT));
+--- with
+          // A title is the first message without its closing full stop.
+          const title = $PROMPT.replace(/[.]+$/, "");
+          const entry = await need("the conversation in the list", () => [...document.querySelectorAll(".agent-sessions__list *")]
+            .find((el) => visible(el) && el.children.length === 0 && squash(el.textContent).replace(/[.…]+$/, "") === title));
+=== replace desktop/e2e/native.py
+--- find
+    provider.open("native-close")
+    finished = view.wait_text("Holding and kept working.") and view.idle()
+--- with
+    provider.open("native-close")
+    # The text before the pause is shown apart from the rest of the answer.
+    finished = view.wait_text("and kept working.") and view.idle()
+=== replace desktop/e2e/native.py
+--- find
+    after = view.wait_text("Noted.", 90) and view.idle()
+    listed = view.js('return !!(await until(() => (document.querySelector(".agent-sessions__list") || {}).textContent?.includes("Before the crash."), 15000));')
+    check.expect("the first conversation answered before the crash", before)
+    check.expect("the host restarted its runtime", victims and restarted is True, restarted)
+    check.expect("the UI runs a new conversation on the restarted runtime", after)
+--- with
+    after = view.wait_text("Noted.", 90) and view.idle()
+    seen = None
+    if not after:
+        seen = {"page": view.js("return text().slice(-500);"), "status": host.call("status"), "runtime_output": host.call("logs", limit=40)}
+    listed = view.js('return !!(await until(() => (document.querySelector(".agent-sessions__list") || {}).textContent?.includes("Before the crash"), 15000));')
+    check.expect("the first conversation answered before the crash", before)
+    check.expect("the host restarted its runtime", victims and restarted is True, restarted)
+    check.expect("the UI runs a new conversation on the restarted runtime", after, seen)
+=== replace desktop/e2e/native.py
+--- find
+    listed = view.js(T('return !!(await until(() => (document.querySelector(".agent-sessions__list") || {}).textContent?.includes($P), 15000));', P=prompt))
+--- with
+    listed = view.js(T('return !!(await until(() => (document.querySelector(".agent-sessions__list") || {}).textContent?.includes($P), 15000));', P=prompt.rstrip(".")))
+=== replace desktop/e2e/native.py
+--- find
+    if LINUX:
+        found = subprocess.run(["xdotool", "search", "--name", "^Lightagent$"], capture_output=True, text=True, timeout=10)
+        for window in found.stdout.split():
+            subprocess.run(["xdotool", "windowfocus", window], capture_output=True, timeout=10)
+    time.sleep(0.5)
+    return None
+--- with
+    try:
+        if LINUX:
+            found = subprocess.run(["xdotool", "search", "--name", "^Lightagent$"], capture_output=True, text=True, timeout=10)
+            for window in found.stdout.split():
+                subprocess.run(["xdotool", "windowfocus", window], capture_output=True, timeout=10)
+        elif MACOS:
+            subprocess.run(["osascript", "-e", 'tell application "System Events" to set frontmost of '
+                            f"(first process whose unix id is {host.process.pid}) to true"], capture_output=True, timeout=30)
+        else:
+            subprocess.run(["powershell", "-NoProfile", "-Command",
+                            f"(New-Object -ComObject WScript.Shell).AppActivate({host.process.pid}) | Out-Null"],
+                           capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as error:
+        return f"bringing the window to the front: {error}"
+    time.sleep(0.5)
+    return None
+=== replace desktop/e2e/native.py
+--- find
+          press(await need("Use", () => one("button", "Use", row)));
+          return true;""", ID=target))
+--- with
+          press(await need("Use", () => one("button", "Use", row)));
+          const blocked = await until(() => text().includes("still working in this profile"), 3000);
+          if (blocked) throw new Error("the switch is blocked: a run is still working (an earlier scenario left it)");
+          return true;""", ID=target))
+=== end
