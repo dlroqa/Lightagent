@@ -21,6 +21,8 @@ name: source-edit
 #   === write <path>                    (create or replace the whole file)
 #   === lock <. | desktop>               (resolve that workspace's Cargo.lock on the
 #                                        runner, minimally, after the edits)
+#   === update <. | desktop> <crate>...  (cargo update -p each crate in that
+#                                        workspace, after the edits and locks)
 #   <lines>
 #   === end
 
@@ -69,7 +71,7 @@ jobs:
           lines = open(req, encoding="utf-8").read().split("\n")
           if lines and lines[-1] == "":
               lines.pop()
-          ops, locks, message, i = [], [], None, 0
+          ops, locks, updates, message, i = [], [], [], None, 0
           def block(stop):
               global i
               out = []
@@ -102,6 +104,15 @@ jobs:
                   ops.append(("replace", path, find, repl, count))
               elif line.startswith("=== write "):
                   ops.append(("write", line[len("=== write "):].strip(), block(["=== "]), None, None))
+              elif line.startswith("=== update "):
+                  parts = line[len("=== update "):].split()
+                  if len(parts) < 2 or parts[0] not in (".", "desktop"):
+                      sys.exit(f"update: <. | desktop> <crate>..., not {line!r}")
+                  if not all(all(c.isalnum() or c in "-_.@" for c in p) for p in parts[1:]):
+                      sys.exit(f"update: refused crate names in {line!r}")
+                  updates.append(parts)
+                  if parts[0] not in locks:
+                      locks.append(parts[0])
               elif line.startswith("=== lock "):
                   where = line[len("=== lock "):].strip()
                   if where not in (".", "desktop"):
@@ -128,6 +139,7 @@ jobs:
               touched.append(path)
           touched += [os.path.normpath(os.path.join(where, "Cargo.lock")) for where in locks]
           open(os.environ["RUNNER_TEMP"] + "/locks", "w").write("".join(where + "\n" for where in locks))
+          open(os.environ["RUNNER_TEMP"] + "/updates", "w").write("".join(" ".join(parts) + "\n" for parts in updates))
           open(os.environ["RUNNER_TEMP"] + "/message", "w", encoding="utf-8").write(message)
           open(os.environ["RUNNER_TEMP"] + "/touched", "w").write("\n".join(sorted(set(touched))) + "\n")
           print("applied", len(ops), "edit(s) to", len(set(touched)), "file(s)")
@@ -140,6 +152,10 @@ jobs:
           while read -r where; do
             [ -n "$where" ] || continue
             cargo metadata --format-version 1 --manifest-path "$where/Cargo.toml" > /dev/null
+            grep "^$where " "$RUNNER_TEMP/updates" 2>/dev/null | while read -r _ crates; do
+              args=(); for crate in $crates; do args+=(-p "$crate"); done
+              cargo update --manifest-path "$where/Cargo.toml" "${args[@]}"
+            done
             {
               echo "## Lockfile $where/Cargo.lock"
               echo '```'
