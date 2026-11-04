@@ -345,6 +345,7 @@ fn with_broker(ctx: ToolCtx, github: &GitHub) -> ToolCtx {
             workflows: Vec::new(),
             commit_refs: vec!["subagents/coder".to_owned()],
             poll_interval: Duration::from_millis(50),
+            queue_wait: Duration::from_secs(5),
             max_wait: Duration::from_secs(5),
             max_log_bytes: 4096,
         },

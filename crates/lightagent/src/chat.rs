@@ -468,6 +468,7 @@ pub(crate) fn actions_context(config: &Config) -> Option<ActionsContext> {
         workflows: actions.workflows.clone(),
         commit_refs: actions.commit_refs.clone(),
         poll_interval: Duration::from_secs(actions.poll_interval_secs.max(1)),
+        queue_wait: Duration::from_secs(actions.queue_wait_secs),
         max_wait: Duration::from_secs(actions.max_wait_secs),
         max_log_bytes: actions.max_log_bytes,
     };

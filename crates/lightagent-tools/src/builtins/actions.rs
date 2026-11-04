@@ -38,6 +38,9 @@ use crate::definition::{Tool, ToolDefinition};
 const RUNS_PAGE: usize = 30;
 /// The longest a dispatch waits for its run to appear.
 const LOCATE_WAIT: Duration = Duration::from_secs(60);
+/// Run statuses before any job has a runner: queued, a pending concurrency
+/// group, or an environment waiting for approval.
+const NOT_STARTED: [&str; 4] = ["requested", "queued", "pending", "waiting"];
 
 fn definition(name: &str, description: &str, parameters: Value) -> ToolDefinition {
     ToolDefinition::new(
@@ -683,7 +686,7 @@ impl ActionsStatus {
             "type": "object",
             "properties": {
                 "run_id": { "type": "integer", "minimum": 1, "description": "The run to read." },
-                "wait_seconds": { "type": "integer", "minimum": 0, "description": "Wait up to this long for the run to complete." }
+                "wait_seconds": { "type": "integer", "minimum": 0, "description": "Wait up to this long in all for the run to complete. Waiting for a runner and running are each bounded by the broker's policy; a run that has not completed is reported still_queued or still_running, never passed." }
             },
             "required": ["run_id"],
             "additionalProperties": false,
@@ -721,7 +724,12 @@ impl Tool for ActionsStatus {
             .and_then(Value::as_u64)
             .map(Duration::from_secs)
             .unwrap_or_default()
-            .min(actions.policy.max_wait);
+            .min(
+                actions
+                    .policy
+                    .queue_wait
+                    .saturating_add(actions.policy.max_wait),
+            );
         match status(actions, run, wait, ctx).await {
             Ok(report) => ToolOutcome::ok(report.to_string()),
             Err(error) => ToolOutcome::error(error),
@@ -729,22 +737,60 @@ impl Tool for ActionsStatus {
     }
 }
 
+/// Read a run, waiting up to `wait` in all for it to complete: at most
+/// `queue_wait` for it to get a runner, and at most `max_wait` from when it
+/// is first seen executing. What was waited for, and why the wait ended, is
+/// reported with the run.
 async fn status(
     actions: &ActionsContext,
     run_id: u64,
     wait: Duration,
     ctx: &ToolCtx,
 ) -> Result<Value, String> {
-    let deadline = Instant::now() + wait;
+    let policy = &actions.policy;
+    let begun = Instant::now();
+    let mut running_since: Option<Instant> = None;
+    // Times are as observed at each poll: queue time counts only when a read
+    // saw the run waiting for a runner.
+    let mut seen_queued = false;
     let mut run = read_run(actions, run_id).await?;
     let completed = |run: &Value| run.get("status").and_then(Value::as_str) == Some("completed");
-    while !completed(&run) && Instant::now() < deadline {
-        ctx.report(ToolProgress::stage("waiting"));
-        if !pause(ctx, actions.policy.poll_interval).await {
-            break;
+    let queued = |run: &Value| {
+        run.get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| NOT_STARTED.contains(&status))
+    };
+    let outcome = loop {
+        if completed(&run) {
+            break "completed";
+        }
+        seen_queued |= queued(&run);
+        let now = Instant::now();
+        if running_since.is_none() && !queued(&run) {
+            running_since = Some(now);
+        }
+        if wait.is_zero() {
+            break "not_waited";
+        }
+        if now >= begun + wait {
+            break "overall_timeout";
+        }
+        match running_since {
+            None if now >= begun + policy.queue_wait => break "queue_timeout",
+            Some(since) if now >= since + policy.max_wait => break "run_timeout",
+            _ => {}
+        }
+        ctx.report(ToolProgress::stage(if running_since.is_some() {
+            "waiting for the run to finish"
+        } else {
+            "waiting for the run to get a runner"
+        }));
+        if !pause(ctx, policy.poll_interval).await {
+            break "cancelled";
         }
         run = read_run(actions, run_id).await?;
-    }
+    };
+    let ended = Instant::now();
     let jobs = read_jobs(actions, run_id).await?;
     let conclusion = run.get("conclusion").and_then(Value::as_str);
     let verdict = match (completed(&run), conclusion) {
@@ -752,8 +798,29 @@ async fn status(
         (true, Some("failure")) => "failed",
         (true, Some("cancelled")) => "cancelled",
         (true, _) => "not_passed",
+        (false, _) if queued(&run) => "still_queued",
         (false, _) => "still_running",
     };
+    let millis = |duration: Duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+    let queued_for = if seen_queued {
+        running_since.unwrap_or(ended).duration_since(begun)
+    } else {
+        Duration::ZERO
+    };
+    let running_for = running_since
+        .map(|since| ended.duration_since(since))
+        .unwrap_or_default();
+    let waited = json!({
+        "outcome": outcome,
+        "waited_ms": millis(ended.duration_since(begun)),
+        "queued_ms": millis(queued_for),
+        "running_ms": millis(running_for),
+        "limits_ms": {
+            "overall": millis(wait),
+            "queue": millis(policy.queue_wait),
+            "run": millis(policy.max_wait),
+        },
+    });
     Ok(json!({
         "run_id": run_id,
         "run_url": run.get("html_url"),
@@ -764,6 +831,7 @@ async fn status(
         "status": run.get("status"),
         "conclusion": conclusion,
         "verdict": verdict,
+        "wait": waited,
         "jobs": jobs,
     }))
 }

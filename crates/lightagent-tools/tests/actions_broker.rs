@@ -2,10 +2,10 @@
 //! REST API. Real tool implementations; only GitHub is simulated. The live
 //! check against github.com is the `subagents` workflow's broker job.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lightagent_core::{
     AgentProvider, AllowedWorkflow, ApprovalPolicy, FinishReason, MockProvider, ModelRouting,
@@ -34,11 +34,15 @@ struct Seen {
     body: Value,
 }
 
-/// The stand-in's state: requests seen and runs created.
+/// The stand-in's state: requests seen and runs created. A staged run's
+/// reads go through its `phases` (status, conclusion) in turn and stay at
+/// the last; `shown` is the phase its last read showed.
 #[derive(Default)]
 struct Api {
     seen: Vec<Seen>,
     runs: Vec<Value>,
+    phases: BTreeMap<u64, VecDeque<(String, Option<String>)>>,
+    shown: BTreeMap<u64, (String, Option<String>)>,
 }
 
 struct GitHub {
@@ -101,19 +105,35 @@ fn answer(api: &mut Api, port: u16, seen: &Seen) -> (u16, String, String) {
         } else {
             api.runs.iter().find(|run| run["id"] == id).cloned()
         };
-        let Some(found) = found else {
+        let Some(mut found) = found else {
             return (
                 404,
                 String::new(),
                 json!({ "message": "Not Found" }).to_string(),
             );
         };
+        if let Some(phases) = api.phases.get_mut(&id) {
+            if tail.is_empty() {
+                let phase = if phases.len() > 1 {
+                    phases.pop_front()
+                } else {
+                    phases.front().cloned()
+                };
+                if let Some(phase) = phase {
+                    api.shown.insert(id, phase);
+                }
+            }
+            if let Some((status, conclusion)) = api.shown.get(&id) {
+                found["status"] = json!(status);
+                found["conclusion"] = json!(conclusion);
+            }
+        }
         if tail.starts_with("jobs") {
             let conclusion = found["conclusion"].clone();
             let job = json!({
                 "id": id * 10,
                 "name": "verify",
-                "status": "completed",
+                "status": found["status"].clone(),
                 "conclusion": conclusion,
                 "steps": [{ "name": "Check", "conclusion": conclusion }],
             });
@@ -207,6 +227,10 @@ async fn github() -> GitHub {
 }
 
 fn broker(github: &GitHub) -> ActionsContext {
+    broker_with(github, Duration::from_secs(5), Duration::from_secs(5))
+}
+
+fn broker_with(github: &GitHub, queue_wait: Duration, max_wait: Duration) -> ActionsContext {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -231,7 +255,8 @@ fn broker(github: &GitHub) -> ActionsContext {
             workflows: vec![workflow],
             commit_refs: Vec::new(),
             poll_interval: Duration::from_millis(50),
-            max_wait: Duration::from_secs(5),
+            queue_wait,
+            max_wait,
             max_log_bytes: 4096,
         },
     )
@@ -254,6 +279,187 @@ async fn dispatch(ctx: &ToolCtx, mode: &str) -> ToolOutcome {
         "inputs": { "mode": mode },
     });
     ActionsDispatch::new().call(&args, ctx).await
+}
+
+/// A run of the fixture workflow whose reads go through `phases` in turn.
+fn staged(github: &GitHub, id: u64, phases: &[(&str, Option<&str>)]) {
+    let mut api = github.state.lock().unwrap();
+    api.runs.push(run(
+        id,
+        ".github/workflows/fixture.yml",
+        "success",
+        "staged",
+    ));
+    let phases = phases
+        .iter()
+        .map(|(status, conclusion)| ((*status).to_owned(), conclusion.map(str::to_owned)))
+        .collect();
+    api.phases.insert(id, phases);
+}
+
+async fn wait_for(ctx: &ToolCtx, id: u64, seconds: u64) -> Value {
+    let args = json!({ "run_id": id, "wait_seconds": seconds });
+    report(&ActionsStatus::new().call(&args, ctx).await)
+}
+
+fn waiting(github: &GitHub, queue: Duration, run: Duration) -> ToolCtx {
+    ToolCtx::new(CancellationToken::new()).with_actions(broker_with(github, queue, run))
+}
+
+#[tokio::test]
+async fn a_queued_run_that_starts_and_passes_is_waited_for_in_both_phases() {
+    let github = github().await;
+    staged(
+        &github,
+        500,
+        &[
+            ("queued", None),
+            ("queued", None),
+            ("in_progress", None),
+            ("in_progress", None),
+            ("completed", Some("success")),
+        ],
+    );
+    let ctx = waiting(&github, Duration::from_secs(5), Duration::from_secs(5));
+    let status = wait_for(&ctx, 500, 30).await;
+    assert_eq!(status["verdict"], "passed", "{status}");
+    assert_eq!(status["wait"]["outcome"], "completed", "{status}");
+    assert!(
+        status["wait"]["queued_ms"]
+            .as_u64()
+            .is_some_and(|ms| ms > 0),
+        "{status}"
+    );
+    assert!(
+        status["wait"]["running_ms"]
+            .as_u64()
+            .is_some_and(|ms| ms > 0),
+        "{status}"
+    );
+    assert_eq!(status["jobs"][0]["conclusion"], "success", "{status}");
+}
+
+#[tokio::test]
+async fn a_run_that_never_gets_a_runner_is_reported_still_queued() {
+    let github = github().await;
+    staged(&github, 501, &[("queued", None)]);
+    let ctx = waiting(&github, Duration::from_millis(300), Duration::from_secs(5));
+    let started = Instant::now();
+    let status = wait_for(&ctx, 501, 30).await;
+    assert_eq!(status["verdict"], "still_queued", "{status}");
+    assert_eq!(status["wait"]["outcome"], "queue_timeout", "{status}");
+    assert_eq!(status["wait"]["running_ms"], 0, "{status}");
+    assert_eq!(status["wait"]["limits_ms"]["queue"], 300, "{status}");
+    assert!(started.elapsed() < Duration::from_secs(3), "{status}");
+}
+
+#[tokio::test]
+async fn a_run_that_outlasts_its_execution_wait_is_reported_still_running() {
+    let github = github().await;
+    staged(&github, 502, &[("queued", None), ("in_progress", None)]);
+    let ctx = waiting(&github, Duration::from_secs(5), Duration::from_millis(300));
+    let status = wait_for(&ctx, 502, 30).await;
+    assert_eq!(status["verdict"], "still_running", "{status}");
+    assert_eq!(status["wait"]["outcome"], "run_timeout", "{status}");
+    assert!(
+        status["wait"]["running_ms"]
+            .as_u64()
+            .is_some_and(|ms| ms >= 300),
+        "{status}"
+    );
+}
+
+#[tokio::test]
+async fn a_cancelled_wait_stops_at_once_and_never_passes() {
+    let github = github().await;
+    staged(&github, 503, &[("in_progress", None)]);
+    let token = CancellationToken::new();
+    let ctx = ToolCtx::new(token.clone()).with_actions(broker_with(
+        &github,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    ));
+    let cancel = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        cancel.cancel();
+    });
+    let started = Instant::now();
+    let status = wait_for(&ctx, 503, 30).await;
+    assert_eq!(status["verdict"], "still_running", "{status}");
+    assert_eq!(status["wait"]["outcome"], "cancelled", "{status}");
+    assert!(started.elapsed() < Duration::from_secs(3), "{status}");
+}
+
+#[tokio::test]
+async fn unexpected_failures_are_reported_as_they_are() {
+    let github = github().await;
+    staged(
+        &github,
+        504,
+        &[
+            ("queued", None),
+            ("in_progress", None),
+            ("completed", Some("failure")),
+        ],
+    );
+    staged(
+        &github,
+        505,
+        &[
+            ("in_progress", None),
+            ("completed", Some("startup_failure")),
+        ],
+    );
+    let ctx = waiting(&github, Duration::from_secs(5), Duration::from_secs(5));
+    let failed = wait_for(&ctx, 504, 30).await;
+    assert_eq!(failed["verdict"], "failed", "{failed}");
+    assert_eq!(failed["wait"]["outcome"], "completed", "{failed}");
+    let broken = wait_for(&ctx, 505, 30).await;
+    assert_eq!(broken["verdict"], "not_passed", "{broken}");
+}
+
+#[tokio::test]
+async fn without_a_wait_or_past_the_overall_cap_a_run_is_not_passed() {
+    let github = github().await;
+    staged(&github, 506, &[("queued", None)]);
+    staged(&github, 507, &[("queued", None)]);
+    let ctx = waiting(&github, Duration::from_secs(30), Duration::from_secs(30));
+    let unwaited = wait_for(&ctx, 506, 0).await;
+    assert_eq!(unwaited["verdict"], "still_queued", "{unwaited}");
+    assert_eq!(unwaited["wait"]["outcome"], "not_waited", "{unwaited}");
+    let capped = wait_for(&ctx, 507, 1).await;
+    assert_eq!(capped["verdict"], "still_queued", "{capped}");
+    assert_eq!(capped["wait"]["outcome"], "overall_timeout", "{capped}");
+    assert_eq!(capped["wait"]["limits_ms"]["overall"], 1000, "{capped}");
+}
+
+#[tokio::test]
+async fn a_run_completed_before_the_first_read_was_never_seen_queued() {
+    let github = github().await;
+    staged(&github, 508, &[("completed", Some("success"))]);
+    let ctx = waiting(&github, Duration::from_secs(5), Duration::from_secs(5));
+    let status = wait_for(&ctx, 508, 30).await;
+    assert_eq!(status["verdict"], "passed", "{status}");
+    assert_eq!(status["wait"]["outcome"], "completed", "{status}");
+    assert_eq!(status["wait"]["queued_ms"], 0, "{status}");
+    assert_eq!(status["wait"]["running_ms"], 0, "{status}");
+}
+
+/// In a live check, a run the wait gave up on is cancelled so it does not
+/// hold a runner after the check has failed; its wait is printed.
+async fn cancel_unfinished(ctx: &ToolCtx, status: &Value) {
+    if matches!(
+        status["verdict"].as_str(),
+        Some("still_queued" | "still_running")
+    ) {
+        let args = json!({ "run_id": status["run_id"] });
+        let cancelled = ActionsCancel::new().call(&args, ctx).await;
+        println!(
+            "EVIDENCE cancelled unfinished run {}: {} (wait {})",
+            status["run_id"], cancelled.content, status["wait"]
+        );
+    }
 }
 
 #[tokio::test]
@@ -556,6 +762,9 @@ async fn live_the_broker_reports_a_passing_and_a_failing_hosted_run() {
             workflows: vec![workflow],
             commit_refs: Vec::new(),
             poll_interval: Duration::from_secs(10),
+            // Hosted runners have held a dispatched run queued for up to 19
+            // minutes (2026-11-03); executing, the fixture takes seconds.
+            queue_wait: Duration::from_secs(1800),
             max_wait: Duration::from_secs(600),
             max_log_bytes: 8192,
         },
@@ -577,10 +786,11 @@ async fn live_the_broker_reports_a_passing_and_a_failing_hosted_run() {
         runs.push((mode, dispatched["run_id"].clone()));
     }
     for (mode, run) in runs {
-        let args = json!({ "run_id": run, "wait_seconds": 600 });
+        let args = json!({ "run_id": run, "wait_seconds": 2400 });
         let outcome = ActionsStatus::new().call(&args, &ctx).await;
         println!("EVIDENCE status {mode}: {}", outcome.content);
         let status = report(&outcome);
+        cancel_unfinished(&ctx, &status).await;
         assert_eq!(status["head_sha"], sha.as_str());
         let expected = if mode == "pass" { "passed" } else { "failed" };
         assert_eq!(status["verdict"], expected, "{status}");
@@ -685,6 +895,9 @@ async fn live_the_coders_patch_is_committed_and_verified_on_actions() {
             workflows: vec![workflow],
             commit_refs: vec!["subagents/live-coder-*".to_owned()],
             poll_interval: Duration::from_secs(10),
+            // Hosted runners have held a dispatched run queued for up to 19
+            // minutes (2026-11-03); executing, the fixture takes seconds.
+            queue_wait: Duration::from_secs(1800),
             max_wait: Duration::from_secs(600),
             max_log_bytes: 8192,
         },
@@ -717,7 +930,9 @@ async fn live_the_coders_patch_is_committed_and_verified_on_actions() {
     let committed = report(&committed);
     let new_sha = committed["commit"].as_str().unwrap().to_owned();
 
-    let mut verdicts = Vec::new();
+    // Both verifications are dispatched first, so they wait for runners
+    // together rather than one after the other.
+    let mut dispatched = Vec::new();
     for (on, at) in [
         (scratch.as_str(), new_sha.as_str()),
         (branch.as_str(), sha.as_str()),
@@ -728,11 +943,19 @@ async fn live_the_coders_patch_is_committed_and_verified_on_actions() {
             "sha": at,
             "inputs": { "mode": "verify" },
         });
-        let dispatched = report(&ActionsDispatch::new().call(&args, &ctx).await);
-        let status_args = json!({ "run_id": dispatched["run_id"], "wait_seconds": 600 });
+        dispatched.push((
+            on,
+            at,
+            report(&ActionsDispatch::new().call(&args, &ctx).await),
+        ));
+    }
+    let mut verdicts = Vec::new();
+    for (on, at, run) in dispatched {
+        let status_args = json!({ "run_id": run["run_id"], "wait_seconds": 2400 });
         let status = ActionsStatus::new().call(&status_args, &ctx).await;
         println!("EVIDENCE verify {on} at {at}: {}", status.content);
         let status = report(&status);
+        cancel_unfinished(&ctx, &status).await;
         assert_eq!(status["head_sha"], at);
         verdicts.push(status["verdict"].as_str().unwrap_or_default().to_owned());
     }
