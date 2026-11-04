@@ -1,0 +1,138 @@
+=== base f84f308543b76d94d97912060259af1d207c9d6a
+=== message
+Keep the app mounted under the close question; settle the switch after its reload
+
+The native runs at f84f308 (desktop run 41826163830) failed two checks on
+all four targets:
+
+- After "Keep working" the run's rest never appeared. The gate rendered
+  the app directly when ready and inside a wrapper while asking about
+  close, so the question's coming and going remounted the whole app and
+  the conversation lost the run it was showing. The app now always sits
+  in the same wrapper (display: contents), made inert and hidden only
+  while the question shows.
+- The switch's own reload ended the script that pressed Use while it
+  waited to see a blocked switch, so the script never answered. The
+  script now only presses Use; the harness waits for the host to serve
+  the profile and only then looks for a blocked switch.
+
+Also recorded, not gated yet: whether a run still working is shown again
+after a plain reload of the page.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace frontend/src/desktop/DesktopGate.tsx
+--- find
+  if (ready && status?.close_requested) {
+    return (
+      <>
+        <div aria-hidden="true" inert>
+          {children}
+        </div>
+        <div className="desktop-gate desktop-gate--overlay" role="presentation">
+          <CloseWithRuns onKeep={() => setGeneration((value) => value + 1)} />
+        </div>
+      </>
+    );
+  }
+  if (ready) return <>{children}</>;
+--- with
+  if (ready) {
+    // One tree whether or not the close question shows: hiding the app
+    // behind it must not remount the app, or a conversation in progress
+    // loses the run it is showing.
+    const closing = Boolean(status?.close_requested);
+    return (
+      <>
+        <div className="desktop-gate__app" aria-hidden={closing || undefined} inert={closing || undefined}>
+          {children}
+        </div>
+        {closing && (
+          <div className="desktop-gate desktop-gate--overlay" role="presentation">
+            <CloseWithRuns onKeep={() => setGeneration((value) => value + 1)} />
+          </div>
+        )}
+      </>
+    );
+  }
+=== replace frontend/src/desktop/desktop-gate.css
+--- find
+/* Desktop start-up gate: semantic tokens only (styles/tokens.css). */
+--- with
+/* Desktop start-up gate: semantic tokens only (styles/tokens.css). */
+
+/* The app inside the gate: no box of its own, so the layout is the app's. */
+.desktop-gate__app {
+  display: contents;
+}
+=== replace desktop/e2e/native.py
+--- find
+          press(await need("Use", () => one("button", "Use", row)));
+          const blocked = await until(() => text().includes("still working in this profile"), 3000);
+          if (blocked) throw new Error("the switch is blocked: a run is still working (an earlier scenario left it)");
+          return true;""", ID=target))
+        switched = harness.wait_until(lambda: (lambda s: s["state"] == "ready" and s["profile"] == target)(host.call("status")), timeout=90)
+        view.wait_ui()
+--- with
+          press(await need("Use", () => one("button", "Use", row)));
+          return true;""", ID=target))
+        # A switch reloads the page, so the outcome is read from the host.
+        switched = harness.wait_until(lambda: (lambda s: s["state"] == "ready" and s["profile"] == target)(host.call("status")), timeout=90)
+        if not switched:
+            _, blocked = view.try_js('return text().includes("still working in this profile");', 10)
+            check.expect(f"{target}: the switch is not blocked by a run an earlier scenario left", blocked is not True, blocked)
+        view.wait_ui()
+=== replace desktop/e2e/native.py
+--- find
+    # The text before the pause is shown apart from the rest of the answer.
+    finished = view.wait_text("and kept working.") and view.idle()
+    check.expect("closing with a working run asks first", held and asked)
+    check.expect("Keep working keeps the window, the runtime and the run", gone and alive and finished, (gone, alive, finished))
+    return check
+--- with
+    # The text before the pause is shown apart from the rest of the answer.
+    finished = view.wait_text("and kept working.") and view.idle()
+    seen = (gone, alive, finished)
+    if not finished:
+        seen = {"gone": gone, "alive": alive, "page": view.js("return text().slice(-400);"),
+                "saved": harness.answers(saved_with(os.environ["LIGHTAGENT_HOME"], "[e2e:native-close]"))}
+    check.expect("closing with a working run asks first", held and asked)
+    check.expect("Keep working keeps the window, the runtime and the run", gone and alive and finished, seen)
+    return check
+
+
+def scenario_reattach(view, provider, home, notes):
+    """Recorded: a run still working when the page reloads is shown again
+    when its conversation is opened, and its answer arrives."""
+    check = Checks("reload_while_working")
+    prompt = "[e2e:native-reload] Keep going through a reload."
+    view.new_chat()
+    view.send(prompt)
+    held = provider.wait_for("gate", "native-reload", gate="native-reload")
+    view.reload()
+    view.js(T("""
+      const title = $PROMPT.replace(/[.]+$/, "");
+      const entry = await need("the conversation in the list", () => [...document.querySelectorAll(".agent-sessions__list *")]
+        .find((el) => visible(el) && el.children.length === 0 && squash(el.textContent).replace(/[.…]+$/, "") === title));
+      press(entry);
+      return true;""", PROMPT=prompt))
+    working = view.js('return !!(await until(() => one("button", "Stop"), 10000));')
+    provider.open("native-reload")
+    shown = view.wait_text("after the reload.", 30)
+    saved = (harness.answers(saved_with(home, "[e2e:native-reload]")) or [""])[-1]
+    notes["reload_while_working"] = {"held": held, "stop_shown_after_reload": working, "answer_shown": shown,
+                                     "answer_saved": saved.endswith("after the reload.")}
+    view.idle(30)
+    return check
+=== replace desktop/e2e/native.py
+--- find
+        "native-close": hold("native-close", " and kept working."),
+--- with
+        "native-close": hold("native-close", " and kept working."),
+        "native-reload": hold("native-reload", " after the reload."),
+=== replace desktop/e2e/native.py
+--- find
+                ("close_with_runs", lambda: scenario_close(view, host, provider)),
+--- with
+                ("close_with_runs", lambda: scenario_close(view, host, provider)),
+                ("reload_while_working", lambda: scenario_reattach(view, provider, home, notes)),
+=== end
