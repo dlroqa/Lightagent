@@ -156,6 +156,8 @@ class FakeProvider:
         self.record(
             event="request", scenario=scenario, turn=turn, index=index, tools=sorted(tools.values()),
             roles=[m.get("role") for m in messages], offered=len(request.get("tools") or []),
+            model=request.get("model"),
+            system="\n".join(content_of(m) for m in messages if m.get("role") in ("system", "developer"))[:4000],
         )
         script = self.scripts.get(scenario)
         steps = script(self, turn, index) if script else [("text", "ok"), ("finish", "stop")]

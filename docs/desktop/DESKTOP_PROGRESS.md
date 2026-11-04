@@ -1943,6 +1943,22 @@ Coverage: 218 of 222. Remaining, with the stage and the criterion:
 | `env.LIGHTAGENT_API_KEY` | remote mode | D8 | the desktop against a `serve --key-env LIGHTAGENT_API_KEY` server: the key held by the host, never in the renderer; a failing remote is an error with no local execution |
 | `cli.chat.opt.profile` | an owner decision | D7/D8 | the desktop's profile switch persists the active profile (DESKTOP_ARCHITECTURE.md §7); `chat --profile` does not. Either accept the switch as the equivalent and document the difference, or build a non-persisting per-conversation profile; then evidence |
 
+## Row 57 (2026-11-04, owner `a0fb357c`)
+
+Owner decision (2026-11-04): `lightagent chat --profile` is matched by a
+conversation-scoped profile, prepared for later account integration;
+the profile switch stays the only way to change the active profile.
+#154 `desktop/d7y-conversation-profile`: request 151 (3583a5a), then 152
+(c54b905). The first check run, 41780671146, found two defects:
+- Product: a run that continues no conversation looked up an operator
+  conversation store, which an embedding without a home refused with
+  500. Thirteen ownership tests showed it.
+- Test: the browser check waited on a hidden element; its screenshot
+  showed the feature working.
+Green at c54b905: check 41782010579, desktop 41782010641. Coverage 219
+of 222. Contract and account mapping:
+DESKTOP_CONVERSATION_PROFILES.md.
+
 ## Next
 
 The owner's order of 2026-11-03 (sole owner `a0fb357c`):

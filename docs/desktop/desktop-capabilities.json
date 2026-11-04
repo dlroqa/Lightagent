@@ -117,7 +117,7 @@
    "not-applicable": 34
   },
   "parity_denominator": 222,
-  "parity_implemented": 218,
+  "parity_implemented": 219,
   "pending_decision_rows": 0,
   "not_counted_duplicates": 26
  },
@@ -202,13 +202,13 @@
    "counts_toward_parity": true,
    "duplicate_of": null,
    "ui": "Conversations: profile selector",
-   "backend": "api: POST /runs {profile} (honoured only in multi-user mode today; see D1 profile decision)",
+   "backend": "api: the conversation operations name their profile (?profile= on /sessions, profile in POST /runs and regenerate); the profile's own store and run factory",
    "permission": "local-operator",
    "data_scope": "profile",
-   "desktop_status": "not-started",
-   "verification": null,
-   "tested_sha": null,
-   "actions_evidence": null
+   "desktop_status": "implemented",
+   "verification": "Conversation-scoped profile, the persisted active profile unchanged (owner decision 2026-11-04; docs/desktop/DESKTOP_CONVERSATION_PROFILES.md): a conversation is bound to its profile and kept in that profile's store; its runs use that profile's persona and model, as lightagent chat --profile sends them; chat --profile --session and the desktop continue each other; found only under its own profile; a missing or invalid profile finds and creates nothing. Backend desktop_conversation_profile.rs, host runs.py conversation_profile, browser e2e/conversation-profile.mjs (the Profile choice by the conversation list) (row 57)",
+   "tested_sha": "c54b90512568c754670490f4c175ee188604b405",
+   "actions_evidence": "https://github.com/dlroqa/Lightagent/actions/runs/41782010579 (check); https://github.com/dlroqa/Lightagent/actions/runs/41782010641 (desktop)"
   },
   {
    "id": "cli.chat.opt.session",

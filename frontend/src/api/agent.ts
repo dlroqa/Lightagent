@@ -697,6 +697,16 @@ export interface SlashCommandInfo {
   summary: string;
 }
 
+/**
+ * `path` for the conversations of `profile`, a conversation-scoped choice as
+ * `lightagent chat --profile` makes one; without it, the profile the runtime
+ * serves. It never changes the active profile.
+ */
+function forProfile(path: string, profile?: string): string {
+  if (!profile) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}profile=${encodeURIComponent(profile)}`;
+}
+
 /** The profile's onboarding guidance (the chat's /onboard command). */
 export interface Onboarding {
   installed: boolean;
@@ -1032,15 +1042,18 @@ export const agentApi = {
       body: JSON.stringify({ mode }),
     }),
   /** Replace the session's latest answer, written by `runId`, with a new run of its prompt. */
-  regenerate: (sessionId: string, runId: string, model?: string) =>
+  regenerate: (sessionId: string, runId: string, model?: string, profile?: string) =>
     jsonRequest<{ id: string; status: string; session_id: string | null }>(
       `/sessions/${encodeURIComponent(sessionId)}/regenerate`,
-      { method: "POST", body: JSON.stringify({ run_id: runId, model }) },
+      { method: "POST", body: JSON.stringify({ run_id: runId, model, profile }) },
     ),
-  createSession: () => jsonRequest<{ id: string }>("/sessions", { method: "POST", body: "{}" }),
-  uploadAttachment: async (sessionId: string, file: File): Promise<UploadedAttachment> => {
+  /** A new conversation, bound to `profile` (default: the profile the runtime serves). */
+  createSession: (profile?: string) =>
+    jsonRequest<{ id: string }>(forProfile("/sessions", profile), { method: "POST", body: "{}" }),
+  uploadAttachment: async (sessionId: string, file: File, profile?: string): Promise<UploadedAttachment> => {
     const filename = file.name.replace(/[^A-Za-z0-9._ -]/g, "_").slice(0, 180) || "attachment";
-    const response = await apiFetch(`${BASE}/sessions/${encodeURIComponent(sessionId)}/attachments`, {
+    const target = forProfile(`/sessions/${encodeURIComponent(sessionId)}/attachments`, profile);
+    const response = await apiFetch(`${BASE}${target}`, {
       method: "POST",
       headers: { "X-Lightagent-Filename": filename },
       body: file,
@@ -1049,14 +1062,14 @@ export const agentApi = {
     if (!response.ok) throw new Error(`${response.status}: ${body?.error ?? response.statusText}`);
     return body as UploadedAttachment;
   },
-  session: (id: string) =>
-    jsonRequest<AgentSession>(`/sessions/${encodeURIComponent(id)}`),
-  deleteSession: (id: string) =>
-    jsonRequest<{ deleted: boolean }>(`/sessions/${encodeURIComponent(id)}`, {
+  session: (id: string, profile?: string) =>
+    jsonRequest<AgentSession>(forProfile(`/sessions/${encodeURIComponent(id)}`, profile)),
+  deleteSession: (id: string, profile?: string) =>
+    jsonRequest<{ deleted: boolean }>(forProfile(`/sessions/${encodeURIComponent(id)}`, profile), {
       method: "DELETE",
     }),
-  updateSession: (id: string, patch: SessionPatch) =>
-    jsonRequest<SessionSummary>(`/sessions/${encodeURIComponent(id)}`, {
+  updateSession: (id: string, patch: SessionPatch, profile?: string) =>
+    jsonRequest<SessionSummary>(forProfile(`/sessions/${encodeURIComponent(id)}`, profile), {
       method: "PATCH",
       body: JSON.stringify(patch),
     }),
@@ -1066,9 +1079,11 @@ export const agentApi = {
       method: "POST",
       body: "{}",
     }),
-  sessions: () => jsonRequest<{ sessions: SessionSummary[] }>("/sessions"),
-  searchSessions: (query: string) =>
-    jsonRequest<{ sessions: SessionSearchResult[] }>(`/sessions/search?q=${encodeURIComponent(query)}`),
+  sessions: (profile?: string) => jsonRequest<{ sessions: SessionSummary[] }>(forProfile("/sessions", profile)),
+  searchSessions: (query: string, profile?: string) =>
+    jsonRequest<{ sessions: SessionSearchResult[] }>(
+      forProfile(`/sessions/search?q=${encodeURIComponent(query)}`, profile),
+    ),
   approvals: () => jsonRequest<{ approvals: ApprovalRow[] }>("/approvals"),
   respondApproval: (run: string, approve: boolean) =>
     jsonRequest<{ run: string; delivered: boolean }>(`/approvals/${run}`, {
