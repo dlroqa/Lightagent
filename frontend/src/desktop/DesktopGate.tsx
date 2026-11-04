@@ -97,31 +97,31 @@ export function DesktopGate({ children }: { children: ReactNode }) {
 
   if (!isDesktop) return <>{children}</>;
   const ready = status?.state === "ready" && hostError === null;
-  if (ready && status?.close_requested) {
+  if (ready) {
+    // One tree whether or not the close question shows: hiding the app
+    // behind it must not remount the app, or a conversation in progress
+    // loses the run it is showing.
+    const closing = Boolean(status?.close_requested);
     return (
       <>
-        <div aria-hidden="true" inert>
+        <div className="desktop-gate__app" aria-hidden={closing || undefined} inert={closing || undefined}>
           {children}
         </div>
-        <div className="desktop-gate desktop-gate--overlay" role="presentation">
-          <CloseWithRuns onKeep={() => setGeneration((value) => value + 1)} />
-        </div>
+        {status?.mode === "remote" && (
+          // The scope badge: where this window's work runs, always in view.
+          <div className="desktop-scope" role="status"
+            title={`This window is served by ${status.remote ?? "a remote server"}; nothing runs on this computer.`}>
+            Remote · {(status.remote ?? "").replace(/^https?:\/\//, "")}
+          </div>
+        )}
+        {closing && (
+          <div className="desktop-gate desktop-gate--overlay" role="presentation">
+            <CloseWithRuns onKeep={() => setGeneration((value) => value + 1)} />
+          </div>
+        )}
       </>
     );
   }
-  if (ready && status?.mode === "remote") {
-    // The scope badge: where this window's work runs, always in view.
-    return (
-      <>
-        {children}
-        <div className="desktop-scope" role="status"
-          title={`This window is served by ${status.remote ?? "a remote server"}; nothing runs on this computer.`}>
-          Remote · {(status.remote ?? "").replace(/^https?:\/\//, "")}
-        </div>
-      </>
-    );
-  }
-  if (ready) return <>{children}</>;
 
   const panel = failed && !restarting ? (
     <FailurePanel

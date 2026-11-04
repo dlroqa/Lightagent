@@ -312,6 +312,7 @@ def scripts(provider):
                                                ("text", "streamed."), ("finish", "stop")],
         "native-stop": hold("native-stop", " never."),
         "native-close": hold("native-close", " and kept working."),
+        "native-reload": hold("native-reload", " after the reload."),
         "native-quit": hold("native-quit", " never."),
         "remote": lambda p, turn, index: [("text", "Answered remotely."), ("finish", "stop")],
     })
@@ -819,10 +820,12 @@ def scenario_switch(view, host):
           const row = await need("the row of " + $ID, () => [...document.querySelectorAll(".profile-row")]
             .find((el) => visible(el) && el.textContent.includes($ID + " ·")));
           press(await need("Use", () => one("button", "Use", row)));
-          const blocked = await until(() => text().includes("still working in this profile"), 3000);
-          if (blocked) throw new Error("the switch is blocked: a run is still working (an earlier scenario left it)");
           return true;""", ID=target))
+        # A switch reloads the page, so the outcome is read from the host.
         switched = harness.wait_until(lambda: (lambda s: s["state"] == "ready" and s["profile"] == target)(host.call("status")), timeout=90)
+        if not switched:
+            _, blocked = view.try_js('return text().includes("still working in this profile");', 10)
+            check.expect(f"{target}: the switch is not blocked by a run an earlier scenario left", blocked is not True, blocked)
         view.wait_ui()
         view.shot(f"switched-{target}")
         check.expect(f"Use switches the runtime to {target} and the page comes back", switched, host.call("status"))
@@ -843,8 +846,37 @@ def scenario_close(view, host, provider):
     provider.open("native-close")
     # The text before the pause is shown apart from the rest of the answer.
     finished = view.wait_text("and kept working.") and view.idle()
+    seen = (gone, alive, finished)
+    if not finished:
+        seen = {"gone": gone, "alive": alive, "page": view.js("return text().slice(-400);"),
+                "saved": harness.answers(saved_with(os.environ["LIGHTAGENT_HOME"], "[e2e:native-close]"))}
     check.expect("closing with a working run asks first", held and asked)
-    check.expect("Keep working keeps the window, the runtime and the run", gone and alive and finished, (gone, alive, finished))
+    check.expect("Keep working keeps the window, the runtime and the run", gone and alive and finished, seen)
+    return check
+
+
+def scenario_reattach(view, provider, home, notes):
+    """Recorded: a run still working when the page reloads is shown again
+    when its conversation is opened, and its answer arrives."""
+    check = Checks("reload_while_working")
+    prompt = "[e2e:native-reload] Keep going through a reload."
+    view.new_chat()
+    view.send(prompt)
+    held = provider.wait_for("gate", "native-reload", gate="native-reload")
+    view.reload()
+    view.js(T("""
+      const title = $PROMPT.replace(/[.]+$/, "");
+      const entry = await need("the conversation in the list", () => [...document.querySelectorAll(".agent-sessions__list *")]
+        .find((el) => visible(el) && el.children.length === 0 && squash(el.textContent).replace(/[.…]+$/, "") === title));
+      press(entry);
+      return true;""", PROMPT=prompt))
+    working = view.js('return !!(await until(() => one("button", "Stop"), 10000));')
+    provider.open("native-reload")
+    shown = view.wait_text("after the reload.", 30)
+    saved = (harness.answers(saved_with(home, "[e2e:native-reload]")) or [""])[-1]
+    notes["reload_while_working"] = {"held": held, "stop_shown_after_reload": working, "answer_shown": shown,
+                                     "answer_saved": saved.endswith("after the reload.")}
+    view.idle(30)
     return check
 
 
@@ -1010,6 +1042,7 @@ def main():
                 ("remote_mode", lambda: scenario_remote(view, host, provider, cli)),
                 ("profile_switch", lambda: scenario_switch(view, host)),
                 ("close_with_runs", lambda: scenario_close(view, host, provider)),
+                ("reload_while_working", lambda: scenario_reattach(view, provider, home, notes)),
                 # Near the end: the host restarts a crashed runtime at most once a minute.
                 ("crash_recovery", lambda: scenario_crash(view, host, provider)),
                 # Last: it quits the app.
