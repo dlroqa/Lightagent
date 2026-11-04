@@ -114,6 +114,9 @@ env -u LIGHTAGENT_CREDENTIAL_KEY_FILE LIGHTAGENT_HOME="$env_home" \
 env_pid=$!
 wait_for "http://127.0.0.1:$ENV_PORT/health" "the environment server" "$env_pid"
 
+# axe-core for e2e/accessibility.mjs, pinned and not saved as a dependency.
+( cd e2e && npm install --no-save --no-audit --no-fund axe-core@4.10.3 >/dev/null )
+
 echo "== render in a headless browser =="
 PANEL_BASE="http://127.0.0.1:$AGENT_PORT" PANEL_ENV_BASE="http://127.0.0.1:$ENV_PORT" OUT_DIR="$OUT_DIR" \
   node e2e/render.mjs
