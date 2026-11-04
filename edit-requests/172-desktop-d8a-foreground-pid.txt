@@ -1,0 +1,21 @@
+=== base 10345a87eb51d4cc2be92f4190e34b77882cb9d8
+=== message
+Find the window for the Windows foreground attempt by its process
+
+Desktop run 41836802449 recorded window=0: FindWindow by the title found
+nothing, so SetForegroundWindow never had a window. The attempt now takes
+the host process's own main window handle.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace desktop/e2e/native.py
+--- find
+            out = subprocess.run(["powershell", "-NoProfile", "-Command", WINDOWS_FOREGROUND],
+--- with
+            out = subprocess.run(["powershell", "-NoProfile", "-Command", WINDOWS_FOREGROUND.replace("HOST_PID", str(host.process.pid))],
+=== replace desktop/e2e/native.py
+--- find
+$h = [Fg]::FindWindow($null, "Lightagent")
+--- with
+$h = (Get-Process -Id HOST_PID).MainWindowHandle
+if ($h -eq [IntPtr]::Zero) { $h = [Fg]::FindWindow($null, "Lightagent") }
+=== end
