@@ -3767,6 +3767,10 @@ async fn start_run(
     // the one this server serves.
     let (session_profile, session_store) = match &session_scope {
         Some(user) => (user.profile.as_str().to_owned(), user.sessions(&state)),
+        // A run that continues no conversation needs no conversation store.
+        None if body.session_id.is_none() => {
+            (state.session_profile.clone(), state.sessions.clone())
+        }
         None => match operator_conversations(&state, profile.as_deref()) {
             Ok(found) => found,
             Err(response) => return *response,

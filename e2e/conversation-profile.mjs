@@ -121,14 +121,15 @@ export async function checkConversationProfile(browser, base, outDir) {
     const saved = await api(`/sessions/${encodeURIComponent(chat)}?profile=${PROFILE}`);
     if (saved.profile !== PROFILE) failures.push(`conversation profile: the chat is bound to ${saved.profile}`);
     if ((await api("/profiles")).active_profile !== active) failures.push("conversation profile: the active profile changed");
-    await page.getByText(PROMPT, { exact: true }).first().waitFor({ timeout: 10000 });
+    const listed = page.locator(".agent-sessions__list").getByText(PROMPT, { exact: true });
+    await listed.waitFor({ timeout: 10000 });
     await page.screenshot({ path: `${outDir}/conversation-profile.png`, fullPage: true });
     console.log("  [ok] conversation profile: a chat runs as the chosen profile; the active profile stays");
 
     step = "the default profile's list does not hold it";
     await choice.selectOption(active);
     await page.getByText("Chats run as the default profile.", { exact: true }).waitFor({ timeout: 10000 });
-    await until("the list to change", async () => (await page.getByText(PROMPT, { exact: true }).count()) === 0, 10000);
+    await until("the list to change", async () => (await listed.count()) === 0, 10000);
     console.log("  [ok] conversation profile: the default profile's list does not hold the chat");
   } catch (err) {
     failures.push(`conversation profile: ${step}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
