@@ -178,7 +178,7 @@ class View:
         """Until the page answers and shows the app's shell."""
         deadline, last = time.time() + timeout, None
         while time.time() < deadline:
-            ok, value = self.try_js("return document.readyState === 'complete' && !!document.querySelector('.rail__account');", 5)
+            ok, value = self.try_js('return document.readyState === "complete" && !!one("button", "Open account menu");', 5)
             if ok and value:
                 return True
             last = value
@@ -196,12 +196,21 @@ class View:
             self.shots.append(os.path.basename(path))
 
     def go(self, item, route):
-        """Open a screen from the account menu, as a person does."""
-        self.js(T("""
+        """Open a screen from the account menu, as a person does. The chat
+        screen's menu lists fewer screens; one it lacks is reached from
+        Settings, whose menu lists them all."""
+        opened = self.js(T("""
           press(await need("the account menu", () => one("button", "Open account menu")));
-          press(await need($ITEM, () => all("menuitem").find((el) => nameOf(el) === $ITEM)));
+          const entry = await until(() => all("menuitem").find((el) => nameOf(el) === $ITEM), 3000);
+          if (!entry) { key(document.activeElement || document.body, "Escape"); await sleep(300); return false; }
+          press(entry);
           await need("the route", () => location.hash.split("?")[0] === $ROUTE);
           return true;""", ITEM=item, ROUTE=route))
+        if not opened:
+            if item == "Settings":
+                raise harness.HostError("Settings is not in the account menu")
+            self.go("Settings", "#/settings")
+            self.go(item, route)
 
     def new_chat(self):
         self.js("""
