@@ -1,0 +1,106 @@
+=== base 6f9988f21514afaa0905647ceb85cbf0feaf3725
+=== message
+Desktop acceptance: Windows keyboard stages on a host of their own; data check detail
+
+- native.py: the launch-time Windows keyboard stages (row 64's previous
+  head) left the page unable to answer, so every full-mode scenario after
+  them failed on windows-x64 (run 42028198409). They now run in a mode of
+  their own (`keyboard`, Windows only, recorded, not gated) on a fresh
+  host, each stage recorded as it ends so a stage that hangs is named by
+  the last one recorded; the full mode keeps only the read-only focus
+  probe at launch.
+- desktop.yml: the keyboard mode after the lifecycle mode on Windows.
+- user_data.py: a failed check prints what it saw.
+- appimage_lifecycle.py: tools on, as in the native lifecycle mode, so a
+  run starts its MCP server.
+=== replace desktop/e2e/native.py
+--- find
+        if WINDOWS and mode == "full":
+            try:
+                notes["windows_keyboard_at_launch"] = windows_launch_keyboard(view, host)
+            except Exception as error:  # recorded, not gated, until this evidence is reviewed
+                notes["windows_keyboard_at_launch"] = {"error": repr(error)[:300]}
+--- with
+        if WINDOWS and mode == "full":
+            notes["windows_focus_at_launch"] = windows_focus(view, host)
+=== replace desktop/e2e/native.py
+--- find
+    if mode == "lifecycle":
+        lifecycle(out, cli, command, home, results)
+        with open(os.path.join(out, "native-lifecycle.json"), "w", encoding="utf-8") as handle:
+--- with
+    if mode in ("lifecycle", "keyboard"):
+        (lifecycle if mode == "lifecycle" else keyboard_mode)(out, cli, command, home, results)
+        with open(os.path.join(out, f"native-{mode}.json"), "w", encoding="utf-8") as handle:
+=== replace desktop/e2e/native.py
+--- find
+def windows_launch_keyboard(view, host):
+    """Real key presses right after launch, while the page holds focus; after
+    another window was in front; and, if focus did not come back, after a
+    direct Win32 SetFocus on the WebView's container window."""
+    stages = {"launch": windows_stage(view, host)}
+    stages["away_and_back"] = {"away": windows_away_and_back(host), **windows_stage(view, host)}
+    if not stages["away_and_back"]["tab"]["moved"]:
+        stages["container_focus"] = {"set": windows_input(f"[Wi]::FocusContainer({host.process.pid})"), **windows_stage(view, host)}
+    return stages
+--- with
+def windows_launch_keyboard(view, host, stages):
+    """Real key presses right after launch, while the page holds focus; after
+    another window was in front and this one is brought back; after the host
+    moves focus into its WebView (Webview::set_focus); and after a direct
+    Win32 SetFocus on the WebView's container window. Each stage is recorded
+    as soon as it ends: a stage that leaves the page unable to answer is the
+    one after the last recorded."""
+    stages["launch"] = windows_stage(view, host)
+    stages["away_and_back"] = {"away": windows_away_and_back(host), **windows_stage(view, host)}
+    try:
+        host.call("webview_focus")
+        stages["webview_focus"] = windows_stage(view, host)
+    except harness.HostError as error:
+        stages["webview_focus"] = {"error": str(error)}
+    stages["container_focus_set"] = windows_input(f"[Wi]::FocusContainer({host.process.pid})")
+    stages["container_focus"] = windows_stage(view, host)
+
+
+def keyboard_mode(out, cli, command, home, results):
+    """Windows (mode "keyboard"): the launch-time keyboard stages on a host of
+    their own, so a stage that disturbs the page cannot affect the full run.
+    Recorded, not gated."""
+    provider = harness.FakeProvider()
+    harness.prepare_home(cli, home, provider)
+    env = dict(os.environ, LIGHTAGENT_DESKTOP_E2E_DRIVER="1",
+               LIGHTAGENT_DESKTOP_E2E_REPORT=os.path.join(out, "report-keyboard.txt"))
+    host = harness.Host(command, env, os.path.join(out, "driver-keyboard.log"))
+    view = View(host, out, "keyboard")
+    stages = results["recorded"].setdefault("windows_keyboard_at_launch", {})
+    try:
+        host.ready()
+        view.wait_ui()
+        windows_launch_keyboard(view, host, stages)
+    except Exception as error:  # recorded: which stage it stopped after
+        stages["stopped"] = repr(error)[:300]
+        view.shot("stopped")
+    finally:
+        host.stop()
+        provider.close()
+=== replace .github/workflows/desktop.yml
+--- find
+          LIGHTAGENT_HOME="$RUNNER_TEMP/lifecycle-home" "${wrap[@]}" python desktop/e2e/native.py "$out/lifecycle" "$cli" lifecycle -- "$app" || status=1
+--- with
+          LIGHTAGENT_HOME="$RUNNER_TEMP/lifecycle-home" "${wrap[@]}" python desktop/e2e/native.py "$out/lifecycle" "$cli" lifecycle -- "$app" || status=1
+          # Windows keyboard focus at launch, on a host of its own (recorded, not gated).
+          if [ "$RUNNER_OS" = Windows ]; then
+            LIGHTAGENT_HOME="$RUNNER_TEMP/keyboard-home" python desktop/e2e/native.py "$out/keyboard" "$cli" keyboard -- "$app" || true
+          fi
+=== replace desktop/e2e/user_data.py
+--- find
+                      "failed": [name for name, c in checks.items() if not c["ok"]]}))
+--- with
+                      "failed": {name: c["seen"] for name, c in checks.items() if not c["ok"]}}))
+=== replace desktop/e2e/appimage_lifecycle.py
+--- find
+    config["mcp"] = {"enabled": True, "timeout_secs": 30, "servers": [
+--- with
+    config.setdefault("tools", {})["enabled"] = True
+    config["mcp"] = {"enabled": True, "timeout_secs": 30, "servers": [
+=== end
