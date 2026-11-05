@@ -1,0 +1,362 @@
+=== base 4e940fbd159b4c717546a162d9693a54778ed056
+=== message
+Desktop row 64 review: final acceptance, licenses, advisories, process ownership
+
+Documentation only, for the code head 4e940fb (tree 4a0b960), green on
+check 42034765893, desktop 42034766013, jev 42034765887 and subagents
+42034765932.
+
+- DESKTOP_FINAL_ACCEPTANCE.md: the six final acceptance items with their
+  evidence, findings, fixes and what stays unverified.
+- DESKTOP_LICENSES.md: the MPL-2.0 compliance package for review.
+- DESKTOP_ADVISORIES.md: the three cargo-audit warnings, reviewed.
+- DESKTOP_ARCHITECTURE.md §4: process ownership as built (no Job Object
+  or process group; children end with their runs), the AppImage
+  environment rule.
+- DESKTOP_MERGE_ORDER.md: row 64; the delivery PR's role.
+- DESKTOP_PROGRESS.md: row 64. DESKTOP_D8_D9_REPORT.md: gaps updated.
+=== write docs/desktop/DESKTOP_FINAL_ACCEPTANCE.md
+# Lightagent Desktop — final acceptance review (row 64)
+
+Owner of this work: Claude Code session `7cd9d8a9` (claim:
+https://github.com/dlroqa/Lightagent/pull/161#issuecomment-6656887743),
+2026-11-05. Nothing here is merged, tagged or published, and nothing here
+is a release approval.
+
+Row 64 is https://github.com/dlroqa/Lightagent/pull/162
+(`desktop/d11-acceptance`, stacked on row 63 `a19f0d9`). Its code head is
+`4e940fb` (tree `4a0b960`), green on every workflow:
+
+| Workflow | Run | Result |
+|---|---|---|
+| check (4 platforms, 13 jobs) | https://github.com/dlroqa/Lightagent/actions/runs/42034765893 | success |
+| desktop (inventory, host, 4 shells, 4 native, supply chain, host runs) | https://github.com/dlroqa/Lightagent/actions/runs/42034766013 | success |
+| jev evaluation | https://github.com/dlroqa/Lightagent/actions/runs/42034765887 | success |
+| subagents | https://github.com/dlroqa/Lightagent/actions/runs/42034765932 | success |
+
+Earlier runs of row 64, kept as evidence of what each step found:
+42024652486 (`12d14fe`), 42028198409 (`6f9988f`), 42030840705 (`71f5e21`),
+42032516273 (`3739abb`). Artifacts (installers, SHA256SUMS, notices, SBOMs,
+MPL sources, native and lifecycle reports, screenshots) are kept 30 days.
+
+Parity is unchanged: **222 of 222** applicable rows; row 64 adds no
+capability, and the inventory job (drift check, clap tree, self-test)
+passed on `4e940fb`.
+
+## 1. Windows native keyboard
+
+**Proven on the actual WebView2 app (gated):** at launch, Win32 keyboard
+focus is inside WebView2 (`Chrome_WidgetWin_1 < Chrome_WidgetWin_0 <
+WRY_WEBVIEW < Tauri Window`, owned by `msedgewebview2.exe`), the page has
+focus, and three real OS Tab presses sent with `SendInput` move focus
+composer → "Model for this conversation" → "Summarize this project" →
+"Plan next steps". This is the native.py `keyboard` mode on a host of its
+own, gated since `3739abb` and passing on `4e940fb`.
+
+**Why the earlier evidence said "no":** the old check sent keys with .NET
+`SendKeys` after about twenty scenarios. By then Win32 focus was on the
+host's top-level window (`Tauri Window`), not on the WebView, so the
+presses never reached the page. JavaScript focus (`element.focus()`) does
+not move Win32 focus, and the old check did not look at Win32 focus. That
+was an evidence gap, not proof of either outcome.
+
+**Not verified (stated, not waived):** whether keyboard focus returns to
+the page after the Windows share flyout. In the full run the share
+scenario opens the system flyout (`ShellExperienceHost`); the OS Escape
+does not close it, and it is still on screen at the end. After it, Win32
+focus stays on `Tauri Window`, and none of these put it back in the page:
+bringing the window forward, Tauri's `Webview::set_focus` (WebView2
+`MoveFocus`), or a direct Win32 `SetFocus` on the `WRY_WEBVIEW` container
+(runs 42028198409, 42030840705). Bringing a second window in front and
+returning left the page unable to answer the automation, so that stage
+was dropped. Whether a person, who dismisses the flyout by clicking,
+meets the same loss of focus is not established. It needs an
+interactive Windows check or a reproduction outside the share flyout
+before any fix is chosen. Browser-tier keyboard tests (D8d) are separate
+evidence and are not counted as native.
+
+## 2. Lifecycle: quitting and crashes, AppImage included
+
+Every check follows the actual processes: the host, the runtime it
+started, a real program left running by a run's approved `terminal.run`
+call, and the run's stdio MCP server. The MCP fixture
+(desktop/e2e/stubborn_mcp.py) ignores the end of its input on purpose, so
+only being stopped ends it.
+
+| Case | Native build, all 4 targets (e2e hooks) | Shipped AppImage (Linux, smoke account, OS input) |
+|---|---|---|
+| Quit with nothing working | host and runtime exit | WM_DELETE_WINDOW: host, runtime and the AppImage's wrapper exit |
+| Quit with active work | the close question; Stop runs and quit ends host, runtime, program and MCP server | close request keeps everything and asks; Tab, Enter on Stop runs and quit ends host, runtime and MCP server; wrapper exits |
+| Host crash (killed) | runtime exits; no program or MCP server outlives it | SIGKILL of the actual host: runtime exits; MCP server does not outlive it; wrapper exits |
+
+**Product defect found and fixed:** the AppImage's AppRun points
+`PYTHONHOME`, `PYTHONPATH`, `LD_LIBRARY_PATH` and `PATH` at the image, and
+the host passed them to its runtime, so every program a run started
+inherited them. A Python MCP server started from the AppImage died at
+start ("No module named 'encodings'", run 42032516273). Fixed in
+`4e940fb` (desktop/src-tauri/src/sidecar.rs, `appimage_env_changes`, with
+unit tests): inside an AppImage the runtime gets the person's own
+environment. Confirmed on the shipped AppImage by the lifecycle check in
+run 42034766013. The .deb, macOS and Windows packages were not affected.
+
+**Suspected and disproved:** that a killed host leaves a run's programs
+behind. When the host dies, the runtime's lifeline closes, its server
+shuts down, and dropping the runtime's tasks ends every child
+(`kill_on_drop`). The `std::process::exit` five seconds later is only a
+backstop; if it ever fired first, children would outlive the runtime.
+That residual risk is recorded; no case reached it.
+
+## 3. Upgrade and user data
+
+**No Lightagent Desktop release has been published** (releases v0.5.0,
+v0.4.1 and v0.4.0 carry no desktop installer), so there is no upgrade
+from a release to test. The evidence is a **simulated upgrade**:
+desktop/e2e/user_data.py seeds the account's own home
+(`~/.lightagent`) with one of each kind of data, then each installer is
+launched on it, run again over its own installation, launched again and
+uninstalled, with a check after each step.
+
+Seeded: a second profile; a setting; a conversation saved by the runtime
+with an attachment; a memory; an indexed knowledge source; a provider API
+key in the secrets store; a sealed remote credential in the vault (its
+key file outside the home). Checked: all 14 files present and
+byte-identical, and every kind read back through the CLI and a keyed
+`lightagent serve`, including that the provider key is usable and the
+vault opens with its key (`remote-credential status`: key configured, one
+active grant, none unopenable).
+
+| Installer | After launch | Simulated upgrade | After uninstall |
+|---|---|---|---|
+| .deb (smoke account) | unchanged | `apt-get install --reinstall` | `apt-get remove`: unchanged |
+| AppImage (smoke account) | unchanged | — | file deleted: unchanged |
+| .dmg arm64, .dmg x64 | unchanged | app replaced from the image | app removed: unchanged |
+| NSIS | unchanged | setup run again `/S` | `uninstall.exe /S`: unchanged |
+| MSI | unchanged | `msiexec /fvomus` | `msiexec /x`: unchanged |
+
+No installer owns the home, and no uninstaller removed any of it. Left
+behind on Windows after either silent uninstall:
+`%LOCALAPPDATA%\dev.lightagent.desktop` (the WebView2 profile: browser
+storage such as the conversation-profile choice), not user data in the
+home. The NSIS uninstaller's "delete app data" option, shown only
+interactively and unticked by default, removes that folder and
+`%APPDATA%\dev.lightagent.desktop`; it does not touch `~/.lightagent`
+(not exercised interactively).
+
+## 4. Dependency licenses
+
+See [DESKTOP_LICENSES.md](DESKTOP_LICENSES.md). Notices are generated per
+target, bundled in every package and verified inside each installed app;
+the five MPL-2.0 crates are the exact published archives. Found: selectors
+0.38.0 is published without a license file; the notices include the
+MPL-2.0 text for it. Distribution is not approved by this review.
+
+## 5. Dependency audit warnings
+
+See [DESKTOP_ADVISORIES.md](DESKTOP_ADVISORIES.md). Vulnerabilities: 0 in
+both lockfiles and in the UI's production npm packages. RUSTSEC-2026-0386
+is fixed (tokio 1.54.1); RUSTSEC-2024-0370 and RUSTSEC-2024-0429 are
+reviewed with their paths and call sites. A warning that is not reviewed
+now fails the audit step. This is not an unqualified "audit clean".
+
+## 6. Remaining limitations (each needs the owner's explicit acceptance)
+
+| Item | Kind | State |
+|---|---|---|
+| Installers unsigned (Authenticode, Apple signing and notarization, deb/AppImage signatures) | product limitation | unchanged |
+| Gatekeeper and SmartScreen behaviour | missing verification | not exercised |
+| Declared minimum OS (glibc 2.34; macOS 10.14 x64, 11.0 arm64; Windows PE 6.0 + WebView2) | missing verification | declarations only; no older system run |
+| A second, new OS account | missing verification on macOS and Windows | Linux only (`la-smoke`) |
+| Remote server key | product limitation | named per launch; not saved in the secrets store |
+| Remote profile switching | product limitation | refused while remote |
+| Live Jev, providers, MCP services | missing verification | stubs and fixtures only |
+| Windows keyboard focus after the share flyout | missing verification | §1 above |
+| Upgrade from an earlier Desktop release | not applicable yet | no release exists; simulated upgrade only |
+| Permissive components published without a license file | owner review | DESKTOP_LICENSES.md §5 |
+| Runtime exit backstop before child teardown | residual risk | §2 above |
+| Moderate axe findings (heading order, no level-one heading on chat) | product limitation | unchanged |
+
+## Established behaviours, unchanged by row 64
+
+Conversation-scoped profiles do not change the persisted active profile;
+account, agent profile and conversation identities stay separate;
+profile ids are selectors, not authorization; cloud login and sync remain
+a later stage; offline start loads the bundled UI and local data (native
+offline mode passed on every target); interrupted work is never replayed;
+a failed regeneration keeps the saved answer; host-only secret input keeps
+secrets out of renderer state. Row 64 changes only the runtime's
+environment inside an AppImage, the test-only driver, tests, packaging
+resources and documentation.
+=== write docs/desktop/DESKTOP_LICENSES.md
+# Lightagent Desktop — third-party license compliance (for review)
+
+Prepared 2026-11-05 on row 64 (`4e940fb`). **This is material for the
+owner's review; it is not a distribution approval.** Generated by
+`scripts/desktop-sbom.py` in the desktop workflow
+(run https://github.com/dlroqa/Lightagent/actions/runs/42034766013,
+artifact `desktop-supply-chain`, 30 days).
+
+## 1. What ships, per target
+
+| Target | Components (crates + npm) | Build time only | Distinct license texts | Without a license file |
+|---|---|---|---|---|
+| x86_64-apple-darwin | 385 (377 + 8) | 51 | 232 | 14 |
+| aarch64-apple-darwin | 385 (377 + 8) | 51 | 232 | 14 |
+| x86_64-pc-windows-msvc | 382 (374 + 8) | 59 | 224 | 5 |
+| x86_64-unknown-linux-gnu | 417 (409 + 8) | 65 | 238 | 5 |
+
+"Build time only" means procedural macros and what only they use: they
+run while compiling and none of their code is in a package.
+Lightagent itself is Apache-2.0 (LICENSE).
+
+## 2. The MPL-2.0 components
+
+| Crate | Version | SHA-256 (= Cargo.lock checksum) | Reached through | In the executable | License file in its published archive |
+|---|---|---|---|---|---|
+| cssparser | 0.37.0 | `8c9cdaae01d5ed7882b04d795e7f752f46ff52d2fa3b50a20d28c464510bba98` | tauri's HTML handling (dom_query, selectors) | yes | yes |
+| cssparser-macros | 0.7.1 | `d045de693cb712d0b22c6a64be5b953f67b3ce00ab5ad3dd5d8b441886ab8e1a` | cssparser | no (procedural macro) | yes |
+| dtoa-short | 0.3.5 | `cd1511a7b6a56299bd043a9c167a6d2bfb37bf84a6dfceaba651168adfb43c87` | cssparser | yes | yes |
+| option-ext | 0.2.0 | `04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d` | dirs-sys (host and runtime) | yes | yes |
+| selectors | 0.38.0 | `8adfa1c298912827b8a28b223b3b874357397ae706e6190acd9bf28cee99114d` | dom_query | yes | **no** |
+
+**Modified MPL-covered files: none.** No `[patch]` or `[replace]` exists
+in either workspace or Cargo configuration (checked by the script, which
+fails otherwise); every MPL crate comes from crates.io with the checksum
+Cargo.lock pins, and the archive in the cargo cache was hashed and found
+equal.
+
+## 3. The obligations and how they are met
+
+MPL-2.0 is file-level copyleft. For distribution in executable form
+(§3.2): the Source Code Form must be made available and recipients told
+how to obtain it, at no more than the cost of distribution; the
+executable may be under other terms that do not limit the recipients'
+rights in that source. Notices in the covered files must be kept (§3.4).
+Larger Works may combine it with other code (§3.3).
+
+| Obligation | Implementation | Verified by |
+|---|---|---|
+| Tell recipients the source is available, and where | THIRD_PARTY_NOTICES.txt has an MPL-2.0 section: each crate's version, crates.io page, archive URL and SHA-256 | generated per target; bundled; installed copy compared |
+| Make the Source Code Form available | the exact archives are on crates.io; each release also attaches the same archives as `desktop-mpl-sources-<version>.tar.gz` (supply chain artifact `mpl-sources/` with SHA256SUMS and MPL-2.0.txt) | archive hashes equal Cargo.lock's |
+| Include the license | each MPL crate's published LICENSE text is in the notices; selectors, published without one, is pointed to the identical MPL-2.0 text (cssparser 0.37.0's LICENSE), and `MPL-2.0.txt` is beside the archives | the gate fails if no MPL-2.0 text is available |
+| Keep the covered files' notices | the files are not modified | checksum equality |
+
+**Release step still to be done (needs release approval):** attach
+`desktop-mpl-sources-<version>.tar.gz` (the `mpl-sources/` artifact of
+the release's own run) to each Desktop release, as THIRD_PARTY_NOTICES.txt
+says. Until that is done for a release, the notices' statement about
+release attachments is not yet true for it.
+
+## 4. What every package carries
+
+`THIRD_PARTY_NOTICES.txt` and `LICENSE.txt`, as bundle resources
+(desktop.yml passes them to `tauri build --config`). Checked after
+installing each package that the installed files exist and are identical
+to the generated ones:
+
+| Package | Location of the installed notices | Verified |
+|---|---|---|
+| .deb | under `/usr/lib/Lightagent/` | yes |
+| AppImage | inside the image (`usr/lib/Lightagent/`) | yes |
+| .dmg (arm64, x64) | `Lightagent.app/Contents/Resources/` | yes |
+| NSIS, MSI | the installation folder, beside the app | yes |
+
+## 5. Open points for the owner
+
+- Permissive components published without a license file (their license
+  is named in their metadata, and the notices say so, but no copyright
+  line can be reproduced): alloc-stdlib 0.3.0, dlopen2 0.8.2,
+  dlopen2_derive 0.4.3, libappindicator-sys 0.9.0 (Linux); webview2-com
+  0.39.1, webview2-com-macros 0.8.1, webview2-com-sys 0.39.1 (Windows);
+  block2, dispatch2, objc2 and the objc2-* crates (macOS). Options: take
+  the texts from their upstream repositories at the tagged versions, or
+  accept the metadata-only notice. Not decided here.
+- Whether to keep build-time-only components in the notices (they are
+  listed for completeness).
+- Legal review of the notice wording and of the release-attachment step.
+=== write docs/desktop/DESKTOP_ADVISORIES.md
+# Lightagent Desktop — reviewed dependency advisories
+
+Reviewed 2026-11-05 on row 64 (`4e940fb`), cargo-audit 0.22.2 against
+both lockfiles and npm audit against the UI's production packages
+(desktop workflow run https://github.com/dlroqa/Lightagent/actions/runs/42034766013).
+Vulnerabilities: **0** (Cargo.lock), **0** (desktop/Cargo.lock), **0** (npm).
+
+Warnings are not vulnerabilities, but they are not ignored either: the
+audit step now fails on any warning that is not listed in
+`REVIEWED_WARNINGS` in scripts/desktop-sbom.py, which points here. Paths
+and call sites come from `desktop-sbom.py --advisory-paths`, which scans
+the source of every crate each binary is built from at the exact locked
+versions.
+
+| Advisory | Crate and version | Kind | Where | Fix available | Status |
+|---|---|---|---|---|---|
+| RUSTSEC-2026-0386 | tokio 1.53.1 (Cargo.lock) | unsound: `AsyncFd::new` and related constructors violate I/O safety | the bundled runtime | yes: 1.51.6, ≥1.53.3 | **fixed**: Cargo.lock to tokio 1.54.1 (desktop/Cargo.lock already had 1.54.1). Call sites of the affected constructors in the linked crates: 0 |
+| RUSTSEC-2024-0370 | proc-macro-error 1.0.4 (desktop/Cargo.lock) | unmaintained | Linux host: lightagent-desktop > gtk 0.18.2 > gtk3-macros 0.18.2 > proc-macro-error | none (no maintained release; alternatives need the GTK 3 bindings to move) | **reviewed**: build time only, a procedural macro; none of its code is in a package |
+| RUSTSEC-2024-0429 | glib 0.18.5 (desktop/Cargo.lock) | unsound: `VariantStrIter` iterator implementations | Linux host: lightagent-desktop > gtk 0.18.2 > glib 0.18.5 (in the binary) | only in glib ≥0.20, which the GTK 3 bindings (gtk 0.18, used by Tauri 2 on Linux through webkit2gtk) cannot take | **reviewed**: call sites of `VariantStrIter` / `Variant::array_iter_str` in every crate the host is built from: 0. The affected code is linked but not called |
+
+Residual risk: for glib, a future dependency update could start calling
+the affected iterator; the scan runs on every desktop workflow run and
+lists any call site. For proc-macro-error, none at run time. Moving off
+both depends on Tauri's Linux stack moving off GTK 3.
+=== replace docs/desktop/DESKTOP_ARCHITECTURE.md
+--- find
+  - on Windows the child runs in a Job Object (kill-on-close), on Unix in its own process group;
+--- with
+  - as built (corrected 2026-11-05, row 64): the child is not placed in a Job Object or its own process group. The host stops only the pid it started; the processes a run starts (tool programs, stdio MCP servers) are the runtime's children and end with their run: cancelling a run, or the runtime shutting down, drops them, and they are killed on drop. Native lifecycle checks on every target show none outliving a killed host (DESKTOP_FINAL_ACCEPTANCE.md §2);
+  - inside an AppImage the runtime is started without the image's search paths (its entries in PATH, LD_LIBRARY_PATH, PYTHONHOME, PYTHONPATH and the like), so the programs it starts see the person's own environment;
+=== replace docs/desktop/DESKTOP_ARCHITECTURE.md
+--- find
+  - with no runs, or after cancellation, the host sends SIGTERM (CTRL_BREAK on Windows), waits 5 s, then kills the owned job or group.
+--- with
+  - with no runs, or after cancellation, the host closes the runtime's lifeline (stdin), waits 5 s, then kills the runtime's pid (as built; no SIGTERM or CTRL_BREAK is sent).
+=== replace docs/desktop/DESKTOP_MERGE_ORDER.md
+--- find
+| 63 | D10 review: the last rows, the report and this merge strategy | opened with this commit | `desktop/d10-review` | `desktop/d9-installers` | this commit | — |
+--- with
+| 63 | D10 review: the last rows, the report and this merge strategy | https://github.com/dlroqa/Lightagent/pull/160 | `desktop/d10-review` | `desktop/d9-installers` | `a19f0d9` | `a19f0d9` |
+| 64 | Final acceptance: Windows OS keys, lifecycle with a run's processes, the AppImage's environment (fix), user data across reinstall and uninstall, notices and MPL sources, reviewed advisories, tokio 1.54.1 | https://github.com/dlroqa/Lightagent/pull/162 | `desktop/d11-acceptance` | `desktop/d10-review` (`a19f0d9`) | `4e940fb` (code) | `4e940fb`; see DESKTOP_FINAL_ACCEPTANCE.md |
+=== replace docs/desktop/DESKTOP_MERGE_ORDER.md
+--- find
+   (never a fast-forward, never a squash): the final stack head (row 63)
+--- with
+   (never a fast-forward, never a squash): the final stack head (row 64)
+=== replace docs/desktop/DESKTOP_PROGRESS.md
+--- find
+| 2026-11-04 | D9 installers and supply chain; 15 advisories in Cargo.lock updated (`=== update`) | `cf1b2b3` | check https://github.com/dlroqa/Lightagent/actions/runs/41848860574, desktop https://github.com/dlroqa/Lightagent/actions/runs/41848860903 |
+--- with
+| 2026-11-04 | D9 installers and supply chain; 15 advisories in Cargo.lock updated (`=== update`) | `cf1b2b3` | check https://github.com/dlroqa/Lightagent/actions/runs/41848860574, desktop https://github.com/dlroqa/Lightagent/actions/runs/41848860903 |
+
+## Row 64 — final acceptance (2026-11-05, owner `7cd9d8a9`)
+
+https://github.com/dlroqa/Lightagent/pull/162, `desktop/d11-acceptance`,
+stacked on row 63. The results and what stays unverified:
+[DESKTOP_FINAL_ACCEPTANCE.md](DESKTOP_FINAL_ACCEPTANCE.md); licenses:
+[DESKTOP_LICENSES.md](DESKTOP_LICENSES.md); advisories:
+[DESKTOP_ADVISORIES.md](DESKTOP_ADVISORIES.md). Parity 222/222, unchanged.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-05 | Evidence harness (178): Win32 focus probe, lifecycle mode, AppImage lifecycle, user data, notices, MPL sources, advisory paths, tokio 1.54.1 | `12d14fe` | desktop https://github.com/dlroqa/Lightagent/actions/runs/42024652486: native and lifecycle green on 4 targets; the notices gate found selectors published without a license file |
+| 2026-11-05 | MPL text for it (179) | `6f9988f` | desktop https://github.com/dlroqa/Lightagent/actions/runs/42028198409: data unchanged on every installer; the vault check method wrong (403 from a keyed serve) |
+| 2026-11-05 | Windows keyboard on a host of its own (180) | `71f5e21` | desktop https://github.com/dlroqa/Lightagent/actions/runs/42030840705: OS Tab moves focus at launch |
+| 2026-11-05 | Windows keyboard gated, vault via the CLI, AppImage MCP trace (181) | `3739abb` | desktop https://github.com/dlroqa/Lightagent/actions/runs/42032516273: the AppImage's environment broke a Python MCP server |
+| 2026-11-05 | Fix: the AppImage's search paths kept out of the runtime (182) | `4e940fb` | check https://github.com/dlroqa/Lightagent/actions/runs/42034765893, desktop https://github.com/dlroqa/Lightagent/actions/runs/42034766013, jev https://github.com/dlroqa/Lightagent/actions/runs/42034765887, subagents https://github.com/dlroqa/Lightagent/actions/runs/42034765932: all green |
+=== replace docs/desktop/DESKTOP_D8_D9_REPORT.md
+--- find
+(`SHA256SUMS-<target>.txt`). The AppImage's orphan check is recorded, not
+gated: run.py ends the AppImage's wrapper, not the host, which keeps running
+by design; the .deb launch shows the host's lifeline.
+--- with
+(`SHA256SUMS-<target>.txt`). The AppImage's own lifecycle (its actual host
+closed and killed, with a run's MCP server) is gated since row 64; see
+DESKTOP_FINAL_ACCEPTANCE.md §2.
+=== replace docs/desktop/DESKTOP_D8_D9_REPORT.md
+--- find
+- Windows: OS key presses do not reach the page (the window is foreground);
+  keyboard use there rests on the browser tier and the page's own handlers.
+--- with
+- Windows (updated at row 64): OS key presses do reach the page; real Tab
+  presses move focus in WebView2 at launch (gated). Not verified: focus
+  returning to the page after the Windows share flyout
+  (DESKTOP_FINAL_ACCEPTANCE.md §1).
+=== end
