@@ -342,6 +342,11 @@ def notices(metadata_dir, target, frontend, out, root):
                      f"  repository: {c['repository'] or 'not stated'}", ""]
     text += ["== Components ==", ""]
     first_seen, without = {}, []
+    # The MPL-2.0 text for an MPL-2.0 component published without its own
+    # license file: the same license, from another component's published file.
+    mpl_text_from = next((f"{c['name']} {c['version']} ({name})" for c in mpl
+                          for name, body in license_texts(c["directory"], c["license_file"])
+                          if "Mozilla Public License Version 2.0" in body), None)
     for c in ordered:
         text.append(f"-- {c['name']} {c['version']} ({c['ecosystem']}); license: {c['license']}; in: {', '.join(sorted(c['ships_in']))}"
                     + ("; build time only" if c["build_time_only"] else ""))
@@ -350,7 +355,10 @@ def notices(metadata_dir, target, frontend, out, root):
         texts = license_texts(c["directory"], c["license_file"])
         if not texts:
             without.append(f"{c['name']}@{c['version']}")
-            text.append("   (published without a license file; its license is the one named above)")
+            if c in mpl and mpl_text_from:
+                text.append(f"   (its published archive has no license file; the MPL-2.0 text it is licensed under is the one in {mpl_text_from})")
+            else:
+                text.append("   (published without a license file; its license is the one named above)")
         for name, body in texts:
             digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
             if digest in first_seen:
@@ -362,9 +370,8 @@ def notices(metadata_dir, target, frontend, out, root):
     joined = "\n".join(text) + "\n"
     if mpl and "Mozilla Public License Version 2.0" not in joined:
         problems.append("no MPL-2.0 license text is among the components' license files")
-    for c in mpl:
-        if f"{c['name']}@{c['version']}" in without:
-            problems.append(f"{c['name']}@{c['version']} (MPL-2.0) is published without its license file")
+    if mpl and not mpl_text_from:
+        problems.append("no MPL-2.0 component's published files hold the MPL-2.0 text")
     with open(os.path.join(out, "THIRD_PARTY_NOTICES.txt"), "w", encoding="utf-8", newline="\n") as handle:
         handle.write(joined)
     shutil.copy(os.path.join(root, "LICENSE"), os.path.join(out, "LICENSE.txt"))
@@ -376,7 +383,8 @@ def notices(metadata_dir, target, frontend, out, root):
         ident = f"{c['name']}@{c['version']}"
         where = f"crates.io, SHA-256 {sums.get((c['name'], c['version']), '?')}" if c["source"] == CRATES_IO else c["source"]
         lines.append(f"- MPL-2.0 {ident}{' (build time only)' if c['build_time_only'] else ''}: {where}; "
-                     f"license file {'MISSING' if ident in without else 'included'}")
+                     + ("license file not in its published archive; the MPL-2.0 text is included from " + str(mpl_text_from)
+                        if ident in without else "license file included"))
     if without:
         lines.append(f"- published without a license file (license named in their metadata): {', '.join(without[:40])}")
     lines += [f"- FAILED {problem}" for problem in problems]
@@ -388,12 +396,14 @@ def mpl_sources(metadata_dir, out, root):
     """The exact published archives of every MPL-2.0 crate any target links, checked against Cargo.lock."""
     os.makedirs(out, exist_ok=True)
     sums = lock_checksums(root)
-    wanted = {}
+    wanted, folders = {}, {}
     for target in TARGETS:
         for workspace, binary in (("desktop", "lightagent-desktop"), ("root", "lightagent")):
             for package in linked(load(os.path.join(metadata_dir, f"{workspace}-{target}.json")), binary):
                 if package.get("source") and MPL.search(package.get("license") or ""):
                     wanted[(package["name"], package["version"])] = package["source"]
+                    folders[(package["name"], package["version"])] = (os.path.dirname(package["manifest_path"]),
+                                                                      package.get("license_file"))
     cache = os.path.join(os.environ.get("CARGO_HOME") or os.path.join(os.path.expanduser("~"), ".cargo"), "registry", "cache")
     lines, problems, listing = ["### MPL-2.0 source archives (the exact published crates this build uses)"], [], []
     for (name, version), source in sorted(wanted.items()):
@@ -412,10 +422,22 @@ def mpl_sources(metadata_dir, out, root):
         lines.append(f"- {name} {version}: SHA-256 `{actual}`, equal to Cargo.lock's checksum (the published source, unmodified)")
     with open(os.path.join(out, "SHA256SUMS"), "w", encoding="utf-8", newline="\n") as handle:
         handle.write("".join(line + "\n" for line in listing))
+    bare = sorted(f"{name}-{version}.crate" for (name, version), (folder, license_file) in folders.items()
+                  if not license_texts(folder, license_file))
+    mpl_text = next((body for folder, license_file in folders.values() for _name, body in license_texts(folder, license_file)
+                     if "Mozilla Public License Version 2.0" in body), None)
+    if mpl_text:
+        with open(os.path.join(out, "MPL-2.0.txt"), "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(mpl_text + "\n")
+    elif wanted:
+        problems.append("no MPL-2.0 archive holds the MPL-2.0 text")
     with open(os.path.join(out, "README.txt"), "w", encoding="utf-8", newline="\n") as handle:
         handle.write("The Source Code Form of the MPL-2.0 components in Lightagent Desktop: each archive is the\n"
                      "crate exactly as published on crates.io (its SHA-256 equals the checksum Cargo.lock pins),\n"
-                     "used unmodified. Each archive holds the component's license text.\n")
+                     "used unmodified. MPL-2.0.txt is the license text.\n"
+                     + (f"Published without a license file of their own: {', '.join(bare)}.\n" if bare else ""))
+    if bare:
+        lines.append(f"- published without a license file of their own (MPL-2.0.txt added beside them): {', '.join(bare)}")
     problems += [f"{name} patches or replaces crates" for name in patched(root)]
     lines += [f"- FAILED {problem}" for problem in problems]
     print("\n".join(lines))

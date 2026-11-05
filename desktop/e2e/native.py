@@ -327,6 +327,19 @@ public static class Wi {
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string c, string t);
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
   [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string c, string t);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr h);
+  public static string FocusContainer(uint host) {
+    IntPtr top = GetForegroundWindow(); uint pid; uint tid = GetWindowThreadProcessId(top, out pid);
+    if (pid != host) return "container=the app is not in front";
+    IntPtr box = FindWindowEx(top, IntPtr.Zero, "WRY_WEBVIEW", null);
+    if (box == IntPtr.Zero) return "container=missing";
+    uint me = GetCurrentThreadId(); bool attached = AttachThreadInput(me, tid, true);
+    SetFocus(box); AttachThreadInput(me, tid, false);
+    return "container=" + (attached ? "focus set" : "input not attached");
+  }
   public static string Cls(IntPtr h) { var s = new StringBuilder(256); GetClassName(h, s, 256); return s.ToString(); }
   public static string Chain(IntPtr h) { var parts = new System.Collections.Generic.List<string>(); for (int i = 0; h != IntPtr.Zero && i < 8; i++) { parts.Add(Cls(h)); h = GetParent(h); } return string.Join(" < ", parts); }
   public static string Probe(uint host) {
@@ -386,6 +399,41 @@ def windows_tabs(view, presses=3):
     return {"sent": sent, "path": path, "moved": len(set(path)) > 1}
 
 
+COMPOSER = 'const box = await need("the composer", () => one("textbox", "Ask Lightagent")); box.focus(); return true;'
+
+
+def windows_stage(view, host):
+    """The composer focused in the page, then where Win32 focus is and real Tab presses."""
+    time.sleep(0.6)
+    view.js(COMPOSER)
+    return {**windows_focus(view, host), "tab": windows_tabs(view)}
+
+
+def windows_away_and_back(host):
+    """Another window brought in front of the app, then the app brought back."""
+    away = subprocess.Popen([sys.executable, "-c",
+                             "import tkinter as t; r = t.Tk(); r.title('la-focus-away'); r.after(30000, r.destroy); r.mainloop()"])
+    try:
+        time.sleep(3)
+        front = windows_input("[Wi]::Front('la-focus-away')")
+        time.sleep(0.6)
+        focus_window(host)
+        return front
+    finally:
+        away.kill()
+
+
+def windows_launch_keyboard(view, host):
+    """Real key presses right after launch, while the page holds focus; after
+    another window was in front; and, if focus did not come back, after a
+    direct Win32 SetFocus on the WebView's container window."""
+    stages = {"launch": windows_stage(view, host)}
+    stages["away_and_back"] = {"away": windows_away_and_back(host), **windows_stage(view, host)}
+    if not stages["away_and_back"]["tab"]["moved"]:
+        stages["container_focus"] = {"set": windows_input(f"[Wi]::FocusContainer({host.process.pid})"), **windows_stage(view, host)}
+    return stages
+
+
 def windows_keyboard(view, host):
     """Real key presses on Windows in four situations: after the OS brings the
     window forward; after the host moves keyboard focus into its WebView (the
@@ -405,6 +453,7 @@ def windows_keyboard(view, host):
         stages["webview_focus"] = {**windows_focus(view, host), "tab": windows_tabs(view)}
     except harness.HostError as error:
         stages["webview_focus"] = {"error": str(error)}
+    stages["container_focus"] = {"set": windows_input(f"[Wi]::FocusContainer({host.process.pid})"), **windows_stage(view, host)}
     away = subprocess.Popen([sys.executable, "-c",
                              "import tkinter as t; r = t.Tk(); r.title('la-focus-away'); r.after(30000, r.destroy); r.mainloop()"])
     try:
@@ -1377,7 +1426,10 @@ def main():
         view.wait_ui()
         notes["page"] = page_facts(view)
         if WINDOWS and mode == "full":
-            notes["windows_focus_at_launch"] = windows_focus(view, host)
+            try:
+                notes["windows_keyboard_at_launch"] = windows_launch_keyboard(view, host)
+            except Exception as error:  # recorded, not gated, until this evidence is reviewed
+                notes["windows_keyboard_at_launch"] = {"error": repr(error)[:300]}
         notes["runtime"] = {k: status.get(k) for k in ("runtime_version", "desktop_version", "profile")}
         try:
             notes["window"] = host.call("geometry")
