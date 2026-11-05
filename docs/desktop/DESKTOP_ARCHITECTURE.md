@@ -122,12 +122,13 @@ risks with acceptance thresholds (DESKTOP_ACCEPTANCE.md P1–P4).
   - a mismatch is an explicit error, and the host never falls back to another binary.
 - **Ownership**:
   - the host records the child's pid and process start time;
-  - on Windows the child runs in a Job Object (kill-on-close), on Unix in its own process group;
+  - as built (corrected 2026-11-05, row 64): the child is not placed in a Job Object or its own process group. The host stops only the pid it started; the processes a run starts (tool programs, stdio MCP servers) are the runtime's children and end with their run: cancelling a run, or the runtime shutting down, drops them, and they are killed on drop. Native lifecycle checks on every target show none outliving a killed host (DESKTOP_FINAL_ACCEPTANCE.md §2);
+  - inside an AppImage the runtime is started without the image's search paths (its entries in PATH, LD_LIBRARY_PATH, PYTHONHOME, PYTHONPATH and the like), so the programs it starts see the person's own environment;
   - the stdin lifeline makes the sidecar exit when the host disappears, so a crashed host leaves no orphan. This replaced the earlier `--parent-pid` polling design in D3a: it needs no polling and no platform process APIs, and it cannot be fooled by PID reuse;
   - the host never discovers or stops any process it did not spawn: no port scans and no name matching.
 - **Shutdown**:
   - app close with active runs shows a dialog listing them, with *Cancel runs and quit* or *Keep window open*;
-  - with no runs, or after cancellation, the host sends SIGTERM (CTRL_BREAK on Windows), waits 5 s, then kills the owned job or group.
+  - with no runs, or after cancellation, the host closes the runtime's lifeline (stdin), waits 5 s, then kills the runtime's pid (as built; no SIGTERM or CTRL_BREAK is sent).
 - **Crash**:
   - an unexpected sidecar exit marks every open run stream `runtime_exited`;
   - the UI shows the last 200 log lines (redacted) and offers *Restart runtime*;
