@@ -125,6 +125,117 @@ fn new_key() -> Result<String, String> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
+/// The environment changes that keep an AppImage's own search paths out of
+/// the runtime and every program it starts. An AppImage's AppRun points
+/// variables such as PYTHONHOME, PYTHONPATH, LD_LIBRARY_PATH and PATH at the
+/// image (`appdir`); a Python MCP server that inherits them cannot start.
+/// Each variable naming a path under `appdir` loses those entries, and is
+/// removed (`None`) when none is left; PATH then gets the standard search
+/// path instead.
+#[cfg(target_os = "linux")]
+fn appimage_env_changes(
+    appdir: &Path,
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Vec<(std::ffi::OsString, Option<String>)> {
+    let under = appdir.to_string_lossy().into_owned();
+    let mut changes = Vec::new();
+    if under.is_empty() {
+        return changes;
+    }
+    for (name, value) in vars {
+        let Some(text) = value.to_str() else {
+            continue;
+        };
+        if !text.contains(under.as_str()) {
+            continue;
+        }
+        let kept: Vec<&str> = text
+            .split(':')
+            .filter(|entry| !entry.is_empty() && !Path::new(entry).starts_with(appdir))
+            .collect();
+        let value = if !kept.is_empty() {
+            Some(kept.join(":"))
+        } else if name == "PATH" {
+            Some("/usr/local/bin:/usr/bin:/bin".to_owned())
+        } else {
+            None
+        };
+        changes.push((name, value));
+    }
+    changes
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod appimage_env {
+    use super::appimage_env_changes;
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    fn vars(list: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        list.iter()
+            .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+            .collect()
+    }
+
+    #[test]
+    fn an_appimage_s_search_paths_do_not_reach_the_runtime() {
+        let changes = appimage_env_changes(
+            Path::new("/tmp/.mount_la"),
+            vars(&[
+                ("PATH", "/tmp/.mount_la/usr/bin/:/usr/local/bin:/usr/bin"),
+                ("PYTHONHOME", "/tmp/.mount_la/usr/"),
+                ("PYTHONPATH", "/tmp/.mount_la/usr/share/pyshared/:"),
+                ("LD_LIBRARY_PATH", "/tmp/.mount_la/usr/lib/:/opt/lib"),
+                ("LANG", "C.UTF-8"),
+            ]),
+        );
+        let find = |wanted: &str| {
+            changes
+                .iter()
+                .find(|(name, _)| name == wanted)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(
+            find("PATH"),
+            Some(Some("/usr/local/bin:/usr/bin".to_owned()))
+        );
+        assert_eq!(find("PYTHONHOME"), Some(None));
+        assert_eq!(find("PYTHONPATH"), Some(None));
+        assert_eq!(find("LD_LIBRARY_PATH"), Some(Some("/opt/lib".to_owned())));
+        assert_eq!(find("LANG"), None);
+    }
+
+    #[test]
+    fn a_path_left_with_nothing_gets_the_standard_search_path() {
+        let changes = appimage_env_changes(
+            Path::new("/tmp/.mount_la"),
+            vars(&[("PATH", "/tmp/.mount_la/usr/bin")]),
+        );
+        assert_eq!(
+            changes,
+            vec![(
+                OsString::from("PATH"),
+                Some("/usr/local/bin:/usr/bin:/bin".to_owned())
+            )]
+        );
+    }
+
+    #[test]
+    fn a_prefix_that_only_looks_alike_is_kept() {
+        let changes = appimage_env_changes(
+            Path::new("/tmp/.mount_la"),
+            vars(&[("PATH", "/tmp/.mount_la/usr/bin:/tmp/.mount_lab/bin")]),
+        );
+        assert_eq!(
+            changes,
+            vec![(
+                OsString::from("PATH"),
+                Some("/tmp/.mount_lab/bin".to_owned())
+            )]
+        );
+    }
+}
+
 /// Start `binary` as an owned runtime for `profile` and wait for its handshake.
 pub fn launch(
     binary: &Path,
@@ -149,6 +260,23 @@ pub fn launch(
         use std::os::windows::process::CommandExt as _;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
+    }
+    // Inside an AppImage, its search paths stay with the host: the runtime
+    // and the programs it starts get the person's own environment.
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(appdir) = std::env::var_os("APPDIR").filter(|dir| !dir.is_empty()) {
+            for (name, value) in appimage_env_changes(Path::new(&appdir), std::env::vars_os()) {
+                match value {
+                    Some(value) => {
+                        command.env(name, value);
+                    }
+                    None => {
+                        command.env_remove(name);
+                    }
+                }
+            }
+        }
     }
     let mut child = command
         .spawn()

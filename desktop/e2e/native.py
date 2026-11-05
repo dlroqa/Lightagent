@@ -302,6 +302,208 @@ $now = [Fg]::GetForegroundWindow()
 '''
 FOREGROUND = []
 
+# Win32 evidence for the keyboard check: which window holds keyboard focus,
+# and real input through SendInput (not SendKeys): a key press, a mouse click
+# at a screen point, and bringing another window forward. Each action prints
+# one `key=value|...` line.
+WINDOWS_INPUT = r'''
+Add-Type @"
+using System; using System.Text; using System.Runtime.InteropServices;
+public static class Wi {
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
+  [StructLayout(LayoutKind.Sequential)] public struct GUITHREADINFO { public int cbSize; public int flags; public IntPtr hwndActive; public IntPtr hwndFocus; public IntPtr hwndCapture; public IntPtr hwndMenuOwner; public IntPtr hwndMoveSize; public IntPtr hwndCaret; public RECT rcCaret; }
+  [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+  [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+  [StructLayout(LayoutKind.Explicit)] public struct INPUTUNION { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
+  [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public INPUTUNION u; }
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint tid, ref GUITHREADINFO info);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string c, string t);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+  [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string c, string t);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr h);
+  public static string FocusContainer(uint host) {
+    IntPtr top = GetForegroundWindow(); uint pid; uint tid = GetWindowThreadProcessId(top, out pid);
+    if (pid != host) return "container=the app is not in front";
+    IntPtr box = FindWindowEx(top, IntPtr.Zero, "WRY_WEBVIEW", null);
+    if (box == IntPtr.Zero) return "container=missing";
+    uint me = GetCurrentThreadId(); bool attached = AttachThreadInput(me, tid, true);
+    SetFocus(box); AttachThreadInput(me, tid, false);
+    return "container=" + (attached ? "focus set" : "input not attached");
+  }
+  public static string Cls(IntPtr h) { var s = new StringBuilder(256); GetClassName(h, s, 256); return s.ToString(); }
+  public static string Chain(IntPtr h) { var parts = new System.Collections.Generic.List<string>(); for (int i = 0; h != IntPtr.Zero && i < 8; i++) { parts.Add(Cls(h)); h = GetParent(h); } return string.Join(" < ", parts); }
+  public static string Probe(uint host) {
+    IntPtr fg = GetForegroundWindow(); uint fgPid; uint tid = GetWindowThreadProcessId(fg, out fgPid);
+    var info = new GUITHREADINFO(); info.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
+    bool ok = GetGUIThreadInfo(tid, ref info); uint focusPid = 0;
+    if (ok && info.hwndFocus != IntPtr.Zero) GetWindowThreadProcessId(info.hwndFocus, out focusPid);
+    return "foreground_class=" + Cls(fg) + "|foreground_is_app=" + (fgPid == host) + "|focus_chain=" + (ok ? Chain(info.hwndFocus) : "unknown") + "|focus_pid=" + focusPid;
+  }
+  static string Send(INPUT[] inputs) { uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT))); return "sent=" + sent + "|error=" + Marshal.GetLastWin32Error(); }
+  public static string Key(ushort vk) { var a = new INPUT(); a.type = 1; a.u.ki.wVk = vk; var b = a; b.u.ki.dwFlags = 2; return Send(new INPUT[] { a, b }); }
+  public static string Click(int x, int y) { SetCursorPos(x, y); var a = new INPUT(); a.type = 0; a.u.mi.dwFlags = 2; var b = a; b.u.mi.dwFlags = 4; return Send(new INPUT[] { a, b }); }
+  public static string Front(string title) { IntPtr h = FindWindow(null, title); if (h == IntPtr.Zero) return "front=missing"; keybd_event(0x12, 0, 0, UIntPtr.Zero); keybd_event(0x12, 0, 2, UIntPtr.Zero); ShowWindow(h, 9); return "front=" + SetForegroundWindow(h); }
+}
+"@
+ACTION
+'''
+
+
+def windows_input(action):
+    """Run one WINDOWS_INPUT action; its key=value answer, or why it failed."""
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", WINDOWS_INPUT.replace("ACTION", action)],
+                             capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as error:
+        return {"error": repr(error)[:200]}
+    lines = [line for line in (out.stdout or "").splitlines() if "=" in line]
+    if out.returncode != 0 or not lines:
+        return {"error": ((out.stderr or "") + (out.stdout or "")).strip()[-300:]}
+    return dict(part.split("=", 1) for part in lines[-1].split("|") if "=" in part)
+
+
+def windows_focus(view, host):
+    """Which window holds Win32 keyboard focus (its class chain and owning
+    process), and whether the page itself has focus."""
+    state = windows_input(f"[Wi]::Probe({host.process.pid})")
+    pid = state.pop("focus_pid", "0")
+    if pid.isdigit() and pid != "0":
+        try:
+            import psutil
+
+            state["focus_process"] = psutil.Process(int(pid)).name()
+        except Exception:
+            state["focus_process"] = "?"
+    ok, value = view.try_js("return { page_has_focus: document.hasFocus(), active: describe(document.activeElement) };", 10)
+    state.update(value if ok and isinstance(value, dict) else {"page": value})
+    return state
+
+
+def windows_tabs(view, presses=3):
+    """Real Tab presses (SendInput), and where focus is in the page after each."""
+    path, sent = [view.js("return describe(document.activeElement);")], []
+    for _ in range(presses):
+        sent.append(windows_input("[Wi]::Key(9)").get("sent", "?"))
+        time.sleep(0.4)
+        path.append(view.js("return describe(document.activeElement);"))
+    return {"sent": sent, "path": path, "moved": len(set(path)) > 1}
+
+
+COMPOSER = 'const box = await need("the composer", () => one("textbox", "Ask Lightagent")); box.focus(); return true;'
+
+
+def windows_stage(view, host):
+    """The composer focused in the page, then where Win32 focus is and real Tab presses."""
+    time.sleep(0.6)
+    view.js(COMPOSER)
+    return {**windows_focus(view, host), "tab": windows_tabs(view)}
+
+
+def windows_away_and_back(host):
+    """Another window brought in front of the app, then the app brought back."""
+    away = subprocess.Popen([sys.executable, "-c",
+                             "import tkinter as t; r = t.Tk(); r.title('la-focus-away'); r.after(30000, r.destroy); r.mainloop()"])
+    try:
+        time.sleep(3)
+        front = windows_input("[Wi]::Front('la-focus-away')")
+        time.sleep(0.6)
+        focus_window(host)
+        return front
+    finally:
+        away.kill()
+
+
+def windows_launch_keyboard(view, host, stages):
+    """Real key presses right after launch: where Win32 focus is, and whether
+    Tab presses sent through SendInput move focus through the page."""
+    stages["launch"] = windows_stage(view, host)
+
+
+def keyboard_mode(out, cli, command, home, results):
+    """Windows (mode "keyboard"): the launch-time keyboard stages on a host of
+    their own, so a stage that disturbs the page cannot affect the full run.
+    Recorded, not gated."""
+    provider = harness.FakeProvider()
+    harness.prepare_home(cli, home, provider)
+    env = dict(os.environ, LIGHTAGENT_DESKTOP_E2E_DRIVER="1",
+               LIGHTAGENT_DESKTOP_E2E_REPORT=os.path.join(out, "report-keyboard.txt"))
+    host = harness.Host(command, env, os.path.join(out, "driver-keyboard.log"))
+    view = View(host, out, "keyboard")
+    stages = results["recorded"].setdefault("windows_keyboard_at_launch", {})
+    try:
+        host.ready()
+        view.wait_ui()
+        windows_launch_keyboard(view, host, stages)
+    except Exception as error:  # recorded: which stage it stopped after
+        stages["stopped"] = repr(error)[:300]
+        view.shot("stopped")
+    finally:
+        host.stop()
+        provider.close()
+    launch = stages.get("launch") or {}
+    check = Checks("windows_keyboard")
+    check.expect("at launch, OS Tab presses (SendInput) move focus through the page's controls",
+                 launch.get("page_has_focus") is True and (launch.get("tab") or {}).get("moved") is True,
+                 (launch.get("tab") or {}).get("path"))
+    results["checks"]["windows_keyboard"] = check.results
+    results["failures"].extend(check.failures)
+
+
+def windows_keyboard(view, host):
+    """Real key presses on Windows in four situations: after the OS brings the
+    window forward; after the host moves keyboard focus into its WebView (the
+    test-only `webview_focus`, the public Webview::set_focus); after another
+    window was in front and this one is brought back; and after a real mouse
+    click on the composer, as a person does."""
+    stages = {}
+    composer = 'const box = await need("the composer", () => one("textbox", "Ask Lightagent")); box.focus(); return true;'
+    view.new_chat()
+    focus_window(host)
+    view.js(composer)
+    stages["activated"] = {**windows_focus(view, host), "tab": windows_tabs(view)}
+    try:
+        host.call("webview_focus")
+        time.sleep(0.6)
+        view.js(composer)
+        stages["webview_focus"] = {**windows_focus(view, host), "tab": windows_tabs(view)}
+    except harness.HostError as error:
+        stages["webview_focus"] = {"error": str(error)}
+    stages["container_focus"] = {"set": windows_input(f"[Wi]::FocusContainer({host.process.pid})"), **windows_stage(view, host)}
+    away = subprocess.Popen([sys.executable, "-c",
+                             "import tkinter as t; r = t.Tk(); r.title('la-focus-away'); r.after(30000, r.destroy); r.mainloop()"])
+    try:
+        time.sleep(3)
+        front = windows_input("[Wi]::Front('la-focus-away')")
+        time.sleep(0.6)
+        elsewhere = windows_focus(view, host)
+        focus_window(host)
+        view.js(composer)
+        stages["returned"] = {"away": {**front, "foreground_class": elsewhere.get("foreground_class"),
+                                       "page_has_focus": elsewhere.get("page_has_focus")},
+                              **windows_focus(view, host), "tab": windows_tabs(view)}
+    finally:
+        away.kill()
+    view.new_chat()
+    focus_window(host)
+    where = view.js('const r = one("textbox", "Ask Lightagent").getBoundingClientRect(); '
+                    'return { x: r.left + r.width / 2, y: r.top + r.height / 2, dpr: devicePixelRatio };')
+    geometry = host.call("geometry")
+    x, y = int(geometry["x"] + where["x"] * where["dpr"]), int(geometry["y"] + where["y"] * where["dpr"])
+    clicked = windows_input(f"[Wi]::Click({x}, {y})")
+    time.sleep(0.6)
+    stages["clicked"] = {"click": clicked, "at": [x, y], **windows_focus(view, host), "tab": windows_tabs(view)}
+    return stages
+
 
 def saved_with(home, marker):
     """The saved conversation whose user message holds `marker`."""
@@ -612,6 +814,13 @@ def scenario_keyboard(view, host, notes):
             "OS key presses reached the window and moved focus" if why is None and moved
             else "OS key presses were sent but focus did not move (the window did not receive them)" if why is None
             else f"OS key presses unavailable on this runner: {why}")
+        if WINDOWS:
+            # Recorded, not gated, until this evidence is reviewed: where Win32
+            # keyboard focus is, and real input (SendInput) in four situations.
+            try:
+                notes["keyboard_windows"] = windows_keyboard(view, host)
+            except Exception as error:
+                notes["keyboard_windows"] = {"error": repr(error)[:300]}
     return check
 
 
@@ -1005,6 +1214,178 @@ def scenario_offline(view, host, home):
     return check
 
 
+# A run's own processes when the app quits or its host dies (mode "lifecycle")
+
+HOLD = "import time; time.sleep(900)"
+
+
+def marked(marker):
+    """Live processes whose command line carries `marker`."""
+    import psutil
+
+    found = []
+    for process in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            carries = marker in " ".join(process.info["cmdline"] or [])
+            if process.pid != os.getpid() and carries and process.status() != psutil.STATUS_ZOMBIE:
+                found.append(process.pid)
+        except psutil.Error:
+            pass
+    return found
+
+
+def live(pids):
+    import psutil
+
+    left = []
+    for pid in pids:
+        try:
+            if psutil.Process(pid).status() != psutil.STATUS_ZOMBIE:
+                left.append(pid)
+        except psutil.Error:
+            pass
+    return left
+
+
+def end_all(pids):
+    import psutil
+
+    for pid in pids:
+        try:
+            psutil.Process(pid).kill()
+        except psutil.Error:
+            pass
+
+
+def lifecycle_config(home, marker):
+    """Terminal tools on, and one stdio MCP server (stubborn_mcp.py) carrying `marker`."""
+    path = os.path.join(home, "config.json")
+    with open(path, encoding="utf-8") as handle:
+        config = json.load(handle)
+    tools = config.setdefault("tools", {})
+    tools["enabled"] = True
+    tools["allow_terminal"] = True
+    tools["terminal_timeout_secs"] = 900
+    config["mcp"] = {"enabled": True, "timeout_secs": 30, "servers": [
+        {"transport": "stdio", "name": "stubborn", "command": sys.executable,
+         "args": [os.path.join(HERE, "stubborn_mcp.py"), f"{marker}-mcp"]}]}
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=2)
+
+
+def approve_pending(host, run):
+    status, listing = host.fetch("GET", f"{API}/approvals")
+    rows = listing.get("approvals", []) if isinstance(listing, dict) else []
+    if status == 200 and any(row.get("run") == run and row.get("pending") for row in rows):
+        status, _ = host.fetch("POST", f"{API}/approvals/{run}", {"approve": True})
+        return status in (200, 202, 204)
+    return False
+
+
+def working_run(host, scenario, marker):
+    """A run whose approved tool call is a real program, still running, with
+    the MCP server the run started; waits until both run."""
+    session = host.new_session()
+    run = host.start_run(session, f"[e2e:{scenario}] Run the long program.")
+    approved = bool(harness.wait_until(lambda: approve_pending(host, run), timeout=90, every=0.5))
+    tool = harness.wait_until(lambda: marked(f"{marker}-tool"), timeout=60, every=0.5) or []
+    mcp = marked(f"{marker}-mcp")
+    return {"approved": approved, "tool": tool, "mcp": mcp}
+
+
+def gone_within(pids, seconds):
+    return bool(harness.wait_until(lambda: not live(pids), timeout=seconds, every=0.25))
+
+
+def exits_within(host, seconds):
+    try:
+        host.process.wait(timeout=seconds)
+        return True
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def lifecycle(out, cli, command, home, results):
+    """Idle quit, Stop runs and quit, and a killed host: the runtime and every
+    process a run started (a real program the run's approved tool call left
+    running, and the run's MCP server, which ignores the end of its input)
+    must end with the app."""
+    notes = results["recorded"]
+    provider = harness.FakeProvider()
+    harness.prepare_home(cli, home, provider)
+
+    def program(marker):
+        def script(p, turn, index):
+            if turn == 0:
+                return [("tool", "terminal.run", {"command": sys.executable, "args": ["-c", HOLD, f"{marker}-tool"]}),
+                        ("finish", "tool_calls")]
+            return [("text", "The program ended."), ("finish", "stop")]
+        return script
+
+    def started(check, work):
+        check.expect("a run works: its approved program and its MCP server run",
+                     work["approved"] and work["tool"] and work["mcp"],
+                     {"approved": work["approved"], "programs": len(work["tool"]), "mcp_servers": len(work["mcp"])})
+
+    def idle_quit(host, view, check, marker):
+        runtime = [p.pid for p in harness.runtimes(host.process.pid)]
+        host.send("close")
+        check.expect("closing the window with nothing working ends the app", exits_within(host, 30))
+        check.expect("its runtime exits with it", bool(runtime) and gone_within(runtime, 15), live(runtime))
+
+    def quit_with_work(host, view, check, marker):
+        runtime = [p.pid for p in harness.runtimes(host.process.pid)]
+        work = working_run(host, "native-lifecycle-quit", marker)
+        started(check, work)
+        host.call("close")
+        asked = view.js('return !!(await until(() => one("alertdialog", "Runs are still working"), 20000));', 30)
+        host.send("eval", script=PRELUDE + '\npress(one("button", "Stop runs and quit")); return true;', timeout_ms=5000)
+        check.expect("closing with a run working asks first", asked)
+        check.expect("Stop runs and quit ends the app", exits_within(host, 45))
+        check.expect("its runtime exits", gone_within(runtime, 15), live(runtime))
+        check.expect("no program or MCP server the run started is left running", gone_within(work["tool"] + work["mcp"], 20),
+                     {"programs": len(live(work["tool"])), "mcp_servers": len(live(work["mcp"]))})
+
+    def host_crash(host, view, check, marker):
+        runtime = [p.pid for p in harness.runtimes(host.process.pid)]
+        work = working_run(host, "native-lifecycle-crash", marker)
+        started(check, work)
+        host.process.kill()
+        check.expect("the host is gone (killed)", exits_within(host, 30))
+        check.expect("its runtime exits after its host", gone_within(runtime, 20), live(runtime))
+        check.expect("no program or MCP server the run started outlives the runtime", gone_within(work["tool"] + work["mcp"], 20),
+                     {"programs": len(live(work["tool"])), "mcp_servers": len(live(work["mcp"]))})
+
+    cases = [("idle_quit", idle_quit, None), ("quit_with_work", quit_with_work, "native-lifecycle-quit"),
+             ("host_crash", host_crash, "native-lifecycle-crash")]
+    for name, case, scenario in cases:
+        marker = f"la-lifecycle-{name.replace('_', '-')}-{os.getpid()}"
+        lifecycle_config(home, marker)
+        if scenario:
+            provider.scripts[scenario] = program(marker)
+        env = dict(os.environ, LIGHTAGENT_DESKTOP_E2E_DRIVER="1",
+                   LIGHTAGENT_DESKTOP_E2E_REPORT=os.path.join(out, f"report-lifecycle-{name}.txt"))
+        host = harness.Host(command, env, os.path.join(out, f"driver-lifecycle-{name}.log"))
+        view = View(host, out, f"lifecycle-{name}")
+        check = Checks(f"lifecycle_{name}")
+        try:
+            host.ready()
+            view.wait_ui()
+            case(host, view, check, marker)
+        except Exception as error:  # a broken case is a failure; the others still run
+            check.expect("the case ran to the end", False, repr(error)[:300])
+            view.shot("failed")
+        finally:
+            left = marked(marker)
+            if left:
+                notes[f"lifecycle_{name}_cleanup"] = f"{len(left)} process(es) carrying the marker were ended after the checks"
+            end_all(left)
+            host.stop()
+        results["checks"][name] = check.results
+        results["failures"].extend(check.failures)
+    provider.close()
+
+
 def page_facts(view):
     return view.js("""return { origin: location.origin, protocol: location.protocol, user_agent: navigator.userAgent,
       device_pixel_ratio: devicePixelRatio, speech: "speechSynthesis" in window, share: typeof navigator.share === "function",
@@ -1034,6 +1415,12 @@ def main():
                "runner": {"platform": platform.platform(), "machine": platform.machine(),
                           "image": f"{os.environ.get('ImageOS', '?')} {os.environ.get('ImageVersion', '?')}"}}
     failures, notes = results["failures"], results["recorded"]
+    if mode in ("lifecycle", "keyboard"):
+        (lifecycle if mode == "lifecycle" else keyboard_mode)(out, cli, command, home, results)
+        with open(os.path.join(out, f"native-{mode}.json"), "w", encoding="utf-8") as handle:
+            json.dump(results, handle, indent=1)
+        print(json.dumps({"failures": failures}, indent=1))
+        return 1 if failures else 0
     provider = harness.FakeProvider()
     scripts(provider)
     if mode == "offline":
@@ -1063,6 +1450,8 @@ def main():
         status = host.ready()
         view.wait_ui()
         notes["page"] = page_facts(view)
+        if WINDOWS and mode == "full":
+            notes["windows_focus_at_launch"] = windows_focus(view, host)
         notes["runtime"] = {k: status.get(k) for k in ("runtime_version", "desktop_version", "profile")}
         try:
             notes["window"] = host.call("geometry")
@@ -1148,7 +1537,12 @@ def summary(out):
         for name, value in (data.get("recorded") or {}).items():
             if name.startswith("axe"):
                 value = {k: [f"{v['id']}:{v['impact']}" for v in vs] for k, vs in value.items()} if isinstance(value, dict) else [f"{v['id']}:{v['impact']}" for v in value]
-            lines.append(f"  - recorded {name}: {json.dumps(value)[:400]}")
+            text = json.dumps(value)
+            if isinstance(value, dict) and len(text) > 400:
+                for key, part in value.items():
+                    lines.append(f"  - recorded {name}.{key}: {json.dumps(part)[:700]}")
+            else:
+                lines.append(f"  - recorded {name}: {text[:400]}")
         for failure in failed[:25]:
             lines.append(f"  - FAILED {failure[:300]}")
     print("\n".join(lines) or "- no native reports")

@@ -99,6 +99,9 @@ enum Op {
     Geometry,
     /// Bring the window to the front with keyboard focus.
     Focus,
+    /// Move keyboard focus into the page, through the public
+    /// `Webview::set_focus` (the WebView's own focus call).
+    WebviewFocus,
     /// Resize the window (logical pixels).
     Resize {
         width: f64,
@@ -232,6 +235,12 @@ async fn run(host: &Arc<Host>, op: Op) -> Result<Value, String> {
             let _ = window.unminimize();
             window.show().map_err(|error| error.to_string())?;
             window.set_focus().map_err(|error| error.to_string())?;
+            Value::Null
+        }
+        Op::WebviewFocus => {
+            let window = main_window()?;
+            let webview: &tauri::Webview = window.as_ref();
+            webview.set_focus().map_err(|error| error.to_string())?;
             Value::Null
         }
         Op::Resize { width, height } => {
