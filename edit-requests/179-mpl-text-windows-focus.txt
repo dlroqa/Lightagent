@@ -1,0 +1,172 @@
+=== base 12d14fef0f9d2a13c570970e5038686f106410d0
+=== message
+Desktop acceptance: MPL text for crates published without it; Windows focus at launch
+
+- desktop-sbom.py: selectors 0.38.0 is published on crates.io without a
+  license file (found by the notices gate on every target). An MPL-2.0
+  component without its own license file now gets the full MPL-2.0 text
+  from another MPL-2.0 component's published file, and the notices say
+  so; the gate fails only when no MPL-2.0 text is available at all. The
+  MPL source set adds MPL-2.0.txt and names the archives without one.
+- native.py (Windows, recorded): real Tab presses at launch, while the
+  page holds focus; after another window was in front and this one is
+  brought back; and after a direct Win32 SetFocus on the WebView's
+  container window (WRY_WEBVIEW), the mechanism a host fix would use.
+  The post-scenario probe gains the same container stage.
+=== replace scripts/desktop-sbom.py
+--- find
+    text += ["== Components ==", ""]
+    first_seen, without = {}, []
+--- with
+    text += ["== Components ==", ""]
+    first_seen, without = {}, []
+    # The MPL-2.0 text for an MPL-2.0 component published without its own
+    # license file: the same license, from another component's published file.
+    mpl_text_from = next((f"{c['name']} {c['version']} ({name})" for c in mpl
+                          for name, body in license_texts(c["directory"], c["license_file"])
+                          if "Mozilla Public License Version 2.0" in body), None)
+=== replace scripts/desktop-sbom.py
+--- find
+        if not texts:
+            without.append(f"{c['name']}@{c['version']}")
+            text.append("   (published without a license file; its license is the one named above)")
+--- with
+        if not texts:
+            without.append(f"{c['name']}@{c['version']}")
+            if c in mpl and mpl_text_from:
+                text.append(f"   (its published archive has no license file; the MPL-2.0 text it is licensed under is the one in {mpl_text_from})")
+            else:
+                text.append("   (published without a license file; its license is the one named above)")
+=== replace scripts/desktop-sbom.py
+--- find
+    for c in mpl:
+        if f"{c['name']}@{c['version']}" in without:
+            problems.append(f"{c['name']}@{c['version']} (MPL-2.0) is published without its license file")
+--- with
+    if mpl and not mpl_text_from:
+        problems.append("no MPL-2.0 component's published files hold the MPL-2.0 text")
+=== replace scripts/desktop-sbom.py
+--- find
+                     f"license file {'MISSING' if ident in without else 'included'}")
+--- with
+                     + ("license file not in its published archive; the MPL-2.0 text is included from " + str(mpl_text_from)
+                        if ident in without else "license file included"))
+=== replace scripts/desktop-sbom.py
+--- find
+        lines.append(f"- MPL-2.0 {ident}{' (build time only)' if c['build_time_only'] else ''}: {where}; "
+--- with
+        lines.append(f"- MPL-2.0 {ident}{' (build time only)' if c['build_time_only'] else ''}: {where}; "
+=== replace scripts/desktop-sbom.py
+--- find
+                if package.get("source") and MPL.search(package.get("license") or ""):
+                    wanted[(package["name"], package["version"])] = package["source"]
+--- with
+                if package.get("source") and MPL.search(package.get("license") or ""):
+                    wanted[(package["name"], package["version"])] = package["source"]
+                    folders[(package["name"], package["version"])] = (os.path.dirname(package["manifest_path"]),
+                                                                      package.get("license_file"))
+=== replace scripts/desktop-sbom.py
+--- find
+    sums = lock_checksums(root)
+    wanted = {}
+--- with
+    sums = lock_checksums(root)
+    wanted, folders = {}, {}
+=== replace scripts/desktop-sbom.py
+--- find
+    with open(os.path.join(out, "README.txt"), "w", encoding="utf-8", newline="\n") as handle:
+        handle.write("The Source Code Form of the MPL-2.0 components in Lightagent Desktop: each archive is the\n"
+                     "crate exactly as published on crates.io (its SHA-256 equals the checksum Cargo.lock pins),\n"
+                     "used unmodified. Each archive holds the component's license text.\n")
+--- with
+    bare = sorted(f"{name}-{version}.crate" for (name, version), (folder, license_file) in folders.items()
+                  if not license_texts(folder, license_file))
+    mpl_text = next((body for folder, license_file in folders.values() for _name, body in license_texts(folder, license_file)
+                     if "Mozilla Public License Version 2.0" in body), None)
+    if mpl_text:
+        with open(os.path.join(out, "MPL-2.0.txt"), "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(mpl_text + "\n")
+    elif wanted:
+        problems.append("no MPL-2.0 archive holds the MPL-2.0 text")
+    with open(os.path.join(out, "README.txt"), "w", encoding="utf-8", newline="\n") as handle:
+        handle.write("The Source Code Form of the MPL-2.0 components in Lightagent Desktop: each archive is the\n"
+                     "crate exactly as published on crates.io (its SHA-256 equals the checksum Cargo.lock pins),\n"
+                     "used unmodified. MPL-2.0.txt is the license text.\n"
+                     + (f"Published without a license file of their own: {', '.join(bare)}.\n" if bare else ""))
+    if bare:
+        lines.append(f"- published without a license file of their own (MPL-2.0.txt added beside them): {', '.join(bare)}")
+=== replace desktop/e2e/native.py
+--- find
+  [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
+--- with
+  [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string c, string t);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr h);
+  public static string FocusContainer(uint host) {
+    IntPtr top = GetForegroundWindow(); uint pid; uint tid = GetWindowThreadProcessId(top, out pid);
+    if (pid != host) return "container=the app is not in front";
+    IntPtr box = FindWindowEx(top, IntPtr.Zero, "WRY_WEBVIEW", null);
+    if (box == IntPtr.Zero) return "container=missing";
+    uint me = GetCurrentThreadId(); bool attached = AttachThreadInput(me, tid, true);
+    SetFocus(box); AttachThreadInput(me, tid, false);
+    return "container=" + (attached ? "focus set" : "input not attached");
+  }
+=== replace desktop/e2e/native.py
+--- find
+def windows_keyboard(view, host):
+--- with
+COMPOSER = 'const box = await need("the composer", () => one("textbox", "Ask Lightagent")); box.focus(); return true;'
+
+
+def windows_stage(view, host):
+    """The composer focused in the page, then where Win32 focus is and real Tab presses."""
+    time.sleep(0.6)
+    view.js(COMPOSER)
+    return {**windows_focus(view, host), "tab": windows_tabs(view)}
+
+
+def windows_away_and_back(host):
+    """Another window brought in front of the app, then the app brought back."""
+    away = subprocess.Popen([sys.executable, "-c",
+                             "import tkinter as t; r = t.Tk(); r.title('la-focus-away'); r.after(30000, r.destroy); r.mainloop()"])
+    try:
+        time.sleep(3)
+        front = windows_input("[Wi]::Front('la-focus-away')")
+        time.sleep(0.6)
+        focus_window(host)
+        return front
+    finally:
+        away.kill()
+
+
+def windows_launch_keyboard(view, host):
+    """Real key presses right after launch, while the page holds focus; after
+    another window was in front; and, if focus did not come back, after a
+    direct Win32 SetFocus on the WebView's container window."""
+    stages = {"launch": windows_stage(view, host)}
+    stages["away_and_back"] = {"away": windows_away_and_back(host), **windows_stage(view, host)}
+    if not stages["away_and_back"]["tab"]["moved"]:
+        stages["container_focus"] = {"set": windows_input(f"[Wi]::FocusContainer({host.process.pid})"), **windows_stage(view, host)}
+    return stages
+
+
+def windows_keyboard(view, host):
+=== replace desktop/e2e/native.py
+--- find
+    except harness.HostError as error:
+        stages["webview_focus"] = {"error": str(error)}
+--- with
+    except harness.HostError as error:
+        stages["webview_focus"] = {"error": str(error)}
+    stages["container_focus"] = {"set": windows_input(f"[Wi]::FocusContainer({host.process.pid})"), **windows_stage(view, host)}
+=== replace desktop/e2e/native.py
+--- find
+            notes["windows_focus_at_launch"] = windows_focus(view, host)
+--- with
+            try:
+                notes["windows_keyboard_at_launch"] = windows_launch_keyboard(view, host)
+            except Exception as error:  # recorded, not gated, until this evidence is reviewed
+                notes["windows_keyboard_at_launch"] = {"error": repr(error)[:300]}
+=== end
