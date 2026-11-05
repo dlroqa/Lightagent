@@ -1,0 +1,15 @@
+=== base 1affb618c3b7255bf8930fc9263cc7725bd9eca8
+=== message
+DESKTOP_LICENSES.md: name only the notices locations the checks read
+
+The .deb and AppImage checks find the installed notices by name among the
+package's files and compare them with the generated ones; they do not
+record a folder, so none is claimed for them.
+=== replace docs/desktop/DESKTOP_LICENSES.md
+--- find
+| .deb | under `/usr/lib/Lightagent/` | yes |
+| AppImage | inside the image (`usr/lib/Lightagent/`) | yes |
+--- with
+| .deb | among the package's files (`dpkg -L`), found by name | yes |
+| AppImage | inside the image (`--appimage-extract`), found by name | yes |
+=== end
