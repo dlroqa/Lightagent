@@ -108,9 +108,9 @@ section, no level-one heading on the chat screen).
 | macOS arm64 | .dmg | app copied to /Applications | fresh home | removed | not signed | 11.0 |
 
 SHA-256 of each installer is in each shell job's summary and artifact
-(`SHA256SUMS-<target>.txt`). The AppImage's orphan check is recorded, not
-gated: run.py ends the AppImage's wrapper, not the host, which keeps running
-by design; the .deb launch shows the host's lifeline.
+(`SHA256SUMS-<target>.txt`). The AppImage's own lifecycle (its actual host
+closed and killed, with a run's MCP server) is gated since row 64; see
+DESKTOP_FINAL_ACCEPTANCE.md §2.
 
 Supply chain (job "desktop supply chain"): per target a CycloneDX 1.5 SBOM
 and a license inventory of the crates the host and the bundled runtime link
@@ -125,8 +125,10 @@ to 9). Now: Cargo.lock 0, desktop/Cargo.lock 0, the UI 0; warnings only
 
 ## Gaps, stated plainly
 
-- Windows: OS key presses do not reach the page (the window is foreground);
-  keyboard use there rests on the browser tier and the page's own handlers.
+- Windows (updated at row 64): OS key presses do reach the page; real Tab
+  presses move focus in WebView2 at launch (gated). Not verified: focus
+  returning to the page after the Windows share flyout
+  (DESKTOP_FINAL_ACCEPTANCE.md §1).
 - A second user account is used only on Linux; macOS and Windows launch as the
   runner account (macOS with a fresh home). Windows resolves the app's data
   folder through the known-folder API, so it is the runner's.

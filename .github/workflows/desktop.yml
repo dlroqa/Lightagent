@@ -192,7 +192,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf file xvfb imagemagick
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf file xvfb imagemagick xdotool
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
         with:
@@ -221,11 +221,21 @@ jobs:
           mkdir -p desktop/src-tauri/binaries
           cp "target/release/lightagent$ext" "desktop/src-tauri/binaries/lightagent-sidecar-$triple$ext"
           (cd desktop && npx --yes "$TAURI_CLI" icon ../icon/LightagentLogo.png -o src-tauri/icons)
+      - name: Third-party notices for this target (bundled into every package)
+        run: |
+          set -euo pipefail
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          meta="$RUNNER_TEMP/notices-metadata"; mkdir -p "$meta"
+          cargo metadata --locked --format-version 1 --filter-platform "$triple" > "$meta/root-$triple.json"
+          cargo metadata --locked --format-version 1 --filter-platform "$triple" --manifest-path desktop/Cargo.toml > "$meta/desktop-$triple.json"
+          python -I scripts/desktop-sbom.py --notices "$meta" "$triple" frontend desktop/src-tauri/notices . | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Build and bundle
         working-directory: desktop
         run: |
-          config='{}'
-          [ -n "${{ matrix.macos_min }}" ] && config="{\"bundle\":{\"macOS\":{\"minimumSystemVersion\":\"${{ matrix.macos_min }}\"}}}"
+          # The notices generated above ship beside the app in every package.
+          resources='"resources":{"notices/THIRD_PARTY_NOTICES.txt":"THIRD_PARTY_NOTICES.txt","notices/LICENSE.txt":"LICENSE.txt"}'
+          config="{\"bundle\":{$resources}}"
+          [ -n "${{ matrix.macos_min }}" ] && config="{\"bundle\":{$resources,\"macOS\":{\"minimumSystemVersion\":\"${{ matrix.macos_min }}\"}}}"
           start=$(date +%s)
           # hdiutil on hosted macOS images intermittently fails with "Resource
           # busy" (D3b run 41003067980). Only that exact failure is retried,
@@ -363,6 +373,17 @@ jobs:
           done
       - name: SBOM and license inventory per target
         run: python -I scripts/desktop-sbom.py "$RUNNER_TEMP/supply-chain/metadata" frontend "$RUNNER_TEMP/supply-chain" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Third-party notices per target, and the MPL-2.0 source archives
+        if: success() || failure()
+        run: |
+          set -euo pipefail
+          for t in x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc x86_64-unknown-linux-gnu; do
+            python -I scripts/desktop-sbom.py --notices "$RUNNER_TEMP/supply-chain/metadata" "$t" frontend "$RUNNER_TEMP/supply-chain/notices-$t" . | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          python -I scripts/desktop-sbom.py --mpl-sources "$RUNNER_TEMP/supply-chain/metadata" "$RUNNER_TEMP/supply-chain/mpl-sources" . | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Where the reviewed advisories' code is reached (exact versions, call sites)
+        if: success() || failure()
+        run: python -I scripts/desktop-sbom.py --advisory-paths "$RUNNER_TEMP/supply-chain/metadata" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Known vulnerabilities in the crates (cargo audit, both lockfiles)
         if: success() || failure()
         run: |
@@ -540,6 +561,12 @@ jobs:
           status=0
           LIGHTAGENT_HOME="$RUNNER_TEMP/native-home" "${wrap[@]}" python desktop/e2e/native.py "$out" "$cli" full -- "$app" || status=1
           LIGHTAGENT_HOME="$RUNNER_TEMP/offline-home" "${wrap[@]}" python desktop/e2e/native.py "$out/offline" "$cli" offline -- "$app" || status=1
+          # Quit and a killed host, with a run's own processes (a real program and an MCP server).
+          LIGHTAGENT_HOME="$RUNNER_TEMP/lifecycle-home" "${wrap[@]}" python desktop/e2e/native.py "$out/lifecycle" "$cli" lifecycle -- "$app" || status=1
+          # Windows: OS key presses reach the WebView2 page at launch, on a host of its own.
+          if [ "$RUNNER_OS" = Windows ]; then
+            LIGHTAGENT_HOME="$RUNNER_TEMP/keyboard-home" python desktop/e2e/native.py "$out/keyboard" "$cli" keyboard -- "$app" || status=1
+          fi
           exit $status
       - name: Startup with no network at all (Linux network namespace)
         if: runner.os == 'Linux' && (success() || failure()) && steps.build.outcome == 'success'

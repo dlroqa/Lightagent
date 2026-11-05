@@ -2084,3 +2084,19 @@ Heads and the merge strategy: [DESKTOP_MERGE_ORDER.md](DESKTOP_MERGE_ORDER.md) r
 | 2026-11-04 | D8c remote mode (host TLS via the source-edit `=== lock` directive; 32 crates added, none removed); D8a-D8c all green, 75 native checks per target | `71a929c` | desktop https://github.com/dlroqa/Lightagent/actions/runs/41847409624, check https://github.com/dlroqa/Lightagent/actions/runs/41847409491 |
 | 2026-11-04 | D8d browser keyboard and axe | `248e1db` | check https://github.com/dlroqa/Lightagent/actions/runs/41847413678 |
 | 2026-11-04 | D9 installers and supply chain; 15 advisories in Cargo.lock updated (`=== update`) | `cf1b2b3` | check https://github.com/dlroqa/Lightagent/actions/runs/41848860574, desktop https://github.com/dlroqa/Lightagent/actions/runs/41848860903 |
+
+## Row 64 — final acceptance (2026-11-05, owner `7cd9d8a9`)
+
+https://github.com/dlroqa/Lightagent/pull/162, `desktop/d11-acceptance`,
+stacked on row 63. The results and what stays unverified:
+[DESKTOP_FINAL_ACCEPTANCE.md](DESKTOP_FINAL_ACCEPTANCE.md); licenses:
+[DESKTOP_LICENSES.md](DESKTOP_LICENSES.md); advisories:
+[DESKTOP_ADVISORIES.md](DESKTOP_ADVISORIES.md). Parity 222/222, unchanged.
+
+| Date | Step | Commit | Evidence |
+|---|---|---|---|
+| 2026-11-05 | Evidence harness (178): Win32 focus probe, lifecycle mode, AppImage lifecycle, user data, notices, MPL sources, advisory paths, tokio 1.54.1 | `12d14fe` | desktop https://github.com/dlroqa/Lightagent/actions/runs/42024652486: native and lifecycle green on 4 targets; the notices gate found selectors published without a license file |
+| 2026-11-05 | MPL text for it (179) | `6f9988f` | desktop https://github.com/dlroqa/Lightagent/actions/runs/42028198409: data unchanged on every installer; the vault check method wrong (403 from a keyed serve) |
+| 2026-11-05 | Windows keyboard on a host of its own (180) | `71f5e21` | desktop https://github.com/dlroqa/Lightagent/actions/runs/42030840705: OS Tab moves focus at launch |
+| 2026-11-05 | Windows keyboard gated, vault via the CLI, AppImage MCP trace (181) | `3739abb` | desktop https://github.com/dlroqa/Lightagent/actions/runs/42032516273: the AppImage's environment broke a Python MCP server |
+| 2026-11-05 | Fix: the AppImage's search paths kept out of the runtime (182) | `4e940fb` | check https://github.com/dlroqa/Lightagent/actions/runs/42034765893, desktop https://github.com/dlroqa/Lightagent/actions/runs/42034766013, jev https://github.com/dlroqa/Lightagent/actions/runs/42034765887, subagents https://github.com/dlroqa/Lightagent/actions/runs/42034765932: all green |

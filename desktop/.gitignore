@@ -4,3 +4,5 @@
 # The sidecar binary is built and staged on the runner, never committed.
 /src-tauri/binaries
 /src-tauri/gen
+# Third-party notices, generated on the runner for each package (desktop.yml).
+/src-tauri/notices

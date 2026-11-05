@@ -76,7 +76,8 @@ tree are recorded here.
 | 60 | D8c remote mode | https://github.com/dlroqa/Lightagent/pull/157 | `desktop/d8c-remote-mode` | `desktop/d8b-secret-input` (via merge commits) | `71a929c` | `71a929c` |
 | 61 | D8d keyboard and axe in the browser | https://github.com/dlroqa/Lightagent/pull/159 | `desktop/d8d-accessibility` | `desktop/d8c-remote-mode` (via merge commit) | `248e1db` | see DESKTOP_D8_D9_REPORT.md |
 | 62 | D9 installers and supply chain (and the runtime's advisory updates) | https://github.com/dlroqa/Lightagent/pull/158 | `desktop/d9-installers` | `desktop/d8d-accessibility` (via merge commit) | `cf1b2b3` | see DESKTOP_D8_D9_REPORT.md |
-| 63 | D10 review: the last rows, the report and this merge strategy | opened with this commit | `desktop/d10-review` | `desktop/d9-installers` | this commit | — |
+| 63 | D10 review: the last rows, the report and this merge strategy | https://github.com/dlroqa/Lightagent/pull/160 | `desktop/d10-review` | `desktop/d9-installers` | `a19f0d9` | `a19f0d9` |
+| 64 | Final acceptance: Windows OS keys, lifecycle with a run's processes, the AppImage's environment (fix), user data across reinstall and uninstall, notices and MPL sources, reviewed advisories, tokio 1.54.1 | https://github.com/dlroqa/Lightagent/pull/162 | `desktop/d11-acceptance` | `desktop/d10-review` (`a19f0d9`) | `4e940fb` (code) | `4e940fb`; see DESKTOP_FINAL_ACCEPTANCE.md |
 
 **Outside the stack: #147** (`fix/broker-queue-wait`, base `master`): the
 broker's separate queue and run waits. It changes merged subagents code
@@ -99,7 +100,7 @@ be re-validated, and master would still pass through each of them. Instead:
    It changes merged subagents code and its workflow, which the stack does
    not touch.
 2. Merge one integration branch into `master` with a single merge commit
-   (never a fast-forward, never a squash): the final stack head (row 63)
+   (never a fast-forward, never a squash): the final stack head (row 64)
    with #147 merged in. Its combined tree, the exact tree `master` would
    get, is validated beforehand on all four platforms (check, desktop, Jev
    evaluation, subagents) through a draft pull request into `master` that is
