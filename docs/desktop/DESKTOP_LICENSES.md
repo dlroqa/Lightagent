@@ -66,8 +66,8 @@ to the generated ones:
 
 | Package | Location of the installed notices | Verified |
 |---|---|---|
-| .deb | under `/usr/lib/Lightagent/` | yes |
-| AppImage | inside the image (`usr/lib/Lightagent/`) | yes |
+| .deb | among the package's files (`dpkg -L`), found by name | yes |
+| AppImage | inside the image (`--appimage-extract`), found by name | yes |
 | .dmg (arm64, x64) | `Lightagent.app/Contents/Resources/` | yes |
 | NSIS, MSI | the installation folder, beside the app | yes |
 
