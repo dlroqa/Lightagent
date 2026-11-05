@@ -423,15 +423,45 @@ def windows_away_and_back(host):
         away.kill()
 
 
-def windows_launch_keyboard(view, host):
+def windows_launch_keyboard(view, host, stages):
     """Real key presses right after launch, while the page holds focus; after
-    another window was in front; and, if focus did not come back, after a
-    direct Win32 SetFocus on the WebView's container window."""
-    stages = {"launch": windows_stage(view, host)}
+    another window was in front and this one is brought back; after the host
+    moves focus into its WebView (Webview::set_focus); and after a direct
+    Win32 SetFocus on the WebView's container window. Each stage is recorded
+    as soon as it ends: a stage that leaves the page unable to answer is the
+    one after the last recorded."""
+    stages["launch"] = windows_stage(view, host)
     stages["away_and_back"] = {"away": windows_away_and_back(host), **windows_stage(view, host)}
-    if not stages["away_and_back"]["tab"]["moved"]:
-        stages["container_focus"] = {"set": windows_input(f"[Wi]::FocusContainer({host.process.pid})"), **windows_stage(view, host)}
-    return stages
+    try:
+        host.call("webview_focus")
+        stages["webview_focus"] = windows_stage(view, host)
+    except harness.HostError as error:
+        stages["webview_focus"] = {"error": str(error)}
+    stages["container_focus_set"] = windows_input(f"[Wi]::FocusContainer({host.process.pid})")
+    stages["container_focus"] = windows_stage(view, host)
+
+
+def keyboard_mode(out, cli, command, home, results):
+    """Windows (mode "keyboard"): the launch-time keyboard stages on a host of
+    their own, so a stage that disturbs the page cannot affect the full run.
+    Recorded, not gated."""
+    provider = harness.FakeProvider()
+    harness.prepare_home(cli, home, provider)
+    env = dict(os.environ, LIGHTAGENT_DESKTOP_E2E_DRIVER="1",
+               LIGHTAGENT_DESKTOP_E2E_REPORT=os.path.join(out, "report-keyboard.txt"))
+    host = harness.Host(command, env, os.path.join(out, "driver-keyboard.log"))
+    view = View(host, out, "keyboard")
+    stages = results["recorded"].setdefault("windows_keyboard_at_launch", {})
+    try:
+        host.ready()
+        view.wait_ui()
+        windows_launch_keyboard(view, host, stages)
+    except Exception as error:  # recorded: which stage it stopped after
+        stages["stopped"] = repr(error)[:300]
+        view.shot("stopped")
+    finally:
+        host.stop()
+        provider.close()
 
 
 def windows_keyboard(view, host):
@@ -1390,9 +1420,9 @@ def main():
                "runner": {"platform": platform.platform(), "machine": platform.machine(),
                           "image": f"{os.environ.get('ImageOS', '?')} {os.environ.get('ImageVersion', '?')}"}}
     failures, notes = results["failures"], results["recorded"]
-    if mode == "lifecycle":
-        lifecycle(out, cli, command, home, results)
-        with open(os.path.join(out, "native-lifecycle.json"), "w", encoding="utf-8") as handle:
+    if mode in ("lifecycle", "keyboard"):
+        (lifecycle if mode == "lifecycle" else keyboard_mode)(out, cli, command, home, results)
+        with open(os.path.join(out, f"native-{mode}.json"), "w", encoding="utf-8") as handle:
             json.dump(results, handle, indent=1)
         print(json.dumps({"failures": failures}, indent=1))
         return 1 if failures else 0
@@ -1426,10 +1456,7 @@ def main():
         view.wait_ui()
         notes["page"] = page_facts(view)
         if WINDOWS and mode == "full":
-            try:
-                notes["windows_keyboard_at_launch"] = windows_launch_keyboard(view, host)
-            except Exception as error:  # recorded, not gated, until this evidence is reviewed
-                notes["windows_keyboard_at_launch"] = {"error": repr(error)[:300]}
+            notes["windows_focus_at_launch"] = windows_focus(view, host)
         notes["runtime"] = {k: status.get(k) for k in ("runtime_version", "desktop_version", "profile")}
         try:
             notes["window"] = host.call("geometry")

@@ -563,6 +563,10 @@ jobs:
           LIGHTAGENT_HOME="$RUNNER_TEMP/offline-home" "${wrap[@]}" python desktop/e2e/native.py "$out/offline" "$cli" offline -- "$app" || status=1
           # Quit and a killed host, with a run's own processes (a real program and an MCP server).
           LIGHTAGENT_HOME="$RUNNER_TEMP/lifecycle-home" "${wrap[@]}" python desktop/e2e/native.py "$out/lifecycle" "$cli" lifecycle -- "$app" || status=1
+          # Windows keyboard focus at launch, on a host of its own (recorded, not gated).
+          if [ "$RUNNER_OS" = Windows ]; then
+            LIGHTAGENT_HOME="$RUNNER_TEMP/keyboard-home" python desktop/e2e/native.py "$out/keyboard" "$cli" keyboard -- "$app" || true
+          fi
           exit $status
       - name: Startup with no network at all (Linux network namespace)
         if: runner.os == 'Linux' && (success() || failure()) && steps.build.outcome == 'success'

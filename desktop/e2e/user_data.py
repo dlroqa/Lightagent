@@ -275,7 +275,7 @@ def verify(cli, baseline_path, key, description, result_path):
     with open(result_path, "w", encoding="utf-8") as handle:
         json.dump(result, handle, indent=1)
     print(json.dumps({"key": key, "ok": ok, "missing": len(missing), "changed": len(changed),
-                      "failed": [name for name, c in checks.items() if not c["ok"]]}))
+                      "failed": {name: c["seen"] for name, c in checks.items() if not c["ok"]}}))
     return 0 if ok else 1
 
 

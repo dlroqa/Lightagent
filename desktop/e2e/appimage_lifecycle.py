@@ -249,6 +249,7 @@ def configure(cli, home, provider, marker):
     path = os.path.join(home, "config.json")
     with open(path, encoding="utf-8") as handle:
         config = json.load(handle)
+    config.setdefault("tools", {})["enabled"] = True
     config["mcp"] = {"enabled": True, "timeout_secs": 30, "servers": [
         {"transport": "stdio", "name": "stubborn", "command": sys.executable, "args": [FIXTURE, marker]}]}
     with open(path, "w", encoding="utf-8") as handle:
