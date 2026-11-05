@@ -514,6 +514,8 @@ def main():
         if entry.get("lifecycle"):
             for name, checks in (entry["lifecycle"].get("checks") or {}).items():
                 print(f"  - AppImage lifecycle {name}: " + "; ".join(f"{c} {'ok' if v.get('ok') else 'FAILED'}" for c, v in checks.items()))
+            for failure in entry["lifecycle"].get("failures") or []:
+                print(f"  - AppImage lifecycle FAILED {failure[:1500]}")
         if entry.get("app_data_after_uninstall") is not None:
             print(f"  - the WebView's own data folders (dev.lightagent.desktop) after the uninstall: {json.dumps(entry['app_data_after_uninstall'])}")
         for step in STEPS:

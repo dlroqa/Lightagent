@@ -40,6 +40,9 @@ import psutil  # noqa: E402
 
 READY = ["RUNTIME_READY", "PAGE_LOADED", "UI_READY", "API_OK sessions.list"]
 FIXTURE = os.path.join(HERE, "stubborn_mcp.py")
+# Per marker: where the MCP server's start records its environment and errors.
+TRACES = {}
+TRACED = ("LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONHOME", "PYTHONPATH", "APPDIR", "APPIMAGE", "PATH")
 
 
 def sh(args, timeout=60):
@@ -211,8 +214,15 @@ def working(app, provider, scenario, marker, check, out):
     reached = provider.wait_for("gate", scenario, timeout=90, gate=scenario)
     mcp = harness.wait_until(lambda: marked(marker), timeout=30, every=0.5) or []
     screenshot(out, f"{scenario}-working")
-    check.expect("a run works: its model call is held and its MCP server runs", reached and bool(mcp),
-                 {"model_call_held": reached, "mcp_servers": len(mcp)})
+    seen = {"model_call_held": reached, "mcp_servers": len(mcp)}
+    if not mcp:
+        base = TRACES.get(marker, "")
+        env = harness.read(base + ".env")
+        seen["mcp_start_attempted"] = env is not None
+        seen["mcp_environment"] = {key: value[:200] for key, value in (line.split("=", 1) for line in (env or "").splitlines() if "=" in line)
+                                   if key in TRACED or key.startswith("PYTHON")}
+        seen["mcp_errors"] = (harness.read(base + ".err") or "")[-500:]
+    check.expect("a run works: its model call is held and its MCP server runs", reached and bool(mcp), seen)
     return mcp
 
 
@@ -250,8 +260,11 @@ def configure(cli, home, provider, marker):
     with open(path, encoding="utf-8") as handle:
         config = json.load(handle)
     config.setdefault("tools", {})["enabled"] = True
+    base = os.path.join(home, f"trace-{marker}")
+    TRACES[marker] = base
     config["mcp"] = {"enabled": True, "timeout_secs": 30, "servers": [
-        {"transport": "stdio", "name": "stubborn", "command": sys.executable, "args": [FIXTURE, marker]}]}
+        {"transport": "stdio", "name": "stubborn", "command": "/bin/sh",
+         "args": ["-c", 'env > "$0.env"; exec "$1" "$2" "$3" 2>> "$0.err"', base, sys.executable, FIXTURE, marker]}]}
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(config, handle, indent=2)
 

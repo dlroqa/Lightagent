@@ -260,9 +260,10 @@ def verify(cli, baseline_path, key, description, result_path):
                 return status == 200 and state == "ready", state
 
             def vault_opens():
-                status, body = server.request("GET", "/remote-credentials/vault")
-                unopenable = body.get("unopenable_with_configured_key") if isinstance(body, dict) else None
-                return status == 200 and unopenable == 0, {"status": status, "unopenable": unopenable}
+                status = json.loads(harness.run_cli(cli, "--json", "remote-credential", "status"))
+                seen = {k: status.get(k) for k in ("vault", "key_configured", "grants", "unopenable_with_configured_key")}
+                return (status.get("key_configured") is True and (status.get("grants") or {}).get("active") == 1
+                        and status.get("unopenable_with_configured_key") == 0), seen
 
             check("the conversation and its answer are kept", conversation)
             check("the provider key is still usable", provider_key)

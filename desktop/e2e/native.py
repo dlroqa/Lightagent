@@ -424,21 +424,9 @@ def windows_away_and_back(host):
 
 
 def windows_launch_keyboard(view, host, stages):
-    """Real key presses right after launch, while the page holds focus; after
-    another window was in front and this one is brought back; after the host
-    moves focus into its WebView (Webview::set_focus); and after a direct
-    Win32 SetFocus on the WebView's container window. Each stage is recorded
-    as soon as it ends: a stage that leaves the page unable to answer is the
-    one after the last recorded."""
+    """Real key presses right after launch: where Win32 focus is, and whether
+    Tab presses sent through SendInput move focus through the page."""
     stages["launch"] = windows_stage(view, host)
-    stages["away_and_back"] = {"away": windows_away_and_back(host), **windows_stage(view, host)}
-    try:
-        host.call("webview_focus")
-        stages["webview_focus"] = windows_stage(view, host)
-    except harness.HostError as error:
-        stages["webview_focus"] = {"error": str(error)}
-    stages["container_focus_set"] = windows_input(f"[Wi]::FocusContainer({host.process.pid})")
-    stages["container_focus"] = windows_stage(view, host)
 
 
 def keyboard_mode(out, cli, command, home, results):
@@ -462,6 +450,13 @@ def keyboard_mode(out, cli, command, home, results):
     finally:
         host.stop()
         provider.close()
+    launch = stages.get("launch") or {}
+    check = Checks("windows_keyboard")
+    check.expect("at launch, OS Tab presses (SendInput) move focus through the page's controls",
+                 launch.get("page_has_focus") is True and (launch.get("tab") or {}).get("moved") is True,
+                 (launch.get("tab") or {}).get("path"))
+    results["checks"]["windows_keyboard"] = check.results
+    results["failures"].extend(check.failures)
 
 
 def windows_keyboard(view, host):
