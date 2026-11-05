@@ -1,0 +1,134 @@
+=== base 71f5e21a22a3b5806d41829b7baa5b451c60c48c
+=== message
+Desktop acceptance: gate Windows OS keys at launch; vault via the CLI; AppImage MCP trace
+
+- native.py: the keyboard mode (Windows) now gates what run 42030840705
+  showed: at launch the page holds Win32 focus inside WebView2 and real
+  Tab presses (SendInput) move focus through its controls. The stages
+  after it (another window in front, Webview::set_focus, a container
+  SetFocus) left the page unable to answer under automation and are
+  dropped; their findings are in the review documents.
+- desktop.yml: the keyboard mode's result counts.
+- user_data.py: the vault check reads `remote-credential status` through
+  the CLI (the API's vault route is for the desktop's own runtime, so a
+  keyed `serve` answers 403).
+- appimage_lifecycle.py: the MCP server starts through /bin/sh, which
+  records the environment the runtime gave it and its errors, so a run
+  whose MCP server never appears says why.
+- install_smoke.py: each AppImage lifecycle failure printed in full.
+=== replace desktop/e2e/native.py
+--- find
+def windows_launch_keyboard(view, host, stages):
+    """Real key presses right after launch, while the page holds focus; after
+    another window was in front and this one is brought back; after the host
+    moves focus into its WebView (Webview::set_focus); and after a direct
+    Win32 SetFocus on the WebView's container window. Each stage is recorded
+    as soon as it ends: a stage that leaves the page unable to answer is the
+    one after the last recorded."""
+    stages["launch"] = windows_stage(view, host)
+    stages["away_and_back"] = {"away": windows_away_and_back(host), **windows_stage(view, host)}
+    try:
+        host.call("webview_focus")
+        stages["webview_focus"] = windows_stage(view, host)
+    except harness.HostError as error:
+        stages["webview_focus"] = {"error": str(error)}
+    stages["container_focus_set"] = windows_input(f"[Wi]::FocusContainer({host.process.pid})")
+    stages["container_focus"] = windows_stage(view, host)
+--- with
+def windows_launch_keyboard(view, host, stages):
+    """Real key presses right after launch: where Win32 focus is, and whether
+    Tab presses sent through SendInput move focus through the page."""
+    stages["launch"] = windows_stage(view, host)
+=== replace desktop/e2e/native.py
+--- find
+    except Exception as error:  # recorded: which stage it stopped after
+        stages["stopped"] = repr(error)[:300]
+        view.shot("stopped")
+    finally:
+        host.stop()
+        provider.close()
+--- with
+    except Exception as error:  # recorded: which stage it stopped after
+        stages["stopped"] = repr(error)[:300]
+        view.shot("stopped")
+    finally:
+        host.stop()
+        provider.close()
+    launch = stages.get("launch") or {}
+    check = Checks("windows_keyboard")
+    check.expect("at launch, OS Tab presses (SendInput) move focus through the page's controls",
+                 launch.get("page_has_focus") is True and (launch.get("tab") or {}).get("moved") is True,
+                 (launch.get("tab") or {}).get("path"))
+    results["checks"]["windows_keyboard"] = check.results
+    results["failures"].extend(check.failures)
+=== replace .github/workflows/desktop.yml
+--- find
+          # Windows keyboard focus at launch, on a host of its own (recorded, not gated).
+          if [ "$RUNNER_OS" = Windows ]; then
+            LIGHTAGENT_HOME="$RUNNER_TEMP/keyboard-home" python desktop/e2e/native.py "$out/keyboard" "$cli" keyboard -- "$app" || true
+          fi
+--- with
+          # Windows: OS key presses reach the WebView2 page at launch, on a host of its own.
+          if [ "$RUNNER_OS" = Windows ]; then
+            LIGHTAGENT_HOME="$RUNNER_TEMP/keyboard-home" python desktop/e2e/native.py "$out/keyboard" "$cli" keyboard -- "$app" || status=1
+          fi
+=== replace desktop/e2e/user_data.py
+--- find
+            def vault_opens():
+                status, body = server.request("GET", "/remote-credentials/vault")
+                unopenable = body.get("unopenable_with_configured_key") if isinstance(body, dict) else None
+                return status == 200 and unopenable == 0, {"status": status, "unopenable": unopenable}
+--- with
+            def vault_opens():
+                status = json.loads(harness.run_cli(cli, "--json", "remote-credential", "status"))
+                seen = {k: status.get(k) for k in ("vault", "key_configured", "grants", "unopenable_with_configured_key")}
+                return (status.get("key_configured") is True and (status.get("grants") or {}).get("active") == 1
+                        and status.get("unopenable_with_configured_key") == 0), seen
+=== replace desktop/e2e/appimage_lifecycle.py
+--- find
+READY = ["RUNTIME_READY", "PAGE_LOADED", "UI_READY", "API_OK sessions.list"]
+FIXTURE = os.path.join(HERE, "stubborn_mcp.py")
+--- with
+READY = ["RUNTIME_READY", "PAGE_LOADED", "UI_READY", "API_OK sessions.list"]
+FIXTURE = os.path.join(HERE, "stubborn_mcp.py")
+# Per marker: where the MCP server's start records its environment and errors.
+TRACES = {}
+TRACED = ("LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONHOME", "PYTHONPATH", "APPDIR", "APPIMAGE", "PATH")
+=== replace desktop/e2e/appimage_lifecycle.py
+--- find
+    mcp = harness.wait_until(lambda: marked(marker), timeout=30, every=0.5) or []
+    screenshot(out, f"{scenario}-working")
+    check.expect("a run works: its model call is held and its MCP server runs", reached and bool(mcp),
+                 {"model_call_held": reached, "mcp_servers": len(mcp)})
+    return mcp
+--- with
+    mcp = harness.wait_until(lambda: marked(marker), timeout=30, every=0.5) or []
+    screenshot(out, f"{scenario}-working")
+    seen = {"model_call_held": reached, "mcp_servers": len(mcp)}
+    if not mcp:
+        base = TRACES.get(marker, "")
+        env = harness.read(base + ".env")
+        seen["mcp_start_attempted"] = env is not None
+        seen["mcp_environment"] = {key: value[:200] for key, value in (line.split("=", 1) for line in (env or "").splitlines() if "=" in line)
+                                   if key in TRACED or key.startswith("PYTHON")}
+        seen["mcp_errors"] = (harness.read(base + ".err") or "")[-500:]
+    check.expect("a run works: its model call is held and its MCP server runs", reached and bool(mcp), seen)
+    return mcp
+=== replace desktop/e2e/appimage_lifecycle.py
+--- find
+    config["mcp"] = {"enabled": True, "timeout_secs": 30, "servers": [
+        {"transport": "stdio", "name": "stubborn", "command": sys.executable, "args": [FIXTURE, marker]}]}
+--- with
+    base = os.path.join(home, f"trace-{marker}")
+    TRACES[marker] = base
+    config["mcp"] = {"enabled": True, "timeout_secs": 30, "servers": [
+        {"transport": "stdio", "name": "stubborn", "command": "/bin/sh",
+         "args": ["-c", 'env > "$0.env"; exec "$1" "$2" "$3" 2>> "$0.err"', base, sys.executable, FIXTURE, marker]}]}
+=== replace desktop/e2e/install_smoke.py
+--- find
+                print(f"  - AppImage lifecycle {name}: " + "; ".join(f"{c} {'ok' if v.get('ok') else 'FAILED'}" for c, v in checks.items()))
+--- with
+                print(f"  - AppImage lifecycle {name}: " + "; ".join(f"{c} {'ok' if v.get('ok') else 'FAILED'}" for c, v in checks.items()))
+            for failure in entry["lifecycle"].get("failures") or []:
+                print(f"  - AppImage lifecycle FAILED {failure[:1500]}")
+=== end
