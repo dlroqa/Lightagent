@@ -1,196 +1,217 @@
-# Lightagent Desktop — release acceptance, 0.6.0 candidate
+# Lightagent Desktop: release acceptance, 0.6.0 candidate
 
 **Prepared for the owner's review. Nothing here is approved, merged, tagged
 or published.** Pull request https://github.com/dlroqa/Lightagent/pull/164
-(`release/v0.6.0`, draft), 2026-11-06.
+(`release/v0.6.0`, draft). Revised 2026-11-06 after the license fix.
 
 | | Commit | Tree |
 |---|---|---|
 | Base (`master`, the merged Desktop delivery) | `4f6b1f64ca84235f4e2682a2b5f3f65df96e6937` | `16161ba52f6cd4a4d8680708535f67448781cf0d` |
-| Code candidate (packages built from it) | `2e1623d5facc567407dcdd8bfeeffb0f8a8ac445` | `971d5cfb8c0f4e02bf935a61328181eb0a5ea213` |
+| **Code candidate (the final dry run built it)** | `55f4b96b733a254748369f037a128da08caf94b7` | `dc966a88333f8e362e7252a369b035797d40d894` |
+| Earlier code candidate (superseded) | `2e1623d5facc567407dcdd8bfeeffb0f8a8ac445` | `971d5cfb8c0f4e02bf935a61328181eb0a5ea213` |
 
-The commit that adds this record changes documentation only; no package
+The commit that adds this revision changes documentation only. No package
 input differs from the code candidate.
+
+What changed since `2e1623d`, in order:
+
+| Commit | Change |
+|---|---|
+| `248262e` | the upstream license texts, `desktop/licenses/upstream/` (git data API; each blob id equals upstream's) |
+| `1a5936b` | edit request 193: the notices use them and fail without a license text; upstream re-fetch check; checksums verification |
+| `f1bac64` | edit request 194: the signing proofs (quarantined download, Gatekeeper, timestamps) |
+| `55f4b96` | edit request 195: the signature step no longer stops at a rejected assessment (it did on `f1bac64`, below) |
 
 ## 1. Evidence
 
 | Run | On | Result |
 |---|---|---|
-| release dry run 2 (artifact-only; `publish` skipped) | `2e1623d` | https://github.com/dlroqa/Lightagent/actions/runs/42160144740: every job green (gate, 4 CLI builds, 4 Desktop targets, licenses and sources, Windows Server 2022, checksums) |
-| check | `2e1623d` | https://github.com/dlroqa/Lightagent/actions/runs/42160150385 green |
-| desktop | `2e1623d` | https://github.com/dlroqa/Lightagent/actions/runs/42160150122 green, 12/12 |
-| jev evaluation | `2e1623d` | https://github.com/dlroqa/Lightagent/actions/runs/42160150274 green |
-| subagents | `2e1623d` | https://github.com/dlroqa/Lightagent/actions/runs/42160150146 green (its `fail` and `verify` fixture dispatches fail by design) |
-| release dry run 1 (superseded) | `697125b` | https://github.com/dlroqa/Lightagent/actions/runs/42155896523: all packages green; its macos-14 job was refused by GitHub ("The configuration 'macos-14-arm64-us-default' is not supported"), so that job was removed |
+| **release dry run (final; artifact-only, `publish` skipped)** | `55f4b96` | https://github.com/dlroqa/Lightagent/actions/runs/42209236320: **every job green**: gate, 4 CLI builds, 4 Desktop targets, licenses and sources, Windows Server 2022, checksums |
+| check | `55f4b96` | https://github.com/dlroqa/Lightagent/actions/runs/42209246445 green, 13/13 |
+| desktop | `55f4b96` | https://github.com/dlroqa/Lightagent/actions/runs/42209246366 green, 12/12 (supply chain with the upstream re-fetch) |
+| jev evaluation | `55f4b96` | https://github.com/dlroqa/Lightagent/actions/runs/42209246372 green |
+| subagents | `55f4b96` | https://github.com/dlroqa/Lightagent/actions/runs/42209246343 green (its `fail` and `verify` fixture dispatches fail by design) |
+| release dry run | `f1bac64` | 42207800464: **failed** in both macOS jobs' "Signature state of what ships". The job shell runs with `-e`, and `spctl` exits 3 on its (expected) rejection of the unsigned app. Fixed in `55f4b96`; the run was cancelled |
+| release dry run | `1a5936b` | 42207340531: cancelled before it started (superseded by `f1bac64`) |
+| desktop supply chain | `1a5936b` | 42207306326: its supply-chain job passed with the new notices and the upstream re-fetch; the rest of the run was cancelled as superseded |
+| release dry run 2 | `2e1623d` | 42160144740: green, superseded (notices without the upstream texts) |
 
-Every job records the commit and tree it built; all name `2e1623d` /
-`971d5cf`.
+Every job of the final dry run records the commit and tree it built:
+`55f4b96` / `dc966a8`.
 
-### Artifacts of dry run 2
+### Artifacts of the final dry run
 
 | Artifact | What | Kept until |
 |---|---|---|
-| `lightagent-<label>` (4) | CLI archives | 2027-02-04 (repository default, 90 days) |
+| `lightagent-<label>` (4) | CLI archives | 2027-02-04 (90 days) |
 | `release-SHA256SUMS` | the release's checksum file | 2027-02-04 |
-| `release-desktop-<label>` (4) | the Desktop installers | 2026-12-06 (30 days) |
+| `release-desktop-<label>` (4) | the 6 Desktop installers | 2026-12-06 (30 days) |
 | `release-desktop-mpl-sources` | `desktop-mpl-sources-0.6.0.tar.gz` | 2026-12-06 |
-| `desktop-licenses` | SBOMs (CycloneDX) and license inventories per target, notices per target, MPL sources, audit reports | 2026-12-06 |
-| `desktop-evidence-<label>` (4) and `desktop-evidence-windows-2022` | install, launch, user data, uninstall and notices results per installer, AppImage lifecycle, signature state, notices against the binaries, bundling logs | 2026-12-06 |
+| `desktop-licenses` | SBOMs, license inventories, notices per target, MPL sources, audits | 2026-12-06 |
+| `desktop-evidence-<label>` (4) and `desktop-evidence-windows-2022` | install, launch, data, uninstall and notices results per installer (each packaged notices file's SHA-256), signature state, notices against the binaries, bundling logs | 2026-12-06 |
 | `desktop-smoke-kit-windows-x64` | the Windows installers for the Server 2022 job | 2026-11-13 (7 days) |
 
-The repository is public: any signed-in GitHub user can download these
+The repository is public, so any signed-in GitHub user can download these
 artifacts. They are unsigned candidate packages, not a release.
 
-### SHA256SUMS (dry run 2)
+### SHA256SUMS (final dry run)
 
 ```
-cae31185405ecaed242bbb191ab657205eea79ec47e2f611401e6eea13fbd754  lightagent-0.6.0-aarch64-apple-darwin.tar.gz
-04878eaefd2f4845ec123ed34dcee501d430cb90a04002a42d5240bb8f6d47e6  lightagent-0.6.0-x86_64-apple-darwin.tar.gz
-652c9d8a37a1bf2bb722dbb55f09ebad51799e90718e357a98a3c91c5fcdcc77  lightagent-0.6.0-x86_64-pc-windows-msvc.zip
-6e9ccaf47efd1b37be21645916f23ff31031f28964bc9f449d1187dff10d2041  lightagent-0.6.0-x86_64-unknown-linux-gnu.tar.gz
-f35ace1539ce09a327b6f7a1a723911cd01db69c3f32f0fc0294f785ad2ca0e1  Lightagent_0.6.0_aarch64.dmg
-7ff7a2d4c4a1e930209c2e2b6a5d0426e4b99bacc9b89cd64774dd2ba799612d  Lightagent_0.6.0_amd64.AppImage
-3dade43769dc96bb8e269b6186c989b1bf9bc798b47b7499c72c80f716978570  Lightagent_0.6.0_amd64.deb
-5ec903d1a607c27491c512461d2a05dbb2f7a8f9790f1de9752c81f88e6f1880  Lightagent_0.6.0_x64-setup.exe
-8dff2a20ec6fa2d62d8550e31feab9e650dd13eea332cf666a0bada7163d1231  Lightagent_0.6.0_x64.dmg
-c3c8577af2838b9d8225be9fb1a4abd6db8d3062d391e74e2b3e02d90aca40a5  Lightagent_0.6.0_x64_en-US.msi
+8106843e2572b4951e039be775578dcdd648e1820b5193292431b61af80186bf  lightagent-0.6.0-aarch64-apple-darwin.tar.gz
+935409f80e6be66f58a671c8e2dd5cc914ea78c3a002e531d2a964534ada594e  lightagent-0.6.0-x86_64-apple-darwin.tar.gz
+a99e04b924cd254a4a4a0a8ed73bac1e3c66e3822ad8664d7e041ce0abcc1b09  lightagent-0.6.0-x86_64-pc-windows-msvc.zip
+66627e2987954a69aadb7eda672b9466d6b9b326c2b7326eec7b67fccad311ee  lightagent-0.6.0-x86_64-unknown-linux-gnu.tar.gz
+3ad9333a0eb8cd651d01e3cf8bbdcc2b8483bf3eff8a35ae74d81c698e9cf3a6  Lightagent_0.6.0_aarch64.dmg
+35efbaa86e93881223e20f3fcb8a2160e54b65e2d3ce11a24f626fa90f143f50  Lightagent_0.6.0_amd64.AppImage
+361eb87db1aec05fcfb758234a1bd953fa10ddb93822e1ea9f36b479a7081c82  Lightagent_0.6.0_amd64.deb
+aead1542e70596818676929787a34e9901a8a11c51f434e9348c615ce863e96b  Lightagent_0.6.0_x64-setup.exe
+37a5d99ef05046ccbc3a74d8744ff6b1c074f9b98dad74dbe3f405c1bfe6fbce  Lightagent_0.6.0_x64.dmg
+581ef92aa8a33f7652182bbf88613d706656faad316033714e899578b5877291  Lightagent_0.6.0_x64_en-US.msi
 8dca80a16fa2e9f1f7d2d7d12e45564690d0b218012501393706b56284ccc0e8  desktop-mpl-sources-0.6.0.tar.gz
 ```
 
-The packages are not bit-for-bit reproducible between runs (the CLI
-archives' digests differ from dry run 1); the MPL-2.0 source archive is
-(identical digest in both runs).
+The checksums job verified the file (`sha256sum -c`: all 11 OK). It also
+unpacked the MPL archive as the release attaches it and verified its own
+`SHA256SUMS`, 5 of 5 OK. The CLI archives and installers are not
+bit-for-bit reproducible between runs. The MPL archive is: the same digest
+in all three dry runs.
 
 ### Install, launch and uninstall (every installer, its own runner)
 
-Every step passed (no failed step in any result file): install; launch of
-the installed app (bundled runtime ready, UI loaded, first API call, no
-launch key in any process's arguments or environment, runtime gone with
-the app); the bundled notices identical to the generated ones; the user
-data checks; uninstall. On Linux the shipped AppImage's lifecycle (close,
-close with a run working, SIGKILL of the host) passed as well.
-
-**User data, labelled exactly:** one of each kind of data is seeded in the
-account's own home; after the first launch, after a **same-version
-reinstall** (the same installer run again over its own installation:
-`apt-get install --reinstall`, the app replaced from the .dmg, NSIS `/S`
-again, `msiexec /fvomus`) and after uninstall, all 14 files are unchanged
-and every kind reads back, credentials included. This is not an upgrade:
-no earlier Desktop release exists. An upgrade from 0.6.0 can first be
-tested by the release after it.
+Every step of every installer passed, with no failed step in any result
+file. The steps: install; launch (bundled runtime ready, UI loaded, first
+API call, no launch key in any process's arguments or environment);
+packaged notices; the user data checks; a **same-version reinstall** (the
+same installer over its own installation); uninstall. Windows Server 2022
+repeated it for both Windows installers. The Linux AppImage lifecycle passed
+too. This is not an upgrade test: no earlier Desktop release exists.
 
 ## 2. Signing and platform trust
 
-| Platform | State in dry run 2 | What a person sees today |
+| Platform | State in the final dry run | What a person sees today |
 |---|---|---|
-| macOS arm64 | only the linker's ad-hoc signature on the executable; the bundle is not signed (`codesign --verify --deep --strict` fails); not notarized; Gatekeeper rejects it | a downloaded (quarantined) app is blocked; it can be opened only through System Settings › Privacy & Security › Open Anyway, and macOS may call it damaged |
-| macOS x64 | no signature; not notarized; Gatekeeper: "rejected source=no usable signature" | as above |
-| Windows x64 | NSIS, MSI and the app: Authenticode `NotSigned` | SmartScreen "Windows protected your PC"; More info › Run anyway |
-| Linux x64 | .deb and AppImage unsigned | no OS prompt; integrity only through SHA256SUMS over HTTPS |
+| macOS arm64 | only the linker's ad-hoc signature; `codesign --verify --deep --strict` fails; not notarized. **Quarantined download:** disk image rejected ("no usable signature"), app from it rejected | a downloaded app is blocked; it opens only through System Settings › Privacy & Security › Open Anyway, and macOS may call it damaged |
+| macOS x64 | no signature; not notarized. Quarantined download: disk image and app rejected | as above |
+| Windows x64 | NSIS, MSI and `lightagent-desktop.exe`: `NotSigned`, no signer, no timestamp | SmartScreen "Windows protected your PC" › More info › Run anyway |
+| Linux x64 | .deb and AppImage unsigned | no OS prompt; integrity only through SHA256SUMS |
 
-**Wired, not exercised:** release.yml signs only when the signing secrets
-or variables exist (none exist in the repository today), fails on an
-incomplete set, and its "Signature state of what ships" step fails when
-signing was configured but the result does not verify. The first run with
-credentials must be another dry run on this branch.
+The workflow signs only when credentials exist, and none exist. With
+credentials, the step "Signature state of what ships" fails unless:
 
-**What each needs (owner actions; none can be done from here):**
+- macOS: the quarantined .dmg and the app copied out of it are both
+  accepted, the app as "Notarized Developer ID", with a stapled ticket;
+- Windows: every signature is Valid and timestamped.
 
-- macOS: an Apple Developer Program membership (an organization account
-  needs a D-U-N-S number); a **Developer ID Application** certificate
-  exported with its private key as .p12; an App Store Connect API key for
-  notarization. Secrets: `APPLE_CERTIFICATE` (the .p12, base64),
-  `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`
-  (`Developer ID Application: <name> (<team id>)`), `APPLE_API_ISSUER`,
-  `APPLE_API_KEY` (the key id), `APPLE_API_KEY_P8` (the key's contents).
-  Verification after signing (already in the workflow): codesign strict
-  verify, `spctl --assess` accepted as Notarized Developer ID, and the
-  ticket stapled to each .dmg.
-- Windows: a code-signing certificate whose private key is held in
-  hardware or a cloud HSM (required for publicly trusted code-signing
-  certificates since June 2023), so a .pfx in a secret is not an option for
-  a new certificate. Candidates: Azure Artifact Signing (formerly Trusted
-  Signing; eligibility and regions are set by Microsoft), or a CA's cloud
-  signing service. Configuration: repository variable
-  `WINDOWS_SIGN_COMMAND` (Tauri's `signCommand`, `%1` is the file), optional
-  `WINDOWS_SIGN_TOOL` (`crate@version` installed before the build), and the
-  service's credentials as secrets (`AZURE_CLIENT_ID`,
-  `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID` are passed to the build).
-  SmartScreen reputation builds with downloads; a signed installer can
-  still warn at first.
-- Linux: nothing is required. Optional: a detached GPG signature of
-  SHA256SUMS (a key and a secret), or GitHub artifact attestations (these
-  write to a public transparency log, which is a publication decision).
+**What the owner needs to provide, how to store it in a protected
+environment, and the full list of proofs:** `DESKTOP_SIGNING_HANDOFF.md`.
+**macOS stays open until a credentialed dry run's quarantined-download
+check passes for both .dmg files.**
+
+Gap: the Windows bundled runtime (`lightagent.exe`) is not in the build
+directory where the step looks, so its signature is not yet reported. The
+first credentialed run must check it in the installed folder (handoff §3).
 
 ## 3. Licenses
 
-- **Notices against what ships:** a new check reads, from the shipped
-  binaries themselves, the crate versions whose code they contain (the
-  registry paths a release build keeps) and requires each in the bundled
-  notices at the same version. Result on every target: **0 missing**
-  (host and runtime: macOS arm64 76 and 77 crate versions, macOS x64 75
-  and 77, Windows 68 and 75, Linux 67 and 65). The notices also list
-  crates that leave no path (no panicking code, or build time only).
-- **MPL-2.0 Source Code Form:** `desktop-mpl-sources-0.6.0.tar.gz`
-  (SHA-256 `8dca80a1…cc0e8`, 156,645 bytes) holds cssparser 0.37.0,
-  cssparser-macros 0.7.1, dtoa-short 0.3.5, option-ext 0.2.0 and selectors
-  0.38.0, each equal to Cargo.lock's checksum, with SHA256SUMS,
-  MPL-2.0.txt and README.txt. Checked on the runner: its SHA256SUMS
-  verifies, the MPL-2.0 text is present, and it holds exactly the archives
-  the four targets' notices name. Packed reproducibly. The release workflow
-  now attaches it with the installers and lists it in SHA256SUMS, so the
-  notices' statement becomes true when a release is published.
-- **Permissive components published without a license file** (18; their
-  license is named in their metadata, but no copyright line is
-  reproduced). Reviewed upstream:
+**Fixed: the 19 permissive components that were published without a license
+file** (earlier counted as 18; the table had 19 rows). Each now carries its
+upstream license files, from the commit its crates.io version was published
+from: the `git.sha1` in the crate's `.cargo_vcs_info.json`, none dirty.
 
-| Components | License | Upstream text |
-|---|---|---|
-| alloc-stdlib 0.3.0 (all targets) | BSD-3-Clause | dropbox/rust-alloc-no-stdlib, tag `0.3.0`: LICENSE |
-| block2 0.6.2, dispatch2 0.3.1, objc2 0.6.5, objc2-encode 4.1.0, objc2-exception-helper 0.1.1 (macOS) | MIT; Zlib OR Apache-2.0 OR MIT | madsmtm/objc2, tags of those versions: LICENSE.md, LICENSE-MIT.txt, LICENSE-APACHE.txt, LICENSE-ZLIB.txt |
-| objc2-app-kit, -core-foundation, -core-graphics, -foundation, -io-surface, -quartz-core, -web-kit 0.3.2 (macOS) | Zlib OR Apache-2.0 OR MIT; MIT | madsmtm/objc2, no tag for these versions: the default branch's files |
-| webview2-com 0.39.1, webview2-com-macros 0.8.1, webview2-com-sys 0.39.1 (Windows) | MIT | wravery/webview2-rs, no tags: LICENSE on the default branch |
-| dlopen2 0.8.2, dlopen2_derive 0.4.3 (Linux) | MIT | OpenByteDev/dlopen2, no tag for 0.8.x: LICENSE on the default branch |
-| libappindicator-sys 0.9.0 (Linux) | Apache-2.0 OR MIT | tauri-apps/libappindicator-rs, tag `libappindicator-sys-v0.9.0`: LICENSE-APACHE, LICENSE-MIT. Its crate metadata names the wrong repository (rust-windowing/keyboard-types) |
+| Components | License | In | Upstream files (repository @ publishing commit) |
+|---|---|---|---|
+| alloc-stdlib 0.3.0 | BSD-3-Clause | all targets | `LICENSE` (Copyright (c) 2016 Dropbox, Inc.), dropbox/rust-alloc-no-stdlib @ `0a81fd69` |
+| block2 0.6.2, objc2 0.6.5, objc2-encode 4.1.0, objc2-foundation 0.3.2 | MIT | macOS | `LICENSE.md`, madsmtm/objc2 @ `b4167b58`, `d7d2fa23`, `8d214f54`, `7b1abfd7`; plus the SPDX MIT text |
+| dispatch2 0.3.1, objc2-exception-helper 0.1.1, objc2-app-kit, -core-foundation, -core-graphics, -io-surface, -quartz-core, -web-kit 0.3.2 | Zlib OR Apache-2.0 OR MIT | macOS | `LICENSE.md`, madsmtm/objc2 @ `8852b424`, `8d214f54`, `7b1abfd7`; plus the SPDX Zlib, Apache-2.0 and MIT texts |
+| webview2-com 0.39.1, webview2-com-sys 0.39.1 | MIT | Windows | `LICENSE` (Copyright (c) 2021 Bill Avery), wravery/webview2-rs @ `edc2caf8` |
+| webview2-com-macros 0.8.1 | MIT | Windows, **build time only** | the same `LICENSE`, @ `dffa41a8` |
+| dlopen2 0.8.2 | MIT | Linux | `LICENSE` (Szymon Wieloch, Ahmed Masud, OpenByte), OpenByteDev/dlopen2 @ `cc80e4a0` |
+| dlopen2_derive 0.4.3 | MIT | Linux, **build time only** | the same |
+| libappindicator-sys 0.9.0 | Apache-2.0 OR MIT | Linux | `LICENSE-APACHE`, `LICENSE-MIT` (qDot), tauri-apps/libappindicator-rs @ `eafd1e36` |
 
-  MIT and BSD-3-Clause ask that the copyright and permission notice
-  accompany copies, binary ones included, so a metadata-only entry does not
-  meet them. Every text is available upstream; adding them (at the tag, or
-  at a pinned commit where there is none) to the notices generator is a
-  small change, not made here.
+- **objc2 family:** upstream publishes no license text file and **no
+  copyright notice** at any of these commits. Its only file, `LICENSE.md`,
+  names the licenses. So the notices reproduce `LICENSE.md` verbatim and add
+  the standard texts of the named licenses, from the SPDX License List
+  v3.29.0 (spdx/license-list-data @ `31ba1a50`). The MIT text keeps SPDX's
+  `<year> <copyright holders>` placeholder, and each entry says why. No
+  copyright line was invented. `LICENSE.md` also says the crates are derived
+  from Apple SDKs. Owner or legal review (item 13).
+- **Correction:** libappindicator-sys's crate metadata names *no*
+  repository. The earlier record said it named the wrong one; that was a
+  misreading of the neighbouring entry. Its repository and commit come from
+  its `.cargo_vcs_info.json`.
+- **Stored and checked:** the 9 distinct files are in
+  `desktop/licenses/upstream/blobs/` under their git blob ids, marked
+  `-text`. Each one was created through the git data API and its id came
+  back equal to upstream's. `SOURCES.json` records repository, commit, path
+  and blob for each crate, plus the shipped-or-build-time distinction the
+  generator computes per target.
+- **Enforced:** `desktop-sbom.py --notices` fails when a component that is
+  not build time only has no license text. It also fails when a stored text
+  does not hash to its id, or when a recorded commit differs from the
+  crate's own `.cargo_vcs_info.json`.
+  `desktop-upstream-licenses.py` fetches every file again from
+  `raw.githubusercontent.com` at its commit and compares blob ids. In the
+  final run: 19 crates, 14 upstream files, 9 distinct, no difference.
+- **Result, final dry run:**
 
-## 4. Platforms and accounts actually tested
+| Target | Without a license text | With upstream texts | Notices SHA-256 (generated = in each installer) |
+|---|---|---|---|
+| macOS arm64 | 0 | 13 | `37fbf47d72bd9643…` (.dmg) |
+| macOS x64 | 0 | 13 | `46d3f3d9e35bd05b…` (.dmg) |
+| Windows x64 | 0 | 4 | `f2e854ea02999dd8…` (NSIS and MSI) |
+| Linux x64 | 0 | 4 | `9a7446e0e73b5462…` (.deb and AppImage) |
 
-| Target | Declared minimum | Tested by hosted runners |
-|---|---|---|
-| macOS Apple silicon | 11.0 (LSMinimumSystemVersion) | macOS 15.8.2 only |
-| macOS Intel | 10.14 | macOS 15.7.9 only |
-| Windows x64 | PE 6.0 header, WebView2 required | Windows Server 2025 (build 26100, every check) and Windows Server 2022 (build 20348, install, launch, data, uninstall) |
-| Linux x64 | glibc 2.34 (highest symbol version needed) | Ubuntu 22.04, glibc 2.35 |
+  **In every packaged installer:** the install smoke test found
+  THIRD_PARTY_NOTICES.txt and LICENSE.txt in the installed app, identical to
+  the generated ones. The digests above also equal the notices generated
+  separately by the licenses job. The check against the shipped binaries
+  passed on every target: every crate version found in the binaries is in
+  the notices at that version, with a license text (0 missing, 0 without).
+  Every listed crate, build-time ones included, now has a text.
+- **MPL-2.0 Source Code Form:** `desktop-mpl-sources-0.6.0.tar.gz`, SHA-256
+  `8dca80a16fa2e9f1f7d2d7d12e45564690d0b218012501393706b56284ccc0e8`,
+  156,645 bytes. It holds cssparser 0.37.0, cssparser-macros 0.7.1,
+  dtoa-short 0.3.5, option-ext 0.2.0 and selectors 0.38.0, each equal to
+  Cargo.lock's checksum, exactly the archives the four notices name, with
+  MPL-2.0.txt. Verified in the licenses job and again in the checksums job.
+  selectors 0.38.0 still has no license file of its own; it is pointed to the
+  identical MPL-2.0 text (cssparser's).
 
-Gaps hosted runners cannot close: macOS 11-14 (no image older than 15
-runs; macos-14 is refused), Windows 10 and 11 client editions (hosted
-Windows is Server only), glibc 2.34 itself (no image; a container check
-would be possible but is not done). Decision needed: declare only what was
-tested, or keep the declared floors as untested claims, or test them
-outside hosted runners.
+## 4. Platforms: tested versus declared
 
-**Second account:** Linux runs every package as a new account
-(`la-smoke`, its own home). macOS and Windows run as the runner account
-with a seeded home; a second GUI login is not available on hosted runners.
+### Tested (hosted runners, final dry run)
 
-**Windows keyboard focus after the share flyout: still unverified.** A
-mode of its own (native.py `share-focus`) now presses Share with a real
-click and closes the flyout with a real Escape. On the hosted runner the
-system flyout never became visible or took the foreground (desktop
-42160150122: the window stayed active, the page kept focus, and real Tab
-presses moved focus after Escape), while the full run's screenshot shows
-the window losing activation when Share is pressed. A script click opens
-nothing at all (no user activation, desktop 42158154084). So hosted runs
-show focus is not lost when no flyout appears, and cannot show what
-happens after a real flyout. Needed: one check on an interactive Windows
-10 or 11 desktop: Share on an answer, close the flyout with Esc and, again,
-by clicking the app; then Tab must move focus in the app.
+| Target | OS actually run | Image | Account |
+|---|---|---|---|
+| macOS Apple silicon | macOS 15.8.2 (24H232) | `macos-15-arm64` 20261028.0489.1 | runner account, seeded home |
+| macOS Intel | macOS 15.7.9 (24G830) | `macos-15` (Intel) 20260824.0482.1 | runner account, seeded home |
+| Windows x64 | Windows Server 2025 (build 26100), every check | `windows-2025-vs2026` 20261103.298.1 | runner account, seeded home |
+| Windows x64 | Windows Server 2022 (build 20348), install, launch, data, uninstall | `windows-2022` 20261101.353.1 | runner account, seeded home |
+| Linux x64 | Ubuntu 22.04, glibc 2.35 | `ubuntu-22.04` 20261101.347.1 | a new account `la-smoke`, its own home |
+
+### Declared (what the packages claim; not all tested)
+
+| Target | Declared minimum | Where it is declared | Tested at that minimum? |
+|---|---|---|---|
+| macOS Apple silicon | macOS 11.0 | `LSMinimumSystemVersion` (release matrix `macos_min`) | no, 15.8 only |
+| macOS Intel | macOS 10.14 | `LSMinimumSystemVersion` (`tauri.conf.json`, matrix) | no, 15.7 only |
+| Windows x64 | **none declared** by the packages (the PE header says 6.0); WebView2 Runtime required, which supports Windows 10 and 11 | — | no client edition; Server 2025 and 2022 only |
+| Linux x64 | glibc 2.34; `libwebkit2gtk-4.1-0`, `libgtk-3-0` | the binaries' highest GLIBC symbol; the .deb's Depends | no, glibc 2.35 |
+
+Hosted runners cannot close these gaps: no macOS image older than 15 runs
+(macos-14 is refused), hosted Windows is Server only, and there is no glibc
+2.34 image. Decision 7.
+
+### Windows keyboard focus after the share panel: PENDING
+
+Hosted runs cannot show the system share panel (desktop 42160150122,
+42158154084). The manual check is `DESKTOP_WINDOWS_SHARE_FOCUS_CHECK.md`,
+about 10 minutes on Windows 10 or 11. **It stays pending until someone runs
+it.** If focus is lost but the keyboard can recover it, the item is a
+documented limitation with the recovery key. If the keyboard cannot recover
+it, that is an **unrecoverable keyboard trap and a release blocker**.
 
 ## 5. Live evidence and fixtures
 
@@ -200,91 +221,93 @@ by clicking the app; then Tab must move focus in the app.
 | Model providers | none (no provider secrets in the repository) | every chat, run, approval and regenerate check (FakeProvider) |
 | MCP | none against a third-party service | real processes: stdio and HTTP fixture servers, the stubborn server for lifecycle |
 | Update check | read-only against github.com (update-check-live, last on the delivery candidate 42038415262; release-update unchanged since) | loopback release API fixtures |
+| Upstream license texts | fetched live from GitHub at their commits in every licenses job | — |
 | Qdrant and Infinity | real software in service containers (check), not a hosted service | — |
 
 ## 6. Runtime cleanup backstop and accessibility
 
-- Backstop (crates/lightagent/src/serve.rs, `run_desktop`): when the host
-  goes away the lifeline cancels, the server shuts down gracefully, and
-  dropping the runtime's tasks ends their children (`kill_on_drop`). The
-  thread that saw standard input close then calls `std::process::exit(0)`
-  after 5 s, which runs no destructors: a child would outlive the runtime
-  only if the graceful path were still running after 5 s, for example
-  behind a stuck blocking task. No case reached it (host kill on every
-  target and on the shipped AppImage, final acceptance §2). The planned
-  Job Object (Windows) and process-group teardown (DESKTOP_ARCHITECTURE.md
-  §4) is not implemented.
-- Accessibility: axe reports two moderate rules on the chat screen,
-  `page-has-heading-one` and `heading-order`; no serious or critical
-  finding (desktop 42150140810 on master). Keyboard navigation at launch
-  passes on every target.
+Unchanged since the earlier record:
+
+- **Backstop:** when the host goes away, the runtime shuts down gracefully.
+  The thread that saw standard input close calls `std::process::exit(0)`
+  after 5 s. A child process would outlive the runtime only if the graceful
+  path were still running at that point. No case reached it. The Job Object
+  and process-group teardown is not implemented.
+- **Accessibility:** axe reports two moderate rules, `page-has-heading-one`
+  and `heading-order`, and nothing serious or critical. Keyboard navigation
+  at launch passes on every target.
 
 ## 7. Open items, classified
 
-| # | Item | Class | Evidence | Proposed resolution |
-|---|---|---|---|---|
-| 1 | Permissive notices without copyright texts (18 components) | **release blocker** (license compliance) | §3 | add the upstream texts to the notices generator, re-run the dry run |
-| 2 | macOS not signed or notarized; Gatekeeper rejects both packages | **release blocker for a general release**; acceptable only for an explicitly unsigned preview | §2 | sign and notarize (owner's Apple account), or the owner accepts an unsigned preview with instructions |
-| 3 | Windows not signed | documented limitation (SmartScreen warns; Run anyway works) | §2 | sign when a certificate exists |
-| 4 | Linux not signed | documented limitation | §2 | optional signature of SHA256SUMS |
-| 5 | Windows focus after the share flyout | documented limitation until the interactive check; a blocker if that check fails | §4 | one manual check |
-| 6 | Minimum OS versions untested below the runners' | documented limitation | §4 | owner chooses which floors to declare |
-| 7 | Second OS account on macOS and Windows | documented limitation | §4 | — |
-| 8 | Live Jev, providers and MCP services through the Desktop | documented limitation | §5 | optional live runs with credentials |
-| 9 | Runtime exit backstop before child teardown | documented limitation (residual risk) | §6 | Job Object / process group later |
-| 10 | Two moderate axe rules | documented limitation | §6 | heading structure later |
-| 11 | Same-version reinstall only, no upgrade | documented limitation (no earlier release) | §1 | test upgrades from 0.6.0 next |
-| 12 | MPL-2.0 sources attachment | resolved in the workflow; done when the release is published | §3 | — |
-| 13 | Permissive-license notice wording, build-time-only entries | owner review | §3 | — |
+| # | Item | Class | Status |
+|---|---|---|---|
+| 1 | Permissive notices without license texts (19) | was a release blocker | **resolved**: §3, final dry run |
+| 2 | macOS not signed or notarized | **release blocker for a general release**; acceptable only for an explicitly unsigned preview | open until a credentialed dry run's quarantined-download check passes (handoff) |
+| 3 | Windows not signed | documented limitation | handoff §2 |
+| 4 | Linux not signed | documented limitation | optional |
+| 5 | Windows focus after the share panel | **pending manual check**; a blocker if focus cannot be recovered with the keyboard | `DESKTOP_WINDOWS_SHARE_FOCUS_CHECK.md` |
+| 6 | Declared minimum OS versions untested | documented limitation | decision 7 |
+| 7 | Second OS account on macOS and Windows | documented limitation | — |
+| 8 | Live Jev, providers and MCP through the Desktop | documented limitation | optional live runs |
+| 9 | Runtime exit backstop before child teardown | documented limitation (residual risk) | later |
+| 10 | Two moderate axe rules | documented limitation | later |
+| 11 | Same-version reinstall only, no upgrade | documented limitation | test from 0.6.0 next |
+| 12 | MPL-2.0 sources attachment | resolved in the workflow; done when published | — |
+| 13 | objc2 family: no upstream copyright notice, SPDX texts used, Apple SDK statement; build-time entries listed; notice wording | owner or legal review | §3 |
+| 14 | Windows bundled runtime's signature not reported | gap in the signing proof | the first credentialed run (handoff §3) |
 
 ## 8. Proposed version, channel and assets
 
-- **Version 0.6.0** (prepared in this candidate). The repository releases
-  patch versions for features (0.3.x) and minor versions for significant
-  behaviour (0.4.0, 0.5.0); the first Desktop is the latter. One version
-  and **one tag `v0.6.0`** for the CLI and the Desktop: `lightagent update`
-  and the Desktop's read-only update check both read `releases/latest`, so
-  a separate Desktop tag would hide the CLI's update or offer the wrong
-  one.
-- **Assets (12):** the 4 CLI archives `lightagent-0.6.0-<triple>.tar.gz`
-  or `.zip`, unchanged (the updater looks them up by these exact names),
-  the 6 installers `Lightagent_0.6.0_<arch>.{dmg,-setup.exe,msi,deb,AppImage}`
-  (Tauri's names, distinct from the CLI's), `desktop-mpl-sources-0.6.0.tar.gz`,
-  and one `SHA256SUMS` covering all 11.
-- **Channel options:** (a) a normal release, marked Latest, with the
-  Desktop described as unsigned where it is: CLI users keep receiving
-  updates; (b) a GitHub pre-release: `releases/latest` skips it, so
-  `lightagent update` would not offer 0.6.0 to CLI users; (c) Desktop held
-  back and a CLI-only 0.6.0, which needs a workflow change. Recommended:
-  (a), after items 1 and 2 are settled.
-- The Desktop does not update itself (the plan forbids automatic updates of
-  installed apps); a new version is installed from its installer.
+- **Version 0.6.0, one tag `v0.6.0`** for the CLI and the Desktop.
+  `lightagent update` and the Desktop's update check both read
+  `releases/latest`.
+- **Assets (12):** the 4 CLI archives under their unchanged names, the 6
+  installers, `desktop-mpl-sources-0.6.0.tar.gz`, and `SHA256SUMS` covering
+  the other 11.
+- **Channel: pending (the owner's decision).**
+  - (a) A normal release marked Latest. CLI users get the update.
+  - (b) A pre-release. `lightagent update` would not offer 0.6.0.
+  - (c) A CLI-only 0.6.0. This needs a workflow change.
+- The Desktop does not update itself.
 
 ## 9. Verdict
 
-**Not ready for release.** Packaging, installation, data preservation,
-notices against the binaries and the MPL-2.0 sources are verified on all
-four targets in an artifact-only dry run, and every workflow is green on
-the candidate. Two items block a general release: the permissive license
-texts (item 1) and macOS signing and notarization (item 2), unless the
-owner chooses an explicitly unsigned preview. Item 5 needs one manual
-check.
+**Not ready for a general release.** The license blocker is resolved and
+verified in every installer, and the final artifact-only dry run on
+`55f4b96` is green on every job. One release blocker remains: **macOS
+signing and notarization** (item 2), unless the owner chooses an
+explicitly unsigned preview. Item 5 stays pending until someone runs the
+manual Windows check. Item 13 needs the owner's or a legal review.
 
-## 10. The owner's decisions
+## 10. Process record
 
-1. Version 0.6.0 and one shared tag `v0.6.0`, or another.
-2. Channel: (a), (b) or (c) in §8.
-3. macOS: provide signing and notarization credentials, or accept an
-   unsigned preview and its Gatekeeper behaviour.
-4. Windows: obtain a signing service now, or ship unsigned with the
-   SmartScreen warning.
-5. Permissive license texts: approve adding the upstream texts to the
-   notices (then a new dry run).
-6. Windows share-flyout focus: who runs the interactive check, and whether
-   a failure blocks.
-7. Minimum OS declarations: keep, narrow to what was tested, or test
+- **Local `git merge-tree` exception (2026-11-06):** during the read-only
+  verification before the #147 and #161 merges, `git merge-tree` was run
+  twice on the local backup to simulate the merges. The execution policy
+  allows only backup, synchronization, static reading and progress records
+  locally, and counts this as validation. It was disclosed at the time,
+  changed no repository state, and the merges were verified afterwards on
+  GitHub-hosted runners. It has not recurred; every later validation in
+  this record ran on GitHub-hosted runners.
+- Edit request 185 was void (a stray line). Request 186 was refused by the
+  applier and resubmitted as 187. Request 194 introduced the errexit defect
+  that 195 fixes; the defect was caught by the `f1bac64` dry run before any
+  report relied on it.
+
+## 11. The owner's decisions
+
+1. Channel: (a), (b) or (c) in §8. The version is 0.6.0, with tag `v0.6.0`.
+2. macOS: provide the Apple credentials and the protected environment
+   (handoff §1 and §4), or accept an unsigned preview and its Gatekeeper
+   behaviour.
+3. Windows: Azure Artifact Signing, a CA cloud signer, or unsigned with the
+   SmartScreen warning (handoff §2).
+4. Approve the one-line `environment: release-signing` change once the
+   environment exists, then the credentialed dry run.
+5. Windows share-panel check: who runs it, on which Windows versions.
+6. Minimum OS declarations: keep, narrow to what was tested, or test
    elsewhere.
-8. Whether build-time-only components stay in the notices, and legal
-   review of the notice wording.
-9. Separately, when ready: merging #164 (and #163), the tag, and
-   publishing the drafted release.
+7. Item 13: accept the objc2 treatment and the notice wording, or obtain a
+   legal review.
+8. Separately, when ready: merging #164 and #163, the tag, marking Latest,
+   publishing, and closing the superseded drafts.

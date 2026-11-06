@@ -73,14 +73,13 @@ to the generated ones:
 
 ## 5. Open points for the owner
 
-- Permissive components published without a license file (their license
-  is named in their metadata, and the notices say so, but no copyright
-  line can be reproduced): alloc-stdlib 0.3.0, dlopen2 0.8.2,
-  dlopen2_derive 0.4.3, libappindicator-sys 0.9.0 (Linux); webview2-com
-  0.39.1, webview2-com-macros 0.8.1, webview2-com-sys 0.39.1 (Windows);
-  block2, dispatch2, objc2 and the objc2-* crates (macOS). Options: take
-  the texts from their upstream repositories at the tagged versions, or
-  accept the metadata-only notice. Not decided here.
+- Resolved 2026-11-06 (0.6.0 candidate `55f4b96`): the 19 permissive
+  components published without a license file now carry their upstream
+  license files, from the commit each version was published from
+  (`desktop/licenses/upstream/SOURCES.json`). The generator fails when a
+  component that is not build time only has no license text. Details,
+  including the objc2 family (no upstream copyright notice; SPDX standard
+  texts), are in DESKTOP_RELEASE_ACCEPTANCE.md §3.
 - Whether to keep build-time-only components in the notices (they are
   listed for completeness).
 - Legal review of the notice wording and of the release-attachment step.
