@@ -287,7 +287,8 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertIn("sha256sum", self.steps_text("checksums"))
         self.assertIn("release-SHA256SUMS", self.steps_text("checksums"))
         # The release attaches the dry run's checksums; it does not make its own.
-        self.assertNotIn("sha256sum", self.steps_text("publish"))
+        # (It may verify them: `sha256sum -c` only reads SHA256SUMS.)
+        self.assertEqual(re.findall(r"sha256sum(?! -c SHA256SUMS)", self.steps_text("publish")), [])
         self.assertIn("release-SHA256SUMS", self.steps_text("publish"))
 
     def matrix(self):
