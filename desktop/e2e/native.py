@@ -459,6 +459,76 @@ def keyboard_mode(out, cli, command, home, results):
     results["failures"].extend(check.failures)
 
 
+def share_focus_mode(out, cli, command, home, results):
+    """Windows (mode "share-focus"): whether keyboard focus comes back to the
+    page after the system share flyout, on a host of its own. Share on an
+    answer opens the flyout; it is closed as a person closes it: a real Escape
+    (SendInput) first and, if the flyout is still in front, a real click on
+    the composer. After each: which window is in front, where Win32 keyboard
+    focus is, whether the page has focus, and whether real Tab presses move
+    focus through the page. Recorded, not gated."""
+    provider = harness.FakeProvider()
+    scripts(provider)
+    harness.prepare_home(cli, home, provider)
+    env = dict(os.environ, LIGHTAGENT_DESKTOP_E2E_DRIVER="1",
+               LIGHTAGENT_DESKTOP_E2E_REPORT=os.path.join(out, "report-share-focus.txt"))
+    host = harness.Host(command, env, os.path.join(out, "driver-share-focus.log"))
+    view = View(host, out, "share-focus")
+    stages = results["recorded"].setdefault("windows_share_focus", {})
+    try:
+        host.ready()
+        view.wait_ui()
+        stages["launch"] = windows_stage(view, host)
+        stages["answer"] = scenario_chat(view, provider, home, {}).results
+        focus_window(host)
+        stages["before_share"] = windows_stage(view, host)
+        where = view.js('const r = one("textbox", "Ask Lightagent").getBoundingClientRect(); '
+                        'return { x: r.left + r.width / 2, y: r.top + r.height / 2, dpr: devicePixelRatio };')
+        geometry = host.call("geometry")
+        point = [int(geometry["x"] + where["x"] * where["dpr"]), int(geometry["y"] + where["y"] * where["dpr"])]
+        opened = view.js("""
+          const info = { api: typeof navigator.share === "function" };
+          press(one("button", "Share", lastBar()));
+          await sleep(2000);
+          info.notice = noticeOf(lastBar());
+          return info;""")
+        view.shot("share-open")
+        stages["share_open"] = {**opened, **windows_focus(view, host)}
+        if opened.get("api"):
+            escape = {"key": windows_input("[Wi]::Key(27)")}
+            time.sleep(1.5)
+            escape.update(windows_focus(view, host))
+            escape["tab"] = windows_tabs(view)
+            stages["after_escape"] = escape
+            view.shot("share-after-escape")
+            if escape.get("foreground_is_app") != "True":
+                click = {"click": windows_input(f"[Wi]::Click({point[0]}, {point[1]})"), "at": point}
+                time.sleep(1.0)
+                click.update(windows_focus(view, host))
+                click["tab"] = windows_tabs(view)
+                stages["after_click"] = click
+                view.shot("share-after-click")
+    except Exception as error:  # recorded: which stage it stopped after
+        stages["stopped"] = repr(error)[:300]
+        view.shot("stopped")
+    finally:
+        host.stop()
+        provider.close()
+
+    def returned(name):
+        stage = stages.get(name) or {}
+        return stage.get("page_has_focus") is True and (stage.get("tab") or {}).get("moved") is True
+
+    stages["verdict"] = {
+        "share_sheet_opened": (stages.get("share_open") or {}).get("foreground_is_app") == "False",
+        "closed_by_escape": (stages.get("after_escape") or {}).get("foreground_is_app") == "True",
+        "keyboard_returns_after_escape": returned("after_escape"),
+        "keyboard_returns_after_click": returned("after_click") if "after_click" in stages else None,
+        "stopped": stages.get("stopped"),
+    }
+    results["screenshots"] = view.shots
+
+
 def windows_keyboard(view, host):
     """Real key presses on Windows in four situations: after the OS brings the
     window forward; after the host moves keyboard focus into its WebView (the
@@ -1415,8 +1485,8 @@ def main():
                "runner": {"platform": platform.platform(), "machine": platform.machine(),
                           "image": f"{os.environ.get('ImageOS', '?')} {os.environ.get('ImageVersion', '?')}"}}
     failures, notes = results["failures"], results["recorded"]
-    if mode in ("lifecycle", "keyboard"):
-        (lifecycle if mode == "lifecycle" else keyboard_mode)(out, cli, command, home, results)
+    if mode in ("lifecycle", "keyboard", "share-focus"):
+        {"lifecycle": lifecycle, "keyboard": keyboard_mode, "share-focus": share_focus_mode}[mode](out, cli, command, home, results)
         with open(os.path.join(out, f"native-{mode}.json"), "w", encoding="utf-8") as handle:
             json.dump(results, handle, indent=1)
         print(json.dumps({"failures": failures}, indent=1))
