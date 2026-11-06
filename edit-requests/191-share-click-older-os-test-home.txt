@@ -1,0 +1,95 @@
+=== base 6aa873c44fa010bccf5162f51f34ffed6f4bd33a
+=== message
+Release candidate: Share by a real click, no macOS 14 image, a unique test home
+
+- native.py share-focus: Share is pressed with a real mouse click
+  (SendInput) on the button. The run on 6aa873c (desktop 42158154084)
+  showed that a script click opens no share sheet: navigator.share needs
+  user activation, which a script click does not give, so focus was never
+  tested against the flyout.
+- release.yml desktop-older-os: macos-14 removed. GitHub no longer runs it
+  ("The configuration 'macos-14-arm64-us-default' is not supported", dry
+  run 42155896523), so no hosted macOS image older than 15 exists; the
+  macOS floors stay declarations, recorded in the acceptance record. The
+  Windows Server 2022 run stays.
+- desktop_serve.rs: each scratch home gets a per-process counter as well
+  as the time. Both tests start at once, and macOS clocks tick in
+  microseconds, so the time-based name could repeat; check (macos-x64) on
+  6aa873c failed with the runtime exiting before its handshake. Test only,
+  as the MCP test-directory fix was (#81).
+=== replace desktop/e2e/native.py
+--- find
+        opened = view.js("""
+          const info = { api: typeof navigator.share === "function" };
+          press(one("button", "Share", lastBar()));
+          await sleep(2000);
+          info.notice = noticeOf(lastBar());
+          return info;""")
+        view.shot("share-open")
+--- with
+        # A real click: a script click gives no user activation, and the
+        # share sheet opens only with one.
+        share_at = view.js('const b = one("button", "Share", lastBar()); b.scrollIntoView({ block: "center" }); '
+                           'const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, '
+                           'dpr: devicePixelRatio, api: typeof navigator.share === "function" };')
+        at = [int(geometry["x"] + share_at["x"] * share_at["dpr"]), int(geometry["y"] + share_at["y"] * share_at["dpr"])]
+        opened = {"api": share_at["api"], "click": windows_input(f"[Wi]::Click({at[0]}, {at[1]})"), "at": at}
+        time.sleep(2.5)
+        view.shot("share-open")
+        opened["notice"] = view.js("return noticeOf(lastBar());")
+=== replace desktop/e2e/native.py
+--- find
+    page after the system share flyout, on a host of its own. Share on an
+    answer opens the flyout; it is closed as a person closes it: a real Escape
+--- with
+    page after the system share flyout, on a host of its own. A real click on
+    Share opens the flyout; it is closed as a person closes it: a real Escape
+=== replace crates/lightagent/tests/desktop_serve.rs
+--- find
+fn scratch_home() -> std::path::PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!(
+        "lightagent-desktop-serve-{}-{nanos}",
+        std::process::id()
+    ))
+}
+--- with
+fn scratch_home() -> std::path::PathBuf {
+    // Unique per call: both tests start at once, and macOS clocks tick in
+    // microseconds, so a name from the time alone can repeat.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let call = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "lightagent-desktop-serve-{}-{nanos}-{call}",
+        std::process::id()
+    ))
+}
+=== replace .github/workflows/release.yml
+--- find
+  # The same installers on the oldest GitHub-hosted images: macOS 14 (Apple
+  # silicon) and Windows Server 2022. No older hosted image exists for Intel
+  # macOS or Linux; those floors stay declarations (see the acceptance record).
+--- with
+  # The same Windows installers on the oldest GitHub-hosted Windows image,
+  # Windows Server 2022. No hosted macOS image older than 15 runs any more
+  # (macos-14 is refused), and none older than Ubuntu 22.04 exists, so those
+  # floors stay declarations (see the acceptance record).
+=== replace .github/workflows/release.yml
+--- find
+          - { os: macos-14, label: macos-arm64 }
+          - { os: windows-2022, label: windows-x64 }
+--- with
+          - { os: windows-2022, label: windows-x64 }
+=== replace .github/workflows/release.yml
+--- find
+        if: matrix.label == 'macos-arm64' || matrix.label == 'windows-x64'
+--- with
+        if: matrix.label == 'windows-x64'
+=== end
