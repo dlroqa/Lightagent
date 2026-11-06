@@ -2,12 +2,13 @@
 
 **Prepared for the owner's review. Nothing here is approved, merged, tagged
 or published.** Pull request https://github.com/dlroqa/Lightagent/pull/164
-(`release/v0.6.0`, draft). Revised 2026-11-06: signed and unsigned runs separated.
+(`release/v0.6.0`, draft). Revised 2026-11-06: owner-approved unsigned v0.6.0 release path.
 
 | | Commit | Tree |
 |---|---|---|
 | Base (`master`, the merged Desktop delivery) | `4f6b1f64ca84235f4e2682a2b5f3f65df96e6937` | `16161ba52f6cd4a4d8680708535f67448781cf0d` |
-| **Code candidate (the unsigned dry run built it)** | `692dcece27b20590747507ae3f02ee765b0a97fa` | `804fb3606842b9221e73ab3d9403371ed6e68464` |
+| **Release candidate (the final dry run built it)** | `22ad4fe60be6124d14c3f8b77dc8d9bb4c4b2cde` | `9b764e5c2cf41732402f471b9a94dfbce0bd1300` |
+| Code candidate before the unsigned release path | `692dcece27b20590747507ae3f02ee765b0a97fa` | `804fb3606842b9221e73ab3d9403371ed6e68464` |
 | Previous code candidate (license fix) | `55f4b96b733a254748369f037a128da08caf94b7` | `dc966a88333f8e362e7252a369b035797d40d894` |
 | Earlier code candidate (superseded) | `2e1623d5facc567407dcdd8bfeeffb0f8a8ac445` | `971d5cfb8c0f4e02bf935a61328181eb0a5ea213` |
 
@@ -23,13 +24,17 @@ What changed since `2e1623d`, in order:
 | `f1bac64` | edit request 194: the signing proofs (quarantined download, Gatekeeper, timestamps) |
 | `55f4b96` | edit request 195: the signature step no longer stops at a rejected assessment (it did on `f1bac64`, below) |
 | `2a78bcb` | edit request 196: documentation |
+| `8f35230` | edit request 199: the owner-approved unsigned path for v0.6.0 only (exact tag list in the gate; that tag publishes unsigned from its tag push only; a manual publishing run on it is refused; unsigned publication of any other tag is refused); one run per ref (concurrency); the publish job refuses an existing release for the tag, verifies SHA256SUMS and drafts with the release notes; the release notes |
+| `22ad4fe` | edit request 200: the shape test forbids computing checksums in the publish job, not verifying them (its earlier wording failed check on `8f35230`) |
 | `692dcec` | edit request 197: the `signing` input (unsigned by default; a tag push signs); only a signed run's macOS and Windows jobs use the protected `release-signing` environment; a signed run fails without every credential or verification; the .dmg files notarized and stapled; the Windows runtime's signature checked as built and as installed |
 
 ## 1. Evidence
 
 | Run | On | Result |
 |---|---|---|
-| **unsigned release dry run (artifact-only, `signing=unsigned`, `publish` skipped)** | `692dcec` | https://github.com/dlroqa/Lightagent/actions/runs/42221449510: **every job green**: gate (`signing=unsigned`), 4 CLI builds, 4 Desktop targets, licenses and sources, Windows Server 2022, checksums. No job used an environment; none was created |
+| **final release dry run (artifact-only, `signing=unsigned`, `publish` skipped)** | `22ad4fe` | https://github.com/dlroqa/Lightagent/actions/runs/42268737686: **every job green**; every installer installed, launched, reinstalled, uninstalled with user data unchanged; notices identical to the generated ones (the same digests as every run since the license fix); 0 shipped crates without a license text; SHA256SUMS 11 of 11 OK when downloaded; MPL archive `8dca80a1…cc0e8`; afterwards no `v0.6.*` tag and no v0.6.0 release exist, Latest still v0.5.0 |
+| release dry run | `8f35230` | 42268526429: cancelled once check failed on the shape test (fixed in `22ad4fe`) |
+| unsigned release dry run (artifact-only, `signing=unsigned`, `publish` skipped) | `692dcec` | https://github.com/dlroqa/Lightagent/actions/runs/42221449510: **every job green**: gate (`signing=unsigned`), 4 CLI builds, 4 Desktop targets, licenses and sources, Windows Server 2022, checksums. No job used an environment; none was created |
 | check | `692dcec` | https://github.com/dlroqa/Lightagent/actions/runs/42221456703 green, 13/13 (the gate's signing tests included) |
 | desktop | `692dcec` | https://github.com/dlroqa/Lightagent/actions/runs/42221456705 green, 12/12 |
 | jev evaluation | `692dcec` | https://github.com/dlroqa/Lightagent/actions/runs/42221456725 green |
@@ -251,8 +256,8 @@ Unchanged since the earlier record:
 | # | Item | Class | Status |
 |---|---|---|---|
 | 1 | Permissive notices without license texts (19) | was a release blocker | **resolved**: §3 |
-| 2 | macOS not signed or notarized | **release blocker for a general release**; acceptable only for an explicitly unsigned preview | open until a signed dry run passes every macOS proof (handoff §5) |
-| 3 | Windows not signed | documented limitation | handoff §2 |
+| 2 | macOS not signed or notarized | **accepted by the owner for v0.6.0** (2026-11-06; Gatekeeper behaviour documented in the release notes); a blocker again for later versions unless approved | later versions: a signed dry run passing every macOS proof (handoff §5) |
+| 3 | Windows not signed | **accepted by the owner for v0.6.0** (SmartScreen behaviour documented) | handoff §2 for later versions |
 | 4 | Linux not signed | documented limitation | optional |
 | 5 | Windows focus after the share panel | **pending manual check on Windows 11**; an unrecoverable keyboard trap is a blocker and must be fixed before release | `DESKTOP_WINDOWS_SHARE_FOCUS_CHECK.md` |
 | 6 | Declared minimum OS versions untested | documented limitation | decision 7 |
@@ -264,7 +269,7 @@ Unchanged since the earlier record:
 | 12 | MPL-2.0 sources attachment | resolved in the workflow; done when published | — |
 | 13 | objc2 family: no upstream copyright notice, SPDX texts used, Apple SDK statement; build-time entries listed; notice wording | owner or legal review | §3 |
 | 14 | Windows bundled runtime's signature not reported | was a gap in the signing proof | **resolved**: reported as built and in each installation (unsigned run 42221449510); a signed run requires it valid and timestamped |
-| 15 | Signed dry run, and the negative check that a signed request without credentials fails | **open, owner action first** | handoff §1 and §6 |
+| 15 | Signed dry run, and the negative check that a signed request without credentials fails | not needed for v0.6.0 (unsigned); open for later versions, owner action first | handoff §1 and §6 |
 
 ## 8. Proposed version, channel and assets
 
@@ -282,13 +287,18 @@ Unchanged since the earlier record:
 
 ## 9. Verdict
 
-**Not ready for a general release.** The license blocker is resolved and
-verified in every installer. Signed and unsigned runs are separate, and the
-unsigned artifact-only dry run on `692dcec` is green on every job. The
-signed dry run waits for the owner's environment and credentials. One release blocker remains: **macOS
-signing and notarization** (item 2), unless the owner chooses an
-explicitly unsigned preview. Item 5 stays pending until someone runs the
-manual Windows check. Item 13 needs the owner's or a legal review.
+**The owner approved (2026-11-06) unsigned macOS and Windows installers for
+v0.6.0, publication without marking it Latest, the merge of #164, the tag
+and publication, once every gate passes.** The unsigned path is in the
+candidate and tested, and the final artifact-only dry run on `22ad4fe` is
+green with every artifact verified.
+
+**Publication is held on one gate: the Windows 11 share-panel keyboard
+check (item 5) has not been run.** No result has been supplied, and hosted
+runners offer no Windows 11. Until it is run and recorded
+(`DESKTOP_WINDOWS_SHARE_FOCUS_CHECK.md`), #164 is not merged, no tag is
+created and nothing is published. Item 13 (objc2 treatment) remains
+documented for review.
 
 ## 10. Process record
 
@@ -305,20 +315,40 @@ manual Windows check. Item 13 needs the owner's or a legal review.
   that 195 fixes; the defect was caught by the `f1bac64` dry run before any
   report relied on it.
 
-## 11. The owner's decisions and actions
+## 11. Release path for v0.6.0 (approved unsigned)
 
-1. Create `release-signing` exactly as in handoff §1 and say when it
-   exists. Then the negative signed run (handoff §6.1) can run.
-2. macOS: add the six Apple secrets (handoff §2), or accept an unsigned
-   preview (a manual run on the tag with `signing` `unsigned`).
-3. Windows: Azure Artifact Signing or a CA signer (handoff §3), or unsigned
-   with the SmartScreen warning.
-4. Approve the signed dry run's review gate when it asks.
-5. Channel: (a), (b) or (c) in §8.
-6. Windows 11 share-panel check: who runs it.
-7. Minimum OS declarations: keep, narrow to what was tested, or test
-   elsewhere.
-8. Item 13: accept the objc2 treatment and the notice wording, or obtain a
-   legal review.
-9. Separately, when ready: merging #164 and #163, the tag, marking Latest,
-   publishing, and closing the superseded drafts.
+- **Allowed:** the tag push of `v0.6.0`. The gate prints `signing=unsigned
+  publish=true`, no job uses `release-signing`, and the publish job drafts
+  one release with `docs/releases/v0.6.0.md` as its body.
+- **Refused, so nothing can race the tag push or widen the approval:**
+  - a manual publishing run on `v0.6.0` (signed or unsigned);
+  - a manual unsigned publication of any other tag;
+  - any listed tag that is not the exact tag;
+  - the workflow setting the gate's test override.
+- **Guards:** runs on one ref run one at a time, and the publish job refuses
+  to draft when the tag already has a release.
+- **Unchanged for other versions:** a tag push signs; a manual publishing
+  run must be signed.
+- **Publication:** the draft is published with `make_latest` false, so
+  v0.5.0 stays Latest.
+  - `lightagent update` on 0.5.x keeps reporting it is up to date.
+  - 0.6.0 reports itself up to date.
+  - The release notes say so.
+
+## 12. Remaining before publication
+
+1. The Windows 11 share-panel check (item 5), run and recorded by the
+   owner or a tester.
+2. Then, under the owner's approval:
+   - merge #164 at its reviewed head;
+   - verify the master tree and the post-merge checks;
+   - tag that commit `v0.6.0`;
+   - verify the draft's 12 assets and checksums;
+   - publish without Latest;
+   - verify the public release.
+3. Outside this approval:
+   - #163;
+   - superseded-draft cleanup;
+   - signing setup for later versions (handoff);
+   - minimum-OS declarations;
+   - the objc2 review.
