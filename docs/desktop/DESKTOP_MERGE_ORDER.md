@@ -1,14 +1,15 @@
-# Lightagent Desktop — proposed merge order
+# Lightagent Desktop — merge record
 
-**Nothing here is approved, and nothing has been merged.** Merging any PR
-below needs the repository owner's separate, explicit approval. The approval
-covers only the exact head SHA named at that time. If a head changes, the
-approval lapses. Tagging, publishing, and releasing are separate permissions.
+## Completed delivery
 
-Each PR is stacked on the previous one, so its diff shows only its own
-slice. Before merge approval is requested (D10), the combined tree of every
-head, in this order, is validated on GitHub-hosted runners, and its SHA and
-tree are recorded here.
+| Step | PR | Merge commit | Resulting tree | Post-merge Actions |
+|---|---|---|---|---|
+| 1 | [#147](https://github.com/dlroqa/Lightagent/pull/147) | `4cada790ceaa2154050cf34450b059480e39b6dd` | `c73557e834e5996c3b37574c5a9e41628b10fed1` | [Check](https://github.com/dlroqa/Lightagent/actions/runs/42148383320), [Jev](https://github.com/dlroqa/Lightagent/actions/runs/42148383289), [Subagents](https://github.com/dlroqa/Lightagent/actions/runs/42148441908) |
+| 2 | [#161](https://github.com/dlroqa/Lightagent/pull/161) | `4f6b1f64ca84235f4e2682a2b5f3f65df96e6937` | `16161ba52f6cd4a4d8680708535f67448781cf0d` | [Check](https://github.com/dlroqa/Lightagent/actions/runs/42150133524), [Desktop](https://github.com/dlroqa/Lightagent/actions/runs/42150140810), [Jev](https://github.com/dlroqa/Lightagent/actions/runs/42150133551), [Subagents](https://github.com/dlroqa/Lightagent/actions/runs/42150144071) |
+
+Both trees matched the reviewed simulation and all listed workflows passed. The combined candidate incorporated the Desktop stack, including #162. Remaining draft cleanup requires separate approval. Release readiness is tracked in [DESKTOP_FINAL_ACCEPTANCE.md](DESKTOP_FINAL_ACCEPTANCE.md).
+
+## Historical development sequence
 
 | Order | Slice | PR | Branch | Base (prerequisite) | Head at this commit's base | Last fully tested head |
 |---|---|---|---|---|---|---|
