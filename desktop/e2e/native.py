@@ -480,7 +480,6 @@ def share_focus_mode(out, cli, command, home, results):
         view.wait_ui()
         stages["launch"] = windows_stage(view, host)
         stages["answer"] = scenario_chat(view, provider, home, {}).results
-        focus_window(host)
         stages["before_share"] = windows_stage(view, host)
         where = view.js('const r = one("textbox", "Ask Lightagent").getBoundingClientRect(); '
                         'return { x: r.left + r.width / 2, y: r.top + r.height / 2, dpr: devicePixelRatio };')
