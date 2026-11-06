@@ -338,12 +338,38 @@ jobs:
                 for dmg in $r/dmg/*.dmg; do
                   echo "- notarization ticket stapled to $(basename "$dmg"): $(xcrun stapler validate "$dmg" >/dev/null 2>&1 && echo yes || echo no)"
                 done
-                case "${SIGNING:-}" in signed*) [ "$verified" = yes ] || status=1 ;; esac ;;
+                case "${SIGNING:-}" in signed*) [ "$verified" = yes ] || status=1 ;; esac
+                # As a person downloads it: a quarantined copy of each .dmg, and
+                # the app copied out of it, quarantined, assessed by Gatekeeper.
+                # A notarized run fails unless both are accepted and the app
+                # carries its stapled ticket.
+                for dmg in $r/dmg/*.dmg; do
+                  d="$RUNNER_TEMP/gatekeeper-$(basename "$dmg" .dmg)"; mkdir -p "$d/mnt"
+                  quarantine="0083;$(printf %x "$(date +%s)");Safari;"
+                  cp "$dmg" "$d/download.dmg" && xattr -w com.apple.quarantine "$quarantine" "$d/download.dmg"
+                  dmg_gk=$(spctl --assess --type open --context context:primary-signature -vv "$d/download.dmg" 2>&1 | tr '\n' ' ')
+                  copy="$d/$(basename "$app")"
+                  if hdiutil attach -nobrowse -readonly -mountpoint "$d/mnt" "$d/download.dmg" >/dev/null; then
+                    ditto "$d/mnt/$(basename "$app")" "$copy"
+                    hdiutil detach "$d/mnt" >/dev/null || hdiutil detach -force "$d/mnt" >/dev/null
+                  fi
+                  xattr -w com.apple.quarantine "$quarantine" "$copy" 2>/dev/null
+                  app_gk=$(spctl --assess --type execute -vv "$copy" 2>&1 | tr '\n' ' ')
+                  stapled=$(xcrun stapler validate "$copy" >/dev/null 2>&1 && echo yes || echo no)
+                  echo "- downloaded $(basename "$dmg"), quarantined: disk image: $dmg_gk; app from it: $app_gk; app ticket stapled: $stapled"
+                  if [ "${SIGNING:-}" = "signed (Developer ID), notarized" ]; then
+                    case "$dmg_gk" in *": accepted"*) ;; *) status=1 ;; esac
+                    case "$app_gk" in *": accepted"*"source=Notarized Developer ID"*) ;; *) status=1 ;; esac
+                    [ "$stapled" = yes ] || status=1
+                  fi
+                done ;;
               Windows)
-                for f in $r/nsis/*.exe $r/msi/*.msi desktop/target/release/lightagent-desktop.exe; do
-                  state=$(powershell -NoProfile -Command "(Get-AuthenticodeSignature -FilePath '$(cygpath -w "$f")').Status" | tr -d '\r')
-                  echo "- $(basename "$f"): Authenticode $state"
-                  case "${SIGNING:-}" in signed*) [ "$state" = Valid ] || status=1 ;; esac
+                for f in $r/nsis/*.exe $r/msi/*.msi desktop/target/release/lightagent-desktop.exe desktop/target/release/lightagent.exe; do
+                  [ -f "$f" ] || continue
+                  sig=$(powershell -NoProfile -Command "\$s = Get-AuthenticodeSignature -FilePath '$(cygpath -w "$f")'; '{0}|{1}|{2}' -f \$s.Status, \$s.SignerCertificate.Subject, \$s.TimeStamperCertificate.Subject" | tr -d '\r')
+                  IFS='|' read -r state signer stamp <<<"$sig"
+                  echo "- $(basename "$f"): Authenticode $state; signer: ${signer:-none}; timestamp: ${stamp:-none}"
+                  case "${SIGNING:-}" in signed*) [ "$state" = Valid ] && [ -n "$stamp" ] || status=1 ;; esac
                 done ;;
               Linux)
                 echo "- .deb and AppImage: no signature (none is configured); integrity through SHA256SUMS" ;;

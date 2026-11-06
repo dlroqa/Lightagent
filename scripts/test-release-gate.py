@@ -327,6 +327,9 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertLess(names.index(signing["name"]), names.index("Build and bundle"))
         self.assertIn("Signature state of what ships", names)
         self.assertIn("The notices name every crate version found in the shipped binaries", names)
+        (state,) = [s for s in steps if s.get("name") == "Signature state of what ships"]
+        for needed in ("com.apple.quarantine", "source=Notarized Developer ID", "stapler validate", "TimeStamperCertificate"):
+            self.assertIn(needed, state["run"])
 
     def test_licenses_are_complete_and_the_sources_checked(self):
         self.assertIn("scripts/desktop-upstream-licenses.py", self.steps_text("desktop-sources"))
