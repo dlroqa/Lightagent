@@ -1,0 +1,756 @@
+=== base 33d05f61a05664a071452dd4b1304277f719599a
+=== message
+Release workflow: build, verify and checksum Lightagent Desktop with the CLI
+
+A release now carries the Desktop installers next to the CLI archives, from
+the same tag and the same run. A manual run stays a dry run (the gate is
+unchanged): every package is built, verified and checksummed, and kept only
+as run artifacts.
+
+- desktop (4 targets, native, the architecture checked as for the CLI):
+  the installers (.dmg arm64 and x64, NSIS and MSI, .deb and AppImage)
+  with the third-party notices bundled; the test-only driver absent; each
+  installer installed, launched and uninstalled on its runner with the
+  user data checks (the reinstall is a same-version reinstall, not an
+  upgrade); the notices checked against the crate versions found in the
+  shipped binaries themselves; the signature state of what ships.
+- Signing uses the signing secrets when they are configured, and only then:
+  macOS through Tauri's Developer ID signing and notarization
+  (APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY;
+  APPLE_API_ISSUER, APPLE_API_KEY, APPLE_API_KEY_P8), Windows through
+  Tauri's signCommand (repository variable WINDOWS_SIGN_COMMAND, its tool
+  WINDOWS_SIGN_TOOL as crate@version, AZURE_* secrets for it). An
+  incomplete set fails; none at all builds unsigned and says so.
+- desktop-sources: SBOMs and notices per target, the vulnerability audits,
+  and desktop-mpl-sources-<version>.tar.gz, packed reproducibly and checked
+  (its SHA256SUMS, its MPL-2.0 text, exactly the archives the notices name).
+- desktop-older-os: the macOS arm64 and Windows installers installed,
+  launched and uninstalled on the oldest hosted images (macos-14,
+  windows-2022).
+- checksums and publish wait for all of it; SHA256SUMS covers the CLI
+  archives, the installers and the MPL-2.0 sources, so `lightagent update`
+  keeps reading its archive's line from the same file.
+
+scripts/desktop-notices-shipped.py is the shipped-version check;
+scripts/test-release-gate.py covers the new jobs' shape.
+=== write .github/workflows/release.yml
+name: release
+
+# A pushed tag `v<version>` builds, smoke-tests and checksums every package,
+# the CLI archives and the Lightagent Desktop installers, then drafts a GitHub
+# release. A manual run is a dry run unless `dry_run` is turned off: it builds
+# the same packages and uploads them with SHA256SUMS as run artifacts, and
+# creates no release or tag. Turning `dry_run` off is only accepted on the tag
+# itself. scripts/release-gate.sh makes the decision and
+# scripts/test-release-gate.py tests it, and the shape of this file, in check.
+#
+# The Desktop installers are signed only when the signing secrets are
+# configured (docs/desktop/DESKTOP_RELEASE_ACCEPTANCE.md); without them they
+# are built unsigned, and every run reports the signature state of what ships.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build, smoke-test and checksum only; create no release
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: release gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      publish: ${{ steps.decide.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: decide
+        # `shell: bash` adds pipefail, so a refusal fails the step through tee.
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DRY_RUN: ${{ toJSON(inputs.dry_run) }}
+        run: bash ./scripts/release-gate.sh | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    name: build (${{ matrix.label }})
+    needs: gate
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    # Every package is built and smoke-tested natively on its own architecture;
+    # `arch` is what the runner must report, checked below, not inferred from
+    # the label. `macos_min` is the package's minimum macOS (its deployment
+    # target): 11.0 is the floor for Apple silicon, and 10.14 for Intel is the
+    # floor of rustls-platform-verifier (Security.framework), above Rust's 10.12.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, label: macos-arm64, triple: aarch64-apple-darwin, arch: arm64, macos_min: '11.0' }
+          - { os: macos-15-intel, label: macos-x64, triple: x86_64-apple-darwin, arch: x86_64, macos_min: '10.14' }
+          - { os: windows-latest, label: windows-x64, triple: x86_64-pc-windows-msvc, arch: x86_64 }
+          - { os: ubuntu-22.04, label: linux-x64, triple: x86_64-unknown-linux-gnu, arch: x86_64 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup show
+      - name: Runner architecture
+        env:
+          WANT_ARCH: ${{ matrix.arch }}
+          WANT_TRIPLE: ${{ matrix.triple }}
+        run: |
+          arch="$(uname -m)"
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          {
+            echo "### ${{ matrix.label }} runner"
+            echo "- uname: $(uname -srm)"
+            echo "- rustc host: $host"
+            if [ "$(uname -s)" = Darwin ]; then
+              echo "- macOS: $(sw_vers -productVersion) ($(sw_vers -buildVersion))"
+              echo "- CPU: $(sysctl -n machdep.cpu.brand_string)"
+              echo "- hw.optional.arm64: $(sysctl -n hw.optional.arm64 2>/dev/null || echo absent)"
+              echo "- sysctl.proc_translated: $(sysctl -n sysctl.proc_translated 2>/dev/null || echo absent)"
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$arch" = "$WANT_ARCH" ] || { echo "runner is $arch, expected $WANT_ARCH" >&2; exit 1; }
+          [ "$host" = "$WANT_TRIPLE" ] || { echo "rustc host is $host, expected $WANT_TRIPLE" >&2; exit 1; }
+          if [ "$(uname -s)" = Darwin ]; then
+            # Rosetta reports x86_64 from uname on Apple silicon; neither may
+            # stand in for the real hardware.
+            [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 0 ] \
+              || { echo "running under Rosetta translation" >&2; exit 1; }
+            if [ "$WANT_ARCH" = x86_64 ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = 1 ]; then
+              echo "an Apple silicon machine, not an Intel Mac" >&2; exit 1
+            fi
+          fi
+      - name: macOS deployment target
+        if: matrix.macos_min
+        run: echo "MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos_min }}" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.label }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: bash ./scripts/check-versions.sh
+      - run: npm ci --prefix frontend
+      - run: npm run build --prefix frontend
+      - run: cargo build --release -p lightagent --target ${{ matrix.triple }}
+      - run: bash ./scripts/package-lightagent.sh ${{ matrix.triple }}
+      - run: bash ./scripts/smoke-lightagent-package.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lightagent-${{ matrix.label }}
+          if-no-files-found: error
+          path: dist-cli/lightagent-*
+
+  # Lightagent Desktop, built natively on each target from the same commit:
+  # the installers a release attaches, and the evidence that each one installs,
+  # launches, keeps the person's data and uninstalls on its own runner.
+  desktop:
+    name: desktop (${{ matrix.label }})
+    needs: gate
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, label: macos-arm64, triple: aarch64-apple-darwin, arch: arm64, macos_min: '11.0', bundles: 'app,dmg', installers: 1 }
+          - { os: macos-15-intel, label: macos-x64, triple: x86_64-apple-darwin, arch: x86_64, macos_min: '10.14', bundles: 'app,dmg', installers: 1 }
+          - { os: windows-latest, label: windows-x64, triple: x86_64-pc-windows-msvc, arch: x86_64, bundles: 'nsis,msi', installers: 2 }
+          - { os: ubuntu-22.04, label: linux-x64, triple: x86_64-unknown-linux-gnu, arch: x86_64, bundles: 'deb,appimage', installers: 2 }
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_INCREMENTAL: '0'
+      TAURI_CLI: '@tauri-apps/cli@2.12.3'
+      APPIMAGE_EXTRACT_AND_RUN: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup show
+      - name: Runner architecture and tested commit
+        env:
+          WANT_ARCH: ${{ matrix.arch }}
+          WANT_TRIPLE: ${{ matrix.triple }}
+        run: |
+          arch="$(uname -m)"; case "$arch" in AMD64|amd64) arch=x86_64;; aarch64) arch=arm64;; esac
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          {
+            echo "### desktop ${{ matrix.label }}"
+            echo "- source: \`$(git rev-parse HEAD)\` tree \`$(git rev-parse 'HEAD^{tree}')\`"
+            echo "- runner image: ${ImageOS:-?} ${ImageVersion:-?}; $(uname -srm); rustc host $host"
+            if [ "$(uname -s)" = Darwin ]; then echo "- macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion))"; fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$arch" = "$WANT_ARCH" ] || { echo "runner is $arch, expected $WANT_ARCH" >&2; exit 1; }
+          [ "$host" = "$WANT_TRIPLE" ] || { echo "rustc host is $host, expected $WANT_TRIPLE" >&2; exit 1; }
+          if [ "$(uname -s)" = Darwin ]; then
+            [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 0 ] \
+              || { echo "running under Rosetta translation" >&2; exit 1; }
+            if [ "$WANT_ARCH" = x86_64 ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = 1 ]; then
+              echo "an Apple silicon machine, not an Intel Mac" >&2; exit 1
+            fi
+          fi
+      - name: macOS deployment target
+        if: matrix.macos_min
+        run: echo "MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos_min }}" >> "$GITHUB_ENV"
+      - name: Linux system packages (webview, display)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf file xvfb imagemagick xdotool
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            desktop -> target
+          key: release-desktop-${{ matrix.label }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install psutil==7.1.0 pillow==11.3.0
+      - run: bash ./scripts/check-versions.sh
+      - name: Desktop frontend
+        run: |
+          npm ci --prefix frontend
+          npm run build:desktop --prefix frontend
+      - name: Stage the runtime (the real lightagent) and icons
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p lightagent
+          ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
+          mkdir -p desktop/src-tauri/binaries
+          cp "target/release/lightagent$ext" "desktop/src-tauri/binaries/lightagent-sidecar-${{ matrix.triple }}$ext"
+          (cd desktop && npx --yes "$TAURI_CLI" icon ../icon/LightagentLogo.png -o src-tauri/icons)
+      - name: Third-party notices for this target (bundled into every package)
+        run: |
+          set -euo pipefail
+          meta="$RUNNER_TEMP/notices-metadata"; mkdir -p "$meta"
+          cargo metadata --locked --format-version 1 --filter-platform "${{ matrix.triple }}" > "$meta/root-${{ matrix.triple }}.json"
+          cargo metadata --locked --format-version 1 --filter-platform "${{ matrix.triple }}" --manifest-path desktop/Cargo.toml > "$meta/desktop-${{ matrix.triple }}.json"
+          python -I scripts/desktop-sbom.py --notices "$meta" "${{ matrix.triple }}" frontend desktop/src-tauri/notices . | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Signing configuration (the signing secrets only; otherwise unsigned)
+        id: signing
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          WINDOWS_SIGN_COMMAND: ${{ vars.WINDOWS_SIGN_COMMAND }}
+          WINDOWS_SIGN_TOOL: ${{ vars.WINDOWS_SIGN_TOOL }}
+        run: |
+          set -euo pipefail
+          put() { { echo "$1<<LA_SIGNING_END"; printf '%s\n' "$2"; echo "LA_SIGNING_END"; } >> "$GITHUB_ENV"; }
+          given() { n=0; for v in "$@"; do [ -n "${!v}" ] && n=$((n + 1)); done; echo "$n"; }
+          mode=unsigned; config='{}'
+          case "$RUNNER_OS" in
+            macOS)
+              case "$(given APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY)" in
+                0) ;;
+                3)
+                  for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do put "$v" "${!v}"; done
+                  mode="signed (Developer ID), not notarized"
+                  case "$(given APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_P8)" in
+                    0) ;;
+                    3)
+                      key="$RUNNER_TEMP/notary/AuthKey_$APPLE_API_KEY.p8"; mkdir -p "$(dirname "$key")"
+                      printf '%s\n' "$APPLE_API_KEY_P8" > "$key"
+                      put APPLE_API_ISSUER "$APPLE_API_ISSUER"; put APPLE_API_KEY "$APPLE_API_KEY"; put APPLE_API_KEY_PATH "$key"
+                      mode="signed (Developer ID), notarized" ;;
+                    *) echo "::error::notarization needs APPLE_API_ISSUER, APPLE_API_KEY and APPLE_API_KEY_P8 together"; exit 1 ;;
+                  esac ;;
+                *) echo "::error::signing needs APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD and APPLE_SIGNING_IDENTITY together"; exit 1 ;;
+              esac ;;
+            Windows)
+              if [ -n "$WINDOWS_SIGN_COMMAND" ]; then
+                [ -z "$WINDOWS_SIGN_TOOL" ] || cargo install --locked "$WINDOWS_SIGN_TOOL"
+                config=$(python -c 'import json, sys; print(json.dumps({"bundle": {"windows": {"signCommand": sys.argv[1]}}}))' "$WINDOWS_SIGN_COMMAND")
+                mode="signed (signCommand)"
+              elif [ -n "$WINDOWS_SIGN_TOOL" ]; then
+                echo "::error::WINDOWS_SIGN_TOOL is set without WINDOWS_SIGN_COMMAND"; exit 1
+              fi ;;
+          esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          printf 'config=%s\n' "$config" >> "$GITHUB_OUTPUT"
+          echo "- signing (${{ matrix.label }}): $mode" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Build and bundle
+        working-directory: desktop
+        env:
+          SIGN_CONFIG: ${{ steps.signing.outputs.config }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        run: |
+          set -euo pipefail
+          # The notices generated above ship beside the app in every package;
+          # the signing configuration, when there is one, is merged in.
+          config=$(python - "${{ matrix.macos_min }}" "$SIGN_CONFIG" <<'PY'
+          import json, sys
+          floor, signing = sys.argv[1], json.loads(sys.argv[2] or "{}")
+          bundle = {"resources": {"notices/THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt", "notices/LICENSE.txt": "LICENSE.txt"}}
+          if floor:
+              bundle["macOS"] = {"minimumSystemVersion": floor}
+          bundle.update(signing.get("bundle", {}))
+          print(json.dumps({"bundle": bundle}))
+          PY
+          )
+          mkdir -p "$RUNNER_TEMP/release-desktop-evidence"
+          # hdiutil on hosted macOS images intermittently fails with "Resource
+          # busy". Only that exact failure is retried, at most three attempts.
+          for attempt in 1 2 3; do
+            log="$RUNNER_TEMP/release-desktop-evidence/bundle-attempt-$attempt.log"
+            if npx --yes "$TAURI_CLI" build --ci --bundles ${{ matrix.bundles }} --config "$config" 2>&1 | tee "$log"; then
+              break
+            fi
+            if ! grep -q 'hdiutil: create failed - Resource busy' "$log" || [ "$attempt" = 3 ]; then
+              exit 1
+            fi
+            echo "- bundling attempt $attempt hit hdiutil 'Resource busy'; retrying (log kept)" | tee -a "$GITHUB_STEP_SUMMARY"
+            sleep 20
+          done
+      - name: The test-only driver is absent from the packaged app
+        run: |
+          set -euo pipefail
+          r=desktop/target/release
+          ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
+          bins=("$r/lightagent-desktop$ext")
+          if [ "$(uname -s)" = Darwin ]; then bins+=("$(ls -d $r/bundle/macos/*.app)/Contents/MacOS/lightagent-desktop"); fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            mkdir -p "$RUNNER_TEMP/deb-contents"
+            dpkg-deb -x "$(ls $r/bundle/deb/*.deb | head -1)" "$RUNNER_TEMP/deb-contents"
+            bins+=("$RUNNER_TEMP/deb-contents/usr/bin/lightagent-desktop")
+          fi
+          for bin in "${bins[@]}"; do
+            for marker in E2E_DRIVER e2e_reply LIGHTAGENT_DESKTOP_E2E_DRIVER; do
+              if grep -a -q "$marker" "$bin"; then echo "::error::test-only marker $marker found in $bin"; exit 1; fi
+            done
+          done
+          echo "- test-only driver markers absent from ${#bins[@]} packaged host binaries" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The notices name every crate version found in the shipped binaries
+        run: |
+          ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
+          python -I scripts/desktop-notices-shipped.py desktop/src-tauri/notices/THIRD_PARTY_NOTICES.txt \
+            "desktop/target/release/lightagent-desktop$ext" "target/release/lightagent$ext" \
+            | tee "$RUNNER_TEMP/release-desktop-evidence/notices-shipped-${{ matrix.label }}.txt" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
+      - name: Signature state of what ships
+        if: success() || failure()
+        env:
+          SIGNING: ${{ steps.signing.outputs.mode }}
+        run: |
+          set -uo pipefail
+          r=desktop/target/release/bundle
+          report="$RUNNER_TEMP/release-desktop-evidence/signing-${{ matrix.label }}.md"
+          status=0
+          {
+            echo "### signing ${{ matrix.label }}: ${SIGNING:-not configured}"
+            case "$RUNNER_OS" in
+              macOS)
+                app=$(ls -d $r/macos/*.app)
+                echo "- codesign -dv: $(codesign -dv --verbose=2 "$app" 2>&1 | grep -E '^(Authority|TeamIdentifier|Signature|CodeDirectory)' | tr '\n' ';')"
+                if codesign --verify --deep --strict "$app" >/dev/null 2>&1; then verified=yes; else verified=no; fi
+                echo "- codesign --verify --deep --strict: $verified"
+                echo "- Gatekeeper (spctl --assess --type execute): $(spctl --assess --type execute -vv "$app" 2>&1 | tr '\n' ' ')"
+                for dmg in $r/dmg/*.dmg; do
+                  echo "- notarization ticket stapled to $(basename "$dmg"): $(xcrun stapler validate "$dmg" >/dev/null 2>&1 && echo yes || echo no)"
+                done
+                case "${SIGNING:-}" in signed*) [ "$verified" = yes ] || status=1 ;; esac ;;
+              Windows)
+                for f in $r/nsis/*.exe $r/msi/*.msi desktop/target/release/lightagent-desktop.exe; do
+                  state=$(powershell -NoProfile -Command "(Get-AuthenticodeSignature -FilePath '$(cygpath -w "$f")').Status" | tr -d '\r')
+                  echo "- $(basename "$f"): Authenticode $state"
+                  case "${SIGNING:-}" in signed*) [ "$state" = Valid ] || status=1 ;; esac
+                done ;;
+              Linux)
+                echo "- .deb and AppImage: no signature (none is configured); integrity through SHA256SUMS" ;;
+            esac
+          } > "$report"
+          tee -a "$GITHUB_STEP_SUMMARY" < "$report"
+          exit $status
+      - name: Collect the installers
+        id: installers
+        run: |
+          set -euo pipefail
+          version=$(sed -n '/^\[workspace\.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version *= *"\([^"]*\)".*/\1/p' | head -1)
+          out="$RUNNER_TEMP/release-desktop"; mkdir -p "$out"
+          find desktop/target/release/bundle -maxdepth 2 -type f \( -name '*.dmg' -o -name '*-setup.exe' -o -name '*.msi' -o -name '*.deb' -o -name '*.AppImage' \) -exec cp {} "$out/" \;
+          ls -l "$out"
+          count=$(ls "$out" | wc -l | tr -d ' ')
+          [ "$count" = "${{ matrix.installers }}" ] || { echo "::error::found $count installers, expected ${{ matrix.installers }}"; exit 1; }
+          for f in "$out"/*; do
+            case "$(basename "$f")" in "Lightagent_${version}_"*) ;; *) echo "::error::$(basename "$f") is not named Lightagent_${version}_*"; exit 1 ;; esac
+          done
+          (cd "$out" && sha256sum * | tee -a "$GITHUB_STEP_SUMMARY")
+      - name: Install, launch and uninstall each installer, with the user data checks (same-version reinstall)
+        run: |
+          python desktop/e2e/install_smoke.py "$RUNNER_TEMP/release-desktop-evidence/install" "${{ matrix.label }}" desktop/target/release/bundle | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-desktop-${{ matrix.label }}
+          if-no-files-found: error
+          retention-days: 30
+          path: ${{ runner.temp }}/release-desktop/
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: desktop-evidence-${{ matrix.label }}
+          retention-days: 30
+          path: ${{ runner.temp }}/release-desktop-evidence/
+      # What the older-OS job needs to install these same installers again.
+      - uses: actions/upload-artifact@v7
+        if: matrix.label == 'macos-arm64' || matrix.label == 'windows-x64'
+        with:
+          name: desktop-smoke-kit-${{ matrix.label }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            desktop/target/release/bundle/dmg/*.dmg
+            desktop/target/release/bundle/nsis/*-setup.exe
+            desktop/target/release/bundle/msi/*.msi
+            target/release/lightagent
+            target/release/lightagent.exe
+            desktop/src-tauri/notices/
+
+  # The same installers on the oldest GitHub-hosted images: macOS 14 (Apple
+  # silicon) and Windows Server 2022. No older hosted image exists for Intel
+  # macOS or Linux; those floors stay declarations (see the acceptance record).
+  desktop-older-os:
+    name: desktop installers on ${{ matrix.os }}
+    needs: desktop
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, label: macos-arm64 }
+          - { os: windows-2022, label: windows-x64 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install psutil==7.1.0 pillow==11.3.0
+      - uses: actions/download-artifact@v8
+        with:
+          name: desktop-smoke-kit-${{ matrix.label }}
+          path: .
+      - name: The system under test
+        run: |
+          chmod +x target/release/lightagent 2>/dev/null || true
+          {
+            echo "### desktop installers on ${{ matrix.os }}"
+            echo "- source: \`$(git rev-parse HEAD)\` tree \`$(git rev-parse 'HEAD^{tree}')\`"
+            echo "- runner image: ${ImageOS:-?} ${ImageVersion:-?}; $(uname -srm)"
+            if [ "$(uname -s)" = Darwin ]; then echo "- macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion))"; fi
+            if [ "$RUNNER_OS" = Windows ]; then
+              echo "- Windows $(powershell -NoProfile -Command '[Environment]::OSVersion.VersionString' | tr -d '\r')"
+              echo "- WebView2 runtime: $(powershell -NoProfile -Command "(Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue).pv" | tr -d '\r')"
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Install, launch and uninstall each installer, with the user data checks (same-version reinstall)
+        run: |
+          python desktop/e2e/install_smoke.py "$RUNNER_TEMP/older-os" "${{ matrix.label }}-${{ matrix.os }}" desktop/target/release/bundle | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: desktop-evidence-${{ matrix.os }}
+          retention-days: 30
+          path: ${{ runner.temp }}/older-os/
+
+  # Licenses and sources for every Desktop target: the SBOMs, the notices,
+  # the audits, and the MPL-2.0 Source Code Form a release attaches.
+  desktop-sources:
+    name: desktop licenses and MPL-2.0 sources
+    needs: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup show
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: The bundled UI's dependencies (for their licenses)
+        run: npm ci --prefix frontend
+      - name: What each target links (cargo metadata, both workspaces)
+        run: |
+          set -euo pipefail
+          echo "- source: \`$(git rev-parse HEAD)\` tree \`$(git rev-parse 'HEAD^{tree}')\`" | tee -a "$GITHUB_STEP_SUMMARY"
+          dir="$RUNNER_TEMP/supply-chain/metadata"; mkdir -p "$dir"
+          for t in x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc x86_64-unknown-linux-gnu; do
+            cargo metadata --locked --format-version 1 --filter-platform "$t" > "$dir/root-$t.json"
+            cargo metadata --locked --format-version 1 --filter-platform "$t" --manifest-path desktop/Cargo.toml > "$dir/desktop-$t.json"
+          done
+      - name: SBOM and license inventory per target
+        run: python -I scripts/desktop-sbom.py "$RUNNER_TEMP/supply-chain/metadata" frontend "$RUNNER_TEMP/supply-chain" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Third-party notices per target, and the MPL-2.0 source archives
+        run: |
+          set -euo pipefail
+          for t in x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc x86_64-unknown-linux-gnu; do
+            python -I scripts/desktop-sbom.py --notices "$RUNNER_TEMP/supply-chain/metadata" "$t" frontend "$RUNNER_TEMP/supply-chain/notices-$t" . | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          python -I scripts/desktop-sbom.py --mpl-sources "$RUNNER_TEMP/supply-chain/metadata" "$RUNNER_TEMP/supply-chain/mpl-sources" . | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: desktop-mpl-sources-<version>.tar.gz, packed reproducibly and checked
+        run: |
+          set -euo pipefail
+          version=$(sed -n '/^\[workspace\.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version *= *"\([^"]*\)".*/\1/p' | head -1)
+          name="desktop-mpl-sources-$version"
+          out="$RUNNER_TEMP/release-desktop-sources"; mkdir -p "$out"
+          tar --sort=name --mtime='1970-01-01 00:00:00Z' --owner=0 --group=0 --numeric-owner \
+            --transform "s,^mpl-sources,$name," -C "$RUNNER_TEMP/supply-chain" -cf - mpl-sources | gzip -n -9 > "$out/$name.tar.gz"
+          check="$RUNNER_TEMP/mpl-check"; mkdir -p "$check"
+          tar -xzf "$out/$name.tar.gz" -C "$check"
+          (cd "$check/$name" && sha256sum -c SHA256SUMS && test -s MPL-2.0.txt && grep -q 'Mozilla Public License Version 2.0' MPL-2.0.txt)
+          # Exactly the archives the notices of the four targets name.
+          grep -ho 'archive: https://static.crates.io/crates/[^ ]*' "$RUNNER_TEMP"/supply-chain/notices-*/THIRD_PARTY_NOTICES.txt | sed 's,.*/,,' | sort -u > "$RUNNER_TEMP/mpl-named.txt"
+          (cd "$check/$name" && ls -- *.crate | sort) > "$RUNNER_TEMP/mpl-packed.txt"
+          diff "$RUNNER_TEMP/mpl-named.txt" "$RUNNER_TEMP/mpl-packed.txt"
+          {
+            echo "### $name.tar.gz"
+            echo "- SHA-256 \`$(sha256sum "$out/$name.tar.gz" | cut -d' ' -f1)\`, $(stat -c %s "$out/$name.tar.gz") bytes"
+            echo "- archives: $(paste -sd' ' "$RUNNER_TEMP/mpl-packed.txt") (each equal to Cargo.lock's checksum; exactly the ones the notices name)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Known vulnerabilities in the crates (cargo audit, both lockfiles)
+        run: |
+          cargo install --locked cargo-audit
+          echo "- $(cargo audit --version)" | tee -a "$GITHUB_STEP_SUMMARY"
+          status=0
+          for lock in Cargo.lock desktop/Cargo.lock; do
+            report="$RUNNER_TEMP/supply-chain/cargo-audit-$(echo "$lock" | tr / -).json"
+            cargo audit --file "$lock" --json > "$report" || true
+            python -I scripts/desktop-sbom.py --cargo-audit "$report" "$lock" | tee -a "$GITHUB_STEP_SUMMARY"
+            [ "${PIPESTATUS[0]}" = 0 ] || status=1
+          done
+          exit $status
+      - name: Known vulnerabilities in the bundled UI (npm audit, high or critical)
+        run: |
+          report="$RUNNER_TEMP/supply-chain/npm-audit.json"
+          (cd frontend && npm audit --omit=dev --json) > "$report" || true
+          python -I scripts/desktop-sbom.py --npm-audit "$report" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-desktop-mpl-sources
+          if-no-files-found: error
+          retention-days: 30
+          path: ${{ runner.temp }}/release-desktop-sources/
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: desktop-licenses
+          retention-days: 30
+          path: ${{ runner.temp }}/supply-chain/
+
+  # Runs for dry runs and releases alike, so a dry run's SHA256SUMS is the
+  # file a release would attach. It covers the CLI archives (what
+  # `lightagent update` reads), the Desktop installers and the MPL-2.0 sources.
+  checksums:
+    name: checksums
+    needs: [build, desktop, desktop-sources]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: lightagent-*
+          path: release-assets
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-desktop-*
+          path: release-assets
+          merge-multiple: true
+      - name: Checksums
+        working-directory: release-assets
+        env:
+          # One archive per build matrix entry, and every installer of the
+          # desktop matrix; test-release-gate.py keeps them equal.
+          PACKAGES: 4
+          DESKTOP_INSTALLERS: 6
+        run: |
+          ls -l
+          count="$(ls lightagent-* | wc -l | tr -d ' ')"
+          [ "$count" = "$PACKAGES" ] || { echo "found $count packages, expected $PACKAGES" >&2; exit 1; }
+          installers="$(ls Lightagent_* | wc -l | tr -d ' ')"
+          [ "$installers" = "$DESKTOP_INSTALLERS" ] || { echo "found $installers desktop installers, expected $DESKTOP_INSTALLERS" >&2; exit 1; }
+          sources="$(ls desktop-mpl-sources-*.tar.gz | wc -l | tr -d ' ')"
+          [ "$sources" = 1 ] || { echo "found $sources MPL-2.0 source archives, expected 1" >&2; exit 1; }
+          sha256sum lightagent-* Lightagent_* desktop-mpl-sources-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-SHA256SUMS
+          if-no-files-found: error
+          path: release-assets/SHA256SUMS
+
+  publish:
+    name: draft GitHub release
+    needs: [gate, build, checksums, desktop, desktop-older-os, desktop-sources]
+    if: needs.gate.outputs.publish == 'true' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: lightagent-*
+          path: release-assets
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-desktop-*
+          path: release-assets
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-SHA256SUMS
+          path: release-assets
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: release-assets/*
+=== write scripts/desktop-notices-shipped.py
+"""Whether the bundled third-party notices name every crate, at its exact
+version, that the shipped Desktop binaries were built from (release.yml).
+
+  python desktop-notices-shipped.py <THIRD_PARTY_NOTICES.txt> <binary>...
+
+A release build keeps the source paths of code that can panic, under the
+cargo registry: .../index.crates.io-<hash>/<crate>-<version>/... Those paths
+are a record taken from the shipped binaries themselves, not from cargo
+metadata (which the notices are generated from), of which crates and versions
+the binaries contain. Every one must be in the notices with the same version.
+Crates the notices list that the binaries do not show are counted, not
+failed: a crate with no code that can panic leaves no path, and procedural
+macros leave none.
+
+Prints a Markdown summary. Exits 1 when a crate or version found in a binary
+is not in the notices, or when a binary shows no registry path at all (the
+check would prove nothing).
+"""
+
+import re
+import sys
+
+PATH = re.compile(rb"index\.crates\.io-[0-9a-f]{16}[/\\]([A-Za-z0-9_.+-]+?)-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)[/\\]")
+LISTED = re.compile(r"^-- (\S+) (\S+) \(cargo\);")
+
+
+def main():
+    notices, binaries = sys.argv[1], sys.argv[2:]
+    listed = {}
+    with open(notices, encoding="utf-8") as handle:
+        for line in handle:
+            match = LISTED.match(line)
+            if match:
+                listed.setdefault(match.group(1), set()).add(match.group(2))
+    lines = [f"### notices against the shipped binaries: {sum(len(v) for v in listed.values())} crate versions listed"]
+    problems, seen = [], set()
+    for binary in binaries:
+        with open(binary, "rb") as handle:
+            data = handle.read()
+        found = {(m.group(1).decode(), m.group(2).decode()) for m in PATH.finditer(data)}
+        missing = sorted(f"{name}@{version}" for name, version in found if version not in listed.get(name, ()))
+        seen |= found
+        lines.append(f"- {binary}: {len(found)} crate versions found in the binary, {len(missing)} not in the notices"
+                     + (f": {', '.join(missing[:40])}" if missing else ""))
+        if not found:
+            problems.append(f"{binary}: no registry path found, nothing was checked")
+        if missing:
+            problems.append(f"{binary}: {len(missing)} shipped crate versions are not in the notices")
+    unseen = sum(1 for name, versions in listed.items() for version in versions if (name, version) not in seen)
+    lines.append(f"- listed but not visible in any binary (no panicking code, or build time only): {unseen}")
+    lines += [f"- FAILED {problem}" for problem in problems]
+    print("\n".join(lines))
+    return 1 if problems else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+=== replace scripts/test-release-gate.py
+--- find
+    def test_smoke_checks_macos_architecture_and_minimum(self):
+--- with
+    def desktop_matrix(self):
+        return self.jobs["desktop"]["strategy"]["matrix"]["include"]
+
+    def test_desktop_is_built_natively_on_every_platform(self):
+        expected = {
+            "aarch64-apple-darwin": ("macos-15", "arm64", "11.0"),
+            "x86_64-apple-darwin": ("macos-15-intel", "x86_64", "10.14"),
+            "x86_64-pc-windows-msvc": ("windows-latest", "x86_64", None),
+            "x86_64-unknown-linux-gnu": ("ubuntu-22.04", "x86_64", None),
+        }
+        self.assertEqual({e["triple"] for e in self.desktop_matrix()}, set(expected))
+        for entry in self.desktop_matrix():
+            self.assertEqual((entry["os"], entry["arch"], entry.get("macos_min")), expected[entry["triple"]], entry)
+        self.assertIs(self.jobs["desktop"]["strategy"]["fail-fast"], False)
+        labels = [e["label"] for e in self.desktop_matrix()]
+        self.assertEqual(len(labels), len(set(labels)))
+        self.assertIn("bash ./scripts/check-versions.sh", self.steps_text("desktop"))
+
+    def test_desktop_dry_runs_build_like_releases(self):
+        for name in ("desktop", "desktop-older-os", "desktop-sources"):
+            self.assertNotIn("if", self.jobs[name], name)
+        self.assertEqual(self.jobs["desktop"]["needs"], "gate")
+        self.assertEqual(self.jobs["desktop-sources"]["needs"], "gate")
+        self.assertEqual(self.jobs["desktop-older-os"]["needs"], "desktop")
+
+    def test_releases_wait_for_the_desktop(self):
+        for name in ("desktop", "desktop-older-os", "desktop-sources"):
+            self.assertIn(name, self.jobs["publish"]["needs"])
+        for name in ("build", "desktop", "desktop-sources"):
+            self.assertIn(name, self.jobs["checksums"]["needs"])
+        self.assertIn("release-desktop-*", self.steps_text("publish"))
+        self.assertIn("release-desktop-*", self.steps_text("checksums"))
+
+    def test_checksums_require_every_desktop_installer_and_the_sources(self):
+        (step,) = [s for s in self.jobs["checksums"]["steps"] if s.get("name") == "Checksums"]
+        self.assertEqual(int(step["env"]["DESKTOP_INSTALLERS"]), sum(int(e["installers"]) for e in self.desktop_matrix()))
+        for needed in ('"$installers" = "$DESKTOP_INSTALLERS"', "desktop-mpl-sources-", "Lightagent_*"):
+            self.assertIn(needed, step["run"])
+
+    def test_signing_comes_only_from_secrets_and_is_reported(self):
+        steps = self.jobs["desktop"]["steps"]
+        (signing,) = [s for s in steps if s.get("id") == "signing"]
+        for name, value in signing["env"].items():
+            self.assertTrue(value.startswith("${{ secrets.") or value.startswith("${{ vars."), name)
+        names = [s.get("name") for s in steps]
+        self.assertLess(names.index(signing["name"]), names.index("Build and bundle"))
+        self.assertIn("Signature state of what ships", names)
+        self.assertIn("The notices name every crate version found in the shipped binaries", names)
+
+    def test_smoke_checks_macos_architecture_and_minimum(self):
+=== end
