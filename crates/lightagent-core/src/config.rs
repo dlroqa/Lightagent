@@ -1566,7 +1566,10 @@ pub struct GithubActionsConfig {
     pub request_timeout_secs: u64,
     /// Between status checks while a tool waits for a run.
     pub poll_interval_secs: u64,
-    /// The longest one tool call waits for a run.
+    /// The longest a tool call waits for a dispatched run to get a runner.
+    /// Hosted runners have held a run queued for 10 to 20 minutes under load.
+    pub queue_wait_secs: u64,
+    /// The longest a tool call waits for a run once it is executing.
     pub max_wait_secs: u64,
     /// The most bytes of a job log a tool returns (its tail).
     pub max_log_bytes: usize,
@@ -1581,6 +1584,7 @@ impl Default for GithubActionsConfig {
             commit_refs: Vec::new(),
             request_timeout_secs: 20,
             poll_interval_secs: 10,
+            queue_wait_secs: 600,
             max_wait_secs: 120,
             max_log_bytes: 16_384,
         }
@@ -1678,9 +1682,13 @@ impl Config {
                 ));
             }
         }
-        if actions.poll_interval_secs == 0 || actions.max_wait_secs > 900 {
+        if actions.poll_interval_secs == 0
+            || actions.max_wait_secs > 900
+            || actions.queue_wait_secs > 3600
+        {
             return invalid(
-                "platform.github_actions polls at least every second and waits at most 900 s"
+                "platform.github_actions polls at least every second and waits at most 900 s \
+                 for a running run and 3600 s for a queued one"
                     .to_owned(),
             );
         }

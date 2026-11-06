@@ -278,6 +278,7 @@ async fn fixture(deadline: Duration) -> Fixture {
             workflows: vec![workflow],
             commit_refs: vec!["subagents/*".to_owned()],
             poll_interval: Duration::from_millis(20),
+            queue_wait: Duration::from_secs(2),
             max_wait: Duration::from_secs(2),
             max_log_bytes: 4096,
         },

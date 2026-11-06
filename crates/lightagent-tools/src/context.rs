@@ -513,6 +513,11 @@ pub struct ActionsPolicy {
     /// Branches `repo.commit` may advance: exact names or `prefix*`.
     pub commit_refs: Vec<String>,
     pub poll_interval: Duration,
+    /// The longest `actions.status` waits for a dispatched run to get a
+    /// runner (GitHub reports it requested, queued, pending or waiting).
+    pub queue_wait: Duration,
+    /// The longest `actions.status` waits for a run once it is executing,
+    /// counted from when it is first seen running.
     pub max_wait: Duration,
     pub max_log_bytes: usize,
 }
@@ -526,6 +531,7 @@ impl std::fmt::Debug for ActionsPolicy {
             .field("workflows", &self.workflows)
             .field("commit_refs", &self.commit_refs)
             .field("poll_interval", &self.poll_interval)
+            .field("queue_wait", &self.queue_wait)
             .field("max_wait", &self.max_wait)
             .field("max_log_bytes", &self.max_log_bytes)
             .finish()
