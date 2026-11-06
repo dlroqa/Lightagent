@@ -279,6 +279,55 @@ class WorkflowShapeTests(unittest.TestCase):
             self.assertIn(needed, step["run"])
         self.assertIn("bash ./scripts/check.sh", [s.get("run") for s in job["steps"]])
 
+    def desktop_matrix(self):
+        return self.jobs["desktop"]["strategy"]["matrix"]["include"]
+
+    def test_desktop_is_built_natively_on_every_platform(self):
+        expected = {
+            "aarch64-apple-darwin": ("macos-15", "arm64", "11.0"),
+            "x86_64-apple-darwin": ("macos-15-intel", "x86_64", "10.14"),
+            "x86_64-pc-windows-msvc": ("windows-latest", "x86_64", None),
+            "x86_64-unknown-linux-gnu": ("ubuntu-22.04", "x86_64", None),
+        }
+        self.assertEqual({e["triple"] for e in self.desktop_matrix()}, set(expected))
+        for entry in self.desktop_matrix():
+            self.assertEqual((entry["os"], entry["arch"], entry.get("macos_min")), expected[entry["triple"]], entry)
+        self.assertIs(self.jobs["desktop"]["strategy"]["fail-fast"], False)
+        labels = [e["label"] for e in self.desktop_matrix()]
+        self.assertEqual(len(labels), len(set(labels)))
+        self.assertIn("bash ./scripts/check-versions.sh", self.steps_text("desktop"))
+
+    def test_desktop_dry_runs_build_like_releases(self):
+        for name in ("desktop", "desktop-older-os", "desktop-sources"):
+            self.assertNotIn("if", self.jobs[name], name)
+        self.assertEqual(self.jobs["desktop"]["needs"], "gate")
+        self.assertEqual(self.jobs["desktop-sources"]["needs"], "gate")
+        self.assertEqual(self.jobs["desktop-older-os"]["needs"], "desktop")
+
+    def test_releases_wait_for_the_desktop(self):
+        for name in ("desktop", "desktop-older-os", "desktop-sources"):
+            self.assertIn(name, self.jobs["publish"]["needs"])
+        for name in ("build", "desktop", "desktop-sources"):
+            self.assertIn(name, self.jobs["checksums"]["needs"])
+        self.assertIn("release-desktop-*", self.steps_text("publish"))
+        self.assertIn("release-desktop-*", self.steps_text("checksums"))
+
+    def test_checksums_require_every_desktop_installer_and_the_sources(self):
+        (step,) = [s for s in self.jobs["checksums"]["steps"] if s.get("name") == "Checksums"]
+        self.assertEqual(int(step["env"]["DESKTOP_INSTALLERS"]), sum(int(e["installers"]) for e in self.desktop_matrix()))
+        for needed in ('"$installers" = "$DESKTOP_INSTALLERS"', "desktop-mpl-sources-", "Lightagent_*"):
+            self.assertIn(needed, step["run"])
+
+    def test_signing_comes_only_from_secrets_and_is_reported(self):
+        steps = self.jobs["desktop"]["steps"]
+        (signing,) = [s for s in steps if s.get("id") == "signing"]
+        for name, value in signing["env"].items():
+            self.assertTrue(value.startswith("${{ secrets.") or value.startswith("${{ vars."), name)
+        names = [s.get("name") for s in steps]
+        self.assertLess(names.index(signing["name"]), names.index("Build and bundle"))
+        self.assertIn("Signature state of what ships", names)
+        self.assertIn("The notices name every crate version found in the shipped binaries", names)
+
     def test_smoke_checks_macos_architecture_and_minimum(self):
         smoke = (ROOT / "scripts" / "smoke-lightagent-package.sh").read_text(encoding="utf-8")
         for check in ("lipo -archs", "vtool -show-build", "MACOSX_DEPLOYMENT_TARGET"):
