@@ -1,0 +1,362 @@
+=== base 248262e7be27e89dc454c8097ddd242e5b867143
+=== message
+Put the upstream license texts in the notices, and fail without one
+
+The notices generator now gives each crate published without a license
+file the upstream files desktop/licenses/upstream/SOURCES.json records for
+its exact version, checks each stored text against its git blob id and the
+recorded commit against the crate's .cargo_vcs_info.json, and fails when a
+component in the binaries has no license text. Build-time-only entries are
+still marked and may go without.
+
+desktop-upstream-licenses.py fetches every vendored text again from
+upstream at its commit (desktop supply chain, release desktop-sources);
+desktop-notices-shipped.py now also requires a license text for every
+crate found in the shipped binaries; install_smoke records each packaged
+notices file's SHA-256; the checksums job verifies SHA256SUMS and the MPL
+archive's own checksums.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace .gitattributes
+--- find
+docs/integrations/web/la-web-provisioning-1-r4/** -text
+--- with
+docs/integrations/web/la-web-provisioning-1-r4/** -text
+
+# Upstream license files, stored under their git blob ids
+# (desktop/licenses/upstream/SOURCES.json): kept byte for byte.
+desktop/licenses/upstream/blobs/** -text
+=== replace scripts/desktop-sbom.py
+--- find
+      LICENSE.txt into <out-dir>; exit 1 when an MPL-2.0 component is not a
+      checksummed crates.io package, has no license text, or crates are
+      patched.
+--- with
+      LICENSE.txt into <out-dir>. A crate published without a license file
+      gets the upstream files desktop/licenses/upstream/SOURCES.json records
+      for its exact version. Exit 1 when an MPL-2.0 component is not a
+      checksummed crates.io package or has no license text, a component
+      that is not build time only has no license text, a vendored text does
+      not hash to its blob id or its recorded commit is not the one the
+      crate's archive was published from, or crates are patched.
+=== replace scripts/desktop-sbom.py
+--- find
+MPL = re.compile(r"\bMPL-2\.0\b")
+--- with
+MPL = re.compile(r"\bMPL-2\.0\b")
+# Upstream license files for crates published without one (SOURCES.json).
+UPSTREAM = os.path.join("desktop", "licenses", "upstream")
+=== replace scripts/desktop-sbom.py
+--- find
+def shipped(metadata_dir, target, frontend):
+--- with
+def git_blob(data):
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def vcs_commit(directory):
+    """The commit a crates.io archive records it was published from."""
+    try:
+        with open(os.path.join(directory, ".cargo_vcs_info.json"), encoding="utf-8") as handle:
+            return json.load(handle).get("git", {}).get("sha1")
+    except (OSError, ValueError):
+        return None
+
+
+def upstream_texts(root):
+    """{(name, version): (entry, note, [(label, text)])} from SOURCES.json, and the problems found."""
+    path = os.path.join(root, UPSTREAM, "SOURCES.json")
+    if not os.path.isfile(path):
+        return {}, []
+    manifest, found, problems = load(path), {}, []
+    notes = manifest.get("notes", {})
+    for crate in manifest["crates"]:
+        ident, texts = f"{crate['name']}@{crate['version']}", []
+        for t in crate["texts"]:
+            try:
+                with open(os.path.join(root, UPSTREAM, "blobs", t["blob"]), "rb") as handle:
+                    data = handle.read()
+            except OSError:
+                problems.append(f"{ident}: {t['path']} (blob {t['blob']}) is not in {UPSTREAM}/blobs")
+                continue
+            if git_blob(data) != t["blob"]:
+                problems.append(f"{ident}: {UPSTREAM}/blobs/{t['blob']} does not hash to its id")
+                continue
+            texts.append((f"{t['path']} from github.com/{t['repository']} at {t['commit']}", data.decode("utf-8").strip("\n")))
+        found[(crate["name"], crate["version"])] = (crate, notes.get(crate.get("note"), crate.get("note")), texts)
+    return found, problems
+
+
+def shipped(metadata_dir, target, frontend):
+=== replace scripts/desktop-sbom.py
+--- find
+    problems = [f"{name} patches or replaces crates: a listed component may not be its published source" for name in patched(root)]
+--- with
+    problems = [f"{name} patches or replaces crates: a listed component may not be its published source" for name in patched(root)]
+    upstream, upstream_problems = upstream_texts(root)
+    problems += upstream_problems
+=== replace scripts/desktop-sbom.py
+--- find
+            "list is complete.", ""]
+--- with
+            "list is complete. A crate published without a license file is followed by the license files",
+            "of its upstream repository at the commit that version was published from, each with its source.", ""]
+=== replace scripts/desktop-sbom.py
+--- find
+    first_seen, without = {}, []
+--- with
+    first_seen, without, used = {}, [], set()
+=== replace scripts/desktop-sbom.py
+--- find
+        texts = license_texts(c["directory"], c["license_file"])
+        if not texts:
+            without.append(f"{c['name']}@{c['version']}")
+            if c in mpl and mpl_text_from:
+                text.append(f"   (its published archive has no license file; the MPL-2.0 text it is licensed under is the one in {mpl_text_from})")
+            else:
+                text.append("   (published without a license file; its license is the one named above)")
+--- with
+        texts = license_texts(c["directory"], c["license_file"])
+        ident = f"{c['name']}@{c['version']}"
+        if not texts:
+            without.append(ident)
+            vendored = upstream.get((c["name"], c["version"])) if c["ecosystem"] == "cargo" else None
+            if c in mpl and mpl_text_from:
+                text.append(f"   (its published archive has no license file; the MPL-2.0 text it is licensed under is the one in {mpl_text_from})")
+            elif vendored and vendored[2]:
+                entry, note, texts = vendored
+                origin = entry["published_from"]
+                recorded = vcs_commit(c["directory"])
+                if recorded != origin["commit"]:
+                    problems.append(f"{ident}: its archive records commit {recorded}, SOURCES.json {origin['commit']}")
+                used.add(ident)
+                text.append(f"   (its published archive has no license file; the files below are from its upstream repository,"
+                            f" github.com/{origin['repository']}, at {origin['commit']}, the commit this version was published from)")
+                if note:
+                    text.append(f"   note: {note}")
+            else:
+                text.append("   (published without a license file; its license is the one named above)")
+                if not c["build_time_only"]:
+                    problems.append(f"{ident}: no license text, and it is not build time only (add its upstream files to {UPSTREAM}/SOURCES.json)")
+=== replace scripts/desktop-sbom.py
+--- find
+             f"{len(without)} without a license file; {len(joined.encode('utf-8')) // 1024} KiB"]
+--- with
+             f"{len(without)} without a license file in their archive ({len(used)} of them with upstream texts); "
+             f"{len(joined.encode('utf-8')) // 1024} KiB"]
+=== replace scripts/desktop-sbom.py
+--- find
+        lines.append(f"- published without a license file (license named in their metadata): {', '.join(without[:40])}")
+--- with
+        lines.append("- published without a license file: "
+                     + ", ".join(w + (" (upstream texts included)" if w in used else "") for w in without[:40]))
+=== write scripts/desktop-upstream-licenses.py
+"""Whether desktop/licenses/upstream/ holds exactly the upstream license
+files SOURCES.json names (desktop.yml supply chain, release.yml).
+
+  python desktop-upstream-licenses.py <repo-root>
+
+For every crate in SOURCES.json: its version is in Cargo.lock or
+desktop/Cargo.lock, and each of its texts is fetched again from
+https://raw.githubusercontent.com/<repository>/<commit>/<path> and must
+hash to the recorded git blob id, as the stored copy in blobs/ must.
+blobs/ holds no file SOURCES.json does not name. (That each recorded
+commit is the one the crate version was published from is checked by
+desktop-sbom.py --notices against the crate's .cargo_vcs_info.json.)
+
+Prints a Markdown summary. Exits 1 on any difference. Needs network access
+to GitHub.
+"""
+
+import hashlib
+import json
+import os
+import re
+import sys
+import urllib.request
+
+
+def git_blob(data):
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def locked(root):
+    found = set()
+    for lock in ("Cargo.lock", os.path.join("desktop", "Cargo.lock")):
+        with open(os.path.join(root, lock), encoding="utf-8") as handle:
+            for block in handle.read().split("[[package]]"):
+                name = re.search(r'^name = "([^"]+)"', block, re.M)
+                version = re.search(r'^version = "([^"]+)"', block, re.M)
+                if name and version:
+                    found.add((name.group(1), version.group(1)))
+    return found
+
+
+def main():
+    root = sys.argv[1]
+    base = os.path.join(root, "desktop", "licenses", "upstream")
+    with open(os.path.join(base, "SOURCES.json"), encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    pinned, problems, fetched = locked(root), [], {}
+    notes = manifest.get("notes", {})
+    for crate in manifest["crates"]:
+        ident = f"{crate['name']}@{crate['version']}"
+        if (crate["name"], crate["version"]) not in pinned:
+            problems.append(f"{ident}: in SOURCES.json but in neither Cargo.lock")
+        if crate.get("note") and crate["note"] not in notes:
+            problems.append(f"{ident}: its note {crate['note']!r} is not defined")
+        if not crate["texts"]:
+            problems.append(f"{ident}: no texts")
+        for t in crate["texts"]:
+            url = f"https://raw.githubusercontent.com/{t['repository']}/{t['commit']}/{t['path']}"
+            if url not in fetched:
+                with urllib.request.urlopen(url, timeout=60) as response:
+                    fetched[url] = git_blob(response.read())
+            try:
+                with open(os.path.join(base, "blobs", t["blob"]), "rb") as handle:
+                    stored = git_blob(handle.read())
+            except OSError:
+                stored = None
+            if not (fetched[url] == stored == t["blob"]):
+                problems.append(f"{ident}: {url} hashes to {fetched[url]}, the stored copy to {stored}, recorded {t['blob']}")
+    named = {t["blob"] for crate in manifest["crates"] for t in crate["texts"]}
+    stored_blobs = set(os.listdir(os.path.join(base, "blobs")))
+    if stored_blobs != named:
+        problems.append(f"blobs/ holds {sorted(stored_blobs - named)} that SOURCES.json does not name, and lacks {sorted(named - stored_blobs)}")
+    lines = [f"### upstream license texts: {len(manifest['crates'])} crates, {len(named)} distinct files, "
+             f"{len(fetched)} upstream files fetched again and compared by git blob id"]
+    for crate in manifest["crates"]:
+        origin = crate["published_from"]
+        files = ", ".join(t["path"] + ("" if t["repository"] == origin["repository"] else f" ({t['repository']} `{t['commit'][:12]}`)")
+                          for t in crate["texts"])
+        lines.append(f"- {crate['name']} {crate['version']} ({crate['license']}): github.com/{origin['repository']} "
+                     f"at `{origin['commit'][:12]}`: {files}")
+    lines += [f"- FAILED {problem}" for problem in problems]
+    print("\n".join(lines))
+    return 1 if problems else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+=== write scripts/desktop-notices-shipped.py
+"""Whether the bundled third-party notices name every crate, at its exact
+version, that the shipped Desktop binaries were built from, each with a
+license text (release.yml).
+
+  python desktop-notices-shipped.py <THIRD_PARTY_NOTICES.txt> <binary>...
+
+A release build keeps the source paths of code that can panic, under the
+cargo registry: .../index.crates.io-<hash>/<crate>-<version>/... Those paths
+are a record taken from the shipped binaries themselves, not from cargo
+metadata (which the notices are generated from), of which crates and versions
+the binaries contain. Every one must be in the notices with the same version,
+and its entry must carry a license text: its own, one it shares with an
+earlier entry ("the same text as"), or, for an MPL-2.0 crate, the MPL-2.0
+text it is pointed to. Crates the notices list that the binaries do not show
+are counted, not failed: a crate with no code that can panic leaves no path,
+and procedural macros leave none.
+
+Prints a Markdown summary. Exits 1 when a crate or version found in a binary
+is not in the notices or has no license text there, or when a binary shows
+no registry path at all (the check would prove nothing).
+"""
+
+import re
+import sys
+
+PATH = re.compile(rb"index\.crates\.io-[0-9a-f]{16}[/\\]([A-Za-z0-9_.+-]+?)-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)[/\\]")
+LISTED = re.compile(r"^-- (\S+) (\S+) \(cargo\);")
+TEXT = re.compile(r"^   ---- .+ ----$|^   .+: the same text as |the MPL-2\.0 text it is licensed under is the one in ")
+
+
+def main():
+    notices, binaries = sys.argv[1], sys.argv[2:]
+    listed, texted, current = {}, set(), None
+    with open(notices, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.rstrip("\n")
+            match = LISTED.match(line)
+            if match:
+                listed.setdefault(match.group(1), set()).add(match.group(2))
+                current = (match.group(1), match.group(2))
+            elif line.startswith("-- ") or line.startswith("== "):
+                current = None
+            elif current and TEXT.search(line):
+                texted.add(current)
+    lines = [f"### notices against the shipped binaries: {sum(len(v) for v in listed.values())} crate versions listed, "
+             f"{len(texted)} with a license text"]
+    problems, seen = [], set()
+    for binary in binaries:
+        with open(binary, "rb") as handle:
+            data = handle.read()
+        found = {(m.group(1).decode(), m.group(2).decode()) for m in PATH.finditer(data)}
+        missing = sorted(f"{name}@{version}" for name, version in found if version not in listed.get(name, ()))
+        bare = sorted(f"{name}@{version}" for name, version in found if version in listed.get(name, ()) and (name, version) not in texted)
+        seen |= found
+        lines.append(f"- {binary}: {len(found)} crate versions found in the binary, {len(missing)} not in the notices"
+                     + (f": {', '.join(missing[:40])}" if missing else "")
+                     + f", {len(bare)} without a license text" + (f": {', '.join(bare[:40])}" if bare else ""))
+        if not found:
+            problems.append(f"{binary}: no registry path found, nothing was checked")
+        if missing:
+            problems.append(f"{binary}: {len(missing)} shipped crate versions are not in the notices")
+        if bare:
+            problems.append(f"{binary}: {len(bare)} shipped crate versions have no license text in the notices")
+    unseen = sum(1 for name, versions in listed.items() for version in versions if (name, version) not in seen)
+    untexted = sorted(f"{name}@{version}" for name, versions in listed.items() for version in versions if (name, version) not in texted)
+    lines.append(f"- listed but not visible in any binary (no panicking code, or build time only): {unseen}")
+    lines.append(f"- listed without a license text (allowed only for build time only entries, which desktop-sbom.py enforces): "
+                 f"{len(untexted)}" + (f": {', '.join(untexted[:40])}" if untexted else ""))
+    lines += [f"- FAILED {problem}" for problem in problems]
+    print("\n".join(lines))
+    return 1 if problems else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+=== replace desktop/e2e/install_smoke.py
+--- find
+        seen[name] = {"packaged": found is not None,
+--- with
+        seen[name] = {"packaged": found is not None, "sha256": sha256(found) if found else None,
+=== replace .github/workflows/release.yml
+--- find
+      - name: desktop-mpl-sources-<version>.tar.gz, packed reproducibly and checked
+--- with
+      - name: The vendored upstream license texts, fetched again from upstream
+        run: |
+          set -euo pipefail
+          python -I scripts/desktop-upstream-licenses.py . | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: desktop-mpl-sources-<version>.tar.gz, packed reproducibly and checked
+=== replace .github/workflows/release.yml
+--- find
+          cat SHA256SUMS
+--- with
+          cat SHA256SUMS
+          sha256sum -c SHA256SUMS
+          # The MPL-2.0 archive as the release attaches it: its own checksums hold.
+          mkdir "$RUNNER_TEMP/mpl-check"
+          tar -xzf desktop-mpl-sources-*.tar.gz -C "$RUNNER_TEMP/mpl-check"
+          (cd "$RUNNER_TEMP"/mpl-check/desktop-mpl-sources-* && sha256sum -c SHA256SUMS && grep -q 'Mozilla Public License Version 2.0' MPL-2.0.txt)
+=== replace .github/workflows/desktop.yml
+--- find
+      - name: Where the reviewed advisories' code is reached (exact versions, call sites)
+--- with
+      - name: The vendored upstream license texts, fetched again from upstream
+        if: success() || failure()
+        run: |
+          set -euo pipefail
+          python -I scripts/desktop-upstream-licenses.py . | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Where the reviewed advisories' code is reached (exact versions, call sites)
+=== replace scripts/test-release-gate.py
+--- find
+    def test_smoke_checks_macos_architecture_and_minimum(self):
+--- with
+    def test_licenses_are_complete_and_the_sources_checked(self):
+        self.assertIn("scripts/desktop-upstream-licenses.py", self.steps_text("desktop-sources"))
+        (step,) = [s for s in self.jobs["checksums"]["steps"] if s.get("name") == "Checksums"]
+        for needed in ("sha256sum -c SHA256SUMS", "mpl-check"):
+            self.assertIn(needed, step["run"])
+
+    def test_smoke_checks_macos_architecture_and_minimum(self):
+=== end
