@@ -19,9 +19,13 @@
       Write THIRD_PARTY_NOTICES.txt (every third-party component of the
       package for <triple>, its license and the license files it is
       published with, and where the MPL-2.0 components' source is) and
-      LICENSE.txt into <out-dir>; exit 1 when an MPL-2.0 component is not a
-      checksummed crates.io package, has no license text, or crates are
-      patched.
+      LICENSE.txt into <out-dir>. A crate published without a license file
+      gets the upstream files desktop/licenses/upstream/SOURCES.json records
+      for its exact version. Exit 1 when an MPL-2.0 component is not a
+      checksummed crates.io package or has no license text, a component
+      that is not build time only has no license text, a vendored text does
+      not hash to its blob id or its recorded commit is not the one the
+      crate's archive was published from, or crates are patched.
   python desktop-sbom.py --mpl-sources <metadata-dir> <out-dir> <repo-root>
       Copy the exact published archive of each MPL-2.0 crate any target
       links, checked against Cargo.lock's checksum, into <out-dir> with
@@ -48,6 +52,8 @@ TARGETS = ["x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-pc-windows-msv
 LICENSE_NAME = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE|COPYRIGHT|UNLICENSE)([-_.].*)?$", re.I)
 CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
 MPL = re.compile(r"\bMPL-2\.0\b")
+# Upstream license files for crates published without one (SOURCES.json).
+UPSTREAM = os.path.join("desktop", "licenses", "upstream")
 # Advisory warnings reviewed in docs/desktop/DESKTOP_ADVISORIES.md. Any other
 # warning fails the audit step, as a vulnerability does.
 REVIEWED_WARNINGS = {
@@ -281,6 +287,43 @@ def license_texts(directory, license_file=None):
     return texts
 
 
+def git_blob(data):
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def vcs_commit(directory):
+    """The commit a crates.io archive records it was published from."""
+    try:
+        with open(os.path.join(directory, ".cargo_vcs_info.json"), encoding="utf-8") as handle:
+            return json.load(handle).get("git", {}).get("sha1")
+    except (OSError, ValueError):
+        return None
+
+
+def upstream_texts(root):
+    """{(name, version): (entry, note, [(label, text)])} from SOURCES.json, and the problems found."""
+    path = os.path.join(root, UPSTREAM, "SOURCES.json")
+    if not os.path.isfile(path):
+        return {}, []
+    manifest, found, problems = load(path), {}, []
+    notes = manifest.get("notes", {})
+    for crate in manifest["crates"]:
+        ident, texts = f"{crate['name']}@{crate['version']}", []
+        for t in crate["texts"]:
+            try:
+                with open(os.path.join(root, UPSTREAM, "blobs", t["blob"]), "rb") as handle:
+                    data = handle.read()
+            except OSError:
+                problems.append(f"{ident}: {t['path']} (blob {t['blob']}) is not in {UPSTREAM}/blobs")
+                continue
+            if git_blob(data) != t["blob"]:
+                problems.append(f"{ident}: {UPSTREAM}/blobs/{t['blob']} does not hash to its id")
+                continue
+            texts.append((f"{t['path']} from github.com/{t['repository']} at {t['commit']}", data.decode("utf-8").strip("\n")))
+        found[(crate["name"], crate["version"])] = (crate, notes.get(crate.get("note"), crate.get("note")), texts)
+    return found, problems
+
+
 def shipped(metadata_dir, target, frontend):
     """Every third-party component of the package for `target`."""
     components = {}
@@ -316,6 +359,8 @@ def notices(metadata_dir, target, frontend, out, root):
     ordered = sorted(shipped(metadata_dir, target, frontend).values(), key=lambda c: (c["ecosystem"], c["name"].lower(), c["version"]))
     mpl = [c for c in ordered if MPL.search(c["license"] or "")]
     problems = [f"{name} patches or replaces crates: a listed component may not be its published source" for name in patched(root)]
+    upstream, upstream_problems = upstream_texts(root)
+    problems += upstream_problems
     text = [f"Lightagent Desktop {version}: third-party notices", f"Target: {target}", "",
             "Lightagent is licensed under the Apache License, Version 2.0 (LICENSE.txt, beside this file).",
             "This package also contains the third-party software listed below: the Rust crates the desktop",
@@ -323,7 +368,8 @@ def notices(metadata_dir, target, frontend, out, root):
             "each with its version, its license and the license files it is published with. Components",
             "marked \"build time only\" are procedural macros, or used only by them: they run while the",
             "program is compiled and none of their code is in this package. They are listed so that the",
-            "list is complete.", ""]
+            "list is complete. A crate published without a license file is followed by the license files",
+            "of its upstream repository at the commit that version was published from, each with its source.", ""]
     if mpl:
         text += ["== Components under the Mozilla Public License 2.0 ==", "",
                  "These components are distributed in executable form under the MPL-2.0. Their Source Code Form",
@@ -341,7 +387,7 @@ def notices(metadata_dir, target, frontend, out, root):
                      f"  SHA-256: {checksum or 'unknown'}",
                      f"  repository: {c['repository'] or 'not stated'}", ""]
     text += ["== Components ==", ""]
-    first_seen, without = {}, []
+    first_seen, without, used = {}, [], set()
     # The MPL-2.0 text for an MPL-2.0 component published without its own
     # license file: the same license, from another component's published file.
     mpl_text_from = next((f"{c['name']} {c['version']} ({name})" for c in mpl
@@ -353,12 +399,27 @@ def notices(metadata_dir, target, frontend, out, root):
         if c["repository"]:
             text.append(f"   repository: {c['repository']}")
         texts = license_texts(c["directory"], c["license_file"])
+        ident = f"{c['name']}@{c['version']}"
         if not texts:
-            without.append(f"{c['name']}@{c['version']}")
+            without.append(ident)
+            vendored = upstream.get((c["name"], c["version"])) if c["ecosystem"] == "cargo" else None
             if c in mpl and mpl_text_from:
                 text.append(f"   (its published archive has no license file; the MPL-2.0 text it is licensed under is the one in {mpl_text_from})")
+            elif vendored and vendored[2]:
+                entry, note, texts = vendored
+                origin = entry["published_from"]
+                recorded = vcs_commit(c["directory"])
+                if recorded != origin["commit"]:
+                    problems.append(f"{ident}: its archive records commit {recorded}, SOURCES.json {origin['commit']}")
+                used.add(ident)
+                text.append(f"   (its published archive has no license file; the files below are from its upstream repository,"
+                            f" github.com/{origin['repository']}, at {origin['commit']}, the commit this version was published from)")
+                if note:
+                    text.append(f"   note: {note}")
             else:
                 text.append("   (published without a license file; its license is the one named above)")
+                if not c["build_time_only"]:
+                    problems.append(f"{ident}: no license text, and it is not build time only (add its upstream files to {UPSTREAM}/SOURCES.json)")
         for name, body in texts:
             digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
             if digest in first_seen:
@@ -378,7 +439,8 @@ def notices(metadata_dir, target, frontend, out, root):
     crates = sum(1 for c in ordered if c["ecosystem"] == "cargo")
     lines = [f"### third-party notices `{target}`: {len(ordered)} components ({crates} crates, {len(ordered) - crates} npm), "
              f"{sum(1 for c in ordered if c['build_time_only'])} build time only, {len(first_seen)} distinct license texts, "
-             f"{len(without)} without a license file; {len(joined.encode('utf-8')) // 1024} KiB"]
+             f"{len(without)} without a license file in their archive ({len(used)} of them with upstream texts); "
+             f"{len(joined.encode('utf-8')) // 1024} KiB"]
     for c in mpl:
         ident = f"{c['name']}@{c['version']}"
         where = f"crates.io, SHA-256 {sums.get((c['name'], c['version']), '?')}" if c["source"] == CRATES_IO else c["source"]
@@ -386,7 +448,8 @@ def notices(metadata_dir, target, frontend, out, root):
                      + ("license file not in its published archive; the MPL-2.0 text is included from " + str(mpl_text_from)
                         if ident in without else "license file included"))
     if without:
-        lines.append(f"- published without a license file (license named in their metadata): {', '.join(without[:40])}")
+        lines.append("- published without a license file: "
+                     + ", ".join(w + (" (upstream texts included)" if w in used else "") for w in without[:40]))
     lines += [f"- FAILED {problem}" for problem in problems]
     print("\n".join(lines))
     return 1 if problems else 0

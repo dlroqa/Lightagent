@@ -328,6 +328,12 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertIn("Signature state of what ships", names)
         self.assertIn("The notices name every crate version found in the shipped binaries", names)
 
+    def test_licenses_are_complete_and_the_sources_checked(self):
+        self.assertIn("scripts/desktop-upstream-licenses.py", self.steps_text("desktop-sources"))
+        (step,) = [s for s in self.jobs["checksums"]["steps"] if s.get("name") == "Checksums"]
+        for needed in ("sha256sum -c SHA256SUMS", "mpl-check"):
+            self.assertIn(needed, step["run"])
+
     def test_smoke_checks_macos_architecture_and_minimum(self):
         smoke = (ROOT / "scripts" / "smoke-lightagent-package.sh").read_text(encoding="utf-8")
         for check in ("lipo -archs", "vtool -show-build", "MACOSX_DEPLOYMENT_TARGET"):

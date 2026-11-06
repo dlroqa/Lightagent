@@ -381,6 +381,11 @@ jobs:
             python -I scripts/desktop-sbom.py --notices "$RUNNER_TEMP/supply-chain/metadata" "$t" frontend "$RUNNER_TEMP/supply-chain/notices-$t" . | tee -a "$GITHUB_STEP_SUMMARY"
           done
           python -I scripts/desktop-sbom.py --mpl-sources "$RUNNER_TEMP/supply-chain/metadata" "$RUNNER_TEMP/supply-chain/mpl-sources" . | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The vendored upstream license texts, fetched again from upstream
+        if: success() || failure()
+        run: |
+          set -euo pipefail
+          python -I scripts/desktop-upstream-licenses.py . | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Where the reviewed advisories' code is reached (exact versions, call sites)
         if: success() || failure()
         run: python -I scripts/desktop-sbom.py --advisory-paths "$RUNNER_TEMP/supply-chain/metadata" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -190,7 +190,7 @@ def notices_check(paths):
         candidates = [p for p in paths if os.path.basename(p) == name and os.path.isfile(p)]
         found = next((p for p in candidates if os.path.dirname(p) in beside), candidates[0] if candidates else None)
         generated = os.path.join(NOTICES, name)
-        seen[name] = {"packaged": found is not None,
+        seen[name] = {"packaged": found is not None, "sha256": sha256(found) if found else None,
                       "same_as_generated": bool(found) and os.path.isfile(generated) and sha256(found) == sha256(generated)}
     return {"ok": all(v["packaged"] and v["same_as_generated"] for v in seen.values()), **seen}
 

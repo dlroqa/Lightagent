@@ -485,6 +485,10 @@ jobs:
             python -I scripts/desktop-sbom.py --notices "$RUNNER_TEMP/supply-chain/metadata" "$t" frontend "$RUNNER_TEMP/supply-chain/notices-$t" . | tee -a "$GITHUB_STEP_SUMMARY"
           done
           python -I scripts/desktop-sbom.py --mpl-sources "$RUNNER_TEMP/supply-chain/metadata" "$RUNNER_TEMP/supply-chain/mpl-sources" . | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The vendored upstream license texts, fetched again from upstream
+        run: |
+          set -euo pipefail
+          python -I scripts/desktop-upstream-licenses.py . | tee -a "$GITHUB_STEP_SUMMARY"
       - name: desktop-mpl-sources-<version>.tar.gz, packed reproducibly and checked
         run: |
           set -euo pipefail
@@ -572,6 +576,11 @@ jobs:
           [ "$sources" = 1 ] || { echo "found $sources MPL-2.0 source archives, expected 1" >&2; exit 1; }
           sha256sum lightagent-* Lightagent_* desktop-mpl-sources-*.tar.gz > SHA256SUMS
           cat SHA256SUMS
+          sha256sum -c SHA256SUMS
+          # The MPL-2.0 archive as the release attaches it: its own checksums hold.
+          mkdir "$RUNNER_TEMP/mpl-check"
+          tar -xzf desktop-mpl-sources-*.tar.gz -C "$RUNNER_TEMP/mpl-check"
+          (cd "$RUNNER_TEMP"/mpl-check/desktop-mpl-sources-* && sha256sum -c SHA256SUMS && grep -q 'Mozilla Public License Version 2.0' MPL-2.0.txt)
       - uses: actions/upload-artifact@v7
         with:
           name: release-SHA256SUMS
