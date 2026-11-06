@@ -36,9 +36,13 @@ def workspace_version():
 TAG = "v" + workspace_version()
 
 
-def gate(event, ref_type, ref_name, dry_run, signing=""):
-    env = {k: v for k, v in os.environ.items() if k not in ("EVENT", "REF_TYPE", "REF_NAME", "DRY_RUN", "SIGNING")}
+def gate(event, ref_type, ref_name, dry_run, signing="", unsigned=None):
+    """`unsigned` replaces the gate's list of tags approved to publish unsigned; None keeps the shipped list."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("EVENT", "REF_TYPE", "REF_NAME", "DRY_RUN", "SIGNING", "RELEASE_GATE_UNSIGNED_RELEASES")}
     env.update(EVENT=event, REF_TYPE=ref_type, REF_NAME=ref_name, DRY_RUN=dry_run, SIGNING=signing)
+    if unsigned is not None:
+        env["RELEASE_GATE_UNSIGNED_RELEASES"] = unsigned
     done = subprocess.run(["bash", str(GATE)], env=env, capture_output=True, text=True)
     outputs = dict(line.split("=", 1) for line in done.stdout.splitlines() if "=" in line)
     return done.returncode, outputs
@@ -82,7 +86,8 @@ class GateDecisionTests(unittest.TestCase):
 
     # Dry run explicitly off: only the tag naming this version may publish.
     def test_manual_dry_run_off_on_the_tag(self):
-        self.assert_publishes("workflow_dispatch", "tag", TAG, "false")
+        # Signed, and only for a tag not approved to publish unsigned.
+        self.assert_publishes("workflow_dispatch", "tag", TAG, "false", "signed", "")
 
     def test_manual_dry_run_off_on_a_branch_is_refused(self):
         self.assert_refused("workflow_dispatch", "branch", "master", "false")
@@ -137,8 +142,44 @@ class GateDecisionTests(unittest.TestCase):
                 self.assert_refused("workflow_dispatch", "tag", TAG, "false", signing)
 
     def test_tag_push_signs(self):
-        code, out = gate("push", "tag", TAG, "null", "unsigned")
+        code, out = gate("push", "tag", TAG, "null", "unsigned", "")
         self.assertEqual((code, out.get("signing"), out.get("publish")), (0, "signed", "true"), out)
+
+    # The owner's unsigned approval: exactly the listed tag, from its tag push.
+    def test_an_approved_tag_push_publishes_unsigned(self):
+        code, out = gate("push", "tag", TAG, "null", "", TAG)
+        self.assertEqual((code, out.get("signing"), out.get("publish")), (0, "unsigned", "true"), out)
+
+    def test_the_shipped_approval_is_v0_6_0_only(self):
+        self.assertIn('UNSIGNED_RELEASES="${RELEASE_GATE_UNSIGNED_RELEASES-v0.6.0}"', GATE.read_text(encoding="utf-8"))
+        code, out = gate("push", "tag", "v0.6.0", "null")
+        if TAG == "v0.6.0":
+            self.assertEqual((code, out.get("signing"), out.get("publish")), (0, "unsigned", "true"), out)
+        else:
+            self.assertNotEqual(code, 0, out)
+
+    def test_the_approval_matches_whole_tags_only(self):
+        for listed in (TAG[:-1], TAG + "0", "v" + TAG, TAG.upper(), "*", "v*"):
+            with self.subTest(listed=listed):
+                code, out = gate("push", "tag", TAG, "null", "", listed)
+                self.assertEqual((code, out.get("signing"), out.get("publish")), (0, "signed", "true"), out)
+
+    def test_an_approved_tag_cannot_publish_from_a_manual_run(self):
+        for signing in ("unsigned", "signed", ""):
+            with self.subTest(signing=signing):
+                self.assert_refused("workflow_dispatch", "tag", TAG, "false", signing, TAG)
+
+    def test_unauthorized_unsigned_publication_is_refused(self):
+        for signing in ("unsigned", ""):
+            with self.subTest(signing=signing):
+                self.assert_refused("workflow_dispatch", "tag", TAG, "false", signing, "")
+                self.assert_refused("workflow_dispatch", "tag", TAG, "false", signing, "v0.0.1")
+
+    def test_the_approval_never_changes_dry_runs(self):
+        for signing in ("unsigned", "signed"):
+            with self.subTest(signing=signing):
+                code, out = gate("workflow_dispatch", "branch", "release/v0.6.0", "true", signing, TAG)
+                self.assertEqual((code, out.get("signing"), out.get("publish")), (0, signing, "false"), out)
 
     def test_other_events_never_sign(self):
         for event in ("push", "pull_request", "schedule", ""):
@@ -221,6 +262,23 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertEqual(step["shell"], "bash")
         self.assertIn("scripts/release-gate.sh", step["run"])
         self.assertIn('"$GITHUB_OUTPUT"', step["run"])
+
+    def test_one_release_per_tag(self):
+        self.assertEqual(self.doc["concurrency"], {"group": "release-${{ github.ref }}", "cancel-in-progress": False})
+        steps = self.jobs["publish"]["steps"]
+        names = [s.get("name") for s in steps]
+        guard = names.index("No release exists for this tag yet")
+        drafting = next(i for i, s in enumerate(steps) if "action-gh-release" in str(s.get("uses", "")))
+        self.assertLess(guard, drafting)
+        for needed in ("already exists", "sha256sum -c SHA256SUMS", "docs/releases/"):
+            self.assertIn(needed, steps[guard]["run"])
+        self.assertEqual(steps[drafting]["with"]["draft"], True)
+        self.assertIn("docs/releases/", steps[drafting]["with"]["body_path"])
+
+    def test_the_workflow_cannot_widen_the_unsigned_approval(self):
+        self.assertNotIn("RELEASE_GATE_UNSIGNED_RELEASES", WORKFLOW.read_text(encoding="utf-8"))
+        (step,) = [s for s in self.jobs["gate"]["steps"] if s.get("id") == "decide"]
+        self.assertEqual(set(step["env"]), {"EVENT", "REF_TYPE", "REF_NAME", "DRY_RUN", "SIGNING"})
 
     def test_dry_runs_still_build_and_checksum(self):
         # Neither depends on the gate's answer, only on the gate succeeding.

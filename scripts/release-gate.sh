@@ -13,8 +13,11 @@
 #             value or a string such as `"false"` all stay dry.
 #
 #   SIGNING   inputs.signing: `signed` or `unsigned` for a manual run (empty
-#             means unsigned); anything else is refused. A tag push always
-#             signs; no other event does. Printed as `signing=`.
+#             means unsigned); anything else is refused. A tag push signs,
+#             unless the owner approved that exact tag to publish unsigned
+#             (UNSIGNED_RELEASES below); no other event signs. Printed as
+#             `signing=`. A manual publishing run must be signed, and is
+#             refused for a tag approved to publish unsigned.
 #
 # A run that would publish without the tag `v<workspace version>` fails here
 # rather than building something nobody can release.
@@ -32,6 +35,21 @@ REF_NAME="${REF_NAME:-}"
 DRY_RUN="${DRY_RUN:-}"
 SIGNING="${SIGNING:-}"
 
+# Owner-approved unsigned publication, by exact tag. The owner's approval of
+# 2026-11-06: v0.6.0 ships its macOS and Windows installers unsigned. A
+# listed tag publishes unsigned from its own tag push only; every other tag
+# publishes signed. RELEASE_GATE_UNSIGNED_RELEASES replaces the list for
+# scripts/test-release-gate.py only (release.yml never sets it; a test checks).
+UNSIGNED_RELEASES="${RELEASE_GATE_UNSIGNED_RELEASES-v0.6.0}"
+unsigned_approved() {
+  local tags tag
+  read -r -a tags <<<"$UNSIGNED_RELEASES"
+  for tag in ${tags[@]+"${tags[@]}"}; do
+    [ "$tag" = "$1" ] && return 0
+  done
+  return 1
+}
+
 decide() {
   echo "publish=$1"
   echo "reason=$2"
@@ -44,7 +62,13 @@ refuse() {
 # Decided first, so a refusal here never follows a printed publish=true.
 case "$EVENT" in
   push)
-    if [ "$REF_TYPE" = tag ]; then sign=signed; else sign=unsigned; fi
+    if [ "$REF_TYPE" != tag ]; then
+      sign=unsigned
+    elif [ "$REF_NAME" = "$TAG" ] && unsigned_approved "$TAG"; then
+      sign=unsigned
+    else
+      sign=signed
+    fi
     ;;
   workflow_dispatch)
     case "$SIGNING" in
@@ -66,7 +90,7 @@ case "$EVENT" in
     elif [ "$REF_NAME" != "$TAG" ]; then
       refuse "tag $REF_NAME does not match $TAG"
     else
-      decide true "tag push $TAG"
+      decide true "tag push $TAG ($sign)"
     fi
     ;;
   workflow_dispatch)
@@ -76,8 +100,12 @@ case "$EVENT" in
       refuse "dry_run=false must be dispatched on the tag $TAG, not $REF_TYPE $REF_NAME"
     elif [ "$REF_NAME" != "$TAG" ]; then
       refuse "tag $REF_NAME does not match $TAG"
+    elif unsigned_approved "$TAG"; then
+      refuse "$TAG publishes unsigned from its tag push only; a manual publishing run could race it"
+    elif [ "$sign" != signed ]; then
+      refuse "unsigned publication of $TAG is not authorized (approved: ${UNSIGNED_RELEASES:-none})"
     else
-      decide true "manual release of $TAG"
+      decide true "manual release of $TAG (signed)"
     fi
     ;;
   *)

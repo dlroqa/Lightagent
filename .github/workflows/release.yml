@@ -13,7 +13,9 @@ name: release
 # run only the macOS and Windows desktop jobs use the protected
 # release-signing environment (its reviewers approve them), and they fail
 # when a credential is missing or a signature, notarization or timestamp does
-# not verify. Every run reports the signature state of what ships.
+# not verify. Every run reports the signature state of what ships. The
+# owner approved v0.6.0 alone to publish unsigned, from its tag push only
+# (scripts/release-gate.sh, UNSIGNED_RELEASES).
 
 on:
   push:
@@ -32,6 +34,13 @@ on:
 
 permissions:
   contents: read
+
+# One run at a time per ref, never cancelled: a tag's push run and a manual
+# run on the same tag cannot draft at once. The publish job also refuses to
+# draft when the tag already has a release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   gate:
@@ -684,8 +693,25 @@ jobs:
         with:
           name: release-SHA256SUMS
           path: release-assets
+      - uses: actions/checkout@v7
+        with:
+          path: source
+      - name: No release exists for this tag yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          found=$(gh api --paginate "repos/${{ github.repository }}/releases?per_page=100" --jq ".[] | select(.tag_name == \"$TAG\") | .id")
+          if [ -n "$found" ]; then
+            echo "::error::a release for $TAG already exists (id $found); one release per tag"
+            exit 1
+          fi
+          (cd release-assets && sha256sum -c SHA256SUMS)
+          test -s "source/docs/releases/$TAG.md"
       - uses: softprops/action-gh-release@v2
         with:
           draft: true
+          body_path: source/docs/releases/${{ github.ref_name }}.md
           generate_release_notes: true
           files: release-assets/*
