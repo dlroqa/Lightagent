@@ -1,0 +1,422 @@
+=== base 2a78bcb7b453b15ca4ea77c677e182bfcea263e2
+=== message
+Separate signed from unsigned release runs; sign only in the environment
+
+The release gate now decides `signing`: a manual run is unsigned unless
+its new `signing` input is `signed`; a tag push always signs; any other
+value is refused. In a signed run only the macOS and Windows desktop jobs
+name the protected release-signing environment, so only they wait for its
+reviewers and see its secrets; unsigned runs and Linux use no environment.
+
+A signed run fails when a credential is missing (macOS: all six Apple
+values; Windows: WINDOWS_SIGN_COMMAND), when Apple's notary service does
+not accept a disk image, or when a signature does not verify. The .dmg
+files are now signed, notarized and stapled themselves, and must carry
+their ticket. On Windows the bundled runtime (lightagent-sidecar.exe) is
+checked in the build and, with the app, in each installation: present
+always, validly signed and timestamped in a signed run.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace .github/workflows/release.yml
+--- find
+# The Desktop installers are signed only when the signing secrets are
+# configured (docs/desktop/DESKTOP_RELEASE_ACCEPTANCE.md); without them they
+# are built unsigned, and every run reports the signature state of what ships.
+--- with
+# Signing (docs/desktop/DESKTOP_SIGNING_HANDOFF.md): a manual run is unsigned
+# unless its `signing` input is `signed`; a tag push always signs. In a signed
+# run only the macOS and Windows desktop jobs use the protected
+# release-signing environment (its reviewers approve them), and they fail
+# when a credential is missing or a signature, notarization or timestamp does
+# not verify. Every run reports the signature state of what ships.
+=== replace .github/workflows/release.yml
+--- find
+        default: true
+--- with
+        default: true
+      signing:
+        description: unsigned (no environment), or signed (the macOS and Windows jobs use the protected release-signing environment and fail without its credentials or a verified signature)
+        type: choice
+        options: [unsigned, signed]
+        default: unsigned
+=== replace .github/workflows/release.yml
+--- find
+      publish: ${{ steps.decide.outputs.publish }}
+--- with
+      publish: ${{ steps.decide.outputs.publish }}
+      signing: ${{ steps.decide.outputs.signing }}
+=== replace .github/workflows/release.yml
+--- find
+          DRY_RUN: ${{ toJSON(inputs.dry_run) }}
+--- with
+          DRY_RUN: ${{ toJSON(inputs.dry_run) }}
+          SIGNING: ${{ inputs.signing }}
+=== replace .github/workflows/release.yml
+--- find
+    name: desktop (${{ matrix.label }})
+    needs: gate
+--- with
+    name: desktop (${{ matrix.label }})
+    needs: gate
+    # Only a signed run's macOS and Windows jobs: they wait for the
+    # environment's reviewers and see its secrets. Everything else uses none.
+    environment: ${{ needs.gate.outputs.signing == 'signed' && matrix.label != 'linux-x64' && 'release-signing' || '' }}
+=== replace .github/workflows/release.yml
+--- find
+      - name: Signing configuration (the signing secrets only; otherwise unsigned)
+        id: signing
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          WINDOWS_SIGN_COMMAND: ${{ vars.WINDOWS_SIGN_COMMAND }}
+          WINDOWS_SIGN_TOOL: ${{ vars.WINDOWS_SIGN_TOOL }}
+        run: |
+          set -euo pipefail
+          put() { { echo "$1<<LA_SIGNING_END"; printf '%s\n' "$2"; echo "LA_SIGNING_END"; } >> "$GITHUB_ENV"; }
+          given() { n=0; for v in "$@"; do [ -n "${!v}" ] && n=$((n + 1)); done; echo "$n"; }
+          mode=unsigned; config='{}'
+          case "$RUNNER_OS" in
+            macOS)
+              case "$(given APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY)" in
+                0) ;;
+                3)
+                  for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do put "$v" "${!v}"; done
+                  mode="signed (Developer ID), not notarized"
+                  case "$(given APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_P8)" in
+                    0) ;;
+                    3)
+                      key="$RUNNER_TEMP/notary/AuthKey_$APPLE_API_KEY.p8"; mkdir -p "$(dirname "$key")"
+                      printf '%s\n' "$APPLE_API_KEY_P8" > "$key"
+                      put APPLE_API_ISSUER "$APPLE_API_ISSUER"; put APPLE_API_KEY "$APPLE_API_KEY"; put APPLE_API_KEY_PATH "$key"
+                      mode="signed (Developer ID), notarized" ;;
+                    *) echo "::error::notarization needs APPLE_API_ISSUER, APPLE_API_KEY and APPLE_API_KEY_P8 together"; exit 1 ;;
+                  esac ;;
+                *) echo "::error::signing needs APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD and APPLE_SIGNING_IDENTITY together"; exit 1 ;;
+              esac ;;
+            Windows)
+              if [ -n "$WINDOWS_SIGN_COMMAND" ]; then
+                [ -z "$WINDOWS_SIGN_TOOL" ] || cargo install --locked "$WINDOWS_SIGN_TOOL"
+                config=$(python -c 'import json, sys; print(json.dumps({"bundle": {"windows": {"signCommand": sys.argv[1]}}}))' "$WINDOWS_SIGN_COMMAND")
+                mode="signed (signCommand)"
+              elif [ -n "$WINDOWS_SIGN_TOOL" ]; then
+                echo "::error::WINDOWS_SIGN_TOOL is set without WINDOWS_SIGN_COMMAND"; exit 1
+              fi ;;
+          esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          printf 'config=%s\n' "$config" >> "$GITHUB_OUTPUT"
+          echo "- signing (${{ matrix.label }}): $mode" | tee -a "$GITHUB_STEP_SUMMARY"
+--- with
+      - name: Signing configuration (unsigned, or signed from the protected release-signing environment)
+        id: signing
+        env:
+          REQUESTED: ${{ needs.gate.outputs.signing }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          WINDOWS_SIGN_COMMAND: ${{ vars.WINDOWS_SIGN_COMMAND }}
+          WINDOWS_SIGN_TOOL: ${{ vars.WINDOWS_SIGN_TOOL }}
+        run: |
+          set -euo pipefail
+          put() { { echo "$1<<LA_SIGNING_END"; printf '%s\n' "$2"; echo "LA_SIGNING_END"; } >> "$GITHUB_ENV"; }
+          given() { n=0; for v in "$@"; do [ -n "${!v}" ] && n=$((n + 1)); done; echo "$n"; }
+          missing() { echo "::error::a signed run needs $1 in the release-signing environment"; exit 1; }
+          mode=unsigned; config='{}'
+          case "$REQUESTED" in
+            unsigned) ;;
+            signed)
+              case "$RUNNER_OS" in
+                macOS)
+                  [ "$(given APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_P8)" = 6 ] \
+                    || missing "the secrets APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY, APPLE_API_ISSUER, APPLE_API_KEY and APPLE_API_KEY_P8"
+                  for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do put "$v" "${!v}"; done
+                  key="$RUNNER_TEMP/notary/AuthKey_$APPLE_API_KEY.p8"; mkdir -p "$(dirname "$key")"
+                  printf '%s\n' "$APPLE_API_KEY_P8" > "$key"
+                  put APPLE_API_ISSUER "$APPLE_API_ISSUER"; put APPLE_API_KEY "$APPLE_API_KEY"; put APPLE_API_KEY_PATH "$key"
+                  mode="signed (Developer ID), notarized" ;;
+                Windows)
+                  [ -n "$WINDOWS_SIGN_COMMAND" ] || missing "the variable WINDOWS_SIGN_COMMAND"
+                  [ -z "$WINDOWS_SIGN_TOOL" ] || cargo install --locked "$WINDOWS_SIGN_TOOL"
+                  config=$(python -c 'import json, sys; print(json.dumps({"bundle": {"windows": {"signCommand": sys.argv[1]}}}))' "$WINDOWS_SIGN_COMMAND")
+                  mode="signed (signCommand)" ;;
+                *) mode="unsigned (Linux packages are not signed)" ;;
+              esac ;;
+            *) echo "::error::unknown signing request '$REQUESTED'"; exit 1 ;;
+          esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          printf 'config=%s\n' "$config" >> "$GITHUB_OUTPUT"
+          echo "- signing (${{ matrix.label }}): requested $REQUESTED; $mode" | tee -a "$GITHUB_STEP_SUMMARY"
+=== replace .github/workflows/release.yml
+--- find
+      - name: The test-only driver is absent from the packaged app
+--- with
+      - name: Notarize and staple the disk images (signed runs)
+        if: runner.os == 'macOS' && steps.signing.outputs.mode == 'signed (Developer ID), notarized'
+        run: |
+          set -euo pipefail
+          ev="$RUNNER_TEMP/release-desktop-evidence"; mkdir -p "$ev"
+          kc="$RUNNER_TEMP/la-dmg.keychain-db"; pw=$(openssl rand -hex 24)
+          security create-keychain -p "$pw" "$kc"
+          security set-keychain-settings -lut 7200 "$kc"
+          security unlock-keychain -p "$pw" "$kc"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/la-dmg.p12"
+          security import "$RUNNER_TEMP/la-dmg.p12" -k "$kc" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign >/dev/null
+          rm -f "$RUNNER_TEMP/la-dmg.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$pw" "$kc" >/dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          for dmg in desktop/target/release/bundle/dmg/*.dmg; do
+            name=$(basename "$dmg")
+            codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" --keychain "$kc" "$dmg"
+            xcrun notarytool submit "$dmg" --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" \
+              --wait --timeout 60m --output-format json > "$ev/notary-$name.json"
+            read -r id status < <(python -c 'import json, sys; d = json.load(open(sys.argv[1])); print(d.get("id"), d.get("status"))' "$ev/notary-$name.json")
+            echo "- notarization of $name: $status (submission $id)" | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ "$status" != Accepted ]; then
+              xcrun notarytool log "$id" --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" "$ev/notary-log-$name.json" || true
+              exit 1
+            fi
+            xcrun stapler staple "$dmg"
+          done
+          security delete-keychain "$kc"
+      - name: The test-only driver is absent from the packaged app
+=== replace .github/workflows/release.yml
+--- find
+                for dmg in $r/dmg/*.dmg; do
+                  echo "- notarization ticket stapled to $(basename "$dmg"): $(xcrun stapler validate "$dmg" >/dev/null 2>&1 && echo yes || echo no)"
+                done
+--- with
+                for dmg in $r/dmg/*.dmg; do
+                  dmg_stapled=$(xcrun stapler validate "$dmg" >/dev/null 2>&1 && echo yes || echo no)
+                  echo "- $(basename "$dmg"): signature $(codesign -dv --verbose=2 "$dmg" 2>&1 | grep -E '^(Authority|TeamIdentifier)' | tr '\n' ';'); notarization ticket stapled: $dmg_stapled"
+                  [ "${SIGNING:-}" != "signed (Developer ID), notarized" ] || [ "$dmg_stapled" = yes ] || status=1
+                done
+=== replace .github/workflows/release.yml
+--- find
+                for f in $r/nsis/*.exe $r/msi/*.msi desktop/target/release/lightagent-desktop.exe desktop/target/release/lightagent.exe; do
+                  [ -f "$f" ] || continue
+--- with
+                # The installers, the app and the bundled runtime as built.
+                for f in $r/nsis/*.exe $r/msi/*.msi desktop/target/release/lightagent-desktop.exe desktop/target/release/lightagent-sidecar.exe; do
+                  if [ ! -f "$f" ]; then
+                    echo "- $(basename "$f"): not found, so not checked"
+                    case "${SIGNING:-}" in signed*) status=1 ;; esac
+                    continue
+                  fi
+=== replace .github/workflows/release.yml
+--- find
+      - name: Install, launch and uninstall each installer, with the user data checks (same-version reinstall)
+        run: |
+          python desktop/e2e/install_smoke.py "$RUNNER_TEMP/release-desktop-evidence/install" "${{ matrix.label }}" desktop/target/release/bundle | tee -a "$GITHUB_STEP_SUMMARY"
+--- with
+      - name: Install, launch and uninstall each installer, with the user data checks (same-version reinstall)
+        env:
+          # A signed run: the installed app and runtime must be validly signed (Windows).
+          LIGHTAGENT_SIGNING_REQUIRED: ${{ startsWith(steps.signing.outputs.mode, 'signed') && '1' || '' }}
+        run: |
+          python desktop/e2e/install_smoke.py "$RUNNER_TEMP/release-desktop-evidence/install" "${{ matrix.label }}" desktop/target/release/bundle | tee -a "$GITHUB_STEP_SUMMARY"
+=== replace scripts/release-gate.sh
+--- find
+# A run that would publish without the tag `v<workspace version>` fails here
+# rather than building something nobody can release.
+--- with
+#   SIGNING   inputs.signing: `signed` or `unsigned` for a manual run (empty
+#             means unsigned); anything else is refused. A tag push always
+#             signs; no other event does. Printed as `signing=`.
+#
+# A run that would publish without the tag `v<workspace version>` fails here
+# rather than building something nobody can release.
+=== replace scripts/release-gate.sh
+--- find
+DRY_RUN="${DRY_RUN:-}"
+--- with
+DRY_RUN="${DRY_RUN:-}"
+SIGNING="${SIGNING:-}"
+=== replace scripts/release-gate.sh
+--- find
+case "$EVENT" in
+  push)
+    if [ "$REF_TYPE" != tag ]; then
+--- with
+# Decided first, so a refusal here never follows a printed publish=true.
+case "$EVENT" in
+  push)
+    if [ "$REF_TYPE" = tag ]; then sign=signed; else sign=unsigned; fi
+    ;;
+  workflow_dispatch)
+    case "$SIGNING" in
+      signed|unsigned) sign="$SIGNING" ;;
+      "") sign=unsigned ;;
+      *) refuse "signing must be 'signed' or 'unsigned', not '$SIGNING'" ;;
+    esac
+    ;;
+  *)
+    sign=unsigned
+    ;;
+esac
+echo "signing=$sign"
+
+case "$EVENT" in
+  push)
+    if [ "$REF_TYPE" != tag ]; then
+=== replace desktop/e2e/install_smoke.py
+--- find
+with the app. Also recorded: each installer's SHA-256, the signature state
+(unsigned is expected), and the minimum OS the binaries declare, which is a
+--- with
+with the app. Also recorded: each installer's SHA-256 and signature state;
+on Windows the Authenticode status, signer and timestamp of every installed
+executable (the app and the bundled runtime must both be there, and with
+LIGHTAGENT_SIGNING_REQUIRED=1 both must be validly signed and timestamped);
+and the minimum OS the binaries declare, which is a
+=== replace desktop/e2e/install_smoke.py
+--- find
+STEPS = ("install", "launch", "notices", "data_seed", "data_after_launch", "data_after_reinstall", "uninstall",
+         "data_after_uninstall", "lifecycle", "data_after_appimage")
+--- with
+STEPS = ("install", "launch", "notices", "signatures", "data_seed", "data_after_launch", "data_after_reinstall", "uninstall",
+         "data_after_uninstall", "lifecycle", "data_after_appimage")
+# Set by release.yml for a signed run.
+SIGNING_REQUIRED = os.environ.get("LIGHTAGENT_SIGNING_REQUIRED") == "1"
+# What every Windows installation holds beside each other: the app and the bundled runtime.
+REQUIRED_SIGNED = ("lightagent-desktop.exe", "lightagent-sidecar.exe")
+=== replace desktop/e2e/install_smoke.py
+--- find
+def installed_exe():
+--- with
+def signature(path):
+    script = (f"$s = Get-AuthenticodeSignature -LiteralPath '{path}'; "
+              "'{0}|{1}|{2}' -f $s.Status, $s.SignerCertificate.Subject, $s.TimeStamperCertificate.Subject")
+    lines = sh(["powershell", "-NoProfile", "-Command", script])[1].strip().splitlines()
+    status, signer, stamp = (lines[-1].split("|") + ["", ""])[:3] if lines else ("", "", "")
+    return {"status": status.strip(), "signer": signer.strip() or None, "timestamp": stamp.strip() or None}
+
+
+def installed_signatures(exe):
+    """Authenticode of every executable the installation put beside the app."""
+    folder = os.path.dirname(exe)
+    files = {name: signature(os.path.join(folder, name)) for name in sorted(os.listdir(folder)) if name.lower().endswith(".exe")}
+    present = all(name in files for name in REQUIRED_SIGNED)
+    valid = all(files[name]["status"] == "Valid" and files[name]["timestamp"] for name in REQUIRED_SIGNED if name in files)
+    return {"ok": present and (valid or not SIGNING_REQUIRED), "required": SIGNING_REQUIRED,
+            "runtime_present": "lightagent-sidecar.exe" in files, "files": files}
+
+
+def installed_exe():
+=== replace desktop/e2e/install_smoke.py count=2
+--- find
+            entry["notices"] = notices_check([os.path.join(os.path.dirname(exe), name) for name in NOTICE_FILES])
+--- with
+            entry["notices"] = notices_check([os.path.join(os.path.dirname(exe), name) for name in NOTICE_FILES])
+            entry["signatures"] = installed_signatures(exe)
+=== replace desktop/e2e/install_smoke.py
+--- find
+        if entry.get("notices"):
+            print(f"  - packaged notices: {json.dumps(entry['notices'])}")
+--- with
+        if entry.get("notices"):
+            print(f"  - packaged notices: {json.dumps(entry['notices'])}")
+        if entry.get("signatures"):
+            print(f"  - installed executables' signatures: {json.dumps(entry['signatures'])}")
+=== replace scripts/test-release-gate.py
+--- find
+def gate(event, ref_type, ref_name, dry_run):
+    env = {k: v for k, v in os.environ.items() if k not in ("EVENT", "REF_TYPE", "REF_NAME", "DRY_RUN")}
+    env.update(EVENT=event, REF_TYPE=ref_type, REF_NAME=ref_name, DRY_RUN=dry_run)
+--- with
+def gate(event, ref_type, ref_name, dry_run, signing=""):
+    env = {k: v for k, v in os.environ.items() if k not in ("EVENT", "REF_TYPE", "REF_NAME", "DRY_RUN", "SIGNING")}
+    env.update(EVENT=event, REF_TYPE=ref_type, REF_NAME=ref_name, DRY_RUN=dry_run, SIGNING=signing)
+=== replace scripts/test-release-gate.py
+--- find
+# What a step may use or run only in the publish job.
+--- with
+    # Signing: a manual run is unsigned unless it asks for `signed`, a tag
+    # push always signs, and any other value is refused before anything else.
+    def test_manual_runs_are_unsigned_by_default(self):
+        for signing in ("", "unsigned"):
+            with self.subTest(signing=signing):
+                code, out = gate("workflow_dispatch", "branch", "release/v0.6.0", "true", signing)
+                self.assertEqual((code, out.get("signing"), out.get("publish")), (0, "unsigned", "false"), out)
+
+    def test_a_signed_dry_run_stays_dry(self):
+        code, out = gate("workflow_dispatch", "branch", "release/v0.6.0", "true", "signed")
+        self.assertEqual((code, out.get("signing"), out.get("publish")), (0, "signed", "false"), out)
+
+    def test_an_unknown_signing_request_is_refused(self):
+        for signing in ("Signed", "yes", "true", " signed", "null"):
+            with self.subTest(signing=signing):
+                self.assert_refused("workflow_dispatch", "tag", TAG, "false", signing)
+
+    def test_tag_push_signs(self):
+        code, out = gate("push", "tag", TAG, "null", "unsigned")
+        self.assertEqual((code, out.get("signing"), out.get("publish")), (0, "signed", "true"), out)
+
+    def test_other_events_never_sign(self):
+        for event in ("push", "pull_request", "schedule", ""):
+            with self.subTest(event=event):
+                code, out = gate(event, "branch", "master", "true", "signed")
+                self.assertEqual((code, out.get("signing")), (0, "unsigned"), out)
+
+
+# What a step may use or run only in the publish job.
+=== replace scripts/test-release-gate.py
+--- find
+        self.assertIs(dry_run["default"], True)
+--- with
+        self.assertIs(dry_run["default"], True)
+        signing = self.on["workflow_dispatch"]["inputs"]["signing"]
+        self.assertEqual((signing["type"], signing["options"], signing["default"]), ("choice", ["unsigned", "signed"], "unsigned"))
+=== replace scripts/test-release-gate.py
+--- find
+        self.assertEqual(gate_job["outputs"]["publish"], "${{ steps.decide.outputs.publish }}")
+--- with
+        self.assertEqual(gate_job["outputs"]["publish"], "${{ steps.decide.outputs.publish }}")
+        self.assertEqual(gate_job["outputs"]["signing"], "${{ steps.decide.outputs.signing }}")
+=== replace scripts/test-release-gate.py
+--- find
+        self.assertEqual(step["env"]["DRY_RUN"], "${{ toJSON(inputs.dry_run) }}")
+--- with
+        self.assertEqual(step["env"]["DRY_RUN"], "${{ toJSON(inputs.dry_run) }}")
+        self.assertEqual(step["env"]["SIGNING"], "${{ inputs.signing }}")
+=== replace scripts/test-release-gate.py
+--- find
+        for name, value in signing["env"].items():
+            self.assertTrue(value.startswith("${{ secrets.") or value.startswith("${{ vars."), name)
+--- with
+        env = dict(signing["env"])
+        self.assertEqual(env.pop("REQUESTED"), "${{ needs.gate.outputs.signing }}")
+        for name, value in env.items():
+            self.assertTrue(value.startswith("${{ secrets.") or value.startswith("${{ vars."), name)
+        for needed in ("missing ", "APPLE_API_KEY_P8", "WINDOWS_SIGN_COMMAND"):
+            self.assertIn(needed, signing["run"])
+=== replace scripts/test-release-gate.py
+--- find
+        for needed in ("com.apple.quarantine", "source=Notarized Developer ID", "stapler validate", "TimeStamperCertificate"):
+            self.assertIn(needed, state["run"])
+--- with
+        for needed in ("com.apple.quarantine", "source=Notarized Developer ID", "stapler validate", "TimeStamperCertificate",
+                       "lightagent-sidecar.exe", "dmg_stapled"):
+            self.assertIn(needed, state["run"])
+
+    def test_only_the_signing_jobs_use_the_protected_environment(self):
+        for name, job in self.jobs.items():
+            if name != "desktop":
+                self.assertNotIn("environment", job, name)
+        self.assertEqual(
+            self.jobs["desktop"]["environment"],
+            "${{ needs.gate.outputs.signing == 'signed' && matrix.label != 'linux-x64' && 'release-signing' || '' }}",
+        )
+        steps = self.jobs["desktop"]["steps"]
+        names = [s.get("name") for s in steps]
+        notarize = names.index("Notarize and staple the disk images (signed runs)")
+        self.assertLess(names.index("Build and bundle"), notarize)
+        self.assertLess(notarize, names.index("Signature state of what ships"))
+        (install,) = [s for s in steps if "install_smoke.py" in (s.get("run") or "")]
+        self.assertIn("LIGHTAGENT_SIGNING_REQUIRED", install.get("env", {}))
+=== end
