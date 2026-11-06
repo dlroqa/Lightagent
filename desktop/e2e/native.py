@@ -461,8 +461,8 @@ def keyboard_mode(out, cli, command, home, results):
 
 def share_focus_mode(out, cli, command, home, results):
     """Windows (mode "share-focus"): whether keyboard focus comes back to the
-    page after the system share flyout, on a host of its own. Share on an
-    answer opens the flyout; it is closed as a person closes it: a real Escape
+    page after the system share flyout, on a host of its own. A real click on
+    Share opens the flyout; it is closed as a person closes it: a real Escape
     (SendInput) first and, if the flyout is still in front, a real click on
     the composer. After each: which window is in front, where Win32 keyboard
     focus is, whether the page has focus, and whether real Tab presses move
@@ -485,13 +485,16 @@ def share_focus_mode(out, cli, command, home, results):
                         'return { x: r.left + r.width / 2, y: r.top + r.height / 2, dpr: devicePixelRatio };')
         geometry = host.call("geometry")
         point = [int(geometry["x"] + where["x"] * where["dpr"]), int(geometry["y"] + where["y"] * where["dpr"])]
-        opened = view.js("""
-          const info = { api: typeof navigator.share === "function" };
-          press(one("button", "Share", lastBar()));
-          await sleep(2000);
-          info.notice = noticeOf(lastBar());
-          return info;""")
+        # A real click: a script click gives no user activation, and the
+        # share sheet opens only with one.
+        share_at = view.js('const b = one("button", "Share", lastBar()); b.scrollIntoView({ block: "center" }); '
+                           'const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, '
+                           'dpr: devicePixelRatio, api: typeof navigator.share === "function" };')
+        at = [int(geometry["x"] + share_at["x"] * share_at["dpr"]), int(geometry["y"] + share_at["y"] * share_at["dpr"])]
+        opened = {"api": share_at["api"], "click": windows_input(f"[Wi]::Click({at[0]}, {at[1]})"), "at": at}
+        time.sleep(2.5)
         view.shot("share-open")
+        opened["notice"] = view.js("return noticeOf(lastBar());")
         stages["share_open"] = {**opened, **windows_focus(view, host)}
         if opened.get("api"):
             escape = {"key": windows_input("[Wi]::Key(27)")}

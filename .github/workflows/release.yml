@@ -383,7 +383,7 @@ jobs:
           path: ${{ runner.temp }}/release-desktop-evidence/
       # What the older-OS job needs to install these same installers again.
       - uses: actions/upload-artifact@v7
-        if: matrix.label == 'macos-arm64' || matrix.label == 'windows-x64'
+        if: matrix.label == 'windows-x64'
         with:
           name: desktop-smoke-kit-${{ matrix.label }}
           if-no-files-found: error
@@ -396,9 +396,10 @@ jobs:
             target/release/lightagent.exe
             desktop/src-tauri/notices/
 
-  # The same installers on the oldest GitHub-hosted images: macOS 14 (Apple
-  # silicon) and Windows Server 2022. No older hosted image exists for Intel
-  # macOS or Linux; those floors stay declarations (see the acceptance record).
+  # The same Windows installers on the oldest GitHub-hosted Windows image,
+  # Windows Server 2022. No hosted macOS image older than 15 runs any more
+  # (macos-14 is refused), and none older than Ubuntu 22.04 exists, so those
+  # floors stay declarations (see the acceptance record).
   desktop-older-os:
     name: desktop installers on ${{ matrix.os }}
     needs: desktop
@@ -408,7 +409,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14, label: macos-arm64 }
           - { os: windows-2022, label: windows-x64 }
     defaults:
       run:
