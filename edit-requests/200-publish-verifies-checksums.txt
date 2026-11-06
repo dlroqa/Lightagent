@@ -1,0 +1,17 @@
+=== base 8f35230a177dae422fe2aac031cfd1aa6c428930
+=== message
+Let the publish job verify the checksums it attaches, never make them
+
+The shape test forbade any `sha256sum` in the publish job, so it also
+caught the new `sha256sum -c SHA256SUMS` check of the assets against the
+dry run's checksums. It now forbids exactly what it meant: computing
+checksums in the publish job. Verifying them stays required.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace scripts/test-release-gate.py
+--- find
+        self.assertNotIn("sha256sum", self.steps_text("publish"))
+--- with
+        # (It may verify them: `sha256sum -c` only reads SHA256SUMS.)
+        self.assertEqual(re.findall(r"sha256sum(?! -c SHA256SUMS)", self.steps_text("publish")), [])
+=== end
