@@ -1,0 +1,19 @@
+=== base 697125b85c3a23270955cff904fc07fafffdca10
+=== message
+Desktop native share-focus: do not force the window forward before Share
+
+The first share-focus run (desktop 42155899869) stopped before Share: the
+page stopped answering the automation right after focus_window (the ALT
+press and SetForegroundWindow), as the earlier away-and-back stage did. The
+app is already in front after launch, and the full run's Share scenario
+never forces it, so the mode no longer does; it records the foreground
+state instead.
+=== replace desktop/e2e/native.py
+--- find
+        stages["answer"] = scenario_chat(view, provider, home, {}).results
+        focus_window(host)
+        stages["before_share"] = windows_stage(view, host)
+--- with
+        stages["answer"] = scenario_chat(view, provider, home, {}).results
+        stages["before_share"] = windows_stage(view, host)
+=== end
