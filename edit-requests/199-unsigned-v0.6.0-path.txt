@@ -1,0 +1,358 @@
+=== base 12e1f48615fc41315192b1905add0b07eb1083d5
+=== message
+Give v0.6.0 its owner-approved unsigned release path, and one release per tag
+
+The owner approved unsigned macOS and Windows installers for v0.6.0 only.
+The release gate now holds that approval as an exact list of tags
+(UNSIGNED_RELEASES="v0.6.0"): such a tag publishes unsigned, from its own
+tag push only, so its desktop jobs never use release-signing. A manual
+publishing run on it is refused, so the two cannot race. Every other tag
+still publishes signed, and a manual unsigned publication of any other tag
+is refused. Dry runs are unchanged.
+
+release.yml runs one release at a time per ref (concurrency, never
+cancelling), and the publish job refuses to draft when a release for the
+tag already exists, verifies SHA256SUMS against the assets, and drafts
+with docs/releases/<tag>.md as the body.
+
+The release notes state that the installers are unsigned, what Gatekeeper
+reported, the effect of not marking the release Latest on
+`lightagent update`, the tested and declared OS versions, and how to check
+the files.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace scripts/release-gate.sh
+--- find
+DRY_RUN="${DRY_RUN:-}"
+SIGNING="${SIGNING:-}"
+--- with
+DRY_RUN="${DRY_RUN:-}"
+SIGNING="${SIGNING:-}"
+
+# Owner-approved unsigned publication, by exact tag. The owner's approval of
+# 2026-11-06: v0.6.0 ships its macOS and Windows installers unsigned. A
+# listed tag publishes unsigned from its own tag push only; every other tag
+# publishes signed. RELEASE_GATE_UNSIGNED_RELEASES replaces the list for
+# scripts/test-release-gate.py only (release.yml never sets it; a test checks).
+UNSIGNED_RELEASES="${RELEASE_GATE_UNSIGNED_RELEASES-v0.6.0}"
+unsigned_approved() {
+  local tags tag
+  read -r -a tags <<<"$UNSIGNED_RELEASES"
+  for tag in ${tags[@]+"${tags[@]}"}; do
+    [ "$tag" = "$1" ] && return 0
+  done
+  return 1
+}
+=== replace scripts/release-gate.sh
+--- find
+    if [ "$REF_TYPE" = tag ]; then sign=signed; else sign=unsigned; fi
+--- with
+    if [ "$REF_TYPE" != tag ]; then
+      sign=unsigned
+    elif [ "$REF_NAME" = "$TAG" ] && unsigned_approved "$TAG"; then
+      sign=unsigned
+    else
+      sign=signed
+    fi
+=== replace scripts/release-gate.sh
+--- find
+      decide true "tag push $TAG"
+--- with
+      decide true "tag push $TAG ($sign)"
+=== replace scripts/release-gate.sh
+--- find
+    else
+      decide true "manual release of $TAG"
+    fi
+--- with
+    elif unsigned_approved "$TAG"; then
+      refuse "$TAG publishes unsigned from its tag push only; a manual publishing run could race it"
+    elif [ "$sign" != signed ]; then
+      refuse "unsigned publication of $TAG is not authorized (approved: ${UNSIGNED_RELEASES:-none})"
+    else
+      decide true "manual release of $TAG (signed)"
+    fi
+=== replace scripts/release-gate.sh
+--- find
+#   SIGNING   inputs.signing: `signed` or `unsigned` for a manual run (empty
+#             means unsigned); anything else is refused. A tag push always
+#             signs; no other event does. Printed as `signing=`.
+--- with
+#   SIGNING   inputs.signing: `signed` or `unsigned` for a manual run (empty
+#             means unsigned); anything else is refused. A tag push signs,
+#             unless the owner approved that exact tag to publish unsigned
+#             (UNSIGNED_RELEASES below); no other event signs. Printed as
+#             `signing=`. A manual publishing run must be signed, and is
+#             refused for a tag approved to publish unsigned.
+=== replace .github/workflows/release.yml
+--- find
+# not verify. Every run reports the signature state of what ships.
+--- with
+# not verify. Every run reports the signature state of what ships. The
+# owner approved v0.6.0 alone to publish unsigned, from its tag push only
+# (scripts/release-gate.sh, UNSIGNED_RELEASES).
+=== replace .github/workflows/release.yml
+--- find
+permissions:
+  contents: read
+
+jobs:
+--- with
+permissions:
+  contents: read
+
+# One run at a time per ref, never cancelled: a tag's push run and a manual
+# run on the same tag cannot draft at once. The publish job also refuses to
+# draft when the tag already has a release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+=== replace .github/workflows/release.yml
+--- find
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-SHA256SUMS
+          path: release-assets
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: release-assets/*
+--- with
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-SHA256SUMS
+          path: release-assets
+      - uses: actions/checkout@v7
+        with:
+          path: source
+      - name: No release exists for this tag yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          found=$(gh api --paginate "repos/${{ github.repository }}/releases?per_page=100" --jq ".[] | select(.tag_name == \"$TAG\") | .id")
+          if [ -n "$found" ]; then
+            echo "::error::a release for $TAG already exists (id $found); one release per tag"
+            exit 1
+          fi
+          (cd release-assets && sha256sum -c SHA256SUMS)
+          test -s "source/docs/releases/$TAG.md"
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          body_path: source/docs/releases/${{ github.ref_name }}.md
+          generate_release_notes: true
+          files: release-assets/*
+=== replace scripts/test-release-gate.py
+--- find
+def gate(event, ref_type, ref_name, dry_run, signing=""):
+    env = {k: v for k, v in os.environ.items() if k not in ("EVENT", "REF_TYPE", "REF_NAME", "DRY_RUN", "SIGNING")}
+    env.update(EVENT=event, REF_TYPE=ref_type, REF_NAME=ref_name, DRY_RUN=dry_run, SIGNING=signing)
+--- with
+def gate(event, ref_type, ref_name, dry_run, signing="", unsigned=None):
+    """`unsigned` replaces the gate's list of tags approved to publish unsigned; None keeps the shipped list."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("EVENT", "REF_TYPE", "REF_NAME", "DRY_RUN", "SIGNING", "RELEASE_GATE_UNSIGNED_RELEASES")}
+    env.update(EVENT=event, REF_TYPE=ref_type, REF_NAME=ref_name, DRY_RUN=dry_run, SIGNING=signing)
+    if unsigned is not None:
+        env["RELEASE_GATE_UNSIGNED_RELEASES"] = unsigned
+=== replace scripts/test-release-gate.py
+--- find
+    def test_manual_dry_run_off_on_the_tag(self):
+        self.assert_publishes("workflow_dispatch", "tag", TAG, "false")
+--- with
+    def test_manual_dry_run_off_on_the_tag(self):
+        # Signed, and only for a tag not approved to publish unsigned.
+        self.assert_publishes("workflow_dispatch", "tag", TAG, "false", "signed", "")
+=== replace scripts/test-release-gate.py
+--- find
+    def test_tag_push_signs(self):
+        code, out = gate("push", "tag", TAG, "null", "unsigned")
+        self.assertEqual((code, out.get("signing"), out.get("publish")), (0, "signed", "true"), out)
+--- with
+    def test_tag_push_signs(self):
+        code, out = gate("push", "tag", TAG, "null", "unsigned", "")
+        self.assertEqual((code, out.get("signing"), out.get("publish")), (0, "signed", "true"), out)
+
+    # The owner's unsigned approval: exactly the listed tag, from its tag push.
+    def test_an_approved_tag_push_publishes_unsigned(self):
+        code, out = gate("push", "tag", TAG, "null", "", TAG)
+        self.assertEqual((code, out.get("signing"), out.get("publish")), (0, "unsigned", "true"), out)
+
+    def test_the_shipped_approval_is_v0_6_0_only(self):
+        self.assertIn('UNSIGNED_RELEASES="${RELEASE_GATE_UNSIGNED_RELEASES-v0.6.0}"', GATE.read_text(encoding="utf-8"))
+        code, out = gate("push", "tag", "v0.6.0", "null")
+        if TAG == "v0.6.0":
+            self.assertEqual((code, out.get("signing"), out.get("publish")), (0, "unsigned", "true"), out)
+        else:
+            self.assertNotEqual(code, 0, out)
+
+    def test_the_approval_matches_whole_tags_only(self):
+        for listed in (TAG[:-1], TAG + "0", "v" + TAG, TAG.upper(), "*", "v*"):
+            with self.subTest(listed=listed):
+                code, out = gate("push", "tag", TAG, "null", "", listed)
+                self.assertEqual((code, out.get("signing"), out.get("publish")), (0, "signed", "true"), out)
+
+    def test_an_approved_tag_cannot_publish_from_a_manual_run(self):
+        for signing in ("unsigned", "signed", ""):
+            with self.subTest(signing=signing):
+                self.assert_refused("workflow_dispatch", "tag", TAG, "false", signing, TAG)
+
+    def test_unauthorized_unsigned_publication_is_refused(self):
+        for signing in ("unsigned", ""):
+            with self.subTest(signing=signing):
+                self.assert_refused("workflow_dispatch", "tag", TAG, "false", signing, "")
+                self.assert_refused("workflow_dispatch", "tag", TAG, "false", signing, "v0.0.1")
+
+    def test_the_approval_never_changes_dry_runs(self):
+        for signing in ("unsigned", "signed"):
+            with self.subTest(signing=signing):
+                code, out = gate("workflow_dispatch", "branch", "release/v0.6.0", "true", signing, TAG)
+                self.assertEqual((code, out.get("signing"), out.get("publish")), (0, signing, "false"), out)
+=== replace scripts/test-release-gate.py
+--- find
+    def test_dry_runs_still_build_and_checksum(self):
+--- with
+    def test_one_release_per_tag(self):
+        self.assertEqual(self.doc["concurrency"], {"group": "release-${{ github.ref }}", "cancel-in-progress": False})
+        steps = self.jobs["publish"]["steps"]
+        names = [s.get("name") for s in steps]
+        guard = names.index("No release exists for this tag yet")
+        drafting = next(i for i, s in enumerate(steps) if "action-gh-release" in str(s.get("uses", "")))
+        self.assertLess(guard, drafting)
+        for needed in ("already exists", "sha256sum -c SHA256SUMS", "docs/releases/"):
+            self.assertIn(needed, steps[guard]["run"])
+        self.assertEqual(steps[drafting]["with"]["draft"], True)
+        self.assertIn("docs/releases/", steps[drafting]["with"]["body_path"])
+
+    def test_the_workflow_cannot_widen_the_unsigned_approval(self):
+        self.assertNotIn("RELEASE_GATE_UNSIGNED_RELEASES", WORKFLOW.read_text(encoding="utf-8"))
+        (step,) = [s for s in self.jobs["gate"]["steps"] if s.get("id") == "decide"]
+        self.assertEqual(set(step["env"]), {"EVENT", "REF_TYPE", "REF_NAME", "DRY_RUN", "SIGNING"})
+
+    def test_dry_runs_still_build_and_checksum(self):
+=== write docs/releases/v0.6.0.md
+# Lightagent 0.6.0
+
+> **The macOS and Windows Desktop installers in this release are not code-signed.**
+> The macOS packages are not signed with a Developer ID or notarized by
+> Apple, and the Windows installers carry no Authenticode signature. Your
+> system will warn you or block the app at first (see "Before you install").
+> Check every download against `SHA256SUMS` before you open it.
+
+0.6.0 is the first release with **Lightagent Desktop**, a native app for macOS
+(Apple silicon and Intel), Windows x64 and Linux x64. It starts and owns its
+own bundled runtime and reaches every applicable CLI capability (222 of 222)
+through the same operations the CLI and the API use: conversations,
+profiles, providers and models, tools, extensions and MCP servers, skills,
+memory, knowledge, workers, identity, remote credentials, diagnostics and
+setup. The CLI keeps its name and its archives.
+
+## This release is not marked Latest
+
+The previous Latest release stays Latest. `lightagent update` (and the
+Desktop's "Check for updates") read GitHub's latest release, so:
+
+- On 0.5.x, `lightagent update` reports that you are up to date and does
+  **not** install 0.6.0. To use 0.6.0, download it from this page.
+- On 0.6.0, the update check reports 0.6.0 as up to date (the latest
+  release it reads is older). Nothing is downgraded.
+
+## Downloads
+
+| System | File |
+| --- | --- |
+| macOS, Apple silicon | `Lightagent_0.6.0_aarch64.dmg` (unsigned) |
+| macOS, Intel | `Lightagent_0.6.0_x64.dmg` (unsigned) |
+| Windows x64 | `Lightagent_0.6.0_x64-setup.exe` (per user) or `Lightagent_0.6.0_x64_en-US.msi` (per machine), both unsigned |
+| Linux x64 | `Lightagent_0.6.0_amd64.deb` or `Lightagent_0.6.0_amd64.AppImage` |
+| CLI | `lightagent-0.6.0-<target>.tar.gz` (macOS, Linux) or `.zip` (Windows) |
+| Checksums | `SHA256SUMS` (every file above and the source archive) |
+| MPL-2.0 sources | `desktop-mpl-sources-0.6.0.tar.gz` |
+
+## Check the download first
+
+```
+# macOS: compare with the line for the file in SHA256SUMS
+shasum -a 256 Lightagent_0.6.0_aarch64.dmg
+
+# Linux, in the download folder
+sha256sum -c SHA256SUMS --ignore-missing
+
+# Windows (PowerShell): compare with the line for the file in SHA256SUMS
+Get-FileHash .\Lightagent_0.6.0_x64-setup.exe -Algorithm SHA256
+```
+
+Linux packages are not signed either. Their integrity check is `SHA256SUMS`,
+as for every earlier Lightagent release.
+
+## Before you install
+
+- **macOS.** Gatekeeper rejects both apps. On GitHub's macOS 15 runners, a
+  quarantined copy of each .dmg, and the app copied out of it, were
+  assessed as rejected: "no usable signature" (Intel), and "code has no
+  resources but signature indicates they must be present" (Apple silicon,
+  which carries only the build's ad-hoc signature). Expect macOS to refuse
+  to open the app, and on Apple silicon possibly to call it damaged.
+  - **Normal route:** open it once, then System Settings › Privacy &
+    Security › *Open Anyway*.
+  - **If that option does not appear:** after copying the app to
+    Applications, run
+    `xattr -dr com.apple.quarantine /Applications/Lightagent.app`, and do
+    this only for a file whose checksum you have verified.
+- **Windows.** The setup .exe, the .msi, the app and its bundled runtime
+  have no Authenticode signature (Windows reports `NotSigned`). Microsoft
+  Defender SmartScreen is expected to show "Windows protected your PC" for
+  a downloaded unsigned installer: choose *More info*, then *Run anyway*.
+  GitHub's Windows runners cannot show SmartScreen, so this prompt was not
+  observed there.
+- **Your data.** The Desktop keeps its data in the same Lightagent home as
+  the CLI (`~/.lightagent`). Installing, reinstalling and uninstalling the
+  app leave it in place.
+- **Updates.** The Desktop does not update itself. Install a newer version
+  from its installer.
+
+## What was tested
+
+Every installer was installed, launched, installed again over itself
+(same version), and uninstalled on a GitHub-hosted runner of its platform.
+The user's data (a profile, settings, a conversation with an attachment, a
+memory, a knowledge source, a provider key and a sealed credential) was
+checked after each step and was unchanged.
+
+| Package | Tested on | Declared minimum (not tested at that version) |
+| --- | --- | --- |
+| macOS, Apple silicon | macOS 15.8 | macOS 11.0 |
+| macOS, Intel | macOS 15.7 | macOS 10.14 |
+| Windows x64 | Windows Server 2025 and Windows Server 2022 | none declared; needs the WebView2 Runtime (Windows 10 or 11) |
+| Linux x64 | Ubuntu 22.04 (glibc 2.35) | glibc 2.34, `libwebkit2gtk-4.1-0` |
+
+Windows 10 and Windows 11 client editions and macOS versions before 15
+were not tested by the automated runs.
+
+## Licenses and notices
+
+Each package carries `THIRD_PARTY_NOTICES.txt` and `LICENSE.txt`:
+
+- **macOS:** inside `Lightagent.app/Contents/Resources`.
+- **Windows:** beside the installed app.
+- **Linux:** in the package.
+
+The notices name every third-party component at its exact version with its
+license text. Where a crate was published without one, the text comes from
+its upstream repository at the commit that version was published from.
+`desktop-mpl-sources-0.6.0.tar.gz` is the exact, unmodified source of the
+five MPL-2.0 components the Desktop contains (cssparser 0.37.0,
+cssparser-macros 0.7.1, dtoa-short 0.3.5, option-ext 0.2.0, selectors
+0.38.0), with their checksums and the MPL-2.0 text. Lightagent is licensed
+under the Apache License 2.0.
+
+## Changes
+
+See `CHANGELOG.md`, section 0.6.0, and
+`docs/desktop/DESKTOP_RELEASE_ACCEPTANCE.md` for the full acceptance record.
+=== end
