@@ -1762,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "lightagent-desktop"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -1783,7 +1783,7 @@ dependencies = [
 
 [[package]]
 name = "lightagent-mock-sidecar"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "litemap"

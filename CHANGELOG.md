@@ -4,8 +4,18 @@ All notable Lightagent changes are documented here.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-06
+
+Release notes: `docs/releases/v0.6.0.md`.
+
 ### Added
 
+- Lightagent Desktop, the first desktop app: a native window (Tauri 2) on
+  macOS (Apple silicon and Intel), Windows x64 and Linux x64 that starts and
+  owns its own bundled runtime (`lightagent serve --desktop`) and reaches
+  every applicable CLI capability (222 of 222) through one shared operation
+  set. Installers: .dmg, NSIS and MSI, .deb and AppImage. They are not
+  code-signed. See `docs/desktop/`.
 - A response action row beneath the final assistant answer in the Web UI:
   copy, rate (kept in the page), read aloud, share, try again, and a menu
   with the answer's time and a "Branch in new chat" row that stays disabled
