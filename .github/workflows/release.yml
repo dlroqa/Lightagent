@@ -322,7 +322,9 @@ jobs:
         env:
           SIGNING: ${{ steps.signing.outputs.mode }}
         run: |
-          set -uo pipefail
+          # Report-only apart from `status`: no command's failure ends the step
+          # (spctl exits 3 when it rejects, which unsigned packages always are).
+          set +e -uo pipefail
           r=desktop/target/release/bundle
           report="$RUNNER_TEMP/release-desktop-evidence/signing-${{ matrix.label }}.md"
           status=0
