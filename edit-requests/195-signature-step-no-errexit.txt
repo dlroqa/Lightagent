@@ -1,0 +1,18 @@
+=== base f1bac64d12a3a95c159de6d157d628fd49573865
+=== message
+Keep the signature state step running past a rejected assessment
+
+The job's shell runs with -e, so a plain assignment from spctl, which
+exits 3 when it rejects (as it does for every unsigned package), ended
+the step before it reported. The step is report-only apart from its
+explicit status, so it now turns errexit off.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace .github/workflows/release.yml
+--- find
+          set -uo pipefail
+--- with
+          # Report-only apart from `status`: no command's failure ends the step
+          # (spctl exits 3 when it rejects, which unsigned packages always are).
+          set +e -uo pipefail
+=== end
