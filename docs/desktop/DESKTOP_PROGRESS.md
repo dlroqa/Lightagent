@@ -5,14 +5,22 @@ Governing documents: [DESKTOP_BUILD_PLAN.md](DESKTOP_BUILD_PLAN.md) and
 
 States: **proposed** → **implemented** (committed on a branch) →
 **CI-validated** (a named hosted run passed on that exact commit) →
-**packaged-tested** → **approved**. Nothing has been merged, tagged,
-published, or deployed.
+**packaged-tested** → **approved** → **merged**. The Desktop delivery is merged into `master`. Release readiness is tracked separately.
 
 A commit cannot record its own SHA. Each update records evidence for commits
 that already exist; the commit carrying an update is itself untested until the
 next update names its run.
 
-## Status board
+## Completed delivery
+
+| Step | PR | Merge commit | Resulting tree | Post-merge Actions |
+|---|---|---|---|---|
+| 1 | [#147](https://github.com/dlroqa/Lightagent/pull/147) | `4cada790ceaa2154050cf34450b059480e39b6dd` | `c73557e834e5996c3b37574c5a9e41628b10fed1` | [Check](https://github.com/dlroqa/Lightagent/actions/runs/42148383320), [Jev](https://github.com/dlroqa/Lightagent/actions/runs/42148383289), [Subagents](https://github.com/dlroqa/Lightagent/actions/runs/42148441908) |
+| 2 | [#161](https://github.com/dlroqa/Lightagent/pull/161) | `4f6b1f64ca84235f4e2682a2b5f3f65df96e6937` | `16161ba52f6cd4a4d8680708535f67448781cf0d` | [Check](https://github.com/dlroqa/Lightagent/actions/runs/42150133524), [Desktop](https://github.com/dlroqa/Lightagent/actions/runs/42150140810), [Jev](https://github.com/dlroqa/Lightagent/actions/runs/42150133551), [Subagents](https://github.com/dlroqa/Lightagent/actions/runs/42150144071) |
+
+Both trees matched the reviewed simulation and all listed workflows passed. The combined candidate incorporated the Desktop stack, including #162. Remaining draft cleanup requires separate approval. Release readiness is tracked in [DESKTOP_FINAL_ACCEPTANCE.md](DESKTOP_FINAL_ACCEPTANCE.md).
+
+## Historical status board
 
 | Slice | State | Branch | Draft PR | Latest implementation commit | Latest tested commit |
 |---|---|---|---|---|---|
