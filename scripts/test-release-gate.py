@@ -36,9 +36,9 @@ def workspace_version():
 TAG = "v" + workspace_version()
 
 
-def gate(event, ref_type, ref_name, dry_run):
-    env = {k: v for k, v in os.environ.items() if k not in ("EVENT", "REF_TYPE", "REF_NAME", "DRY_RUN")}
-    env.update(EVENT=event, REF_TYPE=ref_type, REF_NAME=ref_name, DRY_RUN=dry_run)
+def gate(event, ref_type, ref_name, dry_run, signing=""):
+    env = {k: v for k, v in os.environ.items() if k not in ("EVENT", "REF_TYPE", "REF_NAME", "DRY_RUN", "SIGNING")}
+    env.update(EVENT=event, REF_TYPE=ref_type, REF_NAME=ref_name, DRY_RUN=dry_run, SIGNING=signing)
     done = subprocess.run(["bash", str(GATE)], env=env, capture_output=True, text=True)
     outputs = dict(line.split("=", 1) for line in done.stdout.splitlines() if "=" in line)
     return done.returncode, outputs
@@ -119,6 +119,34 @@ class GateDecisionTests(unittest.TestCase):
                     self.assert_dry(event, ref_type, ref_name, dry_run)
 
 
+    # Signing: a manual run is unsigned unless it asks for `signed`, a tag
+    # push always signs, and any other value is refused before anything else.
+    def test_manual_runs_are_unsigned_by_default(self):
+        for signing in ("", "unsigned"):
+            with self.subTest(signing=signing):
+                code, out = gate("workflow_dispatch", "branch", "release/v0.6.0", "true", signing)
+                self.assertEqual((code, out.get("signing"), out.get("publish")), (0, "unsigned", "false"), out)
+
+    def test_a_signed_dry_run_stays_dry(self):
+        code, out = gate("workflow_dispatch", "branch", "release/v0.6.0", "true", "signed")
+        self.assertEqual((code, out.get("signing"), out.get("publish")), (0, "signed", "false"), out)
+
+    def test_an_unknown_signing_request_is_refused(self):
+        for signing in ("Signed", "yes", "true", " signed", "null"):
+            with self.subTest(signing=signing):
+                self.assert_refused("workflow_dispatch", "tag", TAG, "false", signing)
+
+    def test_tag_push_signs(self):
+        code, out = gate("push", "tag", TAG, "null", "unsigned")
+        self.assertEqual((code, out.get("signing"), out.get("publish")), (0, "signed", "true"), out)
+
+    def test_other_events_never_sign(self):
+        for event in ("push", "pull_request", "schedule", ""):
+            with self.subTest(event=event):
+                code, out = gate(event, "branch", "master", "true", "signed")
+                self.assertEqual((code, out.get("signing")), (0, "unsigned"), out)
+
+
 # What a step may use or run only in the publish job.
 RELEASE_WRITERS = re.compile(
     r"action-gh-release|create-release|upload-release-asset|release-action"
@@ -143,6 +171,8 @@ class WorkflowShapeTests(unittest.TestCase):
         dry_run = self.on["workflow_dispatch"]["inputs"]["dry_run"]
         self.assertEqual(dry_run["type"], "boolean")
         self.assertIs(dry_run["default"], True)
+        signing = self.on["workflow_dispatch"]["inputs"]["signing"]
+        self.assertEqual((signing["type"], signing["options"], signing["default"]), ("choice", ["unsigned", "signed"], "unsigned"))
 
     def test_workflow_is_read_only_by_default(self):
         self.assertEqual(self.doc["permissions"], {"contents": "read"})
@@ -181,8 +211,10 @@ class WorkflowShapeTests(unittest.TestCase):
     def test_gate_passes_the_typed_input_exactly(self):
         gate_job = self.jobs["gate"]
         self.assertEqual(gate_job["outputs"]["publish"], "${{ steps.decide.outputs.publish }}")
+        self.assertEqual(gate_job["outputs"]["signing"], "${{ steps.decide.outputs.signing }}")
         (step,) = [s for s in gate_job["steps"] if s.get("id") == "decide"]
         self.assertEqual(step["env"]["DRY_RUN"], "${{ toJSON(inputs.dry_run) }}")
+        self.assertEqual(step["env"]["SIGNING"], "${{ inputs.signing }}")
         self.assertEqual(step["env"]["EVENT"], "${{ github.event_name }}")
         self.assertEqual(step["env"]["REF_TYPE"], "${{ github.ref_type }}")
         self.assertEqual(step["env"]["REF_NAME"], "${{ github.ref_name }}")
@@ -321,15 +353,36 @@ class WorkflowShapeTests(unittest.TestCase):
     def test_signing_comes_only_from_secrets_and_is_reported(self):
         steps = self.jobs["desktop"]["steps"]
         (signing,) = [s for s in steps if s.get("id") == "signing"]
-        for name, value in signing["env"].items():
+        env = dict(signing["env"])
+        self.assertEqual(env.pop("REQUESTED"), "${{ needs.gate.outputs.signing }}")
+        for name, value in env.items():
             self.assertTrue(value.startswith("${{ secrets.") or value.startswith("${{ vars."), name)
+        for needed in ("missing ", "APPLE_API_KEY_P8", "WINDOWS_SIGN_COMMAND"):
+            self.assertIn(needed, signing["run"])
         names = [s.get("name") for s in steps]
         self.assertLess(names.index(signing["name"]), names.index("Build and bundle"))
         self.assertIn("Signature state of what ships", names)
         self.assertIn("The notices name every crate version found in the shipped binaries", names)
         (state,) = [s for s in steps if s.get("name") == "Signature state of what ships"]
-        for needed in ("com.apple.quarantine", "source=Notarized Developer ID", "stapler validate", "TimeStamperCertificate"):
+        for needed in ("com.apple.quarantine", "source=Notarized Developer ID", "stapler validate", "TimeStamperCertificate",
+                       "lightagent-sidecar.exe", "dmg_stapled"):
             self.assertIn(needed, state["run"])
+
+    def test_only_the_signing_jobs_use_the_protected_environment(self):
+        for name, job in self.jobs.items():
+            if name != "desktop":
+                self.assertNotIn("environment", job, name)
+        self.assertEqual(
+            self.jobs["desktop"]["environment"],
+            "${{ needs.gate.outputs.signing == 'signed' && matrix.label != 'linux-x64' && 'release-signing' || '' }}",
+        )
+        steps = self.jobs["desktop"]["steps"]
+        names = [s.get("name") for s in steps]
+        notarize = names.index("Notarize and staple the disk images (signed runs)")
+        self.assertLess(names.index("Build and bundle"), notarize)
+        self.assertLess(notarize, names.index("Signature state of what ships"))
+        (install,) = [s for s in steps if "install_smoke.py" in (s.get("run") or "")]
+        self.assertIn("LIGHTAGENT_SIGNING_REQUIRED", install.get("env", {}))
 
     def test_licenses_are_complete_and_the_sources_checked(self):
         self.assertIn("scripts/desktop-upstream-licenses.py", self.steps_text("desktop-sources"))

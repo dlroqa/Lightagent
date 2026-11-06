@@ -8,9 +8,12 @@ name: release
 # itself. scripts/release-gate.sh makes the decision and
 # scripts/test-release-gate.py tests it, and the shape of this file, in check.
 #
-# The Desktop installers are signed only when the signing secrets are
-# configured (docs/desktop/DESKTOP_RELEASE_ACCEPTANCE.md); without them they
-# are built unsigned, and every run reports the signature state of what ships.
+# Signing (docs/desktop/DESKTOP_SIGNING_HANDOFF.md): a manual run is unsigned
+# unless its `signing` input is `signed`; a tag push always signs. In a signed
+# run only the macOS and Windows desktop jobs use the protected
+# release-signing environment (its reviewers approve them), and they fail
+# when a credential is missing or a signature, notarization or timestamp does
+# not verify. Every run reports the signature state of what ships.
 
 on:
   push:
@@ -21,6 +24,11 @@ on:
         description: Build, smoke-test and checksum only; create no release
         type: boolean
         default: true
+      signing:
+        description: unsigned (no environment), or signed (the macOS and Windows jobs use the protected release-signing environment and fail without its credentials or a verified signature)
+        type: choice
+        options: [unsigned, signed]
+        default: unsigned
 
 permissions:
   contents: read
@@ -32,6 +40,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       publish: ${{ steps.decide.outputs.publish }}
+      signing: ${{ steps.decide.outputs.signing }}
     steps:
       - uses: actions/checkout@v7
       - id: decide
@@ -42,6 +51,7 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           DRY_RUN: ${{ toJSON(inputs.dry_run) }}
+          SIGNING: ${{ inputs.signing }}
         run: bash ./scripts/release-gate.sh | tee -a "$GITHUB_OUTPUT"
 
   build:
@@ -126,6 +136,9 @@ jobs:
   desktop:
     name: desktop (${{ matrix.label }})
     needs: gate
+    # Only a signed run's macOS and Windows jobs: they wait for the
+    # environment's reviewers and see its secrets. Everything else uses none.
+    environment: ${{ needs.gate.outputs.signing == 'signed' && matrix.label != 'linux-x64' && 'release-signing' || '' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 100
     strategy:
@@ -211,9 +224,10 @@ jobs:
           cargo metadata --locked --format-version 1 --filter-platform "${{ matrix.triple }}" > "$meta/root-${{ matrix.triple }}.json"
           cargo metadata --locked --format-version 1 --filter-platform "${{ matrix.triple }}" --manifest-path desktop/Cargo.toml > "$meta/desktop-${{ matrix.triple }}.json"
           python -I scripts/desktop-sbom.py --notices "$meta" "${{ matrix.triple }}" frontend desktop/src-tauri/notices . | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Signing configuration (the signing secrets only; otherwise unsigned)
+      - name: Signing configuration (unsigned, or signed from the protected release-signing environment)
         id: signing
         env:
+          REQUESTED: ${{ needs.gate.outputs.signing }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -226,37 +240,32 @@ jobs:
           set -euo pipefail
           put() { { echo "$1<<LA_SIGNING_END"; printf '%s\n' "$2"; echo "LA_SIGNING_END"; } >> "$GITHUB_ENV"; }
           given() { n=0; for v in "$@"; do [ -n "${!v}" ] && n=$((n + 1)); done; echo "$n"; }
+          missing() { echo "::error::a signed run needs $1 in the release-signing environment"; exit 1; }
           mode=unsigned; config='{}'
-          case "$RUNNER_OS" in
-            macOS)
-              case "$(given APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY)" in
-                0) ;;
-                3)
+          case "$REQUESTED" in
+            unsigned) ;;
+            signed)
+              case "$RUNNER_OS" in
+                macOS)
+                  [ "$(given APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_P8)" = 6 ] \
+                    || missing "the secrets APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY, APPLE_API_ISSUER, APPLE_API_KEY and APPLE_API_KEY_P8"
                   for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do put "$v" "${!v}"; done
-                  mode="signed (Developer ID), not notarized"
-                  case "$(given APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_P8)" in
-                    0) ;;
-                    3)
-                      key="$RUNNER_TEMP/notary/AuthKey_$APPLE_API_KEY.p8"; mkdir -p "$(dirname "$key")"
-                      printf '%s\n' "$APPLE_API_KEY_P8" > "$key"
-                      put APPLE_API_ISSUER "$APPLE_API_ISSUER"; put APPLE_API_KEY "$APPLE_API_KEY"; put APPLE_API_KEY_PATH "$key"
-                      mode="signed (Developer ID), notarized" ;;
-                    *) echo "::error::notarization needs APPLE_API_ISSUER, APPLE_API_KEY and APPLE_API_KEY_P8 together"; exit 1 ;;
-                  esac ;;
-                *) echo "::error::signing needs APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD and APPLE_SIGNING_IDENTITY together"; exit 1 ;;
+                  key="$RUNNER_TEMP/notary/AuthKey_$APPLE_API_KEY.p8"; mkdir -p "$(dirname "$key")"
+                  printf '%s\n' "$APPLE_API_KEY_P8" > "$key"
+                  put APPLE_API_ISSUER "$APPLE_API_ISSUER"; put APPLE_API_KEY "$APPLE_API_KEY"; put APPLE_API_KEY_PATH "$key"
+                  mode="signed (Developer ID), notarized" ;;
+                Windows)
+                  [ -n "$WINDOWS_SIGN_COMMAND" ] || missing "the variable WINDOWS_SIGN_COMMAND"
+                  [ -z "$WINDOWS_SIGN_TOOL" ] || cargo install --locked "$WINDOWS_SIGN_TOOL"
+                  config=$(python -c 'import json, sys; print(json.dumps({"bundle": {"windows": {"signCommand": sys.argv[1]}}}))' "$WINDOWS_SIGN_COMMAND")
+                  mode="signed (signCommand)" ;;
+                *) mode="unsigned (Linux packages are not signed)" ;;
               esac ;;
-            Windows)
-              if [ -n "$WINDOWS_SIGN_COMMAND" ]; then
-                [ -z "$WINDOWS_SIGN_TOOL" ] || cargo install --locked "$WINDOWS_SIGN_TOOL"
-                config=$(python -c 'import json, sys; print(json.dumps({"bundle": {"windows": {"signCommand": sys.argv[1]}}}))' "$WINDOWS_SIGN_COMMAND")
-                mode="signed (signCommand)"
-              elif [ -n "$WINDOWS_SIGN_TOOL" ]; then
-                echo "::error::WINDOWS_SIGN_TOOL is set without WINDOWS_SIGN_COMMAND"; exit 1
-              fi ;;
+            *) echo "::error::unknown signing request '$REQUESTED'"; exit 1 ;;
           esac
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           printf 'config=%s\n' "$config" >> "$GITHUB_OUTPUT"
-          echo "- signing (${{ matrix.label }}): $mode" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "- signing (${{ matrix.label }}): requested $REQUESTED; $mode" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Build and bundle
         working-directory: desktop
         env:
@@ -292,6 +301,34 @@ jobs:
             echo "- bundling attempt $attempt hit hdiutil 'Resource busy'; retrying (log kept)" | tee -a "$GITHUB_STEP_SUMMARY"
             sleep 20
           done
+      - name: Notarize and staple the disk images (signed runs)
+        if: runner.os == 'macOS' && steps.signing.outputs.mode == 'signed (Developer ID), notarized'
+        run: |
+          set -euo pipefail
+          ev="$RUNNER_TEMP/release-desktop-evidence"; mkdir -p "$ev"
+          kc="$RUNNER_TEMP/la-dmg.keychain-db"; pw=$(openssl rand -hex 24)
+          security create-keychain -p "$pw" "$kc"
+          security set-keychain-settings -lut 7200 "$kc"
+          security unlock-keychain -p "$pw" "$kc"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/la-dmg.p12"
+          security import "$RUNNER_TEMP/la-dmg.p12" -k "$kc" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign >/dev/null
+          rm -f "$RUNNER_TEMP/la-dmg.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$pw" "$kc" >/dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          for dmg in desktop/target/release/bundle/dmg/*.dmg; do
+            name=$(basename "$dmg")
+            codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" --keychain "$kc" "$dmg"
+            xcrun notarytool submit "$dmg" --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" \
+              --wait --timeout 60m --output-format json > "$ev/notary-$name.json"
+            read -r id status < <(python -c 'import json, sys; d = json.load(open(sys.argv[1])); print(d.get("id"), d.get("status"))' "$ev/notary-$name.json")
+            echo "- notarization of $name: $status (submission $id)" | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ "$status" != Accepted ]; then
+              xcrun notarytool log "$id" --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" "$ev/notary-log-$name.json" || true
+              exit 1
+            fi
+            xcrun stapler staple "$dmg"
+          done
+          security delete-keychain "$kc"
       - name: The test-only driver is absent from the packaged app
         run: |
           set -euo pipefail
@@ -338,7 +375,9 @@ jobs:
                 echo "- codesign --verify --deep --strict: $verified"
                 echo "- Gatekeeper (spctl --assess --type execute): $(spctl --assess --type execute -vv "$app" 2>&1 | tr '\n' ' ')"
                 for dmg in $r/dmg/*.dmg; do
-                  echo "- notarization ticket stapled to $(basename "$dmg"): $(xcrun stapler validate "$dmg" >/dev/null 2>&1 && echo yes || echo no)"
+                  dmg_stapled=$(xcrun stapler validate "$dmg" >/dev/null 2>&1 && echo yes || echo no)
+                  echo "- $(basename "$dmg"): signature $(codesign -dv --verbose=2 "$dmg" 2>&1 | grep -E '^(Authority|TeamIdentifier)' | tr '\n' ';'); notarization ticket stapled: $dmg_stapled"
+                  [ "${SIGNING:-}" != "signed (Developer ID), notarized" ] || [ "$dmg_stapled" = yes ] || status=1
                 done
                 case "${SIGNING:-}" in signed*) [ "$verified" = yes ] || status=1 ;; esac
                 # As a person downloads it: a quarantined copy of each .dmg, and
@@ -366,8 +405,13 @@ jobs:
                   fi
                 done ;;
               Windows)
-                for f in $r/nsis/*.exe $r/msi/*.msi desktop/target/release/lightagent-desktop.exe desktop/target/release/lightagent.exe; do
-                  [ -f "$f" ] || continue
+                # The installers, the app and the bundled runtime as built.
+                for f in $r/nsis/*.exe $r/msi/*.msi desktop/target/release/lightagent-desktop.exe desktop/target/release/lightagent-sidecar.exe; do
+                  if [ ! -f "$f" ]; then
+                    echo "- $(basename "$f"): not found, so not checked"
+                    case "${SIGNING:-}" in signed*) status=1 ;; esac
+                    continue
+                  fi
                   sig=$(powershell -NoProfile -Command "\$s = Get-AuthenticodeSignature -FilePath '$(cygpath -w "$f")'; '{0}|{1}|{2}' -f \$s.Status, \$s.SignerCertificate.Subject, \$s.TimeStamperCertificate.Subject" | tr -d '\r')
                   IFS='|' read -r state signer stamp <<<"$sig"
                   echo "- $(basename "$f"): Authenticode $state; signer: ${signer:-none}; timestamp: ${stamp:-none}"
@@ -394,6 +438,9 @@ jobs:
           done
           (cd "$out" && sha256sum * | tee -a "$GITHUB_STEP_SUMMARY")
       - name: Install, launch and uninstall each installer, with the user data checks (same-version reinstall)
+        env:
+          # A signed run: the installed app and runtime must be validly signed (Windows).
+          LIGHTAGENT_SIGNING_REQUIRED: ${{ startsWith(steps.signing.outputs.mode, 'signed') && '1' || '' }}
         run: |
           python desktop/e2e/install_smoke.py "$RUNNER_TEMP/release-desktop-evidence/install" "${{ matrix.label }}" desktop/target/release/bundle | tee -a "$GITHUB_STEP_SUMMARY"
           exit "${PIPESTATUS[0]}"

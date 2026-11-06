@@ -12,6 +12,10 @@
 #             manual run's dry run off. `true`, `null` (no input), an empty
 #             value or a string such as `"false"` all stay dry.
 #
+#   SIGNING   inputs.signing: `signed` or `unsigned` for a manual run (empty
+#             means unsigned); anything else is refused. A tag push always
+#             signs; no other event does. Printed as `signing=`.
+#
 # A run that would publish without the tag `v<workspace version>` fails here
 # rather than building something nobody can release.
 set -euo pipefail
@@ -26,6 +30,7 @@ EVENT="${EVENT:-}"
 REF_TYPE="${REF_TYPE:-}"
 REF_NAME="${REF_NAME:-}"
 DRY_RUN="${DRY_RUN:-}"
+SIGNING="${SIGNING:-}"
 
 decide() {
   echo "publish=$1"
@@ -35,6 +40,24 @@ refuse() {
   echo "  FAIL  $1" >&2
   exit 1
 }
+
+# Decided first, so a refusal here never follows a printed publish=true.
+case "$EVENT" in
+  push)
+    if [ "$REF_TYPE" = tag ]; then sign=signed; else sign=unsigned; fi
+    ;;
+  workflow_dispatch)
+    case "$SIGNING" in
+      signed|unsigned) sign="$SIGNING" ;;
+      "") sign=unsigned ;;
+      *) refuse "signing must be 'signed' or 'unsigned', not '$SIGNING'" ;;
+    esac
+    ;;
+  *)
+    sign=unsigned
+    ;;
+esac
+echo "signing=$sign"
 
 case "$EVENT" in
   push)
