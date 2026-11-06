@@ -1,0 +1,114 @@
+=== base 4f6b1f64ca84235f4e2682a2b5f3f65df96e6937
+=== message
+Release candidate 0.6.0: one version for the CLI and Lightagent Desktop
+
+Bump the synchronized workspace, desktop and frontend versions to 0.6.0,
+the first release that carries Lightagent Desktop. The CLI and the
+Desktop share one version and one tag, so `lightagent update`, which reads
+the latest release and its SHA256SUMS, keeps working when that release
+also holds the Desktop installers.
+
+scripts/check-versions.sh now also compares the Desktop workspace and the
+bundle version (tauri.conf.json), so a release can no longer build
+installers that carry another version than the CLI.
+
+CHANGELOG: [0.6.0] promoted (proposed date 2026-11-06; another release
+date means a documentation-only change of this candidate).
+=== replace Cargo.toml
+--- find
+version = "0.5.0"
+--- with
+version = "0.6.0"
+=== replace desktop/Cargo.toml
+--- find
+version = "0.5.0"
+--- with
+version = "0.6.0"
+=== replace desktop/src-tauri/tauri.conf.json
+--- find
+  "version": "0.5.0",
+--- with
+  "version": "0.6.0",
+=== replace frontend/package.json
+--- find
+  "version": "0.5.0",
+--- with
+  "version": "0.6.0",
+=== replace frontend/package-lock.json
+--- find
+  "version": "0.5.0",
+--- with
+  "version": "0.6.0",
+=== replace frontend/package-lock.json
+--- find
+      "version": "0.5.0",
+--- with
+      "version": "0.6.0",
+=== replace scripts/check-versions.sh
+--- find
+#!/usr/bin/env bash
+# The Rust workspace and Web UI publish one Lightagent version.
+--- with
+#!/usr/bin/env bash
+# The Rust workspace, the Web UI and Lightagent Desktop (its workspace and
+# its bundle) publish one Lightagent version.
+=== replace scripts/check-versions.sh
+--- find
+web="$(node -p "require('./frontend/package.json').version" 2>/dev/null || echo "")"
+
+echo "  workspace       $workspace"
+echo "  frontend        $web"
+
+if [ -z "$workspace" ] || [ -z "$web" ]; then
+  echo "could not read every version (is node installed?)" >&2
+  exit 1
+fi
+if [ "$workspace" != "$web" ]; then
+  echo "  FAIL  versions disagree" >&2
+  exit 1
+fi
+--- with
+web="$(node -p "require('./frontend/package.json').version" 2>/dev/null || echo "")"
+desktop="$(sed -n '/^\[workspace\.package\]/,/^\[/p' desktop/Cargo.toml \
+  | sed -n 's/^version *= *"\([^"]*\)".*/\1/p' | head -1)"
+bundle="$(node -p "require('./desktop/src-tauri/tauri.conf.json').version" 2>/dev/null || echo "")"
+
+echo "  workspace       $workspace"
+echo "  frontend        $web"
+echo "  desktop         $desktop"
+echo "  desktop bundle  $bundle"
+
+if [ -z "$workspace" ] || [ -z "$web" ] || [ -z "$desktop" ] || [ -z "$bundle" ]; then
+  echo "could not read every version (is node installed?)" >&2
+  exit 1
+fi
+if [ "$workspace" != "$web" ] || [ "$workspace" != "$desktop" ] || [ "$workspace" != "$bundle" ]; then
+  echo "  FAIL  versions disagree" >&2
+  exit 1
+fi
+=== replace CHANGELOG.md
+--- find
+## [Unreleased]
+
+### Added
+
+- A response action row beneath the final assistant answer in the Web UI:
+--- with
+## [Unreleased]
+
+## [0.6.0] - 2026-11-06
+
+Release notes: `docs/releases/v0.6.0.md`.
+
+### Added
+
+- Lightagent Desktop, the first desktop app: a native window (Tauri 2) on
+  macOS (Apple silicon and Intel), Windows x64 and Linux x64 that starts and
+  owns its own bundled runtime (`lightagent serve --desktop`) and reaches
+  every applicable CLI capability (222 of 222) through one shared operation
+  set. Installers: .dmg, NSIS and MSI, .deb and AppImage. They are not
+  code-signed. See `docs/desktop/`.
+- A response action row beneath the final assistant answer in the Web UI:
+=== lock .
+=== lock desktop
+=== end
