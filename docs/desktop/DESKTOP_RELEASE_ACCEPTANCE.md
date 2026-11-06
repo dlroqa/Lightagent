@@ -2,12 +2,13 @@
 
 **Prepared for the owner's review. Nothing here is approved, merged, tagged
 or published.** Pull request https://github.com/dlroqa/Lightagent/pull/164
-(`release/v0.6.0`, draft). Revised 2026-11-06 after the license fix.
+(`release/v0.6.0`, draft). Revised 2026-11-06: signed and unsigned runs separated.
 
 | | Commit | Tree |
 |---|---|---|
 | Base (`master`, the merged Desktop delivery) | `4f6b1f64ca84235f4e2682a2b5f3f65df96e6937` | `16161ba52f6cd4a4d8680708535f67448781cf0d` |
-| **Code candidate (the final dry run built it)** | `55f4b96b733a254748369f037a128da08caf94b7` | `dc966a88333f8e362e7252a369b035797d40d894` |
+| **Code candidate (the unsigned dry run built it)** | `692dcece27b20590747507ae3f02ee765b0a97fa` | `804fb3606842b9221e73ab3d9403371ed6e68464` |
+| Previous code candidate (license fix) | `55f4b96b733a254748369f037a128da08caf94b7` | `dc966a88333f8e362e7252a369b035797d40d894` |
 | Earlier code candidate (superseded) | `2e1623d5facc567407dcdd8bfeeffb0f8a8ac445` | `971d5cfb8c0f4e02bf935a61328181eb0a5ea213` |
 
 The commit that adds this revision changes documentation only. No package
@@ -21,25 +22,29 @@ What changed since `2e1623d`, in order:
 | `1a5936b` | edit request 193: the notices use them and fail without a license text; upstream re-fetch check; checksums verification |
 | `f1bac64` | edit request 194: the signing proofs (quarantined download, Gatekeeper, timestamps) |
 | `55f4b96` | edit request 195: the signature step no longer stops at a rejected assessment (it did on `f1bac64`, below) |
+| `2a78bcb` | edit request 196: documentation |
+| `692dcec` | edit request 197: the `signing` input (unsigned by default; a tag push signs); only a signed run's macOS and Windows jobs use the protected `release-signing` environment; a signed run fails without every credential or verification; the .dmg files notarized and stapled; the Windows runtime's signature checked as built and as installed |
 
 ## 1. Evidence
 
 | Run | On | Result |
 |---|---|---|
-| **release dry run (final; artifact-only, `publish` skipped)** | `55f4b96` | https://github.com/dlroqa/Lightagent/actions/runs/42209236320: **every job green**: gate, 4 CLI builds, 4 Desktop targets, licenses and sources, Windows Server 2022, checksums |
-| check | `55f4b96` | https://github.com/dlroqa/Lightagent/actions/runs/42209246445 green, 13/13 |
-| desktop | `55f4b96` | https://github.com/dlroqa/Lightagent/actions/runs/42209246366 green, 12/12 (supply chain with the upstream re-fetch) |
-| jev evaluation | `55f4b96` | https://github.com/dlroqa/Lightagent/actions/runs/42209246372 green |
-| subagents | `55f4b96` | https://github.com/dlroqa/Lightagent/actions/runs/42209246343 green (its `fail` and `verify` fixture dispatches fail by design) |
+| **unsigned release dry run (artifact-only, `signing=unsigned`, `publish` skipped)** | `692dcec` | https://github.com/dlroqa/Lightagent/actions/runs/42221449510: **every job green**: gate (`signing=unsigned`), 4 CLI builds, 4 Desktop targets, licenses and sources, Windows Server 2022, checksums. No job used an environment; none was created |
+| check | `692dcec` | https://github.com/dlroqa/Lightagent/actions/runs/42221456703 green, 13/13 (the gate's signing tests included) |
+| desktop | `692dcec` | https://github.com/dlroqa/Lightagent/actions/runs/42221456705 green, 12/12 |
+| jev evaluation | `692dcec` | https://github.com/dlroqa/Lightagent/actions/runs/42221456725 green |
+| subagents | `692dcec` | https://github.com/dlroqa/Lightagent/actions/runs/42221456760 green |
+| **signed release dry run** | — | **not run**: `release-signing` does not exist yet (owner action, DESKTOP_SIGNING_HANDOFF.md §1). Dispatching one before would create the environment unprotected |
+| release dry run (license fix) | `55f4b96` | 42209236320: every job green; superseded |
 | release dry run | `f1bac64` | 42207800464: **failed** in both macOS jobs' "Signature state of what ships". The job shell runs with `-e`, and `spctl` exits 3 on its (expected) rejection of the unsigned app. Fixed in `55f4b96`; the run was cancelled |
 | release dry run | `1a5936b` | 42207340531: cancelled before it started (superseded by `f1bac64`) |
 | desktop supply chain | `1a5936b` | 42207306326: its supply-chain job passed with the new notices and the upstream re-fetch; the rest of the run was cancelled as superseded |
 | release dry run 2 | `2e1623d` | 42160144740: green, superseded (notices without the upstream texts) |
 
-Every job of the final dry run records the commit and tree it built:
-`55f4b96` / `dc966a8`.
+Every job of the unsigned dry run records the commit and tree it built:
+`692dcec` / `804fb36`.
 
-### Artifacts of the final dry run
+### Artifacts of the unsigned dry run (run 42221449510)
 
 | Artifact | What | Kept until |
 |---|---|---|
@@ -54,27 +59,29 @@ Every job of the final dry run records the commit and tree it built:
 The repository is public, so any signed-in GitHub user can download these
 artifacts. They are unsigned candidate packages, not a release.
 
-### SHA256SUMS (final dry run)
+### SHA256SUMS (unsigned dry run)
 
 ```
-8106843e2572b4951e039be775578dcdd648e1820b5193292431b61af80186bf  lightagent-0.6.0-aarch64-apple-darwin.tar.gz
-935409f80e6be66f58a671c8e2dd5cc914ea78c3a002e531d2a964534ada594e  lightagent-0.6.0-x86_64-apple-darwin.tar.gz
-a99e04b924cd254a4a4a0a8ed73bac1e3c66e3822ad8664d7e041ce0abcc1b09  lightagent-0.6.0-x86_64-pc-windows-msvc.zip
-66627e2987954a69aadb7eda672b9466d6b9b326c2b7326eec7b67fccad311ee  lightagent-0.6.0-x86_64-unknown-linux-gnu.tar.gz
-3ad9333a0eb8cd651d01e3cf8bbdcc2b8483bf3eff8a35ae74d81c698e9cf3a6  Lightagent_0.6.0_aarch64.dmg
-35efbaa86e93881223e20f3fcb8a2160e54b65e2d3ce11a24f626fa90f143f50  Lightagent_0.6.0_amd64.AppImage
-361eb87db1aec05fcfb758234a1bd953fa10ddb93822e1ea9f36b479a7081c82  Lightagent_0.6.0_amd64.deb
-aead1542e70596818676929787a34e9901a8a11c51f434e9348c615ce863e96b  Lightagent_0.6.0_x64-setup.exe
-37a5d99ef05046ccbc3a74d8744ff6b1c074f9b98dad74dbe3f405c1bfe6fbce  Lightagent_0.6.0_x64.dmg
-581ef92aa8a33f7652182bbf88613d706656faad316033714e899578b5877291  Lightagent_0.6.0_x64_en-US.msi
+163b69dc2a996ce4286c59af751930788313abbf7a4b827ae486daff4344ee34  lightagent-0.6.0-aarch64-apple-darwin.tar.gz
+1fa099ef4a6219db98129b92b9663062db577197af84a34ed33778b7d8b97e98  lightagent-0.6.0-x86_64-apple-darwin.tar.gz
+e093870fa6a0e9019de189ae0fd0298205d716a4ab6771dd5dc8d73be33221dc  lightagent-0.6.0-x86_64-pc-windows-msvc.zip
+c080d7453a43a71341257d2b603267ec0e99a17e27acc9c42603362d3f413797  lightagent-0.6.0-x86_64-unknown-linux-gnu.tar.gz
+9094a7bbc45ff237f76520900379d1cd47ef9c9c4741b156da38fb5c0d191e4d  Lightagent_0.6.0_aarch64.dmg
+4434212166fbe31815e14f5c2654ad78daa5b5f78495c789a4d8ef879c1a3f71  Lightagent_0.6.0_amd64.AppImage
+4c16f75de8ecd856c8b5ea1e5cdf97b3630887846ba5adf8be0f55b14700d4b1  Lightagent_0.6.0_amd64.deb
+090256b7549431dfb06330bbcef5d86128caa2d6ae85e673480611002a5f0fa5  Lightagent_0.6.0_x64-setup.exe
+d3bc8f03abc605bac614d1065b66a1edd342f51c045bb8ab6171e1864f45b8fd  Lightagent_0.6.0_x64.dmg
+edcbeced0937757b3132c7cce1d48d3394a5fd9d7ebbbeb704872b4071eb9541  Lightagent_0.6.0_x64_en-US.msi
 8dca80a16fa2e9f1f7d2d7d12e45564690d0b218012501393706b56284ccc0e8  desktop-mpl-sources-0.6.0.tar.gz
 ```
+
+A signed run regenerates this file over the signed packages.
 
 The checksums job verified the file (`sha256sum -c`: all 11 OK). It also
 unpacked the MPL archive as the release attaches it and verified its own
 `SHA256SUMS`, 5 of 5 OK. The CLI archives and installers are not
 bit-for-bit reproducible between runs. The MPL archive is: the same digest
-in all three dry runs.
+in all four dry runs.
 
 ### Install, launch and uninstall (every installer, its own runner)
 
@@ -88,28 +95,30 @@ too. This is not an upgrade test: no earlier Desktop release exists.
 
 ## 2. Signing and platform trust
 
-| Platform | State in the final dry run | What a person sees today |
+| Platform | State in the unsigned dry run | What a person sees today |
 |---|---|---|
 | macOS arm64 | only the linker's ad-hoc signature; `codesign --verify --deep --strict` fails; not notarized. **Quarantined download:** disk image rejected ("no usable signature"), app from it rejected | a downloaded app is blocked; it opens only through System Settings › Privacy & Security › Open Anyway, and macOS may call it damaged |
 | macOS x64 | no signature; not notarized. Quarantined download: disk image and app rejected | as above |
-| Windows x64 | NSIS, MSI and `lightagent-desktop.exe`: `NotSigned`, no signer, no timestamp | SmartScreen "Windows protected your PC" › More info › Run anyway |
+| Windows x64 | NSIS, MSI, `lightagent-desktop.exe` and the bundled runtime `lightagent-sidecar.exe`, as built and as installed by each installer: `NotSigned`, no signer, no timestamp | SmartScreen "Windows protected your PC" › More info › Run anyway |
 | Linux x64 | .deb and AppImage unsigned | no OS prompt; integrity only through SHA256SUMS |
 
-The workflow signs only when credentials exist, and none exist. With
-credentials, the step "Signature state of what ships" fails unless:
+**Signed and unsigned runs are separate.** A manual run is unsigned unless
+its `signing` input is `signed`; a tag push always signs. Only a signed
+run's macOS and Windows jobs use the protected `release-signing`
+environment. A signed run fails when:
 
-- macOS: the quarantined .dmg and the app copied out of it are both
-  accepted, the app as "Notarized Developer ID", with a stapled ticket;
-- Windows: every signature is Valid and timestamped.
+- any credential is missing;
+- Apple's notary service does not accept a disk image;
+- the app, either .dmg, or the app copied out of a quarantined .dmg is not
+  accepted, or any of them lacks a stapled ticket;
+- on Windows, the NSIS setup, the MSI, the app or the runtime (as built,
+  and the app and runtime as installed) is not validly signed and
+  timestamped.
 
-**What the owner needs to provide, how to store it in a protected
-environment, and the full list of proofs:** `DESKTOP_SIGNING_HANDOFF.md`.
-**macOS stays open until a credentialed dry run's quarantined-download
-check passes for both .dmg files.**
-
-Gap: the Windows bundled runtime (`lightagent.exe`) is not in the build
-directory where the step looks, so its signature is not yet reported. The
-first credentialed run must check it in the installed folder (handoff §3).
+The signed dry run has **not** been run: the environment does not exist
+yet. Setup, secret names, the proofs and the order of runs:
+`DESKTOP_SIGNING_HANDOFF.md`. **macOS stays open until a signed dry run
+passes every macOS proof for both .dmg files.**
 
 ## 3. Licenses
 
@@ -153,8 +162,8 @@ from: the `git.sha1` in the crate's `.cargo_vcs_info.json`, none dirty.
   crate's own `.cargo_vcs_info.json`.
   `desktop-upstream-licenses.py` fetches every file again from
   `raw.githubusercontent.com` at its commit and compares blob ids. In the
-  final run: 19 crates, 14 upstream files, 9 distinct, no difference.
-- **Result, final dry run:**
+  every licenses job since: 19 crates, 14 upstream files, 9 distinct, no difference.
+- **Result, dry runs 42209236320 and 42221449510 (identical notices digests):**
 
 | Target | Without a license text | With upstream texts | Notices SHA-256 (generated = in each installer) |
 |---|---|---|---|
@@ -181,15 +190,15 @@ from: the `git.sha1` in the crate's `.cargo_vcs_info.json`, none dirty.
 
 ## 4. Platforms: tested versus declared
 
-### Tested (hosted runners, final dry run)
+### Tested (hosted runners, unsigned dry run 42221449510; the same in 42209236320)
 
 | Target | OS actually run | Image | Account |
 |---|---|---|---|
-| macOS Apple silicon | macOS 15.8.2 (24H232) | `macos-15-arm64` 20261028.0489.1 | runner account, seeded home |
-| macOS Intel | macOS 15.7.9 (24G830) | `macos-15` (Intel) 20260824.0482.1 | runner account, seeded home |
-| Windows x64 | Windows Server 2025 (build 26100), every check | `windows-2025-vs2026` 20261103.298.1 | runner account, seeded home |
-| Windows x64 | Windows Server 2022 (build 20348), install, launch, data, uninstall | `windows-2022` 20261101.353.1 | runner account, seeded home |
-| Linux x64 | Ubuntu 22.04, glibc 2.35 | `ubuntu-22.04` 20261101.347.1 | a new account `la-smoke`, its own home |
+| macOS Apple silicon | macOS 15.8.2 (24H232) | `macos-15-arm64` | runner account, seeded home |
+| macOS Intel | macOS 15.7.9 (24G830) | `macos-15` (Intel) | runner account, seeded home |
+| Windows x64 | Windows Server 2025 (build 26100), every check | `windows-2025-vs2026` | runner account, seeded home |
+| Windows x64 | Windows Server 2022 (build 20348), install, launch, data, uninstall | `windows-2022` | runner account, seeded home |
+| Linux x64 | Ubuntu 22.04, glibc 2.35 | `ubuntu-22.04` | a new account `la-smoke`, its own home |
 
 ### Declared (what the packages claim; not all tested)
 
@@ -208,7 +217,7 @@ Hosted runners cannot close these gaps: no macOS image older than 15 runs
 
 Hosted runs cannot show the system share panel (desktop 42160150122,
 42158154084). The manual check is `DESKTOP_WINDOWS_SHARE_FOCUS_CHECK.md`,
-about 10 minutes on Windows 10 or 11. **It stays pending until someone runs
+about 10 minutes, keyboard only, on Windows 11 (version and OS build recorded). **It stays pending until someone runs
 it.** If focus is lost but the keyboard can recover it, the item is a
 documented limitation with the recovery key. If the keyboard cannot recover
 it, that is an **unrecoverable keyboard trap and a release blocker**.
@@ -241,11 +250,11 @@ Unchanged since the earlier record:
 
 | # | Item | Class | Status |
 |---|---|---|---|
-| 1 | Permissive notices without license texts (19) | was a release blocker | **resolved**: §3, final dry run |
-| 2 | macOS not signed or notarized | **release blocker for a general release**; acceptable only for an explicitly unsigned preview | open until a credentialed dry run's quarantined-download check passes (handoff) |
+| 1 | Permissive notices without license texts (19) | was a release blocker | **resolved**: §3 |
+| 2 | macOS not signed or notarized | **release blocker for a general release**; acceptable only for an explicitly unsigned preview | open until a signed dry run passes every macOS proof (handoff §5) |
 | 3 | Windows not signed | documented limitation | handoff §2 |
 | 4 | Linux not signed | documented limitation | optional |
-| 5 | Windows focus after the share panel | **pending manual check**; a blocker if focus cannot be recovered with the keyboard | `DESKTOP_WINDOWS_SHARE_FOCUS_CHECK.md` |
+| 5 | Windows focus after the share panel | **pending manual check on Windows 11**; an unrecoverable keyboard trap is a blocker and must be fixed before release | `DESKTOP_WINDOWS_SHARE_FOCUS_CHECK.md` |
 | 6 | Declared minimum OS versions untested | documented limitation | decision 7 |
 | 7 | Second OS account on macOS and Windows | documented limitation | — |
 | 8 | Live Jev, providers and MCP through the Desktop | documented limitation | optional live runs |
@@ -254,7 +263,8 @@ Unchanged since the earlier record:
 | 11 | Same-version reinstall only, no upgrade | documented limitation | test from 0.6.0 next |
 | 12 | MPL-2.0 sources attachment | resolved in the workflow; done when published | — |
 | 13 | objc2 family: no upstream copyright notice, SPDX texts used, Apple SDK statement; build-time entries listed; notice wording | owner or legal review | §3 |
-| 14 | Windows bundled runtime's signature not reported | gap in the signing proof | the first credentialed run (handoff §3) |
+| 14 | Windows bundled runtime's signature not reported | was a gap in the signing proof | **resolved**: reported as built and in each installation (unsigned run 42221449510); a signed run requires it valid and timestamped |
+| 15 | Signed dry run, and the negative check that a signed request without credentials fails | **open, owner action first** | handoff §1 and §6 |
 
 ## 8. Proposed version, channel and assets
 
@@ -273,8 +283,9 @@ Unchanged since the earlier record:
 ## 9. Verdict
 
 **Not ready for a general release.** The license blocker is resolved and
-verified in every installer, and the final artifact-only dry run on
-`55f4b96` is green on every job. One release blocker remains: **macOS
+verified in every installer. Signed and unsigned runs are separate, and the
+unsigned artifact-only dry run on `692dcec` is green on every job. The
+signed dry run waits for the owner's environment and credentials. One release blocker remains: **macOS
 signing and notarization** (item 2), unless the owner chooses an
 explicitly unsigned preview. Item 5 stays pending until someone runs the
 manual Windows check. Item 13 needs the owner's or a legal review.
@@ -294,20 +305,20 @@ manual Windows check. Item 13 needs the owner's or a legal review.
   that 195 fixes; the defect was caught by the `f1bac64` dry run before any
   report relied on it.
 
-## 11. The owner's decisions
+## 11. The owner's decisions and actions
 
-1. Channel: (a), (b) or (c) in §8. The version is 0.6.0, with tag `v0.6.0`.
-2. macOS: provide the Apple credentials and the protected environment
-   (handoff §1 and §4), or accept an unsigned preview and its Gatekeeper
-   behaviour.
-3. Windows: Azure Artifact Signing, a CA cloud signer, or unsigned with the
-   SmartScreen warning (handoff §2).
-4. Approve the one-line `environment: release-signing` change once the
-   environment exists, then the credentialed dry run.
-5. Windows share-panel check: who runs it, on which Windows versions.
-6. Minimum OS declarations: keep, narrow to what was tested, or test
+1. Create `release-signing` exactly as in handoff §1 and say when it
+   exists. Then the negative signed run (handoff §6.1) can run.
+2. macOS: add the six Apple secrets (handoff §2), or accept an unsigned
+   preview (a manual run on the tag with `signing` `unsigned`).
+3. Windows: Azure Artifact Signing or a CA signer (handoff §3), or unsigned
+   with the SmartScreen warning.
+4. Approve the signed dry run's review gate when it asks.
+5. Channel: (a), (b) or (c) in §8.
+6. Windows 11 share-panel check: who runs it.
+7. Minimum OS declarations: keep, narrow to what was tested, or test
    elsewhere.
-7. Item 13: accept the objc2 treatment and the notice wording, or obtain a
+8. Item 13: accept the objc2 treatment and the notice wording, or obtain a
    legal review.
-8. Separately, when ready: merging #164 and #163, the tag, marking Latest,
+9. Separately, when ready: merging #164 and #163, the tag, marking Latest,
    publishing, and closing the superseded drafts.
