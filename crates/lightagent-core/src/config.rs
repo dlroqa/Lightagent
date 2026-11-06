@@ -102,6 +102,36 @@ impl SecretRef {
             Self::File { path } => format!("${{file:{}}}", path.display()),
         }
     }
+
+    /// The value to send with a request about to be made. A configured
+    /// reference that cannot be used is refused: a file that cannot be read,
+    /// an unset variable, an empty value, or one no header can carry. A
+    /// request is never made without the credential it was configured with.
+    /// `Ok` always holds a value; it is an `Option` so an optional
+    /// reference reads as `map_or(Ok(None), SecretRef::for_request)`, where
+    /// `None` is an intentionally absent key.
+    pub fn for_request(&self) -> Result<Option<String>, SecretUnavailable> {
+        match self.lookup() {
+            SecretLookup::Value(value) if value.chars().any(char::is_control) => {
+                Err(SecretUnavailable::Invalid)
+            }
+            SecretLookup::Value(value) => Ok(Some(value)),
+            SecretLookup::Unreadable => Err(SecretUnavailable::Unreadable),
+            SecretLookup::Unresolved => Err(SecretUnavailable::Unresolved),
+            SecretLookup::Empty => Err(SecretUnavailable::Empty),
+        }
+    }
+}
+
+/// The state of an optional configured secret, for a status display:
+/// `absent` (none configured, on purpose), `ready`, or why it cannot be used
+/// ([`SecretUnavailable::as_str`]). Never the value or where it is kept.
+pub fn secret_state(secret: Option<&SecretRef>) -> &'static str {
+    match secret.map(SecretRef::for_request) {
+        None => "absent",
+        Some(Ok(_)) => "ready",
+        Some(Err(problem)) => problem.as_str(),
+    }
 }
 
 /// What a [`SecretRef`] holds right now, for a caller that must tell a
@@ -129,6 +159,93 @@ impl std::fmt::Debug for SecretLookup {
             Self::Unreadable => "Unreadable",
             Self::Empty => "Empty",
         })
+    }
+}
+
+/// Why a configured secret cannot be used for a request. No variant, and no
+/// message, names the reference's path or variable, or anything it holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SecretUnavailable {
+    /// A file reference that cannot be read.
+    Unreadable,
+    /// An environment reference whose variable is not set.
+    Unresolved,
+    /// A value of nothing but whitespace.
+    Empty,
+    /// A value with a line break or another control character, which no
+    /// HTTP header can carry.
+    Invalid,
+}
+
+impl SecretUnavailable {
+    /// A stable name for status displays and API responses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unreadable => "unreadable",
+            Self::Unresolved => "unresolved",
+            Self::Empty => "empty",
+            Self::Invalid => "invalid",
+        }
+    }
+}
+
+impl std::fmt::Display for SecretUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unreadable => "the configured secret file cannot be read",
+            Self::Unresolved => "the configured secret's environment variable is not set",
+            Self::Empty => "the configured secret is empty",
+            Self::Invalid => "the configured secret contains a line break or control character",
+        })
+    }
+}
+
+impl std::error::Error for SecretUnavailable {}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    fn scratch() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "lightagent-secret-{}",
+            crate::ids::RunId::new().as_str()
+        ))
+    }
+
+    #[test]
+    fn a_configured_secret_that_cannot_be_used_is_refused_and_an_absent_one_is_not() {
+        let dir = scratch();
+        std::fs::create_dir_all(&dir).expect("dir");
+        let write = |name: &str, text: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, text).expect("write");
+            SecretRef::file(path)
+        };
+        let good = write("good", "  sk-good  \n");
+        assert_eq!(good.for_request(), Ok(Some("sk-good".to_owned())));
+        assert_eq!(secret_state(Some(&good)), "ready");
+        for (secret, problem) in [
+            (
+                SecretRef::file(dir.join("missing")),
+                SecretUnavailable::Unreadable,
+            ),
+            (
+                SecretRef::env("LIGHTAGENT_TEST_FOR_REQUEST_UNSET"),
+                SecretUnavailable::Unresolved,
+            ),
+            (write("empty", " \n"), SecretUnavailable::Empty),
+            (write("control", "abc\u{7}def"), SecretUnavailable::Invalid),
+            (write("break", "abc\ndef"), SecretUnavailable::Invalid),
+        ] {
+            assert_eq!(secret.for_request(), Err(problem), "{secret:?}");
+            assert_eq!(secret_state(Some(&secret)), problem.as_str());
+            let message = problem.to_string();
+            assert!(!message.contains("FOR_REQUEST_UNSET"), "{message}");
+            assert!(!message.contains(&dir.display().to_string()), "{message}");
+        }
+        assert_eq!(secret_state(None), "absent");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -319,6 +436,59 @@ impl Default for SecurityConfig {
 
 /// The built-in, account-free search endpoint offered by `lightagent setup web`.
 pub const DUCKDUCKGO_SEARCH_ENDPOINT: &str = "https://html.duckduckgo.com/html/";
+
+/// What `lightagent setup` → web offers, in its order: the web tools off,
+/// fetching pages only, or agentic search through DuckDuckGo or a SearXNG /
+/// custom JSON endpoint. Setup and the desktop's Settings both apply it with
+/// [`WebMode::apply`], so they write the same keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebMode {
+    Off,
+    Fetch,
+    Duckduckgo,
+    Custom,
+}
+
+impl WebMode {
+    /// Setup's menu order.
+    pub const ALL: [Self; 4] = [Self::Off, Self::Fetch, Self::Duckduckgo, Self::Custom];
+
+    /// The mode `config` is in.
+    pub fn of(config: &Config) -> Self {
+        if !config.web.enabled {
+            Self::Off
+        } else if config.web.search.endpoint.as_deref() == Some(DUCKDUCKGO_SEARCH_ENDPOINT) {
+            Self::Duckduckgo
+        } else if config.web.search.endpoint.is_some() {
+            Self::Custom
+        } else {
+            Self::Fetch
+        }
+    }
+
+    /// Write the mode as setup does. Searching also turns on realtime
+    /// knowledge; DuckDuckGo needs no key. `endpoint` is the custom search
+    /// URL, used by `Custom` only; trimmed, and empty means none.
+    pub fn apply(self, config: &mut Config, endpoint: Option<&str>) {
+        config.web.enabled = self != Self::Off;
+        match self {
+            Self::Duckduckgo => {
+                config.web.search.endpoint = Some(DUCKDUCKGO_SEARCH_ENDPOINT.to_owned());
+                config.web.search.query_param = "q".to_owned();
+                config.web.search.api_key = None;
+            }
+            Self::Custom => {
+                config.web.search.endpoint = endpoint
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                    .map(str::to_owned);
+            }
+            Self::Off | Self::Fetch => config.web.search.endpoint = None,
+        }
+        config.rag.realtime_enabled = matches!(self, Self::Duckduckgo | Self::Custom);
+    }
+}
 
 /// A search backend for `web.search`.
 ///
@@ -1656,6 +1826,14 @@ pub enum ConfigError {
     Unreadable { path: PathBuf, reason: String },
     #[error("could not write the config at {path}: {reason}")]
     Unwritable { path: PathBuf, reason: String },
+    /// The file changed after the writer read it; nothing was written.
+    #[error(
+        "the config changed since revision {expected} was read (it is now {current}); nothing was written"
+    )]
+    Conflict { expected: String, current: String },
+    /// Another writer held the config lock for longer than a writer waits.
+    #[error("the config at {path} is being written by another process; try again")]
+    Busy { path: PathBuf },
 }
 
 /// A non-empty name of letters, digits, `-`, `_` and `.` only.
@@ -2267,10 +2445,74 @@ impl Config {
     }
 }
 
-/// The config file, read and written whole.
+/// The config file, read whole and written whole under one lock.
 #[derive(Clone, Debug)]
 pub struct ConfigStore {
     path: PathBuf,
+    lock_wait: std::time::Duration,
+}
+
+/// How long a writer waits for another writer's lock before reporting
+/// [`ConfigError::Busy`].
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A revision of the config file: `sha256:` and the hash of its exact bytes,
+/// or `absent` before the file exists. A writer names the revision it read;
+/// [`ConfigStore::update`] refuses a write made against any other.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigRevision(String);
+
+impl ConfigRevision {
+    fn of(bytes: Option<&[u8]>) -> Self {
+        use sha2::{Digest as _, Sha256};
+        use std::fmt::Write as _;
+        let Some(bytes) = bytes else {
+            return Self("absent".to_owned());
+        };
+        let mut text = String::from("sha256:");
+        for byte in Sha256::digest(bytes).iter() {
+            let _ = write!(text, "{byte:02x}");
+        }
+        Self(text)
+    }
+
+    /// A revision a client sends back, exactly as it was given out.
+    pub fn parse(value: &str) -> Self {
+        Self(value.trim().to_owned())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Why [`ConfigStore::update`] wrote nothing.
+#[derive(Debug)]
+pub enum UpdateError<E> {
+    /// The change itself refused, with its own error.
+    Change(E),
+    /// The store refused: a stale revision, a busy lock, an invalid result,
+    /// or a file that could not be read or written.
+    Store(ConfigError),
+}
+
+impl UpdateError<std::convert::Infallible> {
+    /// The store's error: a change that cannot fail has no other.
+    pub fn into_store(self) -> ConfigError {
+        match self {
+            Self::Store(error) => error,
+            Self::Change(never) => match never {},
+        }
+    }
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for UpdateError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Change(error) => error.fmt(f),
+            Self::Store(error) => error.fmt(f),
+        }
+    }
 }
 
 /// The on-disk envelope: a version, the config, and any unknown top-level keys.
@@ -2288,7 +2530,16 @@ fn one() -> u32 {
 
 impl ConfigStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            lock_wait: LOCK_WAIT,
+        }
+    }
+
+    /// The same store, waiting at most `wait` for another writer's lock.
+    pub fn with_lock_wait(mut self, wait: std::time::Duration) -> Self {
+        self.lock_wait = wait;
+        self
     }
 
     /// The store for the config file under a resolved home.
@@ -2306,9 +2557,16 @@ impl ConfigStore {
     /// treating a corrupt config as "defaults" would hide a real problem behind
     /// a working-looking agent pointed somewhere unexpected.
     pub fn load(&self) -> Result<Config, ConfigError> {
+        self.load_with_revision().map(|(config, _)| config)
+    }
+
+    /// Load the config with the revision of the exact bytes it came from.
+    pub fn load_with_revision(&self) -> Result<(Config, ConfigRevision), ConfigError> {
         let bytes = match std::fs::read(&self.path) {
             Ok(bytes) => bytes,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((Config::default(), ConfigRevision::of(None)));
+            }
             Err(err) => {
                 return Err(ConfigError::Unreadable {
                     path: self.path.clone(),
@@ -2321,11 +2579,86 @@ impl ConfigStore {
                 path: self.path.clone(),
                 reason: err.to_string(),
             })?;
-        Ok(file.config)
+        Ok((file.config, ConfigRevision::of(Some(&bytes))))
     }
 
-    /// Validate, then write the config atomically and owner-only.
+    /// The one way to change the config. Under the config lock, read the file
+    /// as it is now, refuse when `expected` names another revision, apply
+    /// `change`, validate, and write atomically. Nothing is written unless
+    /// every step succeeds, and no other writer's change is lost: each one
+    /// applies to what the last one wrote. Returns `change`'s value and the
+    /// new revision.
+    pub fn update<T, E>(
+        &self,
+        expected: Option<&ConfigRevision>,
+        change: impl FnOnce(&mut Config) -> Result<T, E>,
+    ) -> Result<(T, ConfigRevision), UpdateError<E>> {
+        let _lock = self.lock().map_err(UpdateError::Store)?;
+        let (mut config, current) = self.load_with_revision().map_err(UpdateError::Store)?;
+        if let Some(expected) = expected
+            && *expected != current
+        {
+            return Err(UpdateError::Store(ConfigError::Conflict {
+                expected: expected.0.clone(),
+                current: current.0,
+            }));
+        }
+        let value = change(&mut config).map_err(UpdateError::Change)?;
+        let revision = self.write(&config).map_err(UpdateError::Store)?;
+        Ok((value, revision))
+    }
+
+    /// Replace the config with `config`, only if the file is still at
+    /// `expected`: for an editor that changed a copy it read earlier, which
+    /// must not silently undo another writer's change.
+    pub fn replace(
+        &self,
+        expected: &ConfigRevision,
+        config: &Config,
+    ) -> Result<ConfigRevision, ConfigError> {
+        self.update(Some(expected), |current| {
+            *current = config.clone();
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .map(|((), revision)| revision)
+        .map_err(UpdateError::into_store)
+    }
+
+    /// Validate, then write the config atomically and owner-only, under the
+    /// lock. It replaces whatever is there; a writer that read the config
+    /// first uses [`ConfigStore::update`] or [`ConfigStore::replace`].
     pub fn save(&self, config: &Config) -> Result<(), ConfigError> {
+        self.update(None, |current| {
+            *current = config.clone();
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .map(|_| ())
+        .map_err(UpdateError::into_store)
+    }
+
+    /// Hold the config's write lock: an exclusive OS lock on `<config>.lock`,
+    /// which every process takes. Waits up to the store's lock wait.
+    fn lock(&self) -> Result<paths::ExclusiveLock, ConfigError> {
+        let mut name = self
+            .path
+            .file_name()
+            .map(std::ffi::OsStr::to_os_string)
+            .unwrap_or_default();
+        name.push(".lock");
+        let path = self.path.with_file_name(name);
+        paths::lock_exclusive(&path, self.lock_wait).map_err(|error| match error {
+            paths::LockError::Busy => ConfigError::Busy {
+                path: self.path.clone(),
+            },
+            paths::LockError::Io(err) => ConfigError::Unwritable {
+                path: path.clone(),
+                reason: err.to_string(),
+            },
+        })
+    }
+
+    /// Validate and write `config`; the caller holds the lock.
+    fn write(&self, config: &Config) -> Result<ConfigRevision, ConfigError> {
         config.validate()?;
         let file = ConfigFile {
             version: FORMAT_VERSION,
@@ -2340,7 +2673,8 @@ impl ConfigStore {
         paths::write_private(&self.path, &bytes).map_err(|err| ConfigError::Unwritable {
             path: self.path.clone(),
             reason: err.to_string(),
-        })
+        })?;
+        Ok(ConfigRevision::of(Some(&bytes)))
     }
 }
 
@@ -2351,6 +2685,132 @@ mod tests {
 
     fn scratch() -> PathBuf {
         std::env::temp_dir().join(format!("lightagent-config-{}", RunId::new().as_str()))
+    }
+
+    type Never = std::convert::Infallible;
+
+    fn set_model(store: &ConfigStore, name: &str) -> ConfigRevision {
+        store
+            .update(None, |config| {
+                config.inference.model = Some(name.to_owned());
+                Ok::<(), Never>(())
+            })
+            .expect("write")
+            .1
+    }
+
+    #[test]
+    fn a_revision_names_the_exact_bytes() {
+        let dir = scratch();
+        let store = ConfigStore::new(dir.join("config.json"));
+        let (_, absent) = store.load_with_revision().expect("load");
+        assert_eq!(absent.as_str(), "absent");
+        let written = set_model(&store, "one");
+        assert!(written.as_str().starts_with("sha256:"), "{written:?}");
+        assert_eq!(store.load_with_revision().expect("load").1, written);
+        assert_ne!(set_model(&store, "two"), written);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_stale_update_writes_nothing() {
+        let dir = scratch();
+        let store = ConfigStore::new(dir.join("config.json"));
+        let first = set_model(&store, "one");
+        let second = set_model(&store, "two");
+        let before = std::fs::read(store.path()).expect("read");
+        let stale = store.update(Some(&first), |config| {
+            config.inference.model = Some("three".to_owned());
+            Ok::<(), Never>(())
+        });
+        assert!(
+            matches!(
+                &stale,
+                Err(UpdateError::Store(ConfigError::Conflict { expected, current }))
+                    if expected == first.as_str() && current == second.as_str()
+            ),
+            "{stale:?}"
+        );
+        assert_eq!(std::fs::read(store.path()).expect("read"), before);
+        // The current revision is accepted.
+        store
+            .update(Some(&second), |_| Ok::<(), Never>(()))
+            .expect("current revision");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_refused_change_and_an_invalid_result_write_nothing() {
+        let dir = scratch();
+        let store = ConfigStore::new(dir.join("config.json"));
+        set_model(&store, "one");
+        let before = std::fs::read(store.path()).expect("read");
+        let refused = store.update(None, |_| Err::<(), _>("no"));
+        assert!(
+            matches!(refused, Err(UpdateError::Change("no"))),
+            "{refused:?}"
+        );
+        let invalid = store.update(None, |config| {
+            config.platform.github_actions.repository = Some("no-slash".to_owned());
+            Ok::<(), Never>(())
+        });
+        assert!(
+            matches!(invalid, Err(UpdateError::Store(ConfigError::Invalid(_)))),
+            "{invalid:?}"
+        );
+        assert_eq!(std::fs::read(store.path()).expect("read"), before);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_writer_waits_for_the_lock_then_keeps_what_the_holder_wrote() {
+        let dir = scratch();
+        let path = dir.join("config.json");
+        let store = ConfigStore::new(&path);
+        set_model(&store, "one");
+        let held = store.lock().expect("lock");
+        let waiting = ConfigStore::new(&path);
+        let writer = std::thread::spawn(move || {
+            waiting
+                .update(None, |config| {
+                    config.memory.top_k = 9;
+                    Ok::<(), Never>(())
+                })
+                .map(|_| ())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            !writer.is_finished(),
+            "the writer did not wait for the lock"
+        );
+        // The holder writes while the other waits.
+        let mut config = store.load().expect("load");
+        config.inference.model = Some("held".to_owned());
+        store.write(&config).expect("write under the lock");
+        drop(held);
+        writer.join().expect("join").expect("update");
+        let config = store.load().expect("load");
+        assert_eq!(config.inference.model.as_deref(), Some("held"));
+        assert_eq!(config.memory.top_k, 9);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_lock_held_too_long_is_reported_as_busy() {
+        let dir = scratch();
+        let store = ConfigStore::new(dir.join("config.json"))
+            .with_lock_wait(std::time::Duration::from_millis(50));
+        let held = store.lock().expect("lock");
+        let busy = store.update(None, |_| Ok::<(), Never>(()));
+        assert!(
+            matches!(busy, Err(UpdateError::Store(ConfigError::Busy { .. }))),
+            "{busy:?}"
+        );
+        drop(held);
+        store
+            .update(None, |_| Ok::<(), Never>(()))
+            .expect("free again");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

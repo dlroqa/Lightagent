@@ -39,6 +39,7 @@ pub fn name(event: &AgentEvent) -> &'static str {
             _ => "run.completed",
         },
         AgentEvent::Error { .. } => "error",
+        AgentEvent::WallClockPaused { .. } => "run.paused",
         _ => "event",
     }
 }
@@ -122,6 +123,10 @@ pub fn data(event: &AgentEvent) -> serde_json::Value {
             "complete": reason.is_complete(),
         }),
         AgentEvent::Error { message } => json!({ "message": message }),
+        AgentEvent::WallClockPaused { elapsed_secs } => json!({
+            "reason": "time_budget",
+            "elapsed_secs": elapsed_secs,
+        }),
         _ => json!({}),
     }
 }

@@ -44,6 +44,9 @@ struct Session {
     cwd: Option<String>,
     active: Option<Arc<RunState>>,
     busy: bool,
+    /// The session's run lease while a prompt runs: no other process runs a
+    /// turn on this session meanwhile.
+    _lease: Option<lightagent_store::RunLease>,
     stored: StoredSession,
     store: Option<SessionStore>,
 }
@@ -259,6 +262,7 @@ impl AcpServer {
                             cwd,
                             active: None,
                             busy: false,
+                            _lease: None,
                             stored,
                             store,
                         },
@@ -314,6 +318,7 @@ impl AcpServer {
                         cwd,
                         active: None,
                         busy: false,
+                        _lease: None,
                         stored: stored.clone(),
                         store: Some(store),
                     },
@@ -378,21 +383,52 @@ impl AcpServer {
                         return;
                     }
                     Some(session) => {
-                        let history = model_history(&session.stored, &text, history_limit);
+                        // One prompt at a time on this session across every
+                        // process (the desktop app, a server, a terminal chat).
+                        let lease = match &session.store {
+                            Some(store) => match store.lease_run(&session.stored.id) {
+                                Ok(lease) => Some(lease),
+                                Err(error) => {
+                                    let message = match error {
+                                        lightagent_store::StoreError::Busy { .. } => format!(
+                                            "session is running a turn in another Lightagent process: {session_id}"
+                                        ),
+                                        other => format!(
+                                            "could not take the session's run lease: {other}"
+                                        ),
+                                    };
+                                    let _ = outbound.send(protocol::error(id, -32602, &message));
+                                    return;
+                                }
+                            },
+                            None => None,
+                        };
+                        // Appended to the session as it is saved now, under
+                        // the store's lock, so a change another client made
+                        // since (a rename, a turn) is kept.
                         let mut updated = session.stored.clone();
-                        updated.push_message(StoredMessage::new("user", &text));
-                        if let Some(store) = &session.store
-                            && let Err(error) = store.save(&updated)
-                        {
-                            let _ = outbound.send(protocol::error(
-                                id,
-                                -32603,
-                                &format!("could not save session: {error}"),
-                            ));
-                            return;
-                        }
+                        let append = |saved: &mut StoredSession| {
+                            let history = model_history(saved, &text, history_limit);
+                            saved.push_message(StoredMessage::new("user", &text));
+                            history
+                        };
+                        let history = match &session.store {
+                            Some(store) => match store.apply(&mut updated, append) {
+                                Ok(history) => history,
+                                Err(error) => {
+                                    let _ = outbound.send(protocol::error(
+                                        id,
+                                        -32603,
+                                        &format!("could not save session: {error}"),
+                                    ));
+                                    return;
+                                }
+                            },
+                            None => append(&mut updated),
+                        };
                         session.stored = updated;
                         session.busy = true;
+                        session._lease = lease;
                         (session.profile.clone(), session.cwd.clone(), history)
                     }
                     None => {
@@ -519,14 +555,20 @@ impl PromptTask {
         // atomically persist the newly completed assistant turn.
         let mut save_error = None;
         if let Some(session) = self.sessions.lock().await.get_mut(&session_id) {
-            session.stored.record_run_events(&events, reason);
-            if let Some(store) = &session.store
-                && let Err(error) = store.save(&session.stored)
-            {
-                save_error = Some(error.to_string());
+            // Recorded into the session as it is saved now, so a change
+            // another client made during the run is kept.
+            let record = |saved: &mut StoredSession| saved.record_run_events(&events, reason);
+            match &session.store {
+                Some(store) => {
+                    if let Err(error) = store.apply(&mut session.stored, record) {
+                        save_error = Some(error.to_string());
+                    }
+                }
+                None => record(&mut session.stored),
             }
             session.active = None;
             session.busy = false;
+            session._lease = None;
         }
         if let Some(error) = save_error {
             let _ = self.outbound.send(protocol::error(

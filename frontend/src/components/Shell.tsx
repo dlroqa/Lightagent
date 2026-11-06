@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { ArrowLeft, Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Search, Settings, SquarePen, Wrench } from "lucide-react";
+import { ArrowLeft, BookOpen, FileText, KeyRound, Lock, Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Rocket, Search, Settings, SquarePen, Stethoscope, Users, Wrench } from "lucide-react";
 
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { usePreferences } from "../state/preferences";
@@ -83,6 +83,13 @@ export function Shell() {
           </div>
           <div className="menu__divider" />
           <MenuItem onClick={() => { setAccountOpen(false); navigate("/tools"); }}><span className="session-menu__item"><Wrench size={17} /> Tools</span></MenuItem>
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/memory"); }}><span className="session-menu__item"><BookOpen size={17} /> Memory</span></MenuItem>
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/knowledge"); }}><span className="session-menu__item"><FileText size={17} /> Knowledge</span></MenuItem>
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/admin/identity"); }}><span className="session-menu__item"><KeyRound size={17} /> Identity</span></MenuItem>
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/admin/credentials"); }}><span className="session-menu__item"><Lock size={17} /> Remote credentials</span></MenuItem>
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/diagnostics"); }}><span className="session-menu__item"><Stethoscope size={17} /> Diagnostics</span></MenuItem>
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/setup"); }}><span className="session-menu__item"><Rocket size={17} /> Setup</span></MenuItem>
+          <MenuItem onClick={() => { setAccountOpen(false); navigate("/profiles"); }}><span className="session-menu__item"><Users size={17} /> Profiles</span></MenuItem>
           <MenuItem onClick={() => { setAccountOpen(false); navigate("/settings"); }}><span className="session-menu__item"><Settings size={17} /> Settings</span></MenuItem>
         </Menu>
 

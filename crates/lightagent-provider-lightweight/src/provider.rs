@@ -87,6 +87,24 @@ impl LightweightProvider {
         Ok(Self { client, config })
     }
 
+    /// A provider for an explicit endpoint check. It makes the same requests,
+    /// but never follows a redirect, so the bearer key reaches the configured
+    /// endpoint only and a redirect is reported as that endpoint's answer;
+    /// and no request outlasts `timeout`. Runs use [`Self::new`].
+    pub fn for_check(
+        config: ProviderConfig,
+        timeout: std::time::Duration,
+    ) -> Result<Self, ProviderError> {
+        tls::ensure_provider();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(timeout)
+            .timeout(timeout)
+            .build()
+            .map_err(|err| ProviderError::Transport(err.to_string()))?;
+        Ok(Self { client, config })
+    }
+
     /// The base URL, without a trailing slash.
     fn base(&self) -> &str {
         self.config.base_url.trim_end_matches('/')

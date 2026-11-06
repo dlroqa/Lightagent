@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The main window gets no core or plugin permissions: no file system, shell, HTTP, or process access. It reaches only the host's own commands, which check every request against docs/desktop/contract/operations.json.",
+  "windows": ["main"],
+  "permissions": []
+}

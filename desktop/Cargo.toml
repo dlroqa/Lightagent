@@ -1,0 +1,22 @@
+# Lightagent Desktop (docs/desktop/DESKTOP_ARCHITECTURE.md).
+#
+# A workspace of its own: the Tauri host and its test runtime keep their
+# dependency graph and lockfile out of the root workspace, so the root's
+# no-sudo build and `scripts/check-deps.sh` gate are untouched. The same
+# banned-crate rules are applied to this graph by `.github/workflows/desktop.yml`.
+[workspace]
+resolver = "3"
+members = ["src-tauri", "mock-sidecar"]
+
+[workspace.package]
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.98"
+license = "Apache-2.0"
+repository = "https://github.com/dlroqa/Lightagent"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "debuginfo"
+panic = "abort"

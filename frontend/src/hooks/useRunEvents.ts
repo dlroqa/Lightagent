@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { agentApi } from "../api/agent";
+import { ApiEventSource } from "../api/transport";
 
 /**
  * One decoded event from a run's SSE stream.
@@ -45,6 +46,7 @@ const EVENT_NAMES = [
   "tool.output",
   "tool.failed",
   "approval.required",
+  "run.paused",
   "turn.completed",
   "run.completed",
   "run.cancelled",
@@ -139,7 +141,7 @@ export function useRunEvents(runId: string | null): { events: RunEvent[]; done: 
 
     const connect = () => {
       source?.close();
-      const next = new EventSource(agentApi.eventsUrl(runId, lastId));
+      const next = new ApiEventSource(agentApi.eventsUrl(runId, lastId));
       for (const name of EVENT_NAMES) {
         next.addEventListener(name, (message: Event) => {
           if (source === next) accept(name, message);
@@ -161,7 +163,7 @@ export function useRunEvents(runId: string | null): { events: RunEvent[]; done: 
         }
         // A CONNECTING source is retrying with Last-Event-ID on its own; a
         // CLOSED one has given up and needs a fresh stream.
-        if (next.readyState === EventSource.CLOSED) scheduleReconnect();
+        if (next.readyState === ApiEventSource.CLOSED) scheduleReconnect();
       };
       source = next;
     };

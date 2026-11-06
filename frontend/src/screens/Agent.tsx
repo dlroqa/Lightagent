@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, CornerDownLeft, Cpu, FilePenLine, FileText, Folder, Globe, MessageCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, Plus, Search, Send, Share2, ShieldCheck, Sparkles, SquarePen, Terminal, Trash2, Wrench, X } from "lucide-react";
+import { Archive, Ban, BookOpen, ChevronDown, ChevronRight, Clock, CornerDownLeft, Cpu, FilePenLine, FileText, Folder, Globe, KeyRound, Lock, MessageCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, Plus, Rocket, Search, Send, Share2, ShieldCheck, Sparkles, SquarePen, Stethoscope, Terminal, Trash2, Wrench, X } from "lucide-react";
 
 import {
   agentApi,
@@ -10,20 +10,42 @@ import {
   type SessionSearchResult,
   type SessionMessage,
   type SessionSummary,
+  type SlashCommandInfo,
   type SystemTime,
   type ToolInfo,
   type UploadedAttachment,
 } from "../api/agent";
-import { promptTimestamp } from "../api/format";
+import { answerTimestamp, promptTimestamp } from "../api/format";
 import { Empty, Pill } from "../components/Bits";
 import { AnimatedLogo } from "../components/Logo";
 import { Menu, MenuItem } from "../components/Menu";
+import { ResponseActions } from "../components/ResponseActions";
 import { TopBar } from "../components/Shell";
 import { usePoll } from "../hooks/usePoll";
 import { useRunEvents, type Delivery, type RunEvent } from "../hooks/useRunEvents";
 import { usePreferences } from "../state/preferences";
 
 const SESSION_KEY = "lightagent.agent.session";
+// The profile the conversation list shows and new chats run as, when it is
+// not the one the runtime serves. A per-viewer convenience.
+const PROFILE_KEY = "lightagent.agent.profile";
+
+function readConversationProfile(): string | null {
+  try {
+    return window.localStorage.getItem(PROFILE_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+
+function keepConversationProfile(profile: string | null) {
+  try {
+    if (profile) window.localStorage.setItem(PROFILE_KEY, profile);
+    else window.localStorage.removeItem(PROFILE_KEY);
+  } catch {
+    // Without storage the choice lasts as long as this page.
+  }
+}
 const WELCOME_PROMPTS = [
   "Where should we begin?",
   "What would you like to make?",
@@ -272,6 +294,12 @@ function describeStop(reason: string, answered: boolean): { label: string; text:
     case "RepeatedToolCalls":
       notice = { label: "limit reached", text: "The run stopped because it kept repeating the same tool call." };
       break;
+    case "Interrupted":
+      notice = {
+        label: "interrupted",
+        text: "Lightagent stopped while this run was working. It was not run again; anything its tools finished before then stays done.",
+      };
+      break;
   }
   return notice;
 }
@@ -378,7 +406,28 @@ export function Agent() {
   const navigate = useNavigate();
   const location = useLocation();
   const { preferences, update: updatePreferences } = usePreferences();
-  const sessions = usePoll(() => agentApi.sessions().then((body) => body.sessions), 2000);
+  // The conversations' profile, chosen for them only, as `lightagent chat
+  // --profile` chooses one for a chat; never the active profile. Null: the
+  // profile the runtime serves. Read through a ref by every call below.
+  const [conversationProfile, setConversationProfile] = useState<string | null>(readConversationProfile);
+  const profileScope = useRef<string | undefined>(undefined);
+  profileScope.current = conversationProfile ?? undefined;
+  const sessions = usePoll(() => agentApi.sessions(profileScope.current).then((body) => body.sessions), 2000);
+  const profileCatalog = usePoll(agentApi.profiles, 0);
+  const defaultProfile = profileCatalog.data?.active_profile ?? "";
+  const profileOptions = useMemo(
+    () => (profileCatalog.data?.profiles ?? []).map((profile) => profile.id),
+    [profileCatalog.data],
+  );
+  const scopedProfile = conversationProfile ?? defaultProfile;
+  // A remembered profile that no longer exists: back to the default one.
+  useEffect(() => {
+    if (!conversationProfile || !profileCatalog.data || profileOptions.includes(conversationProfile)) return;
+    keepConversationProfile(null);
+    profileScope.current = undefined;
+    setConversationProfile(null);
+    sessions.refresh();
+  }, [conversationProfile, profileCatalog.data, profileOptions, sessions.refresh]);
   // Runtime facts exposed by this same Lightagent process.
   const toolCatalog = usePoll(() => agentApi.tools().then((body) => body.tools), 0);
   const provider = usePoll(agentApi.provider, 10_000);
@@ -405,9 +454,15 @@ export function Agent() {
   const sidebarCollapsed = preferences.railCollapsed;
   const [showArchived, setShowArchived] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
+  const [commandsOpen, setCommandsOpen] = useState(false);
+  const closeCommands = useCallback(() => setCommandsOpen(false), []);
   const [sidebarNotice, setSidebarNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The regeneration this page started: its run, and the saved run whose
+  // answer it would replace.
+  const [replacing, setReplacing] = useState<{ sessionId: string; runId: string; savedRunId: string } | null>(null);
   const [deciding, setDeciding] = useState(false);
+  const [continuing, setContinuing] = useState(false);
   const [savingPolicy, setSavingPolicy] = useState(false);
   const [followTranscript, setFollowTranscript] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -490,6 +545,27 @@ export function Agent() {
     return last?.stop_reason ? describeStop(last.stop_reason, lastMessage?.role === "assistant") : null;
   }, [answer, done, events, runId, session]);
   const deliveryNotice = runId !== null && done ? describeDelivery(delivery) : null;
+  // The server keeps the saved answer until a regeneration has a new one.
+  // While the new one streams, or until it is saved, the old one is hidden.
+  // If the run fails, is cancelled or brings no answer, the old one is still
+  // the saved answer: it is shown again and the partial new one is not.
+  const regenerating = replacing !== null && replacing.runId === runId &&
+    replacing.sessionId === session?.id;
+  const keptAfterRegeneration = regenerating && done &&
+    (failure !== null || cancelled || answer.trim().length === 0);
+  const liveAnswerShown = showLiveAnswer && answer.length > 0 && !keptAfterRegeneration;
+  const hiddenAnswerIndex = regenerating && !keptAfterRegeneration &&
+    session?.runs[session.runs.length - 1]?.run_id === replacing?.savedRunId &&
+    session?.messages[session.messages.length - 1]?.role === "assistant"
+    ? session.messages.length - 1
+    : -1;
+  // The action row sits under the final answer only: a saved assistant
+  // message that ends the transcript, with no run streaming or queued.
+  const finalAnswerIndex = !running && !liveAnswerShown && hiddenAnswerIndex < 0 &&
+    steering.length === 0 &&
+    session?.messages[session.messages.length - 1]?.role === "assistant"
+    ? session.messages.length - 1
+    : -1;
   const pending = useMemo(() => {
     if (done) return null;
     let open: { toolCallId: string; tool: string } | null = null;
@@ -512,6 +588,21 @@ export function Agent() {
   useEffect(() => {
     if (!pending) setDeciding(false);
   }, [pending]);
+
+  // A run paused on its time budget, until anything shows it going on again.
+  const paused = useMemo(() => {
+    if (done) return null;
+    let at: { elapsed: number } | null = null;
+    for (const event of events) {
+      if (event.type === "run.paused") at = { elapsed: Number(event.data.elapsed_secs) || 0 };
+      else if (at && ["model.delta", "tool.requested", "tool.started", "turn.completed"].includes(event.type)) at = null;
+    }
+    return at;
+  }, [done, events]);
+
+  useEffect(() => {
+    if (!paused) setContinuing(false);
+  }, [paused]);
 
   useEffect(() => {
     resizeComposer(composerTextarea.current);
@@ -536,10 +627,18 @@ export function Agent() {
   const load = useCallback(async (id: string) => {
     const generation = ++loadGeneration.current;
     try {
-      const loaded = await agentApi.session(id);
+      const loaded = await agentApi.session(id, profileScope.current);
       if (selected.current === id && generation === loadGeneration.current) {
         setSession(loaded);
         setError(null);
+        // A turn this page is not following (paused, or waiting on an
+        // approval, when an earlier page closed): follow it, so its card
+        // comes back with its controls.
+        const active = loaded.active_run;
+        if (active) {
+          backgroundRuns.current.set(id, active.id);
+          setRunId(active.id);
+        }
       }
     } catch (cause) {
       if (selected.current === id && generation === loadGeneration.current) {
@@ -599,7 +698,7 @@ export function Agent() {
         let created: Awaited<ReturnType<typeof agentApi.createRun>> | null = null;
         for (let attempt = 0; attempt < 20; attempt += 1) {
           try {
-            created = await agentApi.createRun(next, undefined, activeId, selectedModel || undefined);
+            created = await agentApi.createRun(next, profileScope.current, activeId, selectedModel || undefined);
             break;
           } catch (cause) {
             const message = cause instanceof Error ? cause.message : String(cause);
@@ -684,7 +783,7 @@ export function Agent() {
     let cancelled = false;
     const timer = window.setTimeout(() => {
       setSearchingTranscripts(true);
-      void agentApi.searchSessions(query)
+      void agentApi.searchSessions(query, profileScope.current)
         .then(({ sessions: matches }) => {
           if (!cancelled) setTranscriptResults(matches);
         })
@@ -737,10 +836,22 @@ export function Agent() {
     setWelcomePromptIndex((current) => (current + 1) % WELCOME_PROMPTS.length);
   }
 
+  /** List `id`'s conversations and start new ones as it; the active profile is untouched. */
+  function chooseProfile(id: string) {
+    if (hasPendingWork) return;
+    const next = id && id !== defaultProfile ? id : null;
+    keepConversationProfile(next);
+    profileScope.current = next ?? undefined;
+    setConversationProfile(next);
+    setTranscriptResults([]);
+    startNew();
+    sessions.refresh();
+  }
+
   async function remove(id: string) {
     if (hasPendingWork && id === activeId) return;
     try {
-      await agentApi.deleteSession(id);
+      await agentApi.deleteSession(id, profileScope.current);
       backgroundRuns.current.delete(id);
       if (id === activeId) {
         window.localStorage.removeItem(SESSION_KEY);
@@ -758,7 +869,7 @@ export function Agent() {
 
   async function updateSession(id: string, patch: SessionPatch) {
     try {
-      await agentApi.updateSession(id, patch);
+      await agentApi.updateSession(id, patch, profileScope.current);
       if (id === activeId && patch.archived) {
         window.localStorage.removeItem(SESSION_KEY);
         selected.current = null;
@@ -779,7 +890,7 @@ export function Agent() {
 
   async function shareSession(row: SessionSummary) {
     try {
-      const transcript = await agentApi.session(row.id);
+      const transcript = await agentApi.session(row.id, profileScope.current);
       const text = transcript.messages.map((message) => `${message.role === "user" ? "You" : "Agent"}: ${message.content}`).join("\n\n");
       if (navigator.share) {
         await navigator.share({ title: row.title || "Lightagent conversation", text });
@@ -814,13 +925,13 @@ export function Agent() {
     try {
       let id = activeId;
       if (!id) {
-        id = (await agentApi.createSession()).id;
+        id = (await agentApi.createSession(profileScope.current)).id;
         window.localStorage.setItem(SESSION_KEY, id);
         selected.current = id;
         loadGeneration.current += 1;
         setActiveId(id);
       }
-      const run = await agentApi.createRun(message, undefined, id, selectedModel || undefined);
+      const run = await agentApi.createRun(message, profileScope.current, id, selectedModel || undefined);
       backgroundRuns.current.set(id, run.id);
       if (selected.current === id) setRunId(run.id);
       setAttachments([]);
@@ -828,6 +939,40 @@ export function Agent() {
       sessions.refresh();
     } catch (cause) {
       setDraft(message);
+      const text = cause instanceof Error ? cause.message : String(cause);
+      setError(text);
+      // The session already has a turn this page is not following (a paused
+      // run a closed page left): follow it, so it can be continued or stopped.
+      if (activeId && text.startsWith("409: session already has an active run")) {
+        const active = await agentApi.session(activeId, profileScope.current)
+          .then((loaded) => loaded.active_run).catch(() => undefined);
+        if (active && selected.current === activeId) {
+          backgroundRuns.current.set(activeId, active.id);
+          setRunId(active.id);
+          setError("This conversation already has a run in progress. Continue, answer or stop it, then send again.");
+        }
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Replace the final answer with a fresh run of the prompt it answered. */
+  async function regenerate() {
+    const id = activeId;
+    const latest = session?.runs[session.runs.length - 1];
+    if (!id || !latest || hasPendingWork || busy) return;
+    setFollowTranscript(true);
+    setBusy(true);
+    setError(null);
+    try {
+      const run = await agentApi.regenerate(id, latest.run_id, selectedModel || undefined, profileScope.current);
+      setReplacing({ sessionId: id, runId: run.id, savedRunId: latest.run_id });
+      backgroundRuns.current.set(id, run.id);
+      if (selected.current === id) setRunId(run.id);
+      await load(id);
+      sessions.refresh();
+    } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(false);
@@ -841,13 +986,13 @@ export function Agent() {
     try {
       let id = activeId;
       if (!id) {
-        id = (await agentApi.createSession()).id;
+        id = (await agentApi.createSession(profileScope.current)).id;
         window.localStorage.setItem(SESSION_KEY, id);
         selected.current = id;
         loadGeneration.current += 1;
         setActiveId(id);
       }
-      const uploaded = await Promise.all([...files].map((file) => agentApi.uploadAttachment(id!, file)));
+      const uploaded = await Promise.all([...files].map((file) => agentApi.uploadAttachment(id!, file, profileScope.current)));
       setAttachments((current) => [...current, ...uploaded]);
       await load(id);
       sessions.refresh();
@@ -879,6 +1024,21 @@ export function Agent() {
     }
   }
 
+  async function continueRun(mode: "extend" | "answer") {
+    if (!runId || continuing) return;
+    setContinuing(true);
+    try {
+      const result = await agentApi.continueRun(runId, mode);
+      if (!result.continued) {
+        setContinuing(false);
+        setError("The run was no longer paused. Please wait for it to update.");
+      }
+    } catch (cause) {
+      setContinuing(false);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
   async function setApprovalPolicy(policy: LightagentSettings["approval_policy"]) {
     const settings = agentSettings.data;
     if (!settings || savingPolicy) return;
@@ -899,7 +1059,9 @@ export function Agent() {
   const activeTool = tools.find((tool) => tool.status === "running" || tool.status === "requested");
   const activity = pending
     ? { tone: "warn" as const, label: "approval needed", detail: `${pending.tool} is paused until you decide.` }
-    : queuePaused
+    : paused
+      ? { tone: "warn" as const, label: "paused", detail: "The run reached its time budget and waits for you to continue it." }
+      : queuePaused
       ? { tone: "warn" as const, label: "queue paused", detail: "A queued steer is paused; retry or clear it." }
       : serviceUnavailable
         ? { tone: "danger" as const, label: "offline", detail: "The Lightagent service cannot be reached." }
@@ -964,6 +1126,23 @@ export function Agent() {
             <SquarePen size={17} strokeWidth={2} /> New chat
           </button>
           {sidebarNotice && <span className="chat-sidebar__notice" role="status">{sidebarNotice}</span>}
+          {profileOptions.length > 1 && (
+            <div className="chat-sidebar__profile">
+              <label className="chat-sidebar__profile-label" htmlFor="conversation-profile">Profile</label>
+              <select id="conversation-profile" className="select chat-sidebar__profile-select" value={scopedProfile}
+                disabled={hasPendingWork} aria-describedby="conversation-profile-hint"
+                onChange={(event) => chooseProfile(event.target.value)}>
+                {profileOptions.map((id) => (
+                  <option key={id} value={id}>{id === defaultProfile ? `${id} (default)` : id}</option>
+                ))}
+              </select>
+              <span id="conversation-profile-hint" className="chat-sidebar__profile-hint">
+                {scopedProfile === defaultProfile
+                  ? "Chats run as the default profile."
+                  : `These chats run as ${scopedProfile}; the default profile stays ${defaultProfile}.`}
+              </span>
+            </div>
+          )}
           <div className="agent-sessions__list" style={{ flex: 1, overflowY: "auto", margin: "0 -6px" }}>
             {visible.length === 0 ? (
               <div className="empty" style={{ padding: 20 }}>
@@ -1014,7 +1193,14 @@ export function Agent() {
               </div>
               <div className="menu__divider" />
               <MenuItem onClick={() => { setAccountOpen(false); navigate("/tools"); }}><span className="session-menu__item"><Wrench size={17} /> Tools</span></MenuItem>
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/memory"); }}><span className="session-menu__item"><BookOpen size={17} /> Memory</span></MenuItem>
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/knowledge"); }}><span className="session-menu__item"><FileText size={17} /> Knowledge</span></MenuItem>
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/admin/identity"); }}><span className="session-menu__item"><KeyRound size={17} /> Identity</span></MenuItem>
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/admin/credentials"); }}><span className="session-menu__item"><Lock size={17} /> Remote credentials</span></MenuItem>
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/diagnostics"); }}><span className="session-menu__item"><Stethoscope size={17} /> Diagnostics</span></MenuItem>
+              <MenuItem onClick={() => { setAccountOpen(false); navigate("/setup"); }}><span className="session-menu__item"><Rocket size={17} /> Setup</span></MenuItem>
               <MenuItem onClick={() => { setAccountOpen(false); navigate("/settings"); }}><span className="session-menu__item"><ShieldCheck size={17} /> Settings</span></MenuItem>
+              <MenuItem onClick={() => { setAccountOpen(false); setCommandsOpen(true); }}><span className="session-menu__item"><Terminal size={17} /> Commands</span></MenuItem>
             </Menu>
           </div>
         </aside>
@@ -1065,6 +1251,7 @@ export function Agent() {
             </div>
           </div>
         )}
+        {commandsOpen && <CommandsDialog onClose={closeCommands} />}
         <section className="agent-conversation chat-thread" style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
           {shownError && (
             <div className="notice notice--danger" role="alert">
@@ -1127,8 +1314,20 @@ export function Agent() {
                     <Empty title="Nothing said yet"
                       hint="Messages, runs, and tool calls are saved with this session." />
                   )}
-                  {session.messages.map((message, index) => (
-                    <AgentMessage key={message.role + index} message={message} />
+                  {session.messages.map((message, index) => index === hiddenAnswerIndex ? null : (
+                    <AgentMessage key={message.role + index} message={message}
+                      actions={index === finalAnswerIndex && (
+                        <ResponseActions
+                          text={message.content}
+                          title={session.title}
+                          timestamp={message.created_at ? answerTimestamp(unix(message.created_at)) : null}
+                          onRetry={session.runs.length > 0 && !busy ? () => void regenerate() : undefined}
+                          // TODO(branch-in-new-chat): the API cannot yet create a
+                          // session from another's transcript up to a message. Pass
+                          // `onBranch` here once it can; until then the menu row is
+                          // shown disabled.
+                        />
+                      )} />
                   ))}
                   {routingStatus && <div className="routing-status" role="status">
                     <Cpu size={14} aria-hidden="true" />
@@ -1152,7 +1351,7 @@ export function Agent() {
                       <span>{`${progressLabel(tool.name)} for “${describeTool(tool).subject}”: ${tool.progress}`}</span>
                     </div>
                   ))}
-                  {showLiveAnswer && answer && (
+                  {liveAnswerShown && (
                     <AgentMessage message={{ role: "assistant", content: answer }} streaming={!done} />
                   )}
                   {running && !answer && (
@@ -1175,6 +1374,11 @@ export function Agent() {
                     <div className="notice notice--warn" role="status" style={{ marginTop: 10 }}>{stopNotice.text}</div>
                   )}
                   {failure && <div className="notice notice--danger" style={{ marginTop: 10 }}>{failure}</div>}
+                  {keptAfterRegeneration && (
+                    <div className="notice notice--info" role="status" style={{ marginTop: 10 }}>
+                      The new answer was not finished, so the previous answer is kept.
+                    </div>
+                  )}
                   {deliveryNotice && (
                     <div className="notice notice--warn" role="status" style={{ marginTop: 10 }}>{deliveryNotice.text}</div>
                   )}
@@ -1197,6 +1401,23 @@ export function Agent() {
                     <button type="button" className="btn" disabled={deciding} onClick={() => void decide(false)}>Deny</button>
                     <button type="button" className="btn btn--primary" disabled={deciding} onClick={() => void decide(true)}>
                       {deciding ? "Deciding…" : "Allow once"}
+                    </button>
+                  </div>
+                </div>
+              )}
+              {paused && (
+                <div className="approval" role="alertdialog" aria-label="Run paused on its time budget">
+                  <Clock size={18} style={{ flex: "none", marginTop: 1 }} aria-hidden="true" />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <strong style={{ fontSize: 13.5 }}>Paused on its time budget</strong>
+                    <span className="muted" style={{ fontSize: 12, display: "block" }}>
+                      Its tools returned results the model has not read yet. Continue for another time budget, or have it answer now from what it has.
+                    </span>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flex: "none", flexWrap: "wrap" }}>
+                    <button type="button" className="btn" disabled={continuing} onClick={() => void continueRun("answer")}>Answer now</button>
+                    <button type="button" className="btn btn--primary" disabled={continuing} onClick={() => void continueRun("extend")}>
+                      {continuing ? "Continuing…" : "Continue"}
                     </button>
                   </div>
                 </div>
@@ -1263,6 +1484,12 @@ export function Agent() {
                       <ModelOptions provider={provider.data} />
                     </select>
                   </label>
+                  {running && (
+                    <button type="button" className="btn btn--danger chat-composer__send" onClick={() => void cancel()}
+                      aria-label="Stop" title="Stop the run">
+                      <Ban size={18} />
+                    </button>
+                  )}
                   <button type="button" className="btn btn--primary chat-composer__send"
                     disabled={(!draft.trim() && attachments.length === 0) || busy || serviceUnavailable} onClick={() => void send()}
                     aria-label={running || steering.length > 0 ? "Queue steer" : "Send message"}
@@ -1363,6 +1590,77 @@ function SessionGroup({ title, rows, activeId, disabled, onOpen, onUpdate, onSha
   );
 }
 
+/** Where each terminal chat command is in the desktop app. */
+const COMMAND_EQUIVALENTS: Record<string, string> = {
+  help: "This list (account menu → Commands)",
+  tools: "Tools screen",
+  skills: "Tools → Installed skills",
+  extensions: "Tools → Extensions",
+  onboard: "Profiles → Guidance",
+  reload: "Tools → Reload tools (every run starts with the current settings)",
+  new: "New chat",
+  continue: "Continue, on a run paused on its time budget",
+  stop: "Stop, beside the running answer",
+  update: "Diagnostics → Check for updates (check only; nothing is installed)",
+  exit: "Close the window",
+};
+
+/** The chat's `/help`: its commands, from the API, and where each is here. */
+function CommandsDialog({ onClose }: { onClose: () => void }) {
+  const [commands, setCommands] = useState<SlashCommandInfo[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    agentApi.commands()
+      .then((answer) => { if (live) setCommands(answer.commands); })
+      .catch((cause) => { if (live) setError(cause instanceof Error ? cause.message : String(cause)); });
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      live = false;
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+  return (
+    <div className="chat-search" role="dialog" aria-modal="true" aria-label="Commands">
+      <button type="button" className="chat-search__backdrop" tabIndex={-1} aria-label="Close commands" onClick={onClose} />
+      <div className="chat-search__panel">
+        <div className="chat-search__header">
+          <h2 className="commands__title">Commands</h2>
+          <div className="chat-search__actions">
+            <button type="button" className="chat-search__close" aria-label="Close commands" autoFocus onClick={onClose}><X size={21} /></button>
+          </div>
+        </div>
+        <p className="commands__note">
+          The terminal chat&apos;s slash commands, and where each one is in the app. Enter sends a message; Shift+Enter starts a new line.
+        </p>
+        {error ? (
+          <p className="config-editor__error" role="alert">{error}</p>
+        ) : !commands ? (
+          <p className="muted">Loading…</p>
+        ) : (
+          <div className="commands__scroll">
+            <table className="commands__table">
+              <thead>
+                <tr><th scope="col">Command</th><th scope="col">What it does</th><th scope="col">In the app</th></tr>
+              </thead>
+              <tbody>
+                {commands.map((command) => (
+                  <tr key={command.name} data-testid={`command-${command.name}`}>
+                    <td><code>/{command.name}</code></td>
+                    <td>{command.summary}</td>
+                    <td>{COMMAND_EQUIVALENTS[command.name] ?? "Not in the app"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete, projectNames }: {
   row: SessionSummary; active: boolean; disabled: boolean;
   onOpen: () => void; onUpdate: (id: string, patch: SessionPatch) => Promise<boolean>;
@@ -1371,13 +1669,33 @@ function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [draftTitle, setDraftTitle] = useState("");
   const menuButton = useRef<HTMLButtonElement | null>(null);
+  const renameField = useRef<HTMLInputElement | null>(null);
+  const renameDone = useRef(false);
   const label = row.title || "Untitled";
+  // Renamed in place, not with window.prompt: native script dialogs are not
+  // available in every desktop WebView.
   const rename = () => {
-    const title = window.prompt("Rename conversation", label);
-    if (title?.trim() && title.trim() !== label) void onUpdate(row.id, { title: title.trim() });
     setMenuOpen(false);
+    setDraftTitle(label);
+    renameDone.current = false;
+    setRenaming(true);
   };
+  const finishRename = (save: boolean) => {
+    if (renameDone.current) return;
+    renameDone.current = true;
+    setRenaming(false);
+    const title = draftTitle.trim();
+    if (save && title && title !== label) void onUpdate(row.id, { title });
+  };
+  useEffect(() => {
+    if (!renaming) return;
+    renameField.current?.focus();
+    renameField.current?.select();
+  }, [renaming]);
   const assignProject = (project: string | null) => {
     void onUpdate(row.id, { project });
     setProjectPickerOpen(false);
@@ -1390,10 +1708,27 @@ function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete
   return (
     <li className="session-row">
       <div className={`session-row__content${active ? " is-active" : ""}`}>
-        <button type="button" className="session-row__open" onClick={onOpen}
-          aria-current={active ? "true" : undefined}>
-          <span>{label}</span>
-        </button>
+        {renaming ? (
+          <input ref={renameField} className="session-row__rename" value={draftTitle} maxLength={200}
+            aria-label={`Rename ${label}`} autoComplete="off" spellCheck={false}
+            onChange={(event) => setDraftTitle(event.target.value)}
+            onBlur={() => finishRename(true)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                finishRename(true);
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                finishRename(false);
+              }
+            }} />
+        ) : (
+          <button type="button" className="session-row__open" onClick={onOpen}
+            aria-current={active ? "true" : undefined}>
+            <span>{label}</span>
+          </button>
+        )}
         <button ref={menuButton} type="button" className="session-row__action" disabled={disabled && active}
           aria-label={`More actions for ${label}`} aria-haspopup="menu" aria-expanded={menuOpen}
           onClick={(event) => { event.stopPropagation(); setMenuOpen((open) => !open); }}>
@@ -1419,14 +1754,27 @@ function SessionRow({ row, active, disabled, onOpen, onUpdate, onShare, onDelete
           <MenuItem onClick={() => { onShare(); setMenuOpen(false); }}><span className="session-menu__item"><Share2 size={17} /> Share</span></MenuItem>
           <div className="menu__divider" role="separator" />
           <MenuItem onClick={() => { void onUpdate(row.id, { archived: !row.archived }); setMenuOpen(false); }}><span className="session-menu__item"><Archive size={17} /> {row.archived ? "Unarchive" : "Archive"}</span></MenuItem>
-          <MenuItem onClick={() => { setMenuOpen(false); onDelete(); }}><span className="session-menu__item session-menu__item--danger"><Trash2 size={17} /> Delete</span></MenuItem>
+          <MenuItem onClick={() => { setMenuOpen(false); setConfirmDelete(true); }}><span className="session-menu__item session-menu__item--danger"><Trash2 size={17} /> Delete</span></MenuItem>
         </Menu>
       </div>
+      {confirmDelete && (
+        <div role="group" aria-label={`Delete ${label}?`} style={{ display: "flex", gap: 6, flexWrap: "wrap", padding: "4px 8px" }}>
+          <button type="button" className="btn btn--danger" onClick={() => { setConfirmDelete(false); onDelete(); }}>
+            {`Confirm: delete ${label}`}
+          </button>
+          <button type="button" className="btn" onClick={() => setConfirmDelete(false)}>Keep it</button>
+        </div>
+      )}
     </li>
   );
 }
 
-function AgentMessage({ message, streaming }: { message: SessionMessage; streaming?: boolean }) {
+function AgentMessage({ message, streaming, actions }: {
+  message: SessionMessage;
+  streaming?: boolean;
+  /** Controls shown beneath the message, inside it. */
+  actions?: ReactNode;
+}) {
   const mine = message.role === "user";
   const timestamp = mine && message.created_at ? promptTimestamp(unix(message.created_at)) : null;
   return (
@@ -1435,6 +1783,7 @@ function AgentMessage({ message, streaming }: { message: SessionMessage; streami
       <article className={`chat-message${mine ? " is-user" : ""}${streaming ? " is-streaming" : ""}`}
         aria-label={mine ? "Your message" : "Agent message"}>
         <div className="chat-message__content">{linkifyMessage(message.content)}</div>
+        {actions}
       </article>
     </>
   );

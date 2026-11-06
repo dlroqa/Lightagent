@@ -175,7 +175,7 @@ pub(crate) fn status(config: &Config, profile: &str, state: &JevState) -> Value 
         .endpoint
         .api_key
         .as_ref()
-        .is_some_and(|secret| secret.resolve().is_some());
+        .is_some_and(|secret| matches!(secret.for_request(), Ok(Some(_))));
     let unix = |time: std::time::SystemTime| {
         time.duration_since(UNIX_EPOCH)
             .map(|elapsed| elapsed.as_secs())

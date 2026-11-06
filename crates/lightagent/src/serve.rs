@@ -64,6 +64,136 @@ async fn inference_for_request(
 
 #[async_trait]
 impl RunFactory for LightweightRunFactory {
+    async fn profiles(
+        &self,
+        request: lightagent_api::ops::ProfileRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        let paths = LightagentPaths::rooted_at(&self.root);
+        crate::ops::Profiles::open(&paths)?.perform(request)
+    }
+    async fn identity(
+        &self,
+        request: lightagent_api::ops::IdentityRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        crate::identity_admin::perform(&self.root, request)
+    }
+
+    async fn remote_credentials(
+        &self,
+        request: lightagent_api::ops::RemoteCredentialRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        crate::remote_credentials::perform(&self.root, request)
+    }
+
+    async fn diagnostics(
+        &self,
+        request: lightagent_api::ops::DiagnosticsRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        use lightagent_api::ops::{DiagnosticsRequest, OpCategory, OpError};
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let internal = |error: String| OpError::new(OpCategory::Internal, error);
+        match request {
+            // The desktop shows no terminal banner.
+            DiagnosticsRequest::Doctor => crate::doctor_report(&paths, false).map_err(internal),
+            DiagnosticsRequest::Architecture => {
+                let config = ConfigStore::at(&paths)
+                    .load()
+                    .map_err(|error| internal(error.to_string()))?;
+                Ok(crate::architecture_report(&config))
+            }
+            DiagnosticsRequest::Bundle => crate::diagnostics::bundle(&self.root).await,
+        }
+    }
+
+    async fn setup(
+        &self,
+        request: lightagent_api::ops::SetupRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        use lightagent_api::ops::{OpCategory, OpError, SetupRequest};
+        match request {
+            SetupRequest::Init {
+                force,
+                profile,
+                base_url,
+                model,
+            } => crate::init_report(
+                &LightagentPaths::rooted_at(&self.root),
+                force,
+                profile,
+                base_url,
+                model,
+            )
+            .map_err(|error| {
+                let category = if error.starts_with("already initialised") {
+                    OpCategory::Conflict
+                } else {
+                    OpCategory::Invalid
+                };
+                OpError::new(category, error)
+            }),
+            SetupRequest::ImportHermes {
+                from,
+                dry_run,
+                force,
+            } => {
+                if from
+                    .as_deref()
+                    .is_some_and(|raw| !std::path::Path::new(raw).is_absolute())
+                {
+                    return Err(OpError::new(
+                        OpCategory::Invalid,
+                        "the Hermes home must be an absolute path",
+                    ));
+                }
+                crate::import::hermes_report(
+                    &self.root,
+                    from.map(std::path::PathBuf::from),
+                    dry_run,
+                    force,
+                )
+                .map_err(|error| OpError::new(OpCategory::Invalid, error))
+            }
+        }
+    }
+
+    async fn update_check(&self) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        release_update::check(release_update::Cli::Lightagent, crate::VERSION)
+            .await
+            .map_err(|error| {
+                lightagent_api::ops::OpError::new(
+                    lightagent_api::ops::OpCategory::Unavailable,
+                    error,
+                )
+            })
+    }
+
+    async fn workers_change(
+        &self,
+        request: lightagent_api::ops::WorkerRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        use lightagent_api::ops::{OpCategory, OpError};
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let config = ConfigStore::at(&paths)
+            .load()
+            .map_err(|error| OpError::new(OpCategory::Internal, error.to_string()))?;
+        crate::worker_assignment(&self.root, &config, request)
+            .map_err(|error| OpError::new(OpCategory::Invalid, error))
+    }
+
+    async fn rag(
+        &self,
+        request: lightagent_api::ops::RagRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        crate::rag::perform(&LightagentPaths::rooted_at(&self.root), request).await
+    }
+
+    async fn memory(
+        &self,
+        request: lightagent_api::ops::MemoryRequest,
+    ) -> Result<serde_json::Value, lightagent_api::ops::OpError> {
+        crate::memory::perform(&LightagentPaths::rooted_at(&self.root), request).await
+    }
+
     async fn tools(&self) -> Result<Vec<ToolDefinition>, String> {
         let paths = LightagentPaths::rooted_at(&self.root);
         let config = ConfigStore::at(&paths).load().map_err(|e| e.to_string())?;
@@ -97,6 +227,71 @@ impl RunFactory for LightweightRunFactory {
             .iter()
             .filter_map(|name| registry.get(name).map(|tool| tool.definition().clone()))
             .collect())
+    }
+
+    /// The catalog `tools()` builds, each tool with its permission under the
+    /// active profile's approval policy, as `lightagent tools list` reports
+    /// it. Without `include_mcp` it is built with MCP off, so no MCP server
+    /// is connected or started.
+    async fn tool_catalog(&self, include_mcp: bool) -> Option<Result<serde_json::Value, String>> {
+        Some(
+            async {
+                let paths = LightagentPaths::rooted_at(&self.root);
+                let mut config = ConfigStore::at(&paths).load().map_err(|e| e.to_string())?;
+                let mcp = if !config.mcp.enabled {
+                    "off"
+                } else if include_mcp {
+                    "connected"
+                } else {
+                    "skipped"
+                };
+                if !include_mcp {
+                    config.mcp.enabled = false;
+                }
+                let profiles = ProfileStore::new(&self.root);
+                let profile = resolve_profile(&profiles, &config, None)?;
+                let profile_dir = profiles.handle(&profile.id).dir().to_path_buf();
+                let extensions = load_extensions(&self.root, &profile_dir);
+                let skills = load_skills(&self.root, &profile_dir, &extensions, &config);
+                let mut registry =
+                    configured_registry(&config, &profile_dir, &extensions, !skills.is_empty())
+                        .await;
+                crate::coordinator::add_explicit_tool(
+                    &mut registry,
+                    &config,
+                    profile.id.as_str(),
+                    crate::coordinator::JevBudget::new(
+                        config.platform.jev.classification.max_calls_per_run,
+                    ),
+                    Arc::clone(&self.jev),
+                );
+                let registry = crate::chat::tool_policy(
+                    &config,
+                    &extensions,
+                    &registry,
+                    &profile,
+                    RunTrust::LocalOperator,
+                )
+                .apply(&registry);
+                let policy = lightagent_core::PolicyEngine::new(profile.approval_policy.into());
+                let tools: Vec<serde_json::Value> = registry
+                    .names()
+                    .iter()
+                    .filter_map(|name| registry.get(name))
+                    .map(|tool| {
+                        let definition = tool.definition();
+                        serde_json::json!({
+                            "name": definition.name,
+                            "risk": definition.risk.as_str(),
+                            "permission": crate::tool_permission(&policy, definition),
+                            "description": definition.description,
+                        })
+                    })
+                    .collect();
+                Ok::<_, String>(serde_json::json!({ "tools": tools, "mcp": mcp }))
+            }
+            .await,
+        )
     }
 
     /// What a run of `profile` with `trust` would receive, built exactly as
@@ -233,18 +428,55 @@ impl RunFactory for LightweightRunFactory {
         let model = model
             .map(str::to_owned)
             .unwrap_or_else(|| configured_model(&profile.routing.model, &config));
-        let mut provider_config =
-            ProviderConfig::new(base_url, model).with_tool_names(config.inference.tool_names);
-        if let Some(key) = config
-            .inference
-            .api_key
-            .as_ref()
-            .and_then(|secret| secret.resolve())
+        let mut provider_config = ProviderConfig::new(base_url.clone(), model)
+            .with_tool_names(config.inference.tool_names);
+        // An unreadable key file: no probe without the credential it names.
+        // Only this endpoint's own key, never another endpoint's.
+        if let Some(key) = lightagent_core::provider_keys::bound_key(&config, &base_url)
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+            .ok()?
         {
             provider_config = provider_config.with_api_key(key);
         }
         let provider = LightweightProvider::new(provider_config).ok()?;
         Some(crate::generation::resolve(&config, &provider).await.history)
+    }
+
+    async fn check_provider(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let config = ConfigStore::at(&paths)
+            .load()
+            .map_err(|error| error.to_string())?;
+        let check = crate::providers::check_active(&config, timeout).await;
+        serde_json::to_value(check).map_err(|error| error.to_string())
+    }
+
+    async fn check_endpoint(
+        &self,
+        base_url: String,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let config = ConfigStore::at(&paths)
+            .load()
+            .map_err(|error| error.to_string())?;
+        let check = crate::providers::check_endpoint(&config, &base_url, timeout).await;
+        serde_json::to_value(check).map_err(|error| error.to_string())
+    }
+
+    async fn check_mcp(&self, name: String) -> Result<Option<serde_json::Value>, String> {
+        let paths = LightagentPaths::rooted_at(&self.root);
+        let config = ConfigStore::at(&paths)
+            .load()
+            .map_err(|error| error.to_string())?;
+        let profiles = ProfileStore::new(&self.root);
+        let profile = resolve_profile(&profiles, &config, None)?;
+        let profile_dir = profiles.handle(&profile.id).dir().to_path_buf();
+        let extensions = load_extensions(&self.root, &profile_dir);
+        Ok(crate::chat::check_mcp_server(&config, &extensions, &name).await)
     }
 
     async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
@@ -259,11 +491,10 @@ impl RunFactory for LightweightRunFactory {
             .base_url
             .unwrap_or_else(|| config.inference.base_url.clone());
         let configured_model = configured_model(&profile.routing.model, &config);
-        let api_key = config
-            .inference
-            .api_key
-            .as_ref()
-            .and_then(|secret| secret.resolve());
+        // The profile's endpoint takes only the key bound to it.
+        let api_key = lightagent_core::provider_keys::bound_key(&config, &base_url)
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+            .map_err(|error| format!("inference: {error}"))?;
         let mut provider_config = ProviderConfig::new(base_url.clone(), configured_model.clone());
         if let Some(key) = api_key.clone() {
             provider_config = provider_config.with_api_key(key);
@@ -348,7 +579,7 @@ impl RunFactory for LightweightRunFactory {
         cancel: CancellationToken,
         decisions: UnboundedReceiver<ApprovalDecision>,
     ) -> RunStatus {
-        self.run_with(request, trust, None, sink, cancel, decisions)
+        self.run_with(request, trust, None, sink, cancel, decisions, None)
             .await
     }
 
@@ -365,14 +596,48 @@ impl RunFactory for LightweightRunFactory {
         cancel: CancellationToken,
         decisions: UnboundedReceiver<ApprovalDecision>,
     ) -> RunStatus {
-        self.run_with(request, trust, Some(authorization), sink, cancel, decisions)
-            .await
+        self.run_with(
+            request,
+            trust,
+            Some(authorization),
+            sink,
+            cancel,
+            decisions,
+            None,
+        )
+        .await
+    }
+
+    /// A run that may pause on its time budget and be continued.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_controlled(
+        &self,
+        request: StartRun,
+        trust: RunTrust,
+        authorization: Option<RunAuthorization>,
+        controls: manager::RunControls,
+        sink: AgentEventSink,
+        cancel: CancellationToken,
+        decisions: UnboundedReceiver<ApprovalDecision>,
+    ) -> RunStatus {
+        self.run_with(
+            request,
+            trust,
+            authorization,
+            sink,
+            cancel,
+            decisions,
+            Some(controls),
+        )
+        .await
     }
 }
 
 impl LightweightRunFactory {
     /// The run itself. `authorization` is `None` for a run that is not
-    /// revocable, which then behaves exactly as it always has.
+    /// revocable, which then behaves exactly as it always has. `controls`,
+    /// when set, makes the run pause on its time budget until continued.
+    #[allow(clippy::too_many_arguments)]
     async fn run_with(
         &self,
         request: StartRun,
@@ -381,6 +646,7 @@ impl LightweightRunFactory {
         sink: AgentEventSink,
         cancel: CancellationToken,
         decisions: UnboundedReceiver<ApprovalDecision>,
+        controls: Option<manager::RunControls>,
     ) -> RunStatus {
         if let Some(authorization) = &authorization
             && let Err(denial) = authorization.verify()
@@ -430,11 +696,18 @@ impl LightweightRunFactory {
                 fallback: preflight.routing_fallback.map(str::to_owned),
             });
         }
-        let api_key = config
-            .inference
-            .api_key
-            .as_ref()
-            .and_then(|secret| secret.resolve());
+        // A key file that cannot be read fails the run before any request:
+        // never a request without the credential it was configured with.
+        // The key is the one bound to this run's endpoint, never another's.
+        let api_key = match lightagent_core::provider_keys::bound_key(&config, &base_url)
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+        {
+            Ok(key) => key,
+            Err(error) => {
+                fail(&sink, &format!("inference: {error}; the run was not sent"));
+                return RunStatus::Failed;
+            }
+        };
 
         let mut provider_config = ProviderConfig::new(base_url.clone(), model)
             .with_tool_names(config.inference.tool_names);
@@ -680,7 +953,14 @@ impl LightweightRunFactory {
         let provider = AuthorizedProvider::new(provider, authorization.clone());
         let agent = AgentLoop::from_profile(provider, executor, &profile)
             .with_generation(generation.budget);
-        manager::drive_supervised(
+        let (agent, continues) = match controls {
+            Some(controls) => (
+                agent.with_wall_clock_policy(controls.on_wall_clock),
+                Some(controls.continues),
+            ),
+            None => (agent, None),
+        };
+        manager::drive_controlled(
             agent,
             request.history,
             request.message,
@@ -688,6 +968,7 @@ impl LightweightRunFactory {
             cancel,
             decisions,
             authorization,
+            continues,
         )
         .await
     }
@@ -725,6 +1006,131 @@ pub(crate) async fn build_run_manager() -> Result<RunManager, String> {
     Ok(RunManager::new(factory))
 }
 
+/// The protocol `serve --desktop` speaks to the desktop host
+/// (docs/desktop/contract/operations.json).
+const DESKTOP_PROTOCOL: u32 = 1;
+
+/// `serve --desktop`: the desktop app's owned runtime
+/// (docs/desktop/DESKTOP_ARCHITECTURE.md §4, §6).
+///
+/// The first line of standard input is the per-launch key; the rest of
+/// standard input is a lifeline the desktop host holds open for as long as it
+/// lives, so the runtime exits however the host ends. Once bound, one JSON
+/// handshake line goes to stdout, and every request must then pass the
+/// desktop guard: the exact Host, no Origin, and the key.
+pub async fn run_desktop(host: String, port: u16, profile: Option<String>) -> Result<(), String> {
+    if host != "127.0.0.1" {
+        return Err("--desktop binds 127.0.0.1 only".to_string());
+    }
+    let key = read_desktop_key()?;
+    let paths = LightagentPaths::resolve().map_err(|error| error.to_string())?;
+    paths.scaffold().map_err(|error| error.to_string())?;
+    let config = ConfigStore::at(&paths)
+        .load()
+        .map_err(|error| error.to_string())?;
+    let store = ProfileStore::new(paths.root());
+    crate::ensure_default_profile(&store, &config)?;
+    let active = match profile {
+        Some(id) => {
+            let id = ProfileId::new(id).map_err(|error| error.to_string())?;
+            store.load(&id).map_err(|error| error.to_string())?;
+            id
+        }
+        None => store
+            .active()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "no active profile".to_string())?,
+    };
+    let sessions = SessionStore::at_profile(&store.handle(&active));
+    // Turns a runtime ended before recording are recorded as interrupted;
+    // none is run again.
+    let interrupted = sessions.recover_all_interrupted();
+    if !interrupted.is_empty() {
+        eprintln!(
+            "recorded {} interrupted run(s); none is run again",
+            interrupted.len()
+        );
+    }
+    let context_limit = config.runtime.n_ctx.unwrap_or(4_096) as usize;
+    let factory = Arc::new(LightweightRunFactory {
+        root: paths.root().to_path_buf(),
+        jev: crate::coordinator::JevState::new(),
+    });
+    let state = AppState {
+        manager: RunManager::new(factory),
+        auth: AuthConfig::keyed(key.clone(), [Scope::Admin]),
+        sessions,
+        session_profile: active.as_str().to_owned(),
+        context_limit,
+        config_store: Some(ConfigStore::at(&paths)),
+        busy_sessions: Arc::new(tokio::sync::Mutex::new(Default::default())),
+        web_root: None,
+    };
+
+    let listener = TcpListener::bind((host.as_str(), port))
+        .await
+        .map_err(|error| format!("could not bind {host}:{port}: {error}"))?;
+    let bound = listener.local_addr().map_err(|error| error.to_string())?;
+    let guard = lightagent_api::desktop::DesktopGuard::new(bound, &key);
+    let app = router(state).layer(axum::middleware::from_fn_with_state(
+        guard,
+        lightagent_api::desktop::guard,
+    ));
+
+    let handshake = serde_json::json!({
+        "lightagent": "serve",
+        "protocol": DESKTOP_PROTOCOL,
+        "version": crate::VERSION,
+        "addr": bound.to_string(),
+        "profile": active.as_str(),
+        "capabilities": lightagent_api::SERVER_CAPABILITIES,
+    });
+    {
+        use std::io::Write as _;
+        let mut stdout = std::io::stdout().lock();
+        writeln!(stdout, "{handshake}")
+            .and_then(|()| stdout.flush())
+            .map_err(|error| format!("could not report ready: {error}"))?;
+    }
+    eprintln!(
+        "Lightagent desktop runtime on {bound} (profile '{}')",
+        active.as_str()
+    );
+
+    let lifeline = CancellationToken::new();
+    {
+        let lifeline = lifeline.clone();
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+            lifeline.cancel();
+            // Let in-flight responses finish briefly, then go regardless:
+            // the host that would read them is gone.
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            std::process::exit(0);
+        });
+    }
+    axum::serve(listener, app.into_make_service())
+        .with_graceful_shutdown(async move { lifeline.cancelled().await })
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// The launch key: the first line of standard input, never an argument or an
+/// environment variable, where other processes could read it.
+fn read_desktop_key() -> Result<String, String> {
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|error| format!("could not read the desktop key ({})", error.kind()))?;
+    let key = line.trim();
+    if key.len() < 32 || !key.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return Err(
+            "--desktop needs the launch key as the first line of standard input".to_string(),
+        );
+    }
+    Ok(key.to_owned())
+}
+
 /// Bind and serve the API until interrupted.
 pub async fn run(
     host: String,
@@ -742,6 +1148,15 @@ pub async fn run(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "no active profile — run `lightagent init` first".to_string())?;
     let sessions = SessionStore::at_profile(&store.handle(&active));
+    // Turns a runtime ended before recording are recorded as interrupted;
+    // none is run again.
+    let interrupted = sessions.recover_all_interrupted();
+    if !interrupted.is_empty() {
+        eprintln!(
+            "recorded {} interrupted run(s); none is run again",
+            interrupted.len()
+        );
+    }
 
     let is_loopback = matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1");
     let auth = match key_env.and_then(|var| std::env::var(&var).ok()) {

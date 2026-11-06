@@ -18,6 +18,7 @@ use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
+use lightagent_api::ops::{IdentityRequest, OpCategory, OpError};
 use lightagent_core::identity::store::{
     IdentityDocument, IdentityStore, Outcome, PrincipalStatus, SCHEMA_VERSION, is_denial,
 };
@@ -686,26 +687,18 @@ fn deliver(delivery: Delivery, token: &IssuedToken) -> Result<&'static str, Stri
     }
 }
 
-/// The CLI entry point.
-pub(crate) fn run(action: IdentityAction, json_output: bool) -> Result<(), String> {
-    let paths = LightagentPaths::resolve().map_err(|error| error.to_string())?;
-    let store = IdentityStore::new(paths.root());
-    let secret_file = match &action {
-        IdentityAction::Credential {
-            action: CredentialAction::Issue { secret_file, .. },
-        }
-        | IdentityAction::Credential {
-            action: CredentialAction::Rotate { secret_file, .. },
-        } => Some(secret_file.as_deref()),
-        _ => None,
-    };
-    let target = match secret_file {
-        Some(path) => Some(delivery(path, json_output)?),
-        None => None,
-    };
+/// Run `action` as the local operator and deliver its secret, if any, to
+/// `target`, chosen (and its file created) before anything was issued. A
+/// refused command leaves no file behind, and an undelivered credential is
+/// revoked before this returns. Shared by the CLI and the API.
+fn complete(
+    store: &IdentityStore,
+    action: &IdentityAction,
+    target: Option<Delivery>,
+) -> Result<Value, String> {
     let actor = operator();
     let now = now_unix();
-    let executed = match execute(&store, &actor, now, &action) {
+    let executed = match execute(store, &actor, now, action) {
         Ok(executed) => executed,
         Err(error) => {
             // Never leave an empty secret file behind a refused command.
@@ -734,6 +727,145 @@ pub(crate) fn run(action: IdentityAction, json_output: bool) -> Result<(), Strin
             }
         }
     }
+    Ok(report)
+}
+
+/// `lightagent identity …` for the API (the API admits only the local
+/// operator). A secret goes only to a new owner-only file named by an
+/// absolute path, created before anything is issued; it is never in the
+/// answer.
+pub(crate) fn perform(root: &Path, request: IdentityRequest) -> Result<Value, OpError> {
+    let invalid = |message: String| OpError::new(OpCategory::Invalid, message);
+    let (action, secret_file) = action_of(request).map_err(invalid)?;
+    let target = match secret_file {
+        None => None,
+        Some(None) => {
+            return Err(invalid(
+                "a credential is never returned over the API: name a new secret file (an absolute path)"
+                    .to_owned(),
+            ));
+        }
+        Some(Some(path)) if !path.is_absolute() => {
+            return Err(invalid(
+                "the secret file must be an absolute path".to_owned(),
+            ));
+        }
+        Some(Some(path)) => Some(delivery(Some(&path), true).map_err(invalid)?),
+    };
+    complete(&IdentityStore::new(root), &action, target).map_err(invalid)
+}
+
+/// The CLI command an API request is, and, for an issue or a rotation, the
+/// secret file it names.
+fn action_of(
+    request: IdentityRequest,
+) -> Result<(IdentityAction, Option<Option<PathBuf>>), String> {
+    let user = |action| IdentityAction::User { action };
+    let credential = |action| IdentityAction::Credential { action };
+    let owner = |action| IdentityAction::Owner { action };
+    Ok(match request {
+        IdentityRequest::Status => (IdentityAction::Status, None),
+        IdentityRequest::UserCreate(id) => (user(UserAction::Create { id }), None),
+        IdentityRequest::UserList => (user(UserAction::List), None),
+        IdentityRequest::UserSuspend(id) => (user(UserAction::Suspend { id }), None),
+        IdentityRequest::CredentialIssue {
+            principal,
+            expires_in,
+            capabilities,
+            profiles,
+            secret_file,
+        } => {
+            let capabilities = capabilities
+                .iter()
+                .map(String::as_str)
+                .map(parse_capability)
+                .collect::<Result<Vec<_>, _>>()?;
+            let secret_file = secret_file.map(PathBuf::from);
+            let action = CredentialAction::Issue {
+                principal,
+                expires_in,
+                capabilities,
+                profiles,
+                secret_file: secret_file.clone(),
+            };
+            (credential(action), Some(secret_file))
+        }
+        IdentityRequest::CredentialRotate {
+            key_id,
+            expires_in,
+            secret_file,
+        } => {
+            let secret_file = secret_file.map(PathBuf::from);
+            let action = CredentialAction::Rotate {
+                key_id,
+                expires_in,
+                secret_file: secret_file.clone(),
+            };
+            (credential(action), Some(secret_file))
+        }
+        IdentityRequest::CredentialRevoke(key_id) => {
+            (credential(CredentialAction::Revoke { key_id }), None)
+        }
+        IdentityRequest::CredentialList { principal } => {
+            (credential(CredentialAction::List { principal }), None)
+        }
+        IdentityRequest::OwnerAssign { profile, principal } => {
+            (owner(OwnerAction::Assign { profile, principal }), None)
+        }
+        IdentityRequest::OwnerReassign { profile, principal } => {
+            (owner(OwnerAction::Reassign { profile, principal }), None)
+        }
+        IdentityRequest::OwnerRemove(profile) => (owner(OwnerAction::Remove { profile }), None),
+        IdentityRequest::GrantsList { profile } => (
+            IdentityAction::Grants {
+                action: Some(GrantsAction::List { profile }),
+            },
+            None,
+        ),
+        IdentityRequest::GrantsRevoke {
+            profile,
+            principal,
+            capability,
+        } => {
+            let capability = parse_capability(&capability)?;
+            (
+                IdentityAction::Grants {
+                    action: Some(GrantsAction::Revoke {
+                        profile,
+                        principal,
+                        capability,
+                    }),
+                },
+                None,
+            )
+        }
+        IdentityRequest::Audit { limit } => (
+            IdentityAction::Audit {
+                limit: limit.unwrap_or(50),
+            },
+            None,
+        ),
+    })
+}
+
+/// The CLI entry point.
+pub(crate) fn run(action: IdentityAction, json_output: bool) -> Result<(), String> {
+    let paths = LightagentPaths::resolve().map_err(|error| error.to_string())?;
+    let store = IdentityStore::new(paths.root());
+    let secret_file = match &action {
+        IdentityAction::Credential {
+            action: CredentialAction::Issue { secret_file, .. },
+        }
+        | IdentityAction::Credential {
+            action: CredentialAction::Rotate { secret_file, .. },
+        } => Some(secret_file.as_deref()),
+        _ => None,
+    };
+    let target = match secret_file {
+        Some(path) => Some(delivery(path, json_output)?),
+        None => None,
+    };
+    let report = complete(&store, &action, target)?;
     if json_output {
         println!("{report}");
     } else {

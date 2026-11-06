@@ -18,7 +18,9 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod allocation;
+pub mod commands;
 pub mod config;
+pub mod config_keys;
 pub mod credentials;
 pub mod event;
 pub mod generation;
@@ -27,28 +29,32 @@ pub mod ids;
 pub mod invoker;
 pub mod limits;
 pub mod loop_;
+pub mod mcp_servers;
 pub mod mock;
 pub mod paths;
 pub mod permissions;
 pub mod profile;
 pub mod provider;
+pub mod provider_keys;
 pub mod provisioning;
+pub mod saved_providers;
 pub mod skills;
 pub mod tool_stream;
 pub mod workers;
+pub mod workspaces;
 
 pub use allocation::{
     Account, AllocationReport, Demand, OutputPlan, PlannedShare, ShareReport, TurnPurpose,
 };
 pub use config::{
     AdaptiveAllocation, AgentConfig, AllowedWorkflow, ApprovalPolicy, Config, ConfigError,
-    ConfigStore, DUCKDUCKGO_SEARCH_ENDPOINT, ExtensionsConfig, GenerationConfig,
+    ConfigRevision, ConfigStore, DUCKDUCKGO_SEARCH_ENDPOINT, ExtensionsConfig, GenerationConfig,
     GenerationOverride, GithubActionsConfig, InferenceConfig, InfinityConfig,
     JevClassificationConfig, JevClassificationMode, JevConfig, JevRoutingGrant, JevRoutingInput,
     JevRoutingPermission, McpConfig, McpServerEntry, OpenTerminalConfig, PlatformConfig,
-    PlatformEndpointConfig, QdrantConfig, SavedProvider, SecretLookup, SecretRef, SecurityConfig,
-    SubagentsConfig, ToolNameMode, ToolPolicyMode, ToolsConfig, WebConfig, WebSearchConfig,
-    WorkerResolution,
+    PlatformEndpointConfig, QdrantConfig, SavedProvider, SecretLookup, SecretRef,
+    SecretUnavailable, SecurityConfig, SubagentsConfig, ToolNameMode, ToolPolicyMode, ToolsConfig,
+    UpdateError, WebConfig, WebMode, WebSearchConfig, WorkerResolution, secret_state,
 };
 pub use event::{
     AgentEvent, ClassificationDiagnostics, SpecialistRestriction, SpecialistSelection,

@@ -20,7 +20,8 @@ export default defineConfig(({ mode }) => {
       },
     },
     build: {
-      outDir: "dist",
+      // The desktop build talks to its host over IPC, never to an API origin.
+      outDir: mode === "desktop" ? "dist-desktop" : "dist",
       assetsDir: "assets",
       sourcemap: true,
     },

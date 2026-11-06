@@ -4,10 +4,40 @@
 
 import { mkdir } from "node:fs/promises";
 import { chromium } from "playwright";
+import { checkResponseActions } from "./actions.mjs";
+import { checkRunControls } from "./runs.mjs";
 import { checkDeliveryStates } from "./delivery.mjs";
 import { checkJevStates } from "./jev.mjs";
+import { checkProfileStates } from "./profiles.mjs";
+import { checkConfigEditor } from "./config.mjs";
+import { checkConfigSections } from "./config-sections.mjs";
+import { checkSetupSections } from "./setup-sections.mjs";
+import { checkSettingsStates } from "./settings.mjs";
+import { checkExtensions } from "./extensions.mjs";
+import { checkOnboarding } from "./onboarding.mjs";
+import { checkCommands } from "./commands.mjs";
+import { checkMcp } from "./mcp.mjs";
+import { checkToolCatalog } from "./tools.mjs";
+import { checkSkillImport } from "./skills.mjs";
+import { checkMemory } from "./memory.mjs";
+import { checkKnowledge } from "./knowledge.mjs";
+import { checkSessions } from "./sessions.mjs";
+import { checkConversations } from "./conversations.mjs";
+import { checkWorkers } from "./workers.mjs";
+import { checkIdentity } from "./identity.mjs";
+import { checkSetup } from "./setup.mjs";
+import { checkDiagnostics } from "./diagnostics.mjs";
+import { checkUpdate } from "./update.mjs";
+import { checkSecurity } from "./security.mjs";
+import { checkRemoteCredentials } from "./credentials.mjs";
+import { checkEnvironment } from "./environment.mjs";
+import { checkRegenerateOnBackend } from "./regenerate.mjs";
+import { checkConversationProfile } from "./conversation-profile.mjs";
+import { checkAccessibility } from "./accessibility.mjs";
 
 const BASE = (process.env.PANEL_BASE ?? "http://127.0.0.1:8735").replace(/\/+$/, "");
+// The second server render-panel.sh starts with LIGHTAGENT_CREDENTIAL_KEY and HERMES_HOME.
+const ENV_BASE = (process.env.PANEL_ENV_BASE ?? "").replace(/\/+$/, "");
 const OUT_DIR = process.env.OUT_DIR ?? "screens";
 // A route settles when the panel has either rendered its data or surfaced its
 // own error; this is the ceiling on waiting for whichever comes first.
@@ -33,6 +63,13 @@ const ROUTES = [
   { name: "agent-alias", hash: "#/agent", agentBacked: true, mustContain: "Where should we begin?" },
   { name: "agent-tools", hash: "#/tools", agentBacked: true, mustContain: "datetime.now" },
   { name: "settings", hash: "#/settings", agentBacked: true, mustContain: "Agent runtime" },
+  { name: "profiles", hash: "#/profiles", agentBacked: true, mustContain: "Saved profiles" },
+  { name: "memory", hash: "#/memory", agentBacked: true, mustContain: "Remember something" },
+  { name: "knowledge", hash: "#/knowledge", agentBacked: true, mustContain: "Add documents" },
+  { name: "identity", hash: "#/admin/identity", agentBacked: true, mustContain: "Identity store" },
+  { name: "diagnostics", hash: "#/diagnostics", agentBacked: true, mustContain: "Diagnostics bundle" },
+  { name: "setup", hash: "#/setup", agentBacked: true, mustContain: "Import from Hermes" },
+  { name: "credentials", hash: "#/admin/credentials", agentBacked: true, mustContain: "Master key" },
 ];
 
 /** Wait until `mustContain` shows, or a fallback sign does, or time runs out. */
@@ -69,7 +106,7 @@ async function checkToolsRecovery(context) {
   ]) {
     const page = await context.newPage();
     try {
-      const endpoint = "**/api/lightagent/v1/tools";
+      const endpoint = /\/api\/lightagent\/v1\/tools(\?.*)?$/;
       await page.route(endpoint, (route) => route.fulfill(failure));
       await page.goto(`${BASE}/#/agent/tools`);
       await page.getByRole("alert").getByText(failure.expected, { exact: false }).waitFor();
@@ -351,11 +388,182 @@ async function main() {
     failures.push(`delivery states: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  // The action row under the final answer, and its regenerate wiring.
+  try {
+    failures.push(...(await checkResponseActions(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`response actions: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // The run controls: approval card, Stop, Continue, and the steering queue.
+  try {
+    failures.push(...(await checkRunControls(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`run controls: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   // Last: these states change the server's Jev settings.
   try {
     failures.push(...(await checkJevStates(browser, BASE, OUT_DIR)));
   } catch (err) {
     failures.push(`jev states: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Adds, rotates and revokes a remote credential; re-seals the harness's.
+  try {
+    failures.push(...(await checkRemoteCredentials(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`credentials: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  }
+  // Creates users, issues, rotates and revokes credentials, owns a profile.
+  try {
+    failures.push(...(await checkIdentity(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`identity: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  }
+  // Checks for updates against the harness's release fixture (read-only).
+  try {
+    failures.push(...(await checkUpdate(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`update: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  }
+  // Prepares and saves the diagnostics bundle, after identity and credentials exist.
+  try {
+    failures.push(...(await checkDiagnostics(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`diagnostics: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  }
+  // Assigns and revokes a specialist role.
+  try {
+    failures.push(...(await checkWorkers(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`workers: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Seeds, opens and deletes a conversation.
+  try {
+    failures.push(...(await checkSessions(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`sessions: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Seeds a conversation; searches, renames, attaches a file, sends two turns.
+  try {
+    failures.push(...(await checkConversations(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`conversations: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Indexes documents (and clears them only when the index was empty).
+  try {
+    failures.push(...(await checkKnowledge(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`knowledge: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Adds and removes memories: after the routes above have rendered.
+  try {
+    failures.push(...(await checkMemory(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`memory: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Installs and removes an extension: after the routes above have rendered.
+  try {
+    failures.push(...(await checkExtensions(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`extensions: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Installs, replaces and removes profile guidance; puts back what was there.
+  try {
+    failures.push(...(await checkOnboarding(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`onboarding: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // The Commands dialog (/help) and Reload tools (/reload); web access restored.
+  try {
+    failures.push(...(await checkCommands(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`commands: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // A conversation's own profile (chat --profile); the profile and endpoint are put back.
+  try {
+    failures.push(...(await checkConversationProfile(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`conversation profile: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Keyboard-only navigation of every screen and an axe scan of each (D8).
+  try {
+    failures.push(...(await checkAccessibility(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`accessibility: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Try again against this server, its model a local stub; the endpoint is put back.
+  try {
+    failures.push(...(await checkRegenerateOnBackend(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`regenerate (real backend): ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // The environment rows, against the second server (its own home).
+  try {
+    failures.push(...(await checkEnvironment(browser, ENV_BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`environment: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Imports and removes a skills pack: after the routes above have rendered.
+  try {
+    failures.push(...(await checkSkillImport(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`skills: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Installs and removes an extension with a skill: after the routes above.
+  try {
+    failures.push(...(await checkToolCatalog(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`tools: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Adds, checks and removes MCP servers: after the routes above have rendered.
+  try {
+    failures.push(...(await checkMcp(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`mcp: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Reconfigures with the current settings and imports a Hermes profile (deleted after).
+  try {
+    failures.push(...(await checkSetup(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`setup: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  }
+  // Changes the profile store: after the routes above have rendered.
+  try {
+    failures.push(...(await checkProfileStates(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`profile states: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // One key of every settable section, each restored.
+  try {
+    failures.push(...(await checkConfigSections(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`config sections: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  }
+  // Each choice `lightagent setup` offers for tools, web, approvals and the
+  // terminal UI, made in Settings; everything restored.
+  try {
+    failures.push(...(await checkSetupSections(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`setup sections: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  }
+  // Changes the config file.
+  try {
+    failures.push(...(await checkConfigEditor(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`config editor: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Reads the [security] section; changes nothing.
+  try {
+    failures.push(...(await checkSecurity(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`security: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  }
+  // Changes the config file and saves a test secret: last.
+  try {
+    failures.push(...(await checkSettingsStates(browser, BASE, OUT_DIR)));
+  } catch (err) {
+    failures.push(`settings states: ${err instanceof Error ? err.message : String(err)}`);
   }
   await browser.close();
 

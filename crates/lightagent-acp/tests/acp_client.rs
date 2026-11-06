@@ -590,3 +590,50 @@ async fn acp_packs_history_against_the_same_resolved_window_as_the_api() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn a_rename_made_while_an_editor_holds_the_session_open_is_kept() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let directory =
+            std::env::temp_dir().join(format!("lightagent-acp-{}", SessionId::generate().as_str()));
+        let store = SessionStore::new(&directory);
+        let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let manager = RunManager::new(Arc::new(HistoryFactory {
+            requests: Arc::clone(&requests),
+        }));
+        let (mut writer, mut reader) = open_history_client(manager, store.clone()).await;
+        send(
+            &mut writer,
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "session/new",
+            "params": { "cwd": "/tmp/project", "mcpServers": [] } }),
+        )
+        .await;
+        let opened = recv(&mut reader).await["result"]["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let id = SessionId::parse(&opened).unwrap();
+        prompt_and_finish(&mut writer, &mut reader, 3, &opened, "hello").await;
+        // Another client renames the session while the editor holds it open;
+        // the editor's next prompt and answer keep the rename.
+        store
+            .update(&id, |session| {
+                session.title = "Renamed in the panel".to_owned();
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .unwrap();
+        prompt_and_finish(&mut writer, &mut reader, 4, &opened, "follow up").await;
+        let saved = store.load(&id).unwrap();
+        assert_eq!(saved.title, "Renamed in the panel");
+        let texts: Vec<&str> = saved
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect();
+        assert_eq!(texts, ["hello", "answer 1", "follow up", "answer 2"]);
+        assert_eq!(saved.runs.len(), 2);
+        let _ = std::fs::remove_dir_all(&directory);
+    })
+    .await
+    .unwrap();
+}

@@ -10,6 +10,7 @@ import {
   type JevRoutingGrant,
   type JevRoutingInput,
   type JevRoutingPermission,
+  type JevRoutingReport,
   type JevSettings,
   type JevStatus,
   type ProfileSummary,
@@ -36,6 +37,72 @@ const GRANT_LABEL: Record<JevRoutingGrant, { label: string; tone: Tone }> = {
   compatibility: { label: "Compatibility", tone: "warn" },
   denied: { label: "Denied", tone: "neutral" },
 };
+
+/** A grant as the server reported it; a value this screen does not know is shown as it is. */
+function grantLabel(value: string): { label: string; tone: Tone } {
+  return GRANT_LABEL[value as JevRoutingGrant] ?? { label: value, tone: "neutral" };
+}
+
+/** The server's routing-permission dry run (`lightagent config jev-routing-report`). It changes nothing. */
+function RoutingReportView() {
+  const [report, setReport] = useState<JevRoutingReport | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  async function run() {
+    setLoading(true);
+    setError(null);
+    try {
+      setReport(await agentApi.jevRoutingReport());
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoading(false);
+    }
+  }
+  return (
+    <div data-testid="jev-routing-report" style={{ marginTop: 12 }}>
+      <button type="button" className="btn" disabled={loading} aria-busy={loading || undefined}
+        onClick={() => void run()}>
+        {loading ? "Running the dry run…" : report ? "Run the dry run again" : "Dry run: who Strict would deny"}
+      </button>
+      {error && <p className="jev-hint" role="alert">The routing report could not be read: {error}</p>}
+      {report && (
+        <div aria-live="polite">
+          <p className="jev-hint">
+            Dry run; nothing was changed. Policy: {report.compatibility ? "Compatibility" : "Strict"}. Routing
+            active: {report.routing_enabled ? "yes" : "no"}.
+          </p>
+          <table className="table" aria-label="Model routing permission dry run">
+            <thead>
+              <tr><th scope="col">Profile</th><th scope="col">Now</th><th scope="col">Under Strict</th></tr>
+            </thead>
+            <tbody>
+              {report.profiles.map((row) => {
+                const now = grantLabel(row.now);
+                const strict = grantLabel(row.under_strict);
+                return (
+                  <tr key={row.profile}>
+                    <td>{row.profile}</td>
+                    <td><Pill tone={now.tone}>{now.label}</Pill></td>
+                    <td><Pill tone={strict.tone}>{strict.label}</Pill></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <p className="jev-hint">
+            {report.denied_under_strict.length
+              ? `Strict would deny: ${report.denied_under_strict.join(", ")}.`
+              : "Strict would deny no profile."}
+            {report.allowed_profiles_not_found.length
+              ? ` Listed but not found as a profile: ${report.allowed_profiles_not_found.join(", ")}.`
+              : ""}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** A profile's model-routing permission, decided as the server decides it. */
 export function routingGrant(policy: JevRoutingPermission, allowed: string[], profile: string): JevRoutingGrant {
@@ -479,6 +546,7 @@ function RoutingPermissionSection({ endpoint, profiles, disabled, onSave }: {
       {missing.length > 0 && (
         <p className="jev-hint">Also listed, but not found as a profile: {missing.join(", ")}.</p>
       )}
+      <RoutingReportView />
       <p className="jev-hint">
         Separate from task classification permission. A profile permission is not proof of who is acting:
         anyone who can run a profile can use its permission. Legacy raw routing input can send sensitive

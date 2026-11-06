@@ -38,8 +38,8 @@ use lightagent_core::identity::{
 };
 use lightagent_core::provider::ProviderMessage;
 use lightagent_core::{
-    AgentEvent, AgentEventSink, AgentLoop, AgentProvider, ApprovalDecision, ApprovalId, ProfileId,
-    RunId, RunOutcome, StopReason, ToolInvoker,
+    AgentEvent, AgentEventSink, AgentLoop, AgentProvider, ApprovalDecision, ApprovalId,
+    Continuation, ProfileId, RunId, RunOutcome, StopReason, ToolInvoker, WallClockPolicy,
 };
 use serde::Serialize;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
@@ -55,6 +55,10 @@ pub enum RunStatus {
     Running,
     /// The run is paused, waiting on an approval decision.
     AwaitingApproval,
+    /// The run is paused on its time budget, waiting to be continued
+    /// ([`RunState::continue_with`]) or cancelled. Only a run started with
+    /// [`RunOptions::pause_on_time_budget`] pauses.
+    AwaitingContinue,
     /// The run finished normally.
     Completed,
     /// The run was cancelled.
@@ -83,6 +87,22 @@ pub struct StartRun {
     /// The working directory for this run (an ACP session's `cwd`); when set it
     /// becomes the confined workspace root instead of the profile's default.
     pub cwd: Option<String>,
+}
+
+/// How a run is started, beyond its request.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunOptions {
+    /// Pause when the time budget runs out with tool results the model has
+    /// not read yet, instead of wrapping up, until the run is continued or
+    /// cancelled. The default wraps up, as every run did before.
+    pub pause_on_time_budget: bool,
+}
+
+/// What a factory needs to honor [`RunOptions`]: the time-budget policy and
+/// where continuations arrive.
+pub struct RunControls {
+    pub on_wall_clock: WallClockPolicy,
+    pub continues: UnboundedReceiver<Continuation>,
 }
 
 /// Who started a run and as which profile, fixed when the run is created.
@@ -168,6 +188,7 @@ pub struct RunState {
     notify: Notify,
     cancel: CancellationToken,
     decisions: mpsc::UnboundedSender<ApprovalDecision>,
+    continues: mpsc::UnboundedSender<Continuation>,
     authorization: RunAuthorization,
     /// Bumped by the supervisor so open event streams re-check their
     /// subscriber at once instead of at their next periodic check.
@@ -246,6 +267,23 @@ impl RunState {
             return false;
         }
         self.decisions.send(decision).is_ok()
+    }
+
+    /// Continue a run paused on its time budget: the same execution carries
+    /// on from where it stopped. Returns whether the run was paused and took
+    /// the continuation; a revoked run takes none.
+    pub async fn continue_with(&self, how: Continuation) -> bool {
+        if self.authorization.revoked().is_some() {
+            return false;
+        }
+        let mut status = self.status.lock().await;
+        if *status != RunStatus::AwaitingContinue || self.continues.send(how).is_err() {
+            return false;
+        }
+        *status = RunStatus::Running;
+        drop(status);
+        self.notify.notify_waiters();
+        true
     }
 
     /// The run's authorization, re-checked during the run.
@@ -350,6 +388,91 @@ pub struct RuntimeModel {
 /// the bounded tool executor. The factory calls [`drive`] with the loop it built.
 #[async_trait]
 pub trait RunFactory: Send + Sync + 'static {
+    /// A profile operation, performed by the embedder that owns the profile
+    /// store (`lightagent serve`); see [`crate::ops`]. Embedders that only
+    /// run agents keep this default.
+    async fn profiles(
+        &self,
+        _request: crate::ops::ProfileRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
+    /// A memory operation on the active profile's memories, performed by
+    /// the embedder that owns them (`lightagent serve`), answered with the
+    /// JSON `lightagent memory … --json` prints. The default refuses.
+    async fn memory(
+        &self,
+        _request: crate::ops::MemoryRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
+    /// A knowledge (RAG) operation on the active profile's index, performed
+    /// by the embedder that owns it, answered with the JSON
+    /// `lightagent rag … --json` prints. The default refuses.
+    async fn rag(
+        &self,
+        _request: crate::ops::RagRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
+    /// A worker-assignment change, performed by the embedder that owns the
+    /// profiles, answered with the JSON `lightagent workers … --json`
+    /// prints. The default refuses.
+    async fn workers_change(
+        &self,
+        _request: crate::ops::WorkerRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
+    /// An identity command (`lightagent identity …`), performed by the
+    /// embedder that owns the home's identity store, answered with the JSON
+    /// the CLI prints. The default refuses.
+    async fn identity(
+        &self,
+        _request: crate::ops::IdentityRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
+    /// A remote-credential command (`lightagent remote-credential …`),
+    /// performed by the embedder that owns the home's credential vault,
+    /// answered with the JSON the CLI prints. The default refuses.
+    async fn remote_credentials(
+        &self,
+        _request: crate::ops::RemoteCredentialRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
+    /// A diagnostics report, built by the embedder that owns the home. The
+    /// default refuses.
+    async fn diagnostics(
+        &self,
+        _request: crate::ops::DiagnosticsRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
+    /// A setup command (`lightagent init`, `lightagent import hermes`),
+    /// performed by the embedder that owns the home, answered with the JSON
+    /// the CLI prints. The default refuses.
+    async fn setup(
+        &self,
+        _request: crate::ops::SetupRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
+    /// `lightagent update --check`: read-only, it installs nothing. The
+    /// default refuses.
+    async fn update_check(&self) -> Result<serde_json::Value, crate::ops::OpError> {
+        Err(crate::ops::OpError::unavailable())
+    }
+
     /// Tools currently visible to the factory's active target.
     async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
         let registry = lightagent_tools::ToolRegistry::builtin();
@@ -394,6 +517,42 @@ pub trait RunFactory: Send + Sync + 'static {
     /// Discover capabilities from the active provider.
     async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
         Err("provider capability discovery is not available in this embedding".to_owned())
+    }
+
+    /// An explicit check of the active provider endpoint, ending within
+    /// `timeout`: what it answered, never a key. The default refuses.
+    async fn check_provider(
+        &self,
+        _timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        Err("provider endpoint checks are not available in this embedding".to_owned())
+    }
+
+    /// An explicit check of the endpoint at `base_url` with the key bound to
+    /// that endpoint, ending within `timeout`: what it answered, never a
+    /// key. The default refuses.
+    async fn check_endpoint(
+        &self,
+        _base_url: String,
+        _timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        Err("provider endpoint checks are not available in this embedding".to_owned())
+    }
+
+    /// An explicit check of the MCP server `name`, connected as an operator
+    /// run connects it (D6-4): its tools, or why it failed; `None` when no
+    /// server has the name. A stdio server's command is started, so this
+    /// runs only on an explicit request. The default refuses.
+    async fn check_mcp(&self, _name: String) -> Result<Option<serde_json::Value>, String> {
+        Err("MCP server checks are not available in this embedding".to_owned())
+    }
+
+    /// The operator's tool catalog with each tool's effective permission
+    /// (auto, ask, block), as `lightagent tools list` reports it; MCP
+    /// servers are connected (a stdio server started) only with
+    /// `include_mcp`. `None`, the default, when the embedding cannot say.
+    async fn tool_catalog(&self, _include_mcp: bool) -> Option<Result<serde_json::Value, String>> {
+        None
     }
 
     /// The window to pack a session's history against before a run of
@@ -472,6 +631,31 @@ pub trait RunFactory: Send + Sync + 'static {
         }
         self.run_as(request, trust, sink, cancel, decisions).await
     }
+
+    /// Drive a run started with [`RunOptions`]; `controls` carries the
+    /// time-budget policy and the continuations. The default ignores them
+    /// and runs as before (supervised when `authorization` is set), so a
+    /// factory that cannot pause never does.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_controlled(
+        &self,
+        request: StartRun,
+        trust: RunTrust,
+        authorization: Option<RunAuthorization>,
+        controls: RunControls,
+        sink: AgentEventSink,
+        cancel: CancellationToken,
+        decisions: UnboundedReceiver<ApprovalDecision>,
+    ) -> RunStatus {
+        drop(controls);
+        match authorization {
+            Some(authorization) => {
+                self.run_supervised(request, trust, authorization, sink, cancel, decisions)
+                    .await
+            }
+            None => self.run_as(request, trust, sink, cancel, decisions).await,
+        }
+    }
 }
 
 /// End a run whose authorization was withdrawn: say why (the code only) and
@@ -524,8 +708,37 @@ pub async fn drive_supervised<P: AgentProvider, I: ToolInvoker>(
     message: String,
     sink: AgentEventSink,
     cancel: CancellationToken,
+    decisions: UnboundedReceiver<ApprovalDecision>,
+    authorization: RunAuthorization,
+) -> RunStatus {
+    drive_controlled(
+        agent,
+        history,
+        message,
+        sink,
+        cancel,
+        decisions,
+        authorization,
+        None,
+    )
+    .await
+}
+
+/// [`drive_supervised`] for a run that may pause on its time budget (its
+/// loop built with [`WallClockPolicy::Pause`]): a pause waits for a
+/// continuation from `continues` or a cancel, and the authorization is
+/// checked again before a continuation is acted on. With `continues` `None`
+/// a pause ends the run, as before.
+#[allow(clippy::too_many_arguments)]
+pub async fn drive_controlled<P: AgentProvider, I: ToolInvoker>(
+    agent: AgentLoop<P, I>,
+    history: Vec<ProviderMessage>,
+    message: String,
+    sink: AgentEventSink,
+    cancel: CancellationToken,
     mut decisions: UnboundedReceiver<ApprovalDecision>,
     authorization: RunAuthorization,
+    mut continues: Option<UnboundedReceiver<Continuation>>,
 ) -> RunStatus {
     if let Err(denial) = authorization.verify() {
         return revoked(&sink, denial);
@@ -549,14 +762,42 @@ pub async fn drive_supervised<P: AgentProvider, I: ToolInvoker>(
     loop {
         match outcome {
             RunOutcome::Completed { events } => return status_from_events(&events),
-            // Only a `WallClockPolicy::Pause` run pauses out of time, and the API
-            // keeps the default wrap-up policy; should one arrive anyway, the
-            // time budget is spent and the run is over.
-            RunOutcome::OutOfTime { .. } => {
-                let _ = sink.send(AgentEvent::RunCompleted {
-                    reason: StopReason::WallClockExceeded,
-                });
-                return RunStatus::Completed;
+            // Only a `WallClockPolicy::Pause` run pauses out of time. With no
+            // way to be continued, the time budget is spent and the run is over.
+            RunOutcome::OutOfTime { suspended, .. } => {
+                let Some(continues) = continues.as_mut() else {
+                    let _ = sink.send(AgentEvent::RunCompleted {
+                        reason: StopReason::WallClockExceeded,
+                    });
+                    return RunStatus::Completed;
+                };
+                tokio::select! {
+                    () = cancel.cancelled() => {
+                        return match authorization.revoked() {
+                            Some(denial) => revoked(&sink, denial),
+                            None => {
+                                let _ = sink.send(AgentEvent::RunCompleted { reason: StopReason::Cancelled });
+                                RunStatus::Cancelled
+                            }
+                        };
+                    }
+                    how = continues.recv() => match how {
+                        Some(how) => {
+                            if let Err(denial) = authorization.verify() {
+                                return revoked(&sink, denial);
+                            }
+                            outcome = match agent.continue_out_of_time(suspended, how, cancel.clone()).await {
+                                Ok(outcome) => outcome,
+                                Err(error) => {
+                                    let _ = sink.send(AgentEvent::Error { message: error.to_string() });
+                                    let _ = sink.send(AgentEvent::RunCompleted { reason: StopReason::Error });
+                                    return RunStatus::Failed;
+                                }
+                            };
+                        }
+                        None => return RunStatus::Cancelled,
+                    }
+                }
             }
             RunOutcome::AwaitingApproval { suspended, .. } => {
                 tokio::select! {
@@ -798,6 +1039,14 @@ impl RunManager {
     pub async fn tools(&self) -> Result<Vec<lightagent_tools::ToolDefinition>, String> {
         self.factory.tools().await
     }
+    /// The operator's tool catalog with permissions (see
+    /// [`RunFactory::tool_catalog`]).
+    pub async fn tool_catalog(
+        &self,
+        include_mcp: bool,
+    ) -> Option<Result<serde_json::Value, String>> {
+        self.factory.tool_catalog(include_mcp).await
+    }
     /// The tools a run of `profile` with `trust` would receive.
     pub async fn tools_for(
         &self,
@@ -824,6 +1073,29 @@ impl RunManager {
     /// Discover the selected provider's current model catalog and capabilities.
     pub async fn provider_capabilities(&self) -> Result<ProviderCapabilities, String> {
         self.factory.provider_capabilities().await
+    }
+
+    /// An explicit, bounded check of the active provider endpoint.
+    pub async fn check_provider(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        self.factory.check_provider(timeout).await
+    }
+
+    /// An explicit, bounded check of the endpoint at `base_url` (a saved
+    /// provider's), with that endpoint's own key.
+    pub async fn check_endpoint(
+        &self,
+        base_url: String,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        self.factory.check_endpoint(base_url, timeout).await
+    }
+
+    /// An explicit check of the MCP server `name` (see [`RunFactory::check_mcp`]).
+    pub async fn check_mcp(&self, name: String) -> Result<Option<serde_json::Value>, String> {
+        self.factory.check_mcp(name).await
     }
 
     /// The token limit to pack a session's history with before a run of
@@ -860,7 +1132,33 @@ impl RunManager {
     /// authorized the owner for `request.profile`. The run is not
     /// revocable: only cancellation stops it.
     pub async fn start_as(&self, request: StartRun, owner: RunOwner) -> Arc<RunState> {
-        self.launch(request, owner, None).await
+        self.launch(request, owner, None, RunOptions::default())
+            .await
+    }
+
+    /// [`start_as`](Self::start_as), with `options`.
+    pub async fn start_as_with(
+        &self,
+        request: StartRun,
+        owner: RunOwner,
+        options: RunOptions,
+    ) -> Arc<RunState> {
+        self.launch(request, owner, None, options).await
+    }
+
+    /// [`start_supervised`](Self::start_supervised), with `options`.
+    pub async fn start_supervised_with(
+        &self,
+        request: StartRun,
+        owner: RunOwner,
+        check: RevocationCheck,
+        generation: Option<u64>,
+        options: RunOptions,
+    ) -> Result<Arc<RunState>, Denial> {
+        check()?;
+        Ok(self
+            .launch(request, owner, Some((check, generation)), options)
+            .await)
     }
 
     /// Start a revocable run. `check` reads the current identity state and is
@@ -875,7 +1173,14 @@ impl RunManager {
         generation: Option<u64>,
     ) -> Result<Arc<RunState>, Denial> {
         check()?;
-        Ok(self.launch(request, owner, Some((check, generation))).await)
+        Ok(self
+            .launch(
+                request,
+                owner,
+                Some((check, generation)),
+                RunOptions::default(),
+            )
+            .await)
     }
 
     async fn launch(
@@ -883,10 +1188,12 @@ impl RunManager {
         request: StartRun,
         owner: RunOwner,
         revocable: Option<(RevocationCheck, Option<u64>)>,
+        options: RunOptions,
     ) -> Arc<RunState> {
         let id = new_run_id();
         let trust = owner.trust();
         let (decisions_tx, decisions_rx) = mpsc::unbounded_channel();
+        let (continues_tx, continues_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let supervised = revocable.is_some();
         let authorization = match revocable {
@@ -904,6 +1211,7 @@ impl RunManager {
             notify: Notify::new(),
             cancel,
             decisions: decisions_tx,
+            continues: continues_tx,
             authorization,
             recheck: watch::Sender::new(0),
             #[cfg(test)]
@@ -943,6 +1251,9 @@ impl RunManager {
                                 .await;
                             forward_state.set_status(RunStatus::AwaitingApproval).await;
                         }
+                        AgentEvent::WallClockPaused { .. } => {
+                            forward_state.set_status(RunStatus::AwaitingContinue).await;
+                        }
                         AgentEvent::ToolCallStarted { .. } | AgentEvent::Content { .. } => {
                             // Any progress past a pause means it resolved.
                             forward_state.set_pending(None).await;
@@ -954,7 +1265,24 @@ impl RunManager {
                 }
             });
 
-            let status = if supervised {
+            let status = if options.pause_on_time_budget {
+                let controls = RunControls {
+                    on_wall_clock: WallClockPolicy::Pause,
+                    continues: continues_rx,
+                };
+                let authorization = supervised.then(|| run_state.authorization.clone());
+                factory
+                    .run_controlled(
+                        request,
+                        trust,
+                        authorization,
+                        controls,
+                        sink_tx,
+                        cancel,
+                        decisions_rx,
+                    )
+                    .await
+            } else if supervised {
                 let authorization = run_state.authorization.clone();
                 factory
                     .run_supervised(request, trust, authorization, sink_tx, cancel, decisions_rx)
@@ -992,6 +1320,81 @@ impl RunManager {
             }
         }
         active
+    }
+
+    /// The runs that have not reached a terminal state, for an operator's
+    /// view: the desktop app asks before it switches profile or quits.
+    pub async fn active_runs(&self) -> Vec<Arc<RunState>> {
+        self.active().await
+    }
+
+    /// Perform a profile operation through the factory (see [`crate::ops`]).
+    pub async fn profiles(
+        &self,
+        request: crate::ops::ProfileRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.profiles(request).await
+    }
+
+    /// Perform an identity command through the factory.
+    pub async fn identity(
+        &self,
+        request: crate::ops::IdentityRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.identity(request).await
+    }
+
+    /// Perform a remote-credential command through the factory.
+    pub async fn remote_credentials(
+        &self,
+        request: crate::ops::RemoteCredentialRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.remote_credentials(request).await
+    }
+
+    /// Build a diagnostics report through the factory.
+    pub async fn diagnostics(
+        &self,
+        request: crate::ops::DiagnosticsRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.diagnostics(request).await
+    }
+
+    /// Perform a setup command through the factory.
+    pub async fn setup(
+        &self,
+        request: crate::ops::SetupRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.setup(request).await
+    }
+
+    /// Check for updates through the factory (read-only).
+    pub async fn update_check(&self) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.update_check().await
+    }
+
+    /// Perform a worker-assignment change through the factory.
+    pub async fn workers_change(
+        &self,
+        request: crate::ops::WorkerRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.workers_change(request).await
+    }
+
+    /// Perform a knowledge (RAG) operation through the factory.
+    pub async fn rag(
+        &self,
+        request: crate::ops::RagRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.rag(request).await
+    }
+
+    /// Perform a memory operation through the factory (see [`crate::ops`]).
+    pub async fn memory(
+        &self,
+        request: crate::ops::MemoryRequest,
+    ) -> Result<serde_json::Value, crate::ops::OpError> {
+        self.factory.memory(request).await
     }
 
     /// The active revocable runs an identity change described by `scope`
@@ -1069,6 +1472,7 @@ impl RunState {
     pub(crate) fn detached() -> Arc<Self> {
         let cancel = CancellationToken::new();
         let (decisions, _) = mpsc::unbounded_channel();
+        let (continues, _) = mpsc::unbounded_channel();
         Arc::new(Self {
             id: new_run_id(),
             owner: RunOwner::operator_only(),
@@ -1078,6 +1482,7 @@ impl RunState {
             notify: Notify::new(),
             cancel: cancel.clone(),
             decisions,
+            continues,
             authorization: RunAuthorization::unconditional(cancel),
             recheck: watch::Sender::new(0),
             gap: StdMutex::new(None),

@@ -174,11 +174,14 @@ impl JevClient {
             .base_url
             .as_deref()
             .ok_or(JevError::NotConfigured)?;
+        // A configured key that cannot be used fails closed: no client, so
+        // nothing is sent without it.
         let api_key = config
             .endpoint
             .api_key
             .as_ref()
-            .and_then(|secret| secret.resolve());
+            .map_or(Ok(None), lightagent_core::SecretRef::for_request)
+            .map_err(|_| JevError::CredentialUnavailable)?;
         Self::new(
             base_url,
             api_key,

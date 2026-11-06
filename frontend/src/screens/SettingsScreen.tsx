@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import { Moon, Sun } from "lucide-react";
 
 import {
@@ -15,6 +15,12 @@ import {
 import { Switch } from "../components/Bits";
 import { JevClassificationSection } from "../components/Jev";
 import { Card } from "../components/Card";
+import { ConfigEditorCard } from "../components/ConfigEditor";
+import { ProviderCredentialCard } from "../components/ProviderCredential";
+import { ProvidersCard } from "../components/Providers";
+import { SecurityCard } from "../components/SecurityCard";
+import { RemoteModeCard } from "../desktop/RemoteMode";
+import { WorkspaceCard } from "../components/Workspace";
 import { TopBar } from "../components/Shell";
 import { usePoll } from "../hooks/usePoll";
 import { usePreferences } from "../state/preferences";
@@ -29,25 +35,51 @@ export function SettingsScreen() {
   const [current, setCurrent] = useState<LightagentSettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  // Bumped by a provider change, so the API key card reloads for the new
+  // active provider and never saves a key typed for another one.
+  const [providerVersion, setProviderVersion] = useState(0);
+  // A change refused because the settings changed elsewhere: kept, with the
+  // values saved now, until it is applied to them or discarded.
+  const [conflict, setConflict] = useState<{
+    patch: Partial<LightagentSettings>;
+    latest: LightagentSettings | null;
+  } | null>(null);
 
   useEffect(() => {
     if (settings.data) setCurrent(settings.data);
   }, [settings.data]);
 
-  async function persist(patch: Partial<LightagentSettings>) {
-    if (!current || saving) return;
+  async function persist(patch: Partial<LightagentSettings>, base: LightagentSettings | null = current) {
+    if (!base || saving) return;
     setSaving(true);
     setMessage(null);
     try {
-      const saved = await agentApi.saveSettings({ ...current, ...patch });
+      // Saved against the revision these values were loaded at: a change
+      // made meanwhile elsewhere is never silently overwritten.
+      const saved = await agentApi.saveSettings({ ...base, ...patch, expected_revision: base.revision });
       setCurrent(saved);
+      setConflict(null);
       setMessage("Saved. New runs use these settings.");
       jev.refresh();
     } catch (cause) {
-      setMessage(cause instanceof Error ? cause.message : String(cause));
+      const text = cause instanceof Error ? cause.message : String(cause);
+      if (text.startsWith("409:")) {
+        // Nothing was saved. The change stays here, with what is saved now.
+        const latest = await agentApi.settings().catch(() => null);
+        setConflict((earlier) => ({ patch: { ...earlier?.patch, ...patch }, latest }));
+      } else {
+        setMessage(text);
+      }
     } finally {
       setSaving(false);
     }
+  }
+
+  function discard() {
+    if (conflict?.latest) setCurrent(conflict.latest);
+    else settings.refresh();
+    setConflict(null);
+    setMessage("Your change was discarded. The values saved now are shown.");
   }
 
   const value = current ?? settings.data;
@@ -90,8 +122,37 @@ export function SettingsScreen() {
           </div>
         )}
         {message && <div className="notice notice--info">{message}</div>}
+        {conflict && (
+          <div className="notice notice--warn" role="alert" data-testid="settings-conflict">
+            <p style={{ margin: 0 }}>
+              These settings were changed elsewhere (another window, the CLI or the desktop app) after this
+              screen loaded, so your change was not saved. It is kept here until you apply or discard it.
+            </p>
+            <ul style={{ margin: "8px 0" }}>
+              {Object.entries(conflict.patch).map(([key, mine]) => (
+                <li key={key}>
+                  <strong>{readableKey(key)}</strong>: your change {shown(mine)}; saved now{" "}
+                  {conflict.latest ? shown(conflict.latest[key as keyof LightagentSettings]) : "could not be read"}
+                </li>
+              ))}
+            </ul>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button type="button" className="btn" disabled={saving || !conflict.latest}
+                onClick={() => void persist(conflict.patch, conflict.latest)}>
+                Apply my change to the current settings
+              </button>
+              <button type="button" className="btn" disabled={saving} onClick={discard}>
+                Discard my change
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))" }}>
+          <ProvidersCard onChanged={() => setProviderVersion((version) => version + 1)} />
+          <ProviderCredentialCard key={providerVersion} />
+          <WorkspaceCard />
+          <RemoteModeCard />
           <Card title="Agent runtime">
             <p className="card__note">
               These controls are shared with the terminal CLI and apply to the next run.
@@ -119,6 +180,8 @@ export function SettingsScreen() {
               value={value?.wall_clock_secs} disabled={!value || saving}
               onSave={(wall_clock_secs) => persist({ wall_clock_secs })} />
           </Card>
+
+          <SecurityCard />
 
           <Card title="Profiles">
             <p className="card__note">
@@ -171,9 +234,8 @@ export function SettingsScreen() {
 
 
           <Card title="Capabilities">
-            <ToggleRow label="Web tools" hint="Allow configured web search and fetch tools."
-              checked={value?.web_enabled ?? false} disabled={!value || saving}
-              onChange={(web_enabled) => void persist({ web_enabled })} />
+            <WebAccessField settings={value ?? null} disabled={!value || saving}
+              onSave={(patch) => persist(patch)} />
             <ToggleRow label="Filesystem tools" hint="Allow confined file reads and writes."
               checked={value?.filesystem_tools_enabled ?? false} disabled={!value || saving}
               onChange={(filesystem_tools_enabled) => void persist({
@@ -209,6 +271,8 @@ export function SettingsScreen() {
               endpoint={value?.open_terminal} disabled={!value || saving}
               onSave={(open_terminal) => persist({ open_terminal })} />
           </Card>
+
+          <ConfigEditorCard />
 
           <Card title="Appearance">
             <div className="field" style={{ marginBottom: 16 }}>
@@ -246,6 +310,18 @@ export function SettingsScreen() {
   );
 }
 
+/** A settings field's name as the conflict notice shows it. */
+function readableKey(key: string): string {
+  return key.replace(/_/g, " ");
+}
+
+/** A value as the conflict notice shows it. A section of settings (Jev, an endpoint) is named, never shown: it can hold a key typed into it. */
+function shown(value: unknown): string {
+  if (value === null || value === undefined) return "none";
+  if (typeof value === "object") return "(an edited section)";
+  return String(value);
+}
+
 function NumberSetting({ label, value, min = 1, max, disabled, onSave }: {
   label: string;
   value: number | undefined;
@@ -256,10 +332,11 @@ function NumberSetting({ label, value, min = 1, max, disabled, onSave }: {
 }) {
   const [draft, setDraft] = useState("");
   useEffect(() => setDraft(value === undefined ? "" : String(value)), [value]);
+  const id = useId();
   return (
     <div className="field">
-      <label className="field__label">{label}</label>
-      <input className="input tnum" type="number" min={min} max={max} value={draft} disabled={disabled}
+      <label className="field__label" htmlFor={id}>{label}</label>
+      <input id={id} className="input tnum" type="number" min={min} max={max} value={draft} disabled={disabled}
         onChange={(event) => setDraft(event.target.value)}
         onBlur={() => {
           const next = Number(draft);
@@ -278,10 +355,11 @@ function OptionalNumberSetting({ label, value, disabled, onSave }: {
 }) {
   const [draft, setDraft] = useState("");
   useEffect(() => setDraft(value == null ? "" : String(value)), [value]);
+  const id = useId();
   return (
     <div className="field" style={{ marginTop: 10 }}>
-      <label className="field__label">{label}</label>
-      <input className="input tnum" type="number" min={1} placeholder="No limit"
+      <label className="field__label" htmlFor={id}>{label}</label>
+      <input id={id} className="input tnum" type="number" min={1} placeholder="No limit"
         value={draft} disabled={disabled} onChange={(event) => setDraft(event.target.value)}
         onBlur={() => {
           const next = draft.trim() ? Number(draft) : null;
@@ -289,6 +367,81 @@ function OptionalNumberSetting({ label, value, disabled, onSave }: {
             void onSave(next);
           } else setDraft(value == null ? "" : String(value));
         }} />
+    </div>
+  );
+}
+
+type WebMode = NonNullable<LightagentSettings["web_mode"]>;
+
+const WEB_MODES: { mode: WebMode; label: string }[] = [
+  { mode: "off", label: "Off" },
+  { mode: "fetch", label: "Fetch web pages only" },
+  { mode: "duckduckgo", label: "Agentic search — DuckDuckGo (no account)" },
+  { mode: "custom", label: "Agentic search — SearXNG or custom JSON endpoint" },
+];
+
+/**
+ * `lightagent setup` → web, on the same keys: the web tools off, fetching
+ * pages only, or agentic search, which also turns on realtime knowledge. A
+ * custom search saves only with its URL.
+ */
+function WebAccessField({ settings, disabled, onSave }: {
+  settings: LightagentSettings | null;
+  disabled: boolean;
+  onSave: (patch: Partial<LightagentSettings>) => Promise<void> | void;
+}) {
+  const mode: WebMode = settings?.web_mode ?? (settings?.web_enabled ? "fetch" : "off");
+  const savedEndpoint = mode === "custom" ? settings?.web_search_endpoint ?? "" : "";
+  const [choice, setChoice] = useState<WebMode>(mode);
+  const [endpoint, setEndpoint] = useState(savedEndpoint);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    setChoice(mode);
+    setEndpoint(savedEndpoint);
+    setError(null);
+  }, [mode, savedEndpoint]);
+  const save = (next: WebMode, url: string) => {
+    if (next === "custom" && !url.trim()) {
+      setError("Enter the search endpoint URL, such as http://127.0.0.1:8080/search?format=json.");
+      return;
+    }
+    setError(null);
+    void onSave({
+      web_mode: next,
+      web_enabled: next !== "off",
+      web_search_endpoint: next === "custom" ? url.trim() : null,
+    });
+  };
+  return (
+    <div className="field" style={{ padding: "12px 0", borderBottom: "1px solid var(--rule)" }}>
+      <label className="field__label" htmlFor="web-access">Web access</label>
+      <select id="web-access" className="select" value={choice} disabled={disabled}
+        onChange={(event) => {
+          const next = event.target.value as WebMode;
+          setChoice(next);
+          if (next !== "custom") save(next, "");
+        }}>
+        {WEB_MODES.map((option) => <option key={option.mode} value={option.mode}>{option.label}</option>)}
+      </select>
+      {choice === "custom" && (
+        <form style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}
+          onSubmit={(event) => {
+            event.preventDefault();
+            save("custom", endpoint);
+          }}>
+          <div className="field" style={{ flex: "1 1 220px" }}>
+            <label className="field__label" htmlFor="web-access-endpoint">Search endpoint (JSON)</label>
+            <input id="web-access-endpoint" className="input" value={endpoint} disabled={disabled}
+              placeholder="http://127.0.0.1:8080/search?format=json" autoComplete="off" spellCheck={false}
+              onChange={(event) => setEndpoint(event.target.value)} />
+          </div>
+          <button type="submit" className="btn" disabled={disabled}>Save endpoint</button>
+        </form>
+      )}
+      {error && <p className="config-editor__error" role="alert">{error}</p>}
+      <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>
+        The same choice as <code>lightagent setup</code> → web. Searching also turns on realtime knowledge.
+      </div>
     </div>
   );
 }
@@ -548,9 +701,10 @@ function TextPlatformSetting({ label, value, disabled, onSave }: {
 }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
+  const id = useId();
   return <div className="field" style={{ marginTop: 10 }}>
-    <label className="field__label">{label}</label>
-    <input className="input" value={draft} disabled={disabled} onChange={(event) => setDraft(event.target.value)}
+    <label className="field__label" htmlFor={id}>{label}</label>
+    <input id={id} className="input" value={draft} disabled={disabled} onChange={(event) => setDraft(event.target.value)}
       onBlur={() => { const next = draft.trim(); if (next !== value) onSave(next); }} />
   </div>;
 }
@@ -566,9 +720,10 @@ function NumberPlatformSetting({ label, value, min, max, step, disabled, onSave 
 }) {
   const [draft, setDraft] = useState(String(value));
   useEffect(() => setDraft(String(value)), [value]);
+  const id = useId();
   return <div className="field" style={{ marginTop: 10 }}>
-    <label className="field__label">{label}</label>
-    <input className="input" type="number" min={min} max={max} step={step} value={draft} disabled={disabled}
+    <label className="field__label" htmlFor={id}>{label}</label>
+    <input id={id} className="input" type="number" min={min} max={max} step={step} value={draft} disabled={disabled}
       onChange={(event) => setDraft(event.target.value)}
       onBlur={() => {
         const next = Number(draft);

@@ -14,6 +14,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
+use lightagent_api::ops::{OpCategory, OpError, RemoteCredentialRequest};
 use lightagent_core::credentials::{
     CredentialVault, ExternalSecret, GrantSpec, MasterKey, RemoteService, origin_of,
 };
@@ -131,7 +132,10 @@ pub(crate) fn execute(
 ) -> Result<Value, String> {
     let vault = CredentialVault::new(home);
     match action {
-        RemoteCredentialAction::Status => status(&vault, key),
+        RemoteCredentialAction::Status => status(&vault, key).map(|mut report| {
+            report["key_source"] = json!(key_source());
+            report
+        }),
         RemoteCredentialAction::Keygen { path } => keygen(path, home),
         RemoteCredentialAction::Add {
             profile,
@@ -333,11 +337,139 @@ fn keygen(path: &Path, home: &Path) -> Result<Value, String> {
     }))
 }
 
+/// Where the configured key comes from, in the order the CLI and the
+/// server resolve it. Never the key or its path.
+fn key_source() -> Option<&'static str> {
+    if std::env::var_os("LIGHTAGENT_CREDENTIAL_KEY_FILE").is_some_and(|value| !value.is_empty()) {
+        Some("file")
+    } else if std::env::var("LIGHTAGENT_CREDENTIAL_KEY").is_ok_and(|value| !value.is_empty()) {
+        Some("env")
+    } else {
+        None
+    }
+}
+
+/// `lightagent remote-credential …` for the API (which admits only the
+/// local operator), with the key the runtime was started with. A secret is
+/// read only from a file named by an absolute path: it is never in a
+/// request or an answer, and no error names the file. A configured key
+/// that cannot be used refuses every command.
+pub(crate) fn perform(home: &Path, request: RemoteCredentialRequest) -> Result<Value, OpError> {
+    let invalid = |message: String| OpError::new(OpCategory::Invalid, message);
+    let absolute = |raw: String, what: &str| {
+        let path = PathBuf::from(raw);
+        if path.is_absolute() {
+            Ok(path)
+        } else {
+            Err(invalid(format!("{what} must be an absolute path")))
+        }
+    };
+    let from_file = |raw: Option<String>| {
+        let raw = raw.ok_or_else(|| {
+            invalid(
+                "over the API a secret is read only from a file: name it (an absolute path)"
+                    .to_owned(),
+            )
+        })?;
+        Ok::<_, OpError>(SecretInput {
+            secret_file: Some(absolute(raw, "the secret file")?),
+            secret_stdin: false,
+        })
+    };
+    // The desktop host's channel: the secret itself, as standard input
+    // carries it to the CLI.
+    let mut inline: Option<String> = None;
+    let source = |raw: Option<String>, carried: bool| {
+        if !carried {
+            return from_file(raw);
+        }
+        if raw.is_some() {
+            return Err(invalid(
+                "name a secret file or send the secret, not both".to_owned(),
+            ));
+        }
+        Ok(SecretInput {
+            secret_file: None,
+            secret_stdin: true,
+        })
+    };
+    let action = match request {
+        RemoteCredentialRequest::Status => RemoteCredentialAction::Status,
+        RemoteCredentialRequest::Keygen { path } => RemoteCredentialAction::Keygen {
+            path: absolute(path, "the key file")?,
+        },
+        RemoteCredentialRequest::Add {
+            profile,
+            service,
+            destinations,
+            operations,
+            expires_in,
+            max_requests_per_run,
+            secret_file,
+            secret,
+        } => {
+            if destinations.is_empty() {
+                return Err(invalid("name at least one destination".to_owned()));
+            }
+            let input = source(secret_file, secret.is_some())?;
+            inline = secret.map(|secret| secret.into_inner());
+            RemoteCredentialAction::Add {
+                profile,
+                service,
+                destinations,
+                operations,
+                expires_in,
+                max_requests_per_run,
+                secret: input,
+            }
+        }
+        RemoteCredentialRequest::Rotate {
+            id,
+            secret_file,
+            secret,
+        } => {
+            let input = source(secret_file, secret.is_some())?;
+            inline = secret.map(|secret| secret.into_inner());
+            RemoteCredentialAction::Rotate { id, secret: input }
+        }
+        RemoteCredentialRequest::Revoke(id) => RemoteCredentialAction::Revoke { id },
+        RemoteCredentialRequest::List { profile } => RemoteCredentialAction::List { profile },
+        RemoteCredentialRequest::Audit { limit } => RemoteCredentialAction::Audit {
+            limit: limit.unwrap_or(50),
+        },
+        RemoteCredentialRequest::Rekey { previous_key_file } => RemoteCredentialAction::Rekey {
+            previous_key_file: absolute(previous_key_file, "the previous key file")?,
+        },
+    };
+    // A new key needs no configured one, even an unusable one.
+    let key = match &action {
+        RemoteCredentialAction::Keygen { .. } => None,
+        _ => MasterKey::from_environment(home).map_err(|error| {
+            invalid(format!(
+                "the configured credential key is unusable: {error}"
+            ))
+        })?,
+    };
+    let secret = match &action {
+        RemoteCredentialAction::Add { secret, .. }
+        | RemoteCredentialAction::Rotate { secret, .. } => Some(match inline.take() {
+            Some(text) => ExternalSecret::new(text).map_err(|error| invalid(error.to_string()))?,
+            None => secret.read().map_err(invalid)?,
+        }),
+        _ => None,
+    };
+    execute(home, &operator(), now_unix(), key.as_ref(), &action, secret).map_err(invalid)
+}
+
 /// The CLI entry point.
 pub(crate) fn run(action: RemoteCredentialAction, json_output: bool) -> Result<(), String> {
     let paths = LightagentPaths::resolve().map_err(|error| error.to_string())?;
     let home = paths.root();
-    let key = MasterKey::from_environment(home).map_err(|error| error.to_string())?;
+    // A new key needs no configured one, even an unusable one.
+    let key = match &action {
+        RemoteCredentialAction::Keygen { .. } => None,
+        _ => MasterKey::from_environment(home).map_err(|error| error.to_string())?,
+    };
     let secret = match &action {
         RemoteCredentialAction::Add { secret, .. }
         | RemoteCredentialAction::Rotate { secret, .. } => Some(secret.read()?),

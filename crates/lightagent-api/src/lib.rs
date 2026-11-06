@@ -11,7 +11,9 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod auth;
+pub mod desktop;
 pub mod manager;
+pub mod ops;
 #[cfg(feature = "provisioning-api")]
 pub mod provisioning;
 pub mod sse;
@@ -34,17 +36,23 @@ use lightagent_core::identity::{
     AuditAction, Caller, Capability, PrincipalId, PrincipalSource, Role, RunTrust,
     authorize_capability, revoked_message,
 };
+use lightagent_core::saved_providers;
 use lightagent_core::{
-    AgentEvent, ApprovalPolicy, ConfigStore, LightagentPaths, PlatformEndpointConfig, ProfileId,
-    ProfileStore, SecretRef, SkillStore, skill_dirs,
+    AgentEvent, ApprovalPolicy, ConfigError, ConfigRevision, ConfigStore, LightagentPaths,
+    PlatformEndpointConfig, ProfileId, ProfileStore, SecretRef, SkillStore, UpdateError,
+    skill_dirs,
 };
-use lightagent_store::{Session, SessionId, SessionStore, StoredMessage, model_history};
+use lightagent_extensions::manage as extension_ops;
+use lightagent_extensions::onboarding;
+use lightagent_store::{
+    Session, SessionId, SessionStore, SessionUpdateError, StoreError, StoredMessage, model_history,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Mutex;
 
 pub use auth::{AuthConfig, IdentityAuthority, IdentityState, Scope};
-pub use manager::{RunFactory, RunManager, RunOwner, RunState, RunStatus, StartRun};
+pub use manager::{RunFactory, RunManager, RunOptions, RunOwner, RunState, RunStatus, StartRun};
 
 /// The shared state every handler reads.
 #[derive(Clone)]
@@ -73,29 +81,232 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/api/lightagent/v1/server", get(server_info))
         .route("/api/lightagent/v1/tools", get(list_tools))
+        .route("/api/lightagent/v1/commands", get(list_commands))
         .route("/api/lightagent/v1/workers", get(list_workers))
+        .route(
+            "/api/lightagent/v1/workers/{role}",
+            axum::routing::put(assign_worker).delete(revoke_worker),
+        )
         .route(
             "/api/lightagent/v1/provider",
             get(get_provider_capabilities),
         )
         .route("/api/lightagent/v1/jev", get(get_jev_status))
         .route("/api/lightagent/v1/jev/verify", post(verify_jev))
+        .route(
+            "/api/lightagent/v1/provider/check",
+            post(post_provider_check),
+        )
+        .route(
+            "/api/lightagent/v1/provider/credential",
+            get(get_provider_credential)
+                .put(put_provider_credential)
+                .delete(delete_provider_credential),
+        )
+        .route(
+            "/api/lightagent/v1/provider/active",
+            axum::routing::put(select_provider),
+        )
+        .route(
+            "/api/lightagent/v1/provider/model",
+            axum::routing::put(select_provider_model),
+        )
+        .route(
+            "/api/lightagent/v1/providers",
+            get(list_providers).post(create_provider),
+        )
+        .route(
+            "/api/lightagent/v1/providers/{id}",
+            get(show_provider)
+                .patch(update_provider)
+                .delete(remove_provider),
+        )
+        .route(
+            "/api/lightagent/v1/providers/{id}/check",
+            post(check_saved_provider),
+        )
+        .route(
+            "/api/lightagent/v1/workspace",
+            get(get_workspace).put(put_workspace),
+        )
+        .route(
+            "/api/lightagent/v1/jev/routing-report",
+            get(get_jev_routing_report),
+        )
         .route("/api/lightagent/v1/skills", get(list_skills))
-        .route("/api/lightagent/v1/profiles", get(list_profiles))
+        .route("/api/lightagent/v1/skills/imports", post(import_skills))
+        .route("/api/lightagent/v1/identity", get(identity_status))
+        .route(
+            "/api/lightagent/v1/identity/users",
+            get(list_identity_users).post(create_identity_user),
+        )
+        .route(
+            "/api/lightagent/v1/identity/users/{id}/suspend",
+            post(suspend_identity_user),
+        )
+        .route(
+            "/api/lightagent/v1/identity/credentials",
+            get(list_identity_credentials).post(issue_identity_credential),
+        )
+        .route(
+            "/api/lightagent/v1/identity/credentials/{key_id}/rotate",
+            post(rotate_identity_credential),
+        )
+        .route(
+            "/api/lightagent/v1/identity/credentials/{key_id}/revoke",
+            post(revoke_identity_credential),
+        )
+        .route(
+            "/api/lightagent/v1/identity/owners/{profile}",
+            axum::routing::put(assign_identity_owner).delete(remove_identity_owner),
+        )
+        .route(
+            "/api/lightagent/v1/identity/owners/{profile}/reassign",
+            post(reassign_identity_owner),
+        )
+        .route(
+            "/api/lightagent/v1/identity/grants",
+            get(list_identity_grants),
+        )
+        .route(
+            "/api/lightagent/v1/identity/grants/revoke",
+            post(revoke_identity_grant),
+        )
+        .route("/api/lightagent/v1/identity/audit", get(identity_audit))
+        .route("/api/lightagent/v1/setup/init", post(setup_init))
+        .route("/api/lightagent/v1/import/hermes", post(import_hermes))
+        .route("/api/lightagent/v1/update/check", get(update_check))
+        .route(
+            "/api/lightagent/v1/diagnostics/doctor",
+            get(diagnostics_doctor),
+        )
+        .route(
+            "/api/lightagent/v1/diagnostics/architecture",
+            get(diagnostics_architecture),
+        )
+        .route(
+            "/api/lightagent/v1/diagnostics/bundle",
+            get(diagnostics_bundle),
+        )
+        .route(
+            "/api/lightagent/v1/remote-credentials",
+            get(list_remote_credentials).post(add_remote_credential),
+        )
+        .route(
+            "/api/lightagent/v1/remote-credentials/vault",
+            get(remote_credential_vault),
+        )
+        .route(
+            "/api/lightagent/v1/remote-credentials/keys",
+            post(create_credential_key),
+        )
+        .route(
+            "/api/lightagent/v1/remote-credentials/audit",
+            get(remote_credential_audit),
+        )
+        .route(
+            "/api/lightagent/v1/remote-credentials/rekey",
+            post(rekey_remote_credentials),
+        )
+        .route(
+            "/api/lightagent/v1/remote-credentials/{id}/rotate",
+            post(rotate_remote_credential),
+        )
+        .route(
+            "/api/lightagent/v1/remote-credentials/{id}/revoke",
+            post(revoke_remote_credential),
+        )
+        .route(
+            "/api/lightagent/v1/memories",
+            get(list_memories).post(add_memory).delete(clear_memories),
+        )
+        .route("/api/lightagent/v1/memories/search", get(search_memories))
+        .route("/api/lightagent/v1/memories/reflect", get(reflect_memories))
+        .route(
+            "/api/lightagent/v1/memories/candidates",
+            get(memory_candidates),
+        )
+        .route("/api/lightagent/v1/memories/promote", post(promote_memory))
+        .route(
+            "/api/lightagent/v1/memories/items/{id}",
+            axum::routing::put(update_memory).delete(forget_memory),
+        )
+        .route(
+            "/api/lightagent/v1/knowledge",
+            get(list_knowledge)
+                .post(add_knowledge)
+                .delete(clear_knowledge),
+        )
+        .route("/api/lightagent/v1/knowledge/search", get(search_knowledge))
+        .route(
+            "/api/lightagent/v1/extensions",
+            get(list_extensions).post(install_extension),
+        )
+        .route(
+            "/api/lightagent/v1/extensions/{name}",
+            get(show_extension).delete(uninstall_extension),
+        )
+        .route(
+            "/api/lightagent/v1/extensions/{name}/enabled",
+            axum::routing::put(set_extension_enabled),
+        )
+        .route(
+            "/api/lightagent/v1/onboarding",
+            get(get_onboarding)
+                .put(put_onboarding)
+                .delete(delete_onboarding),
+        )
+        .route("/api/lightagent/v1/mcp", get(get_mcp).put(put_mcp))
+        .route("/api/lightagent/v1/mcp/servers", post(add_mcp_server))
+        .route(
+            "/api/lightagent/v1/mcp/servers/{name}",
+            axum::routing::put(update_mcp_server).delete(remove_mcp_server),
+        )
+        .route(
+            "/api/lightagent/v1/mcp/servers/{name}/check",
+            post(check_mcp_server),
+        )
+        .route(
+            "/api/lightagent/v1/profiles",
+            get(list_profiles).post(create_profile),
+        )
+        .route(
+            "/api/lightagent/v1/profiles/{id}",
+            get(show_profile).delete(delete_profile),
+        )
+        .route(
+            "/api/lightagent/v1/profiles/{id}/active",
+            axum::routing::put(use_profile),
+        )
+        .route(
+            "/api/lightagent/v1/profiles/{id}/preset",
+            post(preset_profile),
+        )
         .route(
             "/api/lightagent/v1/settings",
             get(get_settings).put(save_settings),
         )
-        .route("/api/lightagent/v1/runs", post(create_run))
+        .route("/api/lightagent/v1/config", get(get_config))
+        .route(
+            "/api/lightagent/v1/config/{key}",
+            get(get_config_key).put(set_config_key),
+        )
+        .route("/api/lightagent/v1/runs", get(list_runs).post(create_run))
         .route("/api/lightagent/v1/runs/{id}", get(get_run))
         .route("/api/lightagent/v1/runs/{id}/events", get(run_events))
         .route("/api/lightagent/v1/runs/{id}/cancel", post(cancel_run))
+        .route("/api/lightagent/v1/runs/{id}/continue", post(continue_run))
         .route(
             "/api/lightagent/v1/sessions",
             get(list_sessions).post(create_session),
         )
         .route("/api/lightagent/v1/sessions/search", get(search_sessions))
+        .route(
+            "/api/lightagent/v1/sessions/{id}/regenerate",
+            post(regenerate_run),
+        )
         .route(
             "/api/lightagent/v1/sessions/{id}",
             get(get_session)
@@ -276,6 +487,7 @@ enum Access {
 }
 
 /// A user authorized, from server-side ownership, for one profile.
+#[derive(Clone)]
 struct UserAccess {
     principal: PrincipalId,
     profile: ProfileId,
@@ -377,6 +589,42 @@ fn no_session() -> Response {
         .into_response()
 }
 
+/// The local operator's conversations of one profile: the profile a request
+/// names for them, as `lightagent chat --profile` names one for a chat, else
+/// the one this server serves. The active profile is not changed. Naming a
+/// profile grants nothing by itself: this is reached only once the request
+/// is authorized as the local operator, and the profile must exist in this
+/// home. A user in multi-user mode is scoped by `access` instead.
+fn operator_conversations(
+    state: &AppState,
+    requested: Option<&str>,
+) -> Result<(String, SessionStore), Box<Response>> {
+    let Some(raw) = requested.filter(|raw| *raw != state.session_profile) else {
+        return Ok((state.session_profile.clone(), state.sessions.clone()));
+    };
+    let Ok(id) = ProfileId::new(raw) else {
+        return Err(Box::new(bad_request("invalid profile id")));
+    };
+    let Some(root) = home(state) else {
+        return Err(Box::new(internal(
+            "conversations of another profile need the Lightagent home",
+        )));
+    };
+    let profiles = ProfileStore::new(&root);
+    if profiles.load(&id).is_err() {
+        return Err(Box::new(
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "no such profile" })),
+            )
+                .into_response(),
+        ));
+    }
+    let sessions = SessionStore::at_profile(&profiles.handle(&id))
+        .keep_history(state.sessions.is_history_kept());
+    Ok((id.as_str().to_owned(), sessions))
+}
+
 /// The answer when a restricted representation cannot be produced: the
 /// endpoint stays operator-only.
 fn operator_only() -> Response {
@@ -394,14 +642,136 @@ struct ProfileQuery {
     profile: Option<String>,
 }
 
+/// `GET /runs`: the runs that have not finished, for the operator. The
+/// desktop app checks them before it switches profile or quits.
+async fn list_runs(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let mut runs = Vec::new();
+    for run in state.manager.active_runs().await {
+        runs.push(json!({ "id": run.id(), "status": run.status().await }));
+    }
+    Json(json!({ "runs": runs })).into_response()
+}
+
+/// Profile management is operator-only: it changes what every later run sees.
+async fn profile_operation(
+    state: &AppState,
+    headers: &HeaderMap,
+    request: ops::ProfileRequest,
+) -> Response {
+    if let Some(rejection) = deny(state, headers, Scope::Admin) {
+        return rejection;
+    }
+    match state.manager.profiles(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn create_profile(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ops::CreateProfile>,
+) -> Response {
+    profile_operation(&state, &headers, ops::ProfileRequest::Create(body)).await
+}
+
+async fn show_profile(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    profile_operation(&state, &headers, ops::ProfileRequest::Show(id)).await
+}
+
+async fn delete_profile(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    profile_operation(&state, &headers, ops::ProfileRequest::Delete(id)).await
+}
+
+async fn use_profile(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    profile_operation(&state, &headers, ops::ProfileRequest::Use(id)).await
+}
+
+#[derive(Deserialize)]
+struct PresetBody {
+    preset: String,
+}
+
+async fn preset_profile(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<PresetBody>,
+) -> Response {
+    profile_operation(
+        &state,
+        &headers,
+        ops::ProfileRequest::Preset {
+            id,
+            preset: body.preset,
+        },
+    )
+    .await
+}
+
 async fn health() -> Response {
     Json(json!({ "status": "ok", "service": "lightagent" })).into_response()
+}
+
+/// The protocol a client of this API speaks (the desktop host's contract).
+pub const SERVER_PROTOCOL: u32 = 1;
+/// What this server offers a client: the desktop handshake reports the same.
+pub const SERVER_CAPABILITIES: &[&str] = &[
+    "runs",
+    "sessions",
+    "approvals",
+    "settings",
+    "tools",
+    "skills",
+    "workers",
+    "provider",
+    "jev",
+];
+
+/// What this server is, for a client about to send it work (the desktop's
+/// remote mode): its service, version, protocol and capabilities. Behind
+/// the key, unlike `/health`.
+async fn server_info(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::SessionsRead) {
+        return rejection;
+    }
+    Json(json!({
+        "service": "lightagent",
+        "version": env!("CARGO_PKG_VERSION"),
+        "protocol": SERVER_PROTOCOL,
+        "capabilities": SERVER_CAPABILITIES,
+        "profile": state.session_profile,
+    }))
+    .into_response()
+}
+
+/// `?mcp=skip`: build the catalog without connecting any MCP server.
+#[derive(Deserialize)]
+struct ToolListingQuery {
+    #[serde(default)]
+    mcp: Option<String>,
 }
 
 async fn list_tools(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<ProfileQuery>,
+    Query(listing): Query<ToolListingQuery>,
 ) -> Response {
     let scoped = match access(&state, &headers, Scope::ToolsRead, query.profile.as_deref()) {
         Ok(Access::Unscoped) => None,
@@ -419,7 +789,21 @@ async fn list_tools(
             Ok(tools) => Ok(tools),
             Err(_) => return operator_only(),
         },
-        None => state.manager.tools().await,
+        None => {
+            // The catalog with permissions, when the embedding builds it.
+            let include_mcp = listing.mcp.as_deref() != Some("skip");
+            if let Some(catalog) = state.manager.tool_catalog(include_mcp).await {
+                return match catalog {
+                    Ok(body) => Json(body).into_response(),
+                    Err(error) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": error })),
+                    )
+                        .into_response(),
+                };
+            }
+            state.manager.tools().await
+        }
     };
     let definitions = match listed {
         Ok(tools) => tools,
@@ -452,6 +836,56 @@ async fn list_tools(
 /// Each specialist role's readiness: state, worker, model, skill, tools and
 /// reason codes. An ordinary user sees only their own profile's, as an
 /// untrusted run of it would have it; nothing names another profile.
+#[derive(Deserialize)]
+struct AssignWorkerBody {
+    #[serde(default)]
+    worker: Option<String>,
+    #[serde(default)]
+    profile: Option<String>,
+}
+
+/// `lightagent workers assign <role>`: to the profile `worker`, or the
+/// built-in worker; for the active profile or the one named. Operator only.
+async fn assign_worker(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(role): Path<String>,
+    Json(body): Json<AssignWorkerBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let request = ops::WorkerRequest::Assign {
+        role,
+        worker: body.worker,
+        profile: body.profile,
+    };
+    match state.manager.workers_change(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+/// `lightagent workers revoke <role>`. Operator only.
+async fn revoke_worker(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(role): Path<String>,
+    Query(query): Query<ProfileQuery>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let request = ops::WorkerRequest::Revoke {
+        role,
+        profile: query.profile,
+    };
+    match state.manager.workers_change(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
 async fn list_workers(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -510,18 +944,40 @@ async fn list_skills(
         Err(error) => return internal(&error.to_string()),
     };
     let profiles = ProfileStore::new(root);
-    let skills = SkillStore::load(&skill_dirs(root, profiles.handle(&profile_id).dir()));
-    let skills: Vec<_> = skills
-        .names()
-        .into_iter()
-        .filter_map(|name| {
-            skills.get(&name).map(|skill| {
-                json!({
-                    "name": skill.name, "description": skill.description,
-                })
-            })
-        })
-        .collect();
+    let profile_dir = profiles.handle(&profile_id).dir().to_path_buf();
+    // What a run loads, in its order: the global skills, the active
+    // extensions' skills, then the profile's own; a later one overrides.
+    let extensions_config = config_store
+        .load()
+        .map(|config| config.extensions)
+        .unwrap_or_default();
+    let extensions = lightagent_extensions::ExtensionStore::load(
+        &lightagent_extensions::extension_dirs(root, &profile_dir),
+    );
+    let mut layers = vec![(json!({ "scope": "global" }), root.join("skills"))];
+    for ext in extensions.active(&extensions_config) {
+        layers.push((
+            json!({ "scope": "extension", "extension": ext.name }),
+            ext.skills_dir(),
+        ));
+    }
+    layers.push((json!({ "scope": "profile" }), profile_dir.join("skills")));
+    let mut found = std::collections::BTreeMap::new();
+    for (source, dir) in layers {
+        let store = SkillStore::load(&[dir]);
+        for name in store.names() {
+            if let Some(skill) = store.get(&name) {
+                found.insert(
+                    name,
+                    json!({
+                        "name": skill.name, "description": skill.description,
+                        "version": skill.version, "source": source,
+                    }),
+                );
+            }
+        }
+    }
+    let skills: Vec<_> = found.into_values().collect();
     Json(json!({ "skills": skills })).into_response()
 }
 /// A user's skill list: the authorized profile's skills, and only when a run
@@ -836,6 +1292,14 @@ struct UiSettings {
     wall_clock_secs: Option<u64>,
     approval_policy: ApprovalPolicy,
     web_enabled: bool,
+    /// `lightagent setup` → web. Absent on a save (an older client),
+    /// `web_enabled` alone applies.
+    #[serde(default)]
+    web_mode: Option<lightagent_core::WebMode>,
+    /// The custom search URL for `web_mode: custom`; in a response, the
+    /// configured search endpoint.
+    #[serde(default)]
+    web_search_endpoint: Option<String>,
     filesystem_tools_enabled: bool,
     terminal_enabled: bool,
     memory_enabled: bool,
@@ -848,6 +1312,13 @@ struct UiSettings {
     qdrant: UiQdrantSettings,
     infinity: UiInfinitySettings,
     open_terminal: UiOpenTerminalSettings,
+    /// The config revision these values were read at; responses only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revision: Option<String>,
+    /// On a save: refused with 409 unless the config is still at this
+    /// revision. Absent, the save applies to the config as it is now.
+    #[serde(default, skip_serializing)]
+    expected_revision: Option<String>,
 }
 
 fn ui_settings(config: &lightagent_core::Config) -> UiSettings {
@@ -857,6 +1328,8 @@ fn ui_settings(config: &lightagent_core::Config) -> UiSettings {
         wall_clock_secs: config.agent.wall_clock_secs,
         approval_policy: config.security.approval_policy,
         web_enabled: config.web.enabled,
+        web_mode: Some(lightagent_core::WebMode::of(config)),
+        web_search_endpoint: config.web.search.endpoint.clone(),
         filesystem_tools_enabled: config.tools.enabled,
         terminal_enabled: config.tools.allow_terminal,
         memory_enabled: config.memory.auto_capture,
@@ -908,6 +1381,8 @@ fn ui_settings(config: &lightagent_core::Config) -> UiSettings {
             poll_interval_ms: Some(config.platform.open_terminal.poll_interval_ms),
             max_output_bytes: Some(config.platform.open_terminal.max_output_bytes),
         },
+        revision: None,
+        expected_revision: None,
     }
 }
 
@@ -975,11 +1450,12 @@ async fn get_settings(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
     let Some(store) = &state.config_store else {
         return internal("Lightagent settings are unavailable in this embedding");
     };
-    let config = match store.load() {
-        Ok(config) => config,
+    let (config, revision) = match store.load_with_revision() {
+        Ok(loaded) => loaded,
         Err(error) => return internal(&error.to_string()),
     };
     let mut settings = ui_settings(&config);
+    settings.revision = Some(revision.as_str().to_owned());
     match active_profile(store, &state.session_profile) {
         Ok(Some((_, profile))) => {
             settings.approval_policy = profile.approval_policy;
@@ -1005,19 +1481,84 @@ async fn save_settings(
     let Some(store) = &state.config_store else {
         return internal("Lightagent settings are unavailable in this embedding");
     };
-    let mut config = match store.load() {
-        Ok(config) => config,
-        Err(error) => return internal(&error.to_string()),
-    };
-    config.agent.max_turns = settings.max_turns;
-    config.agent.max_tool_calls = settings.max_tool_calls;
-    config.agent.wall_clock_secs = settings.wall_clock_secs;
     let profile = match active_profile(store, &state.session_profile) {
         Ok(profile) => profile,
         Err(error) => return internal(&error),
     };
+    let expected = settings
+        .expected_revision
+        .as_deref()
+        .map(ConfigRevision::parse);
+    if settings.web_mode == Some(lightagent_core::WebMode::Custom)
+        && settings
+            .web_search_endpoint
+            .as_deref()
+            .is_none_or(|url| url.trim().is_empty())
+    {
+        return bad_request("a custom web search needs its endpoint URL");
+    }
+    // Kept for the active profile, which is written after the config.
+    let (approval_policy, max_turns, max_tool_calls, wall_clock_secs) = (
+        settings.approval_policy,
+        settings.max_turns,
+        settings.max_tool_calls,
+        settings.wall_clock_secs,
+    );
+    // One locked read-modify-write: the values apply to the config as it is
+    // now, so a concurrent change to any other key is kept.
+    let updated = store.update(expected.as_ref(), |config| {
+        apply_ui_settings(config, store, settings)
+    });
+    let revision = match updated {
+        Ok(((), revision)) => revision,
+        Err(UpdateError::Change(error)) => return internal(&error),
+        Err(UpdateError::Store(error)) => return config_error(error),
+    };
+    if let Some((profiles, mut profile)) = profile {
+        profile.approval_policy = approval_policy;
+        profile.limits.max_turns = max_turns;
+        profile.limits.max_tool_calls = max_tool_calls;
+        profile.limits.wall_clock_secs = wall_clock_secs;
+        if let Err(error) = profiles.save(&profile) {
+            return internal(&error.to_string());
+        }
+    }
+    let config = match store.load() {
+        Ok(config) => config,
+        Err(error) => return internal(&error.to_string()),
+    };
+    let mut saved = ui_settings(&config);
+    saved.revision = Some(revision.as_str().to_owned());
+    Json(saved).into_response()
+}
+
+/// Apply the Settings screen's values to `config`.
+fn apply_ui_settings(
+    config: &mut lightagent_core::Config,
+    store: &ConfigStore,
+    settings: UiSettings,
+) -> Result<(), String> {
+    config.agent.max_turns = settings.max_turns;
+    config.agent.max_tool_calls = settings.max_tool_calls;
+    config.agent.wall_clock_secs = settings.wall_clock_secs;
     config.security.approval_policy = settings.approval_policy;
+    // The web mode applies only as a change: every save carries the mode it
+    // read, and an unrelated one must not reset what a mode implies
+    // (realtime knowledge, the search key).
+    let web_before = lightagent_core::WebMode::of(config);
     config.web.enabled = settings.web_enabled;
+    if let Some(mode) = settings.web_mode {
+        let endpoint = settings
+            .web_search_endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty());
+        let moved = mode == lightagent_core::WebMode::Custom
+            && endpoint != config.web.search.endpoint.as_deref();
+        if mode != web_before || moved {
+            mode.apply(config, endpoint);
+        }
+    }
     config.tools.enabled = settings.filesystem_tools_enabled;
     config.tools.allow_terminal = settings.terminal_enabled;
     config.memory.auto_capture = settings.memory_enabled;
@@ -1062,9 +1603,7 @@ async fn save_settings(
     if let Some(profiles) = settings.jev.routing_allowed_profiles {
         config.platform.jev.routing_allowed_profiles = profiles;
     }
-    if let Err(error) = apply_jev_api_key(&mut config, store, settings.jev.api_key) {
-        return internal(&error);
-    }
+    apply_jev_api_key(config, store, settings.jev.api_key)?;
     apply_platform_endpoint(
         &mut config.platform.qdrant.endpoint,
         &settings.qdrant.endpoint,
@@ -1098,21 +1637,1884 @@ async fn save_settings(
     if let Some(value) = settings.open_terminal.max_output_bytes {
         config.platform.open_terminal.max_output_bytes = value;
     }
-    if let Err(error) = config.validate() {
-        return bad_request(&error.to_string());
+    Ok(())
+}
+
+/// A key write, as `lightagent config set <key> <value>` takes it.
+#[derive(Deserialize)]
+struct ConfigWrite {
+    value: String,
+    /// When set, refused with 409 unless the config is still at it.
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// `lightagent config path` and `show`: where the config lives, its
+/// revision, and its content with secrets redacted.
+/// The active endpoint's provider API key as status only: whether one is
+/// configured and usable, and where it comes from, never the key itself or
+/// the file that holds it.
+fn credential_view(
+    config: &lightagent_core::Config,
+    revision: &ConfigRevision,
+) -> serde_json::Value {
+    let source = config
+        .inference
+        .api_key
+        .as_ref()
+        .map(|secret| match secret {
+            SecretRef::Env { .. } => "env",
+            SecretRef::File { .. } => "file",
+        });
+    json!({
+        "provider_key_id": lightagent_core::provider_keys::active_key_id(config),
+        "base_url": config.inference.base_url,
+        "state": lightagent_core::secret_state(config.inference.api_key.as_ref()),
+        "source": source,
+        "revision": revision.as_str(),
+    })
+}
+
+/// How long an endpoint check may take, in seconds.
+#[derive(Deserialize)]
+struct CheckBody {
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+/// An explicit check of the active provider endpoint (`lightagent models`):
+/// it sends the configured key to that endpoint only, follows no redirect,
+/// and ends within `timeout_secs` (1-30, default 10).
+async fn post_provider_check(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<CheckBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
     }
-    if let Some((profiles, mut profile)) = profile {
-        profile.approval_policy = settings.approval_policy;
-        profile.limits.max_turns = settings.max_turns;
-        profile.limits.max_tool_calls = settings.max_tool_calls;
-        profile.limits.wall_clock_secs = settings.wall_clock_secs;
-        if let Err(error) = profiles.save(&profile) {
-            return internal(&error.to_string());
+    let seconds = body.timeout_secs.unwrap_or(10).clamp(1, 30);
+    match state
+        .manager
+        .check_provider(std::time::Duration::from_secs(seconds))
+        .await
+    {
+        Ok(check) => Json(check).into_response(),
+        Err(error) => unavailable(&error),
+    }
+}
+
+/// A provider key typed into Settings. Write-only: no `Debug`, and never
+/// returned or logged.
+#[derive(Deserialize)]
+struct CredentialBody {
+    key: String,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+async fn get_provider_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => Json(credential_view(&config, &revision)).into_response(),
+        Err(error) => config_error(error),
+    }
+}
+
+/// Save or replace the active endpoint's key in the shared secrets store
+/// and point the config at it, as `lightagent setup provider` does. With
+/// `expected_revision`, a stale save gets 409 and writes nothing.
+async fn put_provider_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<CredentialBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (Some(store), Some(root)) = (&state.config_store, home(&state)) else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    if let Err(message) = lightagent_core::provider_keys::validate_key(&body.key) {
+        return bad_request(message);
+    }
+    let paths = LightagentPaths::rooted_at(root);
+    let expected = body.expected_revision.as_deref().map(ConfigRevision::parse);
+    // The key is written inside the config lock, after the revision check, so
+    // a refused save changes nothing.
+    let saved = store.update(expected.as_ref(), |config| {
+        let provider_id = lightagent_core::provider_keys::active_key_id(config);
+        let secret = lightagent_core::provider_keys::store_key(&paths, &provider_id, &body.key)?;
+        lightagent_core::provider_keys::use_key(config, Some(secret));
+        Ok::<(), String>(())
+    });
+    match saved {
+        Ok(((), revision)) => match store.load() {
+            Ok(config) => Json(credential_view(&config, &revision)).into_response(),
+            Err(error) => config_error(error),
+        },
+        Err(UpdateError::Change(message)) => internal(&message),
+        Err(UpdateError::Store(error)) => config_error(error),
+    }
+}
+
+/// Remove the active endpoint's key: the config stops referring to it, and
+/// the stored file is deleted when it is the shared store's own.
+async fn delete_provider_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (Some(store), Some(root)) = (&state.config_store, home(&state)) else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let paths = LightagentPaths::rooted_at(root);
+    let removed = store.update(None, |config| {
+        let provider_id = lightagent_core::provider_keys::active_key_id(config);
+        let ours = lightagent_core::provider_keys::stored_reference(&paths, &provider_id);
+        let previous = config.inference.api_key.clone();
+        lightagent_core::provider_keys::use_key(config, None);
+        Ok::<_, std::convert::Infallible>((previous == Some(ours)).then_some(provider_id))
+    });
+    match removed {
+        Ok((stored, revision)) => {
+            if let Some(provider_id) = stored
+                && let Err(message) =
+                    lightagent_core::provider_keys::remove_key(&paths, &provider_id)
+            {
+                return internal(&message);
+            }
+            match store.load() {
+                Ok(config) => Json(credential_view(&config, &revision)).into_response(),
+                Err(error) => config_error(error),
+            }
         }
+        Err(error) => config_error(error.into_store()),
     }
-    match store.save(&config) {
-        Ok(()) => Json(ui_settings(&config)).into_response(),
+}
+
+/// A new saved provider, as `lightagent setup provider` creates one.
+#[derive(Deserialize)]
+struct NewProvider {
+    name: String,
+    base_url: String,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// An edit of a saved provider; an absent field stays as it is.
+#[derive(Deserialize)]
+struct ProviderEditBody {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    /// Keep the key when the endpoint changes; otherwise it is released.
+    #[serde(default)]
+    keep_key: bool,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// The provider to make active, and its model (`null`: automatic).
+#[derive(Deserialize)]
+struct SelectProvider {
+    id: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// The model to use on the active endpoint (`null`: automatic).
+#[derive(Deserialize)]
+struct SelectModel {
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RevisionQuery {
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// Every provider the picker offers, the active one and its model, the
+/// revision a change must name, and when a change applies. Never a key.
+fn providers_view(
+    config: &lightagent_core::Config,
+    revision: &ConfigRevision,
+) -> serde_json::Value {
+    let providers = saved_providers::list(config);
+    let active = providers
+        .iter()
+        .find(|provider| provider.active)
+        .map(|provider| provider.id.clone());
+    json!({
+        "providers": providers,
+        "active": active,
+        "model": config.inference.model,
+        "revision": revision.as_str(),
+        "effect": saved_providers::EFFECT,
+    })
+}
+
+/// A refused provider change: invalid input (400), no such provider (404),
+/// a name or endpoint another saved provider has (409, reason
+/// `duplicate`), or a key file that could not be moved (500).
+fn provider_error(error: saved_providers::ProviderError) -> Response {
+    use saved_providers::ProviderError;
+    match &error {
+        ProviderError::Invalid(message) => bad_request(message),
+        ProviderError::NotFound(_) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+        ProviderError::Duplicate(message) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": message, "reason": "duplicate" })),
+        )
+            .into_response(),
+        ProviderError::Store(message) => internal(message),
+    }
+}
+
+/// Apply a provider change in one config update, finish what waits for the
+/// save (a released key file, the active profile), and answer with the
+/// providers at the new revision. A stale `expected_revision` gets 409 and
+/// changes nothing.
+fn change_providers(
+    state: &AppState,
+    expected: Option<&str>,
+    status: StatusCode,
+    change: impl FnOnce(
+        &mut lightagent_core::Config,
+        &LightagentPaths,
+    ) -> Result<saved_providers::Outcome, saved_providers::ProviderError>,
+) -> Response {
+    let (Some(store), Some(root)) = (&state.config_store, home(state)) else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let paths = LightagentPaths::rooted_at(root);
+    let expected = expected.map(ConfigRevision::parse);
+    match store.update(expected.as_ref(), |config| change(config, &paths)) {
+        Ok((outcome, revision)) => {
+            if let Err(message) = saved_providers::finish(&paths, &outcome) {
+                return internal(&message);
+            }
+            match store.load() {
+                Ok(config) => (status, Json(providers_view(&config, &revision))).into_response(),
+                Err(error) => config_error(error),
+            }
+        }
+        Err(UpdateError::Change(error)) => provider_error(error),
+        Err(UpdateError::Store(error)) => config_error(error),
+    }
+}
+
+/// The providers `lightagent setup provider` offers.
+async fn list_providers(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => Json(providers_view(&config, &revision)).into_response(),
+        Err(error) => config_error(error),
+    }
+}
+
+async fn show_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => match saved_providers::get(&config, &id) {
+            Ok(provider) => Json(json!({
+                "provider": provider,
+                "revision": revision.as_str(),
+                "effect": saved_providers::EFFECT,
+            }))
+            .into_response(),
+            Err(error) => provider_error(error),
+        },
+        Err(error) => config_error(error),
+    }
+}
+
+async fn create_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<NewProvider>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    change_providers(
+        &state,
+        body.expected_revision.as_deref(),
+        StatusCode::CREATED,
+        |config, _| {
+            saved_providers::create(config, &body.name, &body.base_url)
+                .map(|_| saved_providers::Outcome::default())
+        },
+    )
+}
+
+async fn update_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<ProviderEditBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let edit = saved_providers::ProviderEdit {
+        name: body.name,
+        base_url: body.base_url,
+        keep_key: body.keep_key,
+    };
+    change_providers(
+        &state,
+        body.expected_revision.as_deref(),
+        StatusCode::OK,
+        |config, paths| {
+            saved_providers::update(config, paths, &id, &edit).map(|(_, outcome)| outcome)
+        },
+    )
+}
+
+async fn remove_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<RevisionQuery>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    change_providers(
+        &state,
+        query.expected_revision.as_deref(),
+        StatusCode::OK,
+        |config, paths| saved_providers::remove(config, paths, &id),
+    )
+}
+
+async fn select_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<SelectProvider>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    change_providers(
+        &state,
+        body.expected_revision.as_deref(),
+        StatusCode::OK,
+        |config, _| {
+            saved_providers::select(config, &body.id, body.model.as_deref())
+                .map(|(_, outcome)| outcome)
+        },
+    )
+}
+
+async fn select_provider_model(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<SelectModel>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    change_providers(
+        &state,
+        body.expected_revision.as_deref(),
+        StatusCode::OK,
+        |config, _| saved_providers::select_model(config, body.model.as_deref()),
+    )
+}
+
+/// An explicit check of one provider's endpoint, with that endpoint's own
+/// key only, ending within `timeout_secs` (1-30, default 10).
+async fn check_saved_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<CheckBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let base_url = match store.load() {
+        Ok(config) => match saved_providers::get(&config, &id) {
+            Ok(provider) => provider.base_url,
+            Err(error) => return provider_error(error),
+        },
+        Err(error) => return config_error(error),
+    };
+    let seconds = body.timeout_secs.unwrap_or(10).clamp(1, 30);
+    match state
+        .manager
+        .check_endpoint(base_url, std::time::Duration::from_secs(seconds))
+        .await
+    {
+        Ok(check) => Json(check).into_response(),
+        Err(error) => unavailable(&error),
+    }
+}
+
+/// A workspace choice: an absolute folder, or `null` for the active
+/// profile's own `workspace/`.
+#[derive(Deserialize)]
+struct WorkspaceBody {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// The workspace for the next run of the active profile, the revision a
+/// change must name, and when a change applies.
+fn workspace_view(
+    config: &lightagent_core::Config,
+    revision: &ConfigRevision,
+    root: &std::path::Path,
+) -> serde_json::Value {
+    json!({
+        "workspace": lightagent_core::workspaces::view(config, &LightagentPaths::rooted_at(root)),
+        "revision": revision.as_str(),
+        "effect": lightagent_core::workspaces::EFFECT,
+    })
+}
+
+/// The workspace folder `lightagent setup tools` sets.
+async fn get_workspace(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (Some(store), Some(root)) = (&state.config_store, home(&state)) else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => Json(workspace_view(&config, &revision, &root)).into_response(),
+        Err(error) => config_error(error),
+    }
+}
+
+/// Set or clear the workspace folder as setup does, on the revision the
+/// caller read: a stale one gets 409 and writes nothing; a folder that is
+/// not absolute, is a file or has no parent folder gets 400.
+async fn put_workspace(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<WorkspaceBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (Some(store), Some(root)) = (&state.config_store, home(&state)) else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let expected = body.expected_revision.as_deref().map(ConfigRevision::parse);
+    match store.update(expected.as_ref(), |config| {
+        lightagent_core::workspaces::set(config, body.path.as_deref())
+    }) {
+        Ok(((), revision)) => match store.load() {
+            Ok(config) => Json(workspace_view(&config, &revision, &root)).into_response(),
+            Err(error) => config_error(error),
+        },
+        Err(UpdateError::Change(message)) => bad_request(&message),
+        Err(UpdateError::Store(error)) => config_error(error),
+    }
+}
+
+/// The `mcp` section with every value withheld, the revision a change must
+/// name, and when a change applies.
+fn mcp_view(config: &lightagent_core::Config, revision: &ConfigRevision) -> serde_json::Value {
+    json!({
+        "mcp": lightagent_core::mcp_servers::view(config),
+        "revision": revision.as_str(),
+        "effect": lightagent_core::mcp_servers::EFFECT,
+    })
+}
+
+/// A change the shared MCP operations refused, by kind.
+fn mcp_refusal(error: lightagent_core::mcp_servers::McpConfigError) -> Response {
+    use lightagent_core::mcp_servers::McpConfigError;
+    let status = match &error {
+        McpConfigError::NotFound(_) => StatusCode::NOT_FOUND,
+        McpConfigError::Invalid(_) => StatusCode::BAD_REQUEST,
+        McpConfigError::Conflict(_) => StatusCode::CONFLICT,
+    };
+    (status, Json(json!({ "error": error.to_string() }))).into_response()
+}
+
+/// One MCP change, on the revision the caller read when it names one: a
+/// stale revision gets 409 and writes nothing, and so does a refused change.
+fn mcp_change(
+    state: &AppState,
+    expected: Option<&str>,
+    created: bool,
+    change: impl FnOnce(
+        &mut lightagent_core::Config,
+    ) -> Result<(), lightagent_core::mcp_servers::McpConfigError>,
+) -> Response {
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let expected = expected.map(ConfigRevision::parse);
+    match store.update(expected.as_ref(), change) {
+        Ok(((), revision)) => match store.load() {
+            Ok(config) => {
+                let status = if created {
+                    StatusCode::CREATED
+                } else {
+                    StatusCode::OK
+                };
+                (status, Json(mcp_view(&config, &revision))).into_response()
+            }
+            Err(error) => config_error(error),
+        },
+        Err(UpdateError::Change(error)) => mcp_refusal(error),
+        Err(UpdateError::Store(error)) => config_error(error),
+    }
+}
+
+/// The MCP servers, switch and timeout, every value withheld.
+async fn get_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => Json(mcp_view(&config, &revision)).into_response(),
+        Err(error) => config_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct McpSettingsBody {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// Switch MCP on or off and set its timeout.
+async fn put_mcp(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<McpSettingsBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (enabled, timeout_secs) = (body.enabled, body.timeout_secs);
+    mcp_change(&state, body.expected_revision.as_deref(), false, |config| {
+        lightagent_core::mcp_servers::set(config, enabled, timeout_secs)
+    })
+}
+
+#[derive(Deserialize)]
+struct McpServerBody {
+    server: lightagent_core::mcp_servers::ServerInput,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+/// Add a configured MCP server.
+async fn add_mcp_server(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<McpServerBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let McpServerBody {
+        server,
+        expected_revision,
+    } = body;
+    mcp_change(&state, expected_revision.as_deref(), true, move |config| {
+        lightagent_core::mcp_servers::add(config, server)
+    })
+}
+
+/// Edit a configured MCP server; a withheld value left `null` is kept.
+async fn update_mcp_server(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(body): Json<McpServerBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let McpServerBody {
+        server,
+        expected_revision,
+    } = body;
+    mcp_change(&state, expected_revision.as_deref(), false, move |config| {
+        lightagent_core::mcp_servers::update(config, &name, server)
+    })
+}
+
+/// Remove a configured MCP server.
+async fn remove_mcp_server(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    mcp_change(&state, None, false, |config| {
+        lightagent_core::mcp_servers::remove(config, &name)
+    })
+}
+
+/// Check one MCP server on request: it is connected exactly as an operator
+/// run connects it (a stdio server's command is started), its tools are
+/// listed, and it is disconnected. No setting changes.
+async fn check_mcp_server(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    match state.manager.check_mcp(name.clone()).await {
+        Ok(Some(check)) => Json(check).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": format!("no MCP server named {name:?} is configured or declared by an active extension")
+            })),
+        )
+            .into_response(),
+        Err(error) => internal(&error),
+    }
+}
+
+/// A knowledge (RAG) operation through the embedder (`lightagent rag …`),
+/// on the active profile's index. Operator only.
+async fn rag_operation(
+    state: &AppState,
+    headers: &HeaderMap,
+    request: ops::RagRequest,
+) -> Response {
+    if let Some(rejection) = deny(state, headers, Scope::Admin) {
+        return rejection;
+    }
+    match state.manager.rag(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn list_knowledge(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    rag_operation(&state, &headers, ops::RagRequest::List).await
+}
+
+#[derive(Deserialize)]
+struct AddKnowledgeBody {
+    path: String,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// Index a file, or every file in a folder. The server's working folder
+/// means nothing to a client, so the path must be absolute.
+async fn add_knowledge(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<AddKnowledgeBody>,
+) -> Response {
+    if !std::path::Path::new(&body.path).is_absolute() {
+        if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+            return rejection;
+        }
+        return bad_request("the path must be an absolute file or folder path");
+    }
+    let request = ops::RagRequest::Add {
+        path: body.path,
+        source: body.source,
+    };
+    rag_operation(&state, &headers, request).await
+}
+
+async fn clear_knowledge(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    rag_operation(&state, &headers, ops::RagRequest::Clear).await
+}
+
+#[derive(Deserialize)]
+struct KnowledgeSearchQuery {
+    q: String,
+    #[serde(default)]
+    top_k: Option<usize>,
+}
+
+async fn search_knowledge(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<KnowledgeSearchQuery>,
+) -> Response {
+    let request = ops::RagRequest::Search {
+        query: query.q,
+        top_k: query.top_k,
+    };
+    rag_operation(&state, &headers, request).await
+}
+
+/// A memory operation through the embedder (`lightagent memory …`, see
+/// [`ops::MemoryRequest`]), on the active profile's memories. Operator only.
+async fn memory_operation(
+    state: &AppState,
+    headers: &HeaderMap,
+    request: ops::MemoryRequest,
+) -> Response {
+    if let Some(rejection) = deny(state, headers, Scope::Admin) {
+        return rejection;
+    }
+    match state.manager.memory(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn list_memories(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    memory_operation(&state, &headers, ops::MemoryRequest::List).await
+}
+
+#[derive(Deserialize)]
+struct AddMemoryBody {
+    text: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+async fn add_memory(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<AddMemoryBody>,
+) -> Response {
+    let request = ops::MemoryRequest::Add {
+        text: body.text,
+        kind: body.kind,
+        tags: body.tags,
+    };
+    memory_operation(&state, &headers, request).await
+}
+
+async fn clear_memories(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    memory_operation(&state, &headers, ops::MemoryRequest::Clear).await
+}
+
+#[derive(Deserialize)]
+struct UpdateMemoryBody {
+    text: String,
+}
+
+async fn update_memory(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateMemoryBody>,
+) -> Response {
+    let request = ops::MemoryRequest::Update {
+        id,
+        text: body.text,
+    };
+    memory_operation(&state, &headers, request).await
+}
+
+async fn forget_memory(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    memory_operation(&state, &headers, ops::MemoryRequest::Forget(id)).await
+}
+
+#[derive(Deserialize)]
+struct MemorySearchQuery {
+    q: String,
+    #[serde(default)]
+    top_k: Option<usize>,
+}
+
+async fn search_memories(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<MemorySearchQuery>,
+) -> Response {
+    let request = ops::MemoryRequest::Search {
+        query: query.q,
+        top_k: query.top_k,
+    };
+    memory_operation(&state, &headers, request).await
+}
+
+#[derive(Deserialize)]
+struct ReflectQuery {
+    #[serde(default)]
+    topic: Option<String>,
+}
+
+async fn reflect_memories(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ReflectQuery>,
+) -> Response {
+    memory_operation(&state, &headers, ops::MemoryRequest::Reflect(query.topic)).await
+}
+
+#[derive(Deserialize)]
+struct CandidatesQuery {
+    session: String,
+}
+
+async fn memory_candidates(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<CandidatesQuery>,
+) -> Response {
+    memory_operation(
+        &state,
+        &headers,
+        ops::MemoryRequest::Candidates(query.session),
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+struct PromoteMemoryBody {
+    session: String,
+    message: usize,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+async fn promote_memory(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<PromoteMemoryBody>,
+) -> Response {
+    let request = ops::MemoryRequest::Promote {
+        session: body.session,
+        message: body.message,
+        text: body.text,
+        kind: body.kind,
+        tags: body.tags,
+    };
+    memory_operation(&state, &headers, request).await
+}
+
+/// Identity administration belongs to the local operator (decision C4):
+/// the desktop host's own runtime, or a server on an open loopback bind. A
+/// keyed server may be reached from elsewhere, and multi-user mode serves
+/// users, so both refuse whatever the caller holds.
+fn local_operator(state: &AppState, headers: &HeaderMap, admitted: bool) -> Option<Response> {
+    if let Some(rejection) = deny(state, headers, Scope::Admin) {
+        return Some(rejection);
+    }
+    let local = state.auth.identity().is_none() && (admitted || !state.auth.requires_key());
+    (!local).then(|| {
+        ops::OpError::new(
+            ops::OpCategory::Denied,
+            "identity is managed only by the local operator: use `lightagent identity`, or the desktop app",
+        )
+        .into_response()
+    })
+}
+
+/// Present when the desktop guard admitted the request.
+type FromDesktop = Option<axum::Extension<desktop::Admitted>>;
+
+/// A `lightagent identity …` command through the embedder (see
+/// [`ops::IdentityRequest`]), for the local operator only. No answer
+/// carries a credential's secret.
+async fn identity_operation(
+    state: &AppState,
+    headers: &HeaderMap,
+    admitted: FromDesktop,
+    request: ops::IdentityRequest,
+) -> Response {
+    if let Some(rejection) = local_operator(state, headers, admitted.is_some()) {
+        return rejection;
+    }
+    match state.manager.identity(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn identity_status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+) -> Response {
+    identity_operation(&state, &headers, admitted, ops::IdentityRequest::Status).await
+}
+
+async fn list_identity_users(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+) -> Response {
+    identity_operation(&state, &headers, admitted, ops::IdentityRequest::UserList).await
+}
+
+#[derive(Deserialize)]
+struct IdentityUserBody {
+    id: String,
+}
+
+async fn create_identity_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Json(body): Json<IdentityUserBody>,
+) -> Response {
+    let request = ops::IdentityRequest::UserCreate(body.id);
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+async fn suspend_identity_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(id): Path<String>,
+) -> Response {
+    let request = ops::IdentityRequest::UserSuspend(id);
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct PrincipalQuery {
+    #[serde(default)]
+    principal: Option<String>,
+}
+
+async fn list_identity_credentials(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Query(query): Query<PrincipalQuery>,
+) -> Response {
+    let request = ops::IdentityRequest::CredentialList {
+        principal: query.principal,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct IssueCredentialBody {
+    principal: String,
+    #[serde(default)]
+    expires_in: Option<u64>,
+    #[serde(default)]
+    capabilities: Vec<String>,
+    #[serde(default)]
+    profiles: Vec<String>,
+    #[serde(default)]
+    secret_file: Option<String>,
+}
+
+async fn issue_identity_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Json(body): Json<IssueCredentialBody>,
+) -> Response {
+    let request = ops::IdentityRequest::CredentialIssue {
+        principal: body.principal,
+        expires_in: body.expires_in,
+        capabilities: body.capabilities,
+        profiles: body.profiles,
+        secret_file: body.secret_file,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct RotateCredentialBody {
+    #[serde(default)]
+    expires_in: Option<u64>,
+    #[serde(default)]
+    secret_file: Option<String>,
+}
+
+async fn rotate_identity_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(key_id): Path<String>,
+    Json(body): Json<RotateCredentialBody>,
+) -> Response {
+    let request = ops::IdentityRequest::CredentialRotate {
+        key_id,
+        expires_in: body.expires_in,
+        secret_file: body.secret_file,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+async fn revoke_identity_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(key_id): Path<String>,
+) -> Response {
+    let request = ops::IdentityRequest::CredentialRevoke(key_id);
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct OwnerBody {
+    principal: String,
+}
+
+async fn assign_identity_owner(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(profile): Path<String>,
+    Json(body): Json<OwnerBody>,
+) -> Response {
+    let request = ops::IdentityRequest::OwnerAssign {
+        profile,
+        principal: body.principal,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+async fn reassign_identity_owner(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(profile): Path<String>,
+    Json(body): Json<OwnerBody>,
+) -> Response {
+    let request = ops::IdentityRequest::OwnerReassign {
+        profile,
+        principal: body.principal,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+async fn remove_identity_owner(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(profile): Path<String>,
+) -> Response {
+    let request = ops::IdentityRequest::OwnerRemove(profile);
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+async fn list_identity_grants(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Query(query): Query<ProfileQuery>,
+) -> Response {
+    let request = ops::IdentityRequest::GrantsList {
+        profile: query.profile,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct RevokeGrantBody {
+    profile: String,
+    principal: String,
+    capability: String,
+}
+
+async fn revoke_identity_grant(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Json(body): Json<RevokeGrantBody>,
+) -> Response {
+    let request = ops::IdentityRequest::GrantsRevoke {
+        profile: body.profile,
+        principal: body.principal,
+        capability: body.capability,
+    };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct AuditQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn identity_audit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Query(query): Query<AuditQuery>,
+) -> Response {
+    let request = ops::IdentityRequest::Audit { limit: query.limit };
+    identity_operation(&state, &headers, admitted, request).await
+}
+
+/// A `lightagent remote-credential …` command through the embedder (see
+/// [`ops::RemoteCredentialRequest`]), for the local operator only. No
+/// request or answer carries a secret.
+async fn remote_credential_operation(
+    state: &AppState,
+    headers: &HeaderMap,
+    admitted: FromDesktop,
+    request: ops::RemoteCredentialRequest,
+) -> Response {
+    if let Some(rejection) = local_operator(state, headers, admitted.is_some()) {
+        return rejection;
+    }
+    // A secret in the request itself is the desktop host's channel: it read
+    // the secret from a file the person chose natively, and the window
+    // cannot send one (the host refuses the field from it).
+    if request.carries_secret() && admitted.is_none() {
+        return bad_request(
+            "a secret in the request is accepted only from the desktop host; name a secret file instead",
+        );
+    }
+    match state.manager.remote_credentials(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn remote_credential_vault(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+) -> Response {
+    let request = ops::RemoteCredentialRequest::Status;
+    remote_credential_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct KeyFileBody {
+    path: String,
+}
+
+async fn create_credential_key(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Json(body): Json<KeyFileBody>,
+) -> Response {
+    let request = ops::RemoteCredentialRequest::Keygen { path: body.path };
+    remote_credential_operation(&state, &headers, admitted, request).await
+}
+
+async fn list_remote_credentials(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Query(query): Query<ProfileQuery>,
+) -> Response {
+    let request = ops::RemoteCredentialRequest::List {
+        profile: query.profile,
+    };
+    remote_credential_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct AddRemoteCredentialBody {
+    profile: String,
+    service: String,
+    #[serde(default)]
+    destinations: Vec<String>,
+    #[serde(default)]
+    operations: Vec<String>,
+    #[serde(default)]
+    expires_in: Option<u64>,
+    #[serde(default)]
+    max_requests_per_run: Option<u32>,
+    #[serde(default)]
+    secret_file: Option<String>,
+    /// From the desktop host only (see `remote_credential_operation`).
+    #[serde(default)]
+    secret: Option<String>,
+}
+
+async fn add_remote_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Json(body): Json<AddRemoteCredentialBody>,
+) -> Response {
+    let request = ops::RemoteCredentialRequest::Add {
+        profile: body.profile,
+        service: body.service,
+        destinations: body.destinations,
+        operations: body.operations,
+        expires_in: body.expires_in,
+        max_requests_per_run: body.max_requests_per_run,
+        secret_file: body.secret_file,
+        secret: body.secret.map(ops::InlineSecret::new),
+    };
+    remote_credential_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct SecretFileBody {
+    #[serde(default)]
+    secret_file: Option<String>,
+    /// From the desktop host only (see `remote_credential_operation`).
+    #[serde(default)]
+    secret: Option<String>,
+}
+
+async fn rotate_remote_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(id): Path<String>,
+    Json(body): Json<SecretFileBody>,
+) -> Response {
+    let request = ops::RemoteCredentialRequest::Rotate {
+        id,
+        secret_file: body.secret_file,
+        secret: body.secret.map(ops::InlineSecret::new),
+    };
+    remote_credential_operation(&state, &headers, admitted, request).await
+}
+
+async fn revoke_remote_credential(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Path(id): Path<String>,
+) -> Response {
+    let request = ops::RemoteCredentialRequest::Revoke(id);
+    remote_credential_operation(&state, &headers, admitted, request).await
+}
+
+async fn remote_credential_audit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Query(query): Query<AuditQuery>,
+) -> Response {
+    let request = ops::RemoteCredentialRequest::Audit { limit: query.limit };
+    remote_credential_operation(&state, &headers, admitted, request).await
+}
+
+#[derive(Deserialize)]
+struct RekeyBody {
+    previous_key_file: String,
+}
+
+async fn rekey_remote_credentials(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+    Json(body): Json<RekeyBody>,
+) -> Response {
+    let request = ops::RemoteCredentialRequest::Rekey {
+        previous_key_file: body.previous_key_file,
+    };
+    remote_credential_operation(&state, &headers, admitted, request).await
+}
+
+/// A diagnostics report through the embedder (see
+/// [`ops::DiagnosticsRequest`]), for the local operator only.
+async fn diagnostics_operation(
+    state: &AppState,
+    headers: &HeaderMap,
+    admitted: FromDesktop,
+    request: ops::DiagnosticsRequest,
+) -> Response {
+    if let Some(rejection) = local_operator(state, headers, admitted.is_some()) {
+        return rejection;
+    }
+    match state.manager.diagnostics(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn diagnostics_doctor(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+) -> Response {
+    diagnostics_operation(&state, &headers, admitted, ops::DiagnosticsRequest::Doctor).await
+}
+
+async fn diagnostics_architecture(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+) -> Response {
+    let request = ops::DiagnosticsRequest::Architecture;
+    diagnostics_operation(&state, &headers, admitted, request).await
+}
+
+/// The diagnostics bundle: allowlisted fields only, returned, never sent.
+async fn diagnostics_bundle(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    admitted: FromDesktop,
+) -> Response {
+    diagnostics_operation(&state, &headers, admitted, ops::DiagnosticsRequest::Bundle).await
+}
+
+/// A setup command through the embedder (see [`ops::SetupRequest`]).
+/// Operator only: it changes the configuration and the profile store.
+async fn setup_operation(
+    state: &AppState,
+    headers: &HeaderMap,
+    request: ops::SetupRequest,
+) -> Response {
+    if let Some(rejection) = deny(state, headers, Scope::Admin) {
+        return rejection;
+    }
+    match state.manager.setup(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct InitBody {
+    #[serde(default)]
+    force: bool,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// `lightagent init`.
+async fn setup_init(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<InitBody>,
+) -> Response {
+    let request = ops::SetupRequest::Init {
+        force: body.force,
+        profile: body.profile,
+        base_url: body.base_url,
+        model: body.model,
+    };
+    setup_operation(&state, &headers, request).await
+}
+
+#[derive(Deserialize)]
+struct ImportHermesBody {
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default)]
+    force: bool,
+}
+
+/// `lightagent import hermes`.
+async fn import_hermes(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ImportHermesBody>,
+) -> Response {
+    let request = ops::SetupRequest::ImportHermes {
+        from: body.from,
+        dry_run: body.dry_run,
+        force: body.force,
+    };
+    setup_operation(&state, &headers, request).await
+}
+
+/// `lightagent update --check`: read-only, it installs nothing. Operator
+/// only. A failed check answers 503 with its reason.
+async fn update_check(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    match state.manager.update_check().await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+/// An import of skills from a repository or folder (new scope).
+#[derive(Deserialize)]
+struct ImportSkillsBody {
+    source: String,
+    #[serde(default)]
+    revision: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    scope: Option<extension_ops::Scope>,
+    #[serde(default)]
+    replace: bool,
+    #[serde(default)]
+    activate: bool,
+}
+
+/// Import skills (see `lightagent_extensions::skill_import`): installed
+/// inactive unless `activate`, never with a tool permission.
+async fn import_skills(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ImportSkillsBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let paths = match extension_paths(&state) {
+        Ok(paths) => paths,
+        Err(response) => return *response,
+    };
+    let remote = body.source.starts_with("https://") || body.source.starts_with("git+https://");
+    if !remote && !std::path::Path::new(&body.source).is_absolute() {
+        return bad_request("the source must be an absolute folder path or an https:// Git URL");
+    }
+    let options = lightagent_extensions::skill_import::ImportOptions {
+        scope: body.scope.unwrap_or(extension_ops::Scope::Global),
+        name: body.name,
+        revision: body.revision,
+        replace: body.replace,
+        activate: body.activate,
+    };
+    let source = PathBuf::from(body.source);
+    match tokio::task::spawn_blocking(move || {
+        lightagent_extensions::skill_import::import(&paths, &source, options)
+    })
+    .await
+    {
+        Ok(Ok(imported)) => (StatusCode::CREATED, Json(imported)).into_response(),
+        Ok(Err(error)) => extension_error(error),
         Err(error) => internal(&error.to_string()),
+    }
+}
+
+/// Where the extension operations act: this runtime's Lightagent home.
+fn extension_paths(state: &AppState) -> Result<LightagentPaths, Box<Response>> {
+    home(state).map(LightagentPaths::rooted_at).ok_or_else(|| {
+        Box::new(internal(
+            "Lightagent settings are unavailable in this embedding",
+        ))
+    })
+}
+
+fn extension_config(state: &AppState) -> Result<lightagent_core::Config, Box<Response>> {
+    match &state.config_store {
+        Some(store) => store.load().map_err(|error| Box::new(config_error(error))),
+        None => Err(Box::new(internal(
+            "Lightagent settings are unavailable in this embedding",
+        ))),
+    }
+}
+
+/// A refusal from the shared extension operations, by kind.
+fn extension_error(error: extension_ops::ManageError) -> Response {
+    let status = match &error {
+        extension_ops::ManageError::NotFound(_) => StatusCode::NOT_FOUND,
+        extension_ops::ManageError::Invalid(_) => StatusCode::BAD_REQUEST,
+        extension_ops::ManageError::Conflict(_) => StatusCode::CONFLICT,
+        extension_ops::ManageError::Unavailable(_) => StatusCode::BAD_GATEWAY,
+        extension_ops::ManageError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, Json(json!({ "error": error.to_string() }))).into_response()
+}
+
+/// The profile this runtime serves: its directory, where its onboarding
+/// guidance lives.
+fn onboarding_dir(state: &AppState) -> Result<std::path::PathBuf, Box<Response>> {
+    let paths = extension_paths(state)?;
+    let profile = ProfileId::new(&state.session_profile)
+        .map_err(|error| Box::new(internal(&error.to_string())))?;
+    Ok(ProfileStore::new(paths.root())
+        .handle(&profile)
+        .dir()
+        .to_path_buf())
+}
+
+fn onboarding_view(text: Option<String>) -> Response {
+    Json(json!({ "installed": text.is_some(), "text": text })).into_response()
+}
+
+fn onboarding_conflict(error: String) -> Response {
+    (StatusCode::CONFLICT, Json(json!({ "error": error }))).into_response()
+}
+
+/// The chat's `/onboard`: the guidance installed for the profile this
+/// runtime serves, if any.
+async fn get_onboarding(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let dir = match onboarding_dir(&state) {
+        Ok(dir) => dir,
+        Err(response) => return *response,
+    };
+    match onboarding::current(&dir) {
+        Ok(text) => onboarding_view(text),
+        Err(error) => onboarding_conflict(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct OnboardingBody {
+    path: String,
+}
+
+/// `/onboard <file.md>`: install or replace the guidance from a Markdown file
+/// on this machine, and turn it on as the chat does. New runs use it.
+async fn put_onboarding(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<OnboardingBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    // The server's working folder means nothing to a client.
+    let source = std::path::Path::new(body.path.trim());
+    if !source.is_absolute() {
+        return bad_request("the guidance file must be an absolute path");
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let dir = match onboarding_dir(&state) {
+        Ok(dir) => dir,
+        Err(response) => return *response,
+    };
+    if let Err(error) = onboarding::current(&dir) {
+        return onboarding_conflict(error);
+    }
+    if let Err(error) = onboarding::install(source, &dir) {
+        return bad_request(&error);
+    }
+    match store.update(None, |config| {
+        onboarding::enable(config);
+        Ok::<(), String>(())
+    }) {
+        Ok(_) => {}
+        Err(UpdateError::Change(error)) => return internal(&error),
+        Err(UpdateError::Store(error)) => return config_error(error),
+    }
+    match onboarding::current(&dir) {
+        Ok(text) => onboarding_view(text),
+        Err(error) => internal(&error),
+    }
+}
+
+/// `/onboard remove`.
+async fn delete_onboarding(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let dir = match onboarding_dir(&state) {
+        Ok(dir) => dir,
+        Err(response) => return *response,
+    };
+    match onboarding::current(&dir) {
+        Ok(None) => return not_found("no guidance is installed for this profile"),
+        Err(error) => return onboarding_conflict(error),
+        Ok(Some(_)) => {}
+    }
+    match onboarding::remove(&dir) {
+        Ok(()) => onboarding_view(None),
+        Err(error) => internal(&error),
+    }
+}
+
+/// The terminal chat's slash commands, as its `/help` lists them.
+async fn list_commands(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::ToolsRead) {
+        return rejection;
+    }
+    let commands: Vec<serde_json::Value> = lightagent_core::commands::SLASH_COMMANDS
+        .iter()
+        .map(|command| json!({ "name": command.name, "summary": command.summary }))
+        .collect();
+    Json(json!({ "commands": commands })).into_response()
+}
+
+/// `lightagent extensions list`, from the same shared operation.
+async fn list_extensions(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (paths, config) = match (extension_paths(&state), extension_config(&state)) {
+        (Ok(paths), Ok(config)) => (paths, config),
+        (Err(response), _) | (_, Err(response)) => return *response,
+    };
+    match extension_ops::list(&paths, &config) {
+        Ok(listing) => Json(listing).into_response(),
+        Err(error) => extension_error(error),
+    }
+}
+
+/// `lightagent extensions show <name>`: the manifest, what its MCP servers
+/// would run (never an environment or header value) and its source.
+async fn show_extension(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (paths, config) = match (extension_paths(&state), extension_config(&state)) {
+        (Ok(paths), Ok(config)) => (paths, config),
+        (Err(response), _) | (_, Err(response)) => return *response,
+    };
+    match extension_ops::show(&paths, &config, &name) {
+        Ok(detail) => Json(detail).into_response(),
+        Err(error) => extension_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct ExtensionEnabledBody {
+    enabled: bool,
+}
+
+/// `lightagent extensions enable|disable <name>`.
+async fn set_extension_enabled(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(body): Json<ExtensionEnabledBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let paths = match extension_paths(&state) {
+        Ok(paths) => paths,
+        Err(response) => return *response,
+    };
+    match extension_ops::set_enabled(&paths, &name, body.enabled) {
+        Ok(toggled) => Json(toggled).into_response(),
+        Err(error) => extension_error(error),
+    }
+}
+
+/// An install: an absolute folder or an https:// Git URL (`#subdir` picks a
+/// folder in it), where to install it, and whether MCP may be switched on
+/// for the extension's servers. It never is unless asked.
+#[derive(Deserialize)]
+struct InstallExtensionBody {
+    source: String,
+    #[serde(default)]
+    scope: Option<extension_ops::Scope>,
+    #[serde(default)]
+    activate_mcp: bool,
+}
+
+/// `lightagent extensions install`, from the same shared operation.
+async fn install_extension(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<InstallExtensionBody>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let paths = match extension_paths(&state) {
+        Ok(paths) => paths,
+        Err(response) => return *response,
+    };
+    // The server's working folder means nothing to a client, so a relative
+    // path is refused rather than resolved against it.
+    let remote = body.source.starts_with("https://") || body.source.starts_with("git+https://");
+    if !remote && !std::path::Path::new(&body.source).is_absolute() {
+        return bad_request("the source must be an absolute folder path or an https:// Git URL");
+    }
+    let options = extension_ops::InstallOptions {
+        scope: body.scope.unwrap_or(extension_ops::Scope::Global),
+        activate_mcp: body.activate_mcp,
+    };
+    let source = PathBuf::from(body.source);
+    match tokio::task::spawn_blocking(move || extension_ops::install(&paths, &source, options))
+        .await
+    {
+        Ok(Ok(installed)) => (StatusCode::CREATED, Json(installed)).into_response(),
+        Ok(Err(error)) => extension_error(error),
+        Err(error) => internal(&error.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct ExtensionScopeQuery {
+    #[serde(default)]
+    scope: Option<extension_ops::Scope>,
+}
+
+/// `lightagent extensions uninstall <name>` (`?scope=profile` for the active
+/// profile's own root).
+async fn uninstall_extension(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Query(query): Query<ExtensionScopeQuery>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let paths = match extension_paths(&state) {
+        Ok(paths) => paths,
+        Err(response) => return *response,
+    };
+    let scope = query.scope.unwrap_or(extension_ops::Scope::Global);
+    match tokio::task::spawn_blocking(move || extension_ops::uninstall(&paths, &name, scope)).await
+    {
+        Ok(Ok(removed)) => Json(removed).into_response(),
+        Ok(Err(error)) => extension_error(error),
+        Err(error) => internal(&error.to_string()),
+    }
+}
+
+/// `lightagent config jev-routing-report`: the same dry run, from the same
+/// shared operation. It reads the config and the profile list and changes
+/// nothing.
+async fn get_jev_routing_report(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let (Some(store), Some(root)) = (&state.config_store, home(&state)) else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let config = match store.load() {
+        Ok(config) => config,
+        Err(error) => return config_error(error),
+    };
+    match ProfileStore::new(&root).list() {
+        Ok(profiles) => Json(lightagent_core::config_keys::jev_routing_report(
+            &config, &profiles,
+        ))
+        .into_response(),
+        Err(error) => internal(&error.to_string()),
+    }
+}
+
+async fn get_config(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => Json(json!({
+            "path": store.path().display().to_string(),
+            "revision": revision.as_str(),
+            "config": config.redacted_json(),
+        }))
+        .into_response(),
+        Err(error) => config_error(error),
+    }
+}
+
+/// `lightagent config get <key>`: the same keys, the same redaction.
+async fn get_config_key(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    match store.load_with_revision() {
+        Ok((config, revision)) => match lightagent_core::config_keys::get_key(&config, &key) {
+            Some(value) => {
+                Json(json!({ "key": key, "value": value, "revision": revision.as_str() }))
+                    .into_response()
+            }
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("unknown or unreadable config key '{key}'") })),
+            )
+                .into_response(),
+        },
+        Err(error) => config_error(error),
+    }
+}
+
+/// `lightagent config set <key> <value>`, the same locked write. With
+/// `expected_revision`, only when nothing changed since it was read.
+async fn set_config_key(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+    Json(body): Json<ConfigWrite>,
+) -> Response {
+    if let Some(rejection) = deny(&state, &headers, Scope::Admin) {
+        return rejection;
+    }
+    let Some(store) = &state.config_store else {
+        return internal("Lightagent settings are unavailable in this embedding");
+    };
+    let expected = body.expected_revision.as_deref().map(ConfigRevision::parse);
+    let written = store.update(expected.as_ref(), |config| {
+        lightagent_core::config_keys::set_key(config, &key, &body.value)?;
+        Ok::<_, String>(lightagent_core::config_keys::get_key(config, &key).unwrap_or_default())
+    });
+    match written {
+        Ok((value, revision)) => {
+            Json(json!({ "key": key, "value": value, "revision": revision.as_str() }))
+                .into_response()
+        }
+        Err(UpdateError::Change(message)) => bad_request(&message),
+        Err(UpdateError::Store(error)) => config_error(error),
     }
 }
 
@@ -1125,12 +3527,216 @@ struct CreateRunBody {
     session_id: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    on_time_budget: OnTimeBudget,
+}
+
+/// What a run does when its time budget runs out while tool results the
+/// model has not read are waiting.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum OnTimeBudget {
+    /// Answer from what it gathered, without tools, and end (as before).
+    #[default]
+    WrapUp,
+    /// Pause until continued (`POST /runs/{id}/continue`) or cancelled.
+    Pause,
+}
+
+/// How to continue a run paused on its time budget.
+#[derive(Deserialize)]
+struct ContinueBody {
+    #[serde(default)]
+    mode: ContinueMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ContinueMode {
+    /// Renew the time budget and carry on, with tools, where it stopped.
+    #[default]
+    Extend,
+    /// Answer now from what it gathered, without tools, and end.
+    Answer,
+}
+
+/// Regenerating names the run whose answer it replaces, so a request made
+/// against a transcript that has since moved on is refused, not misapplied.
+#[derive(Deserialize)]
+struct RegenerateBody {
+    run_id: String,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// How a session run treats the transcript it continues.
+enum Turn {
+    /// A new user prompt, appended to the session.
+    Append,
+    /// The prompt behind the session's latest answer, from run `run_id`, is
+    /// run again; a finished new answer replaces that one.
+    Regenerate { run_id: String },
 }
 
 async fn create_run(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(mut body): Json<CreateRunBody>,
+    Json(body): Json<CreateRunBody>,
+) -> Response {
+    start_run(state, headers, body, Turn::Append).await
+}
+
+/// Run the prompt behind session `id`'s latest answer again, in place of that
+/// answer. The new run is created, authorized and streamed exactly as any
+/// session run is. The saved answer stays until the new run has finished
+/// with an answer; only then are the two exchanged, in one save.
+async fn regenerate_run(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<RegenerateBody>,
+) -> Response {
+    // Replacing a saved answer changes the session, so session write access
+    // is needed as well as the run access `start_run` checks, whoever asks.
+    if let Err(response) = access(
+        &state,
+        &headers,
+        Scope::SessionsWrite,
+        body.profile.as_deref(),
+    ) {
+        return *response;
+    }
+    let run = CreateRunBody {
+        // Taken from the saved session once it is locked.
+        message: String::new(),
+        profile: body.profile,
+        session_id: Some(id),
+        model: body.model,
+        on_time_budget: OnTimeBudget::WrapUp,
+    };
+    let turn = Turn::Regenerate {
+        run_id: body.run_id,
+    };
+    start_run(state, headers, run, turn).await
+}
+
+/// Remove the session's latest answer, and the record of the run that wrote
+/// it, and return the user prompt it answered. `None`, with the session
+/// untouched, unless run `run_id` is the session's latest finished run and the
+/// transcript ends with a user prompt and that run's answer.
+fn take_latest_answer(session: &mut Session, run_id: &str) -> Option<String> {
+    let latest = session.runs.last()?;
+    if latest.run_id != run_id || latest.stop_reason.is_none() {
+        return None;
+    }
+    let [.., prompt, answer] = session.messages.as_slice() else {
+        return None;
+    };
+    if prompt.role != "user" || answer.role != "assistant" {
+        return None;
+    }
+    let prompt = prompt.content.clone();
+    session.messages.pop();
+    session.runs.pop();
+    session.touch();
+    Some(prompt)
+}
+
+/// Why a session run was not admitted.
+enum Refused {
+    /// The session is missing or could not be read.
+    Missing(String),
+    /// The session belongs to another profile than the run's.
+    ProfileMismatch,
+    /// A regeneration named an answer that is not the session's latest.
+    NotLatest,
+    /// The prompt could not be saved.
+    Unsaved(String),
+}
+
+impl IntoResponse for Refused {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Missing(error) => not_found(&error),
+            Self::ProfileMismatch => bad_request("session profile does not match"),
+            Self::NotLatest => (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "only the latest answer can be regenerated"})),
+            )
+                .into_response(),
+            Self::Unsaved(error) => internal(&error),
+        }
+    }
+}
+
+/// Whether a store error means the session cannot be read (missing,
+/// malformed or damaged) rather than that it could not be written.
+fn is_missing(error: &StoreError) -> bool {
+    matches!(
+        error,
+        StoreError::NotFound(_) | StoreError::Unreadable { .. } | StoreError::MalformedId(_)
+    )
+}
+
+/// Admit a run of session `id` for the profile `expected` (and `named`, when
+/// the caller named one): the history the model sees and the prompt to run.
+/// A new prompt is appended, under the store's lock, to the session as it is
+/// saved now. A regeneration only reads: nothing is saved until its run has
+/// finished with an answer (`record_run_in_session`).
+fn admit(
+    store: &SessionStore,
+    id: &SessionId,
+    expected: &str,
+    named: Option<&str>,
+    message: &str,
+    replacing: Option<&str>,
+    history_limit: usize,
+) -> Result<(Vec<lightagent_core::provider::ProviderMessage>, String), Refused> {
+    let check = |session: &Session| {
+        if session.profile != expected || named.is_some_and(|value| value != session.profile) {
+            Err(Refused::ProfileMismatch)
+        } else {
+            Ok(())
+        }
+    };
+    let Some(run_id) = replacing else {
+        return store
+            .update(id, |session| {
+                check(&*session)?;
+                let history = model_history(session, message, history_limit);
+                if session.messages.is_empty() && session.title == "agent session" {
+                    session.title = session_title(message);
+                }
+                session.push_message(StoredMessage::new("user", message));
+                Ok((history, message.to_owned()))
+            })
+            .map(|(admitted, _)| admitted)
+            .map_err(|error| match error {
+                SessionUpdateError::Change(refused) => refused,
+                SessionUpdateError::Store(error) if is_missing(&error) => {
+                    Refused::Missing(error.to_string())
+                }
+                SessionUpdateError::Store(error) => Refused::Unsaved(error.to_string()),
+            });
+    };
+    let mut earlier = store
+        .load(id)
+        .map_err(|error| Refused::Missing(error.to_string()))?;
+    check(&earlier)?;
+    let prompt = take_latest_answer(&mut earlier, run_id).ok_or(Refused::NotLatest)?;
+    // The model sees what preceded the prompt, as it did on the prompt's
+    // first run.
+    earlier.messages.pop();
+    Ok((model_history(&earlier, &prompt, history_limit), prompt))
+}
+
+async fn start_run(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    mut body: CreateRunBody,
+    turn: Turn,
 ) -> Response {
     // Multi-user mode authorizes the caller for the profile, resolved on the
     // server, before anything profile-specific is built. `owner` records who
@@ -1203,13 +3809,21 @@ async fn create_run(
     let mut history = Vec::new();
     let mut profile = body.profile;
     let mut session_id = None;
-    let session_store = match &session_scope {
-        Some(user) => user.sessions(&state),
-        None => state.sessions.clone(),
-    };
-    let session_profile = match &session_scope {
-        Some(user) => user.profile.as_str().to_owned(),
-        None => state.session_profile.clone(),
+    // The session's run lease, held from admission until the run is recorded.
+    let mut run_lease = None;
+    // The conversation's own profile: a user's authorized one, else the one
+    // the operator named for it (as `lightagent chat --profile` does), else
+    // the one this server serves.
+    let (session_profile, session_store) = match &session_scope {
+        Some(user) => (user.profile.as_str().to_owned(), user.sessions(&state)),
+        // A run that continues no conversation needs no conversation store.
+        None if body.session_id.is_none() => {
+            (state.session_profile.clone(), state.sessions.clone())
+        }
+        None => match operator_conversations(&state, profile.as_deref()) {
+            Ok(found) => found,
+            Err(response) => return *response,
+        },
     };
     if let Some(raw) = body.session_id {
         let id = match SessionId::parse(&raw) {
@@ -1236,39 +3850,91 @@ async fn create_run(
             .await;
         let mut busy = state.busy_sessions.lock().await;
         if !busy.insert(id.clone()) {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({"error": "session already has an active run"})),
-            )
-                .into_response();
+            drop(busy);
+            // Named when this process runs it and the caller may see it (a
+            // paused run a closed page left), so it can be continued or
+            // stopped.
+            let mut refusal = json!({"error": "session already has an active run"});
+            if let Some(active) = session_active_run(&state, &headers, &session_store, &id).await {
+                refusal["active_run"] = active;
+            }
+            return (StatusCode::CONFLICT, Json(refusal)).into_response();
         }
-        let mut session = match session_store.load(&id) {
-            Ok(session) => session,
+        // One turn at a time on this session across every process that
+        // shares this home (another server, a terminal chat, an editor): its
+        // run lease, refused exactly like a session busy here.
+        let lease = match session_store.lease_run(&id) {
+            Ok(lease) => lease,
+            Err(StoreError::Busy { .. }) => {
+                busy.remove(&id);
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({"error": "session already has an active run"})),
+                )
+                    .into_response();
+            }
             Err(error) => {
                 busy.remove(&id);
-                return not_found(&error.to_string());
+                return internal(&error.to_string());
             }
         };
-        if session.profile != session_profile
-            || profile
-                .as_ref()
-                .is_some_and(|value| value != &session.profile)
-        {
-            busy.remove(&id);
-            return bad_request("session profile does not match");
+        // A turn of this session that a process ended before recording is
+        // recorded as interrupted before this one is admitted. It is never
+        // run again.
+        if let Err(error) = session_store.recover_interrupted(&id, &lease) {
+            eprintln!("could not record an interrupted run of session {id:?}: {error}");
         }
-        history = model_history(&session, &body.message, history_limit);
-        profile = Some(session.profile.clone());
-        if session.messages.is_empty() && session.title == "agent session" {
-            session.title = session_title(&body.message);
+        // Checked, and for a new prompt saved, on the session as it is saved
+        // now, under the store's lock: a change another writer made since is
+        // kept. The busy entry above stays the rule for admitting runs.
+        let admitted = {
+            let store = session_store.clone();
+            let id = id.clone();
+            let expected = session_profile.clone();
+            let named = profile.clone();
+            let message = body.message.clone();
+            let replacing = match &turn {
+                Turn::Append => None,
+                Turn::Regenerate { run_id } => Some(run_id.clone()),
+            };
+            tokio::task::spawn_blocking(move || {
+                admit(
+                    &store,
+                    &id,
+                    &expected,
+                    named.as_deref(),
+                    &message,
+                    replacing.as_deref(),
+                    history_limit,
+                )
+            })
+            .await
+        };
+        match admitted {
+            Ok(Ok((admitted, prompt))) => {
+                history = admitted;
+                body.message = prompt;
+            }
+            // The lease goes before the busy entry, so a session free here
+            // is free in every process.
+            Ok(Err(refused)) => {
+                drop(lease);
+                busy.remove(&id);
+                return refused.into_response();
+            }
+            Err(error) => {
+                drop(lease);
+                busy.remove(&id);
+                return internal(&error.to_string());
+            }
         }
-        session.push_message(StoredMessage::new("user", &body.message));
-        if let Err(error) = session_store.save(&session) {
-            busy.remove(&id);
-            return internal(&error.to_string());
-        }
+        profile = Some(session_profile.clone());
+        run_lease = Some(lease);
         session_id = Some(id);
     }
+    let options = RunOptions {
+        pause_on_time_budget: body.on_time_budget == OnTimeBudget::Pause,
+    };
     let request = StartRun {
         message: body.message,
         history,
@@ -1294,11 +3960,18 @@ async fn create_run(
                     let check = identity.run_check(caller, owner.clone());
                     let started = state
                         .manager
-                        .start_supervised(request, owner, check, identity.generation())
+                        .start_supervised_with(
+                            request,
+                            owner,
+                            check,
+                            identity.generation(),
+                            options,
+                        )
                         .await;
                     match started {
                         Ok(run) => run,
                         Err(denial) => {
+                            drop(run_lease.take());
                             if let Some(id) = &session_id {
                                 state.busy_sessions.lock().await.remove(id);
                             }
@@ -1306,17 +3979,33 @@ async fn create_run(
                         }
                     }
                 }
-                None => state.manager.start_as(request, owner).await,
+                None => state.manager.start_as_with(request, owner, options).await,
             }
         }
-        None => state.manager.start(request).await,
+        None => {
+            state
+                .manager
+                .start_as_with(request, RunOwner::operator_only(), options)
+                .await
+        }
     };
     if let Some(id) = &session_id {
+        let replacing = match turn {
+            Turn::Append => None,
+            Turn::Regenerate { run_id } => Some(run_id),
+        };
+        // If this process ends before the run is recorded, the next one to
+        // take the session records it as interrupted, and never reruns it.
+        if let Err(error) = session_store.journal_run(id, run.id(), replacing.is_some()) {
+            eprintln!("could not journal the run of session {id:?}: {error}");
+        }
         tokio::spawn(record_run_in_session(
             Arc::clone(&run),
             session_store.clone(),
             Arc::clone(&state.busy_sessions),
             id.clone(),
+            replacing,
+            run_lease,
         ));
     }
     (
@@ -1328,30 +4017,61 @@ async fn create_run(
 
 /// Once `run` is terminal, record its events into session `id` and release
 /// the session for its next run.
+///
+/// A run `replacing` the answer that saved run wrote is recorded only when it
+/// completed with an answer: then the old answer and its run record are
+/// exchanged for the new ones in one save. A failed, cancelled or empty run
+/// leaves the session exactly as it was, so the saved answer survives.
 async fn record_run_in_session(
     run: Arc<RunState>,
     sessions: SessionStore,
     busy: Arc<Mutex<HashSet<SessionId>>>,
     id: SessionId,
+    replacing: Option<String>,
+    // Released just before the busy entry, once the run is recorded.
+    mut lease: Option<lightagent_store::RunLease>,
 ) {
     let mut seen = 0;
     loop {
         let (events, status) = run.wait_from(seen).await;
         seen += events.len();
         if status.is_terminal() {
-            match sessions.load(&id) {
-                Ok(mut session) => {
-                    let events = run.events().await;
-                    // The stop reason, as the terminal saves it, so a
-                    // reloaded session still says why a run ended.
-                    let stop = stop_reason_of(&events).unwrap_or_else(|| format!("{status:?}"));
-                    session.record_run_events(&events, &stop);
-                    if let Err(error) = sessions.save(&session) {
-                        eprintln!("could not save agent session {id:?}: {error}");
+            let events = run.events().await;
+            // The stop reason, as the terminal saves it, so a
+            // reloaded session still says why a run ended.
+            let stop = stop_reason_of(&events).unwrap_or_else(|| format!("{status:?}"));
+            let has_answer = status == RunStatus::Completed && answered(&events);
+            let (store, session, replacing) = (sessions.clone(), id.clone(), replacing.clone());
+            // Recorded, under the store's lock, into the session as it is
+            // saved now, so a change another writer made during the run is
+            // kept.
+            let recorded = tokio::task::spawn_blocking(move || {
+                store.update(&session, |saved| {
+                    // Only a finished answer replaces the saved one; a
+                    // failed, cancelled or empty run leaves it as it was.
+                    if let Some(old) = &replacing
+                        && (!has_answer || take_latest_answer(saved, old).is_none())
+                    {
+                        return Err(());
                     }
+                    saved.record_run_events(&events, &stop);
+                    Ok(())
+                })
+            })
+            .await;
+            match recorded {
+                Ok(Ok(_)) | Ok(Err(SessionUpdateError::Change(()))) => {}
+                Ok(Err(SessionUpdateError::Store(error))) => {
+                    eprintln!("could not save agent session {id:?}: {error}");
                 }
-                Err(error) => eprintln!("could not read agent session {id:?}: {error}"),
+                Err(error) => eprintln!("could not save agent session {id:?}: {error}"),
             }
+            // The turn is recorded (or kept out of the session on purpose):
+            // nothing is left to recover.
+            sessions.clear_run_journal(&id);
+            // The lease goes first: once the busy entry is gone, the session
+            // is free in every process.
+            drop(lease.take());
             busy.lock().await.remove(&id);
             break;
         }
@@ -1505,6 +4225,57 @@ async fn cancel_run(
     }
 }
 
+/// The turn of session `id` this process is running, as `{id, status}`, if
+/// the caller may see that run: a run paused on its time budget or waiting
+/// on an approval stays reachable from its session after the page that
+/// started it is gone. A journal another process wrote names no run here.
+async fn session_active_run(
+    state: &AppState,
+    headers: &HeaderMap,
+    sessions: &SessionStore,
+    id: &SessionId,
+) -> Option<serde_json::Value> {
+    let run_id = sessions.journaled_run(id)?;
+    let (run, _) = authorized_run(state, headers, &run_id, Scope::RunsRead)
+        .await
+        .ok()?;
+    let status = run.status().await;
+    if status.is_terminal() {
+        return None;
+    }
+    Some(json!({ "id": run.id(), "status": status }))
+}
+
+/// Continue a run paused on its time budget. The same execution carries on
+/// from where it stopped (its conversation, the tool results the model has
+/// not read, its turn and tool-call counts): this is not a new turn. 409
+/// unless the run is paused.
+async fn continue_run(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<ContinueBody>,
+) -> Response {
+    match authorized_run(&state, &headers, &id, Scope::RunsWrite).await {
+        Ok((run, _)) => {
+            let how = match body.mode {
+                ContinueMode::Extend => lightagent_core::Continuation::Extend,
+                ContinueMode::Answer => lightagent_core::Continuation::WrapUp,
+            };
+            if run.continue_with(how).await {
+                Json(json!({ "id": run.id(), "continued": true })).into_response()
+            } else {
+                (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "run is not paused on its time budget" })),
+                )
+                    .into_response()
+            }
+        }
+        Err(response) => *response,
+    }
+}
+
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1532,7 +4303,11 @@ async fn list_sessions(
         }
         Err(response) => return *response,
     }
-    match state.sessions.list() {
+    let (_, sessions) = match operator_conversations(&state, query.profile.as_deref()) {
+        Ok(found) => found,
+        Err(response) => return *response,
+    };
+    match sessions.list() {
         Ok(list) => Json(json!({ "sessions": list })).into_response(),
         Err(error) => internal(&error.to_string()),
     }
@@ -1585,7 +4360,11 @@ async fn search_sessions(
             Err(_) => internal("sessions could not be searched"),
         };
     }
-    match state.sessions.search(term, limit) {
+    let (_, sessions) = match operator_conversations(&state, query.profile.as_deref()) {
+        Ok(found) => found,
+        Err(response) => return *response,
+    };
+    match sessions.search(term, limit) {
         Ok(list) => Json(json!({ "sessions": list })).into_response(),
         Err(error) => internal(&error.to_string()),
     }
@@ -1622,8 +4401,12 @@ async fn create_session(
             Err(_) => internal("the session could not be saved"),
         };
     }
-    let session = Session::new(&state.session_profile, "agent session");
-    match state.sessions.save(&session) {
+    let (profile, sessions) = match operator_conversations(&state, query.profile.as_deref()) {
+        Ok(found) => found,
+        Err(response) => return *response,
+    };
+    let session = Session::new(&profile, "agent session");
+    match sessions.save(&session) {
         Ok(()) => (StatusCode::CREATED, Json(json!({ "id": session.id }))).into_response(),
         Err(error) => internal(&error.to_string()),
     }
@@ -1682,14 +4465,18 @@ async fn upload_attachment(
             _ => no_session(),
         };
     }
-    let session = match state.sessions.load(&id) {
+    let (profile, sessions) = match operator_conversations(&state, query.profile.as_deref()) {
+        Ok(found) => found,
+        Err(response) => return *response,
+    };
+    let session = match sessions.load(&id) {
         Ok(session) => session,
         Err(error) => return not_found(&error.to_string()),
     };
-    if session.profile != state.session_profile {
+    if session.profile != profile {
         return bad_request("session profile does not match");
     }
-    match state.sessions.save_attachment(&id, filename, &body) {
+    match sessions.save_attachment(&id, filename, &body) {
         Ok(path) => Json(json!({ "name": filename, "path": path })).into_response(),
         Err(error) => internal(&error.to_string()),
     }
@@ -1697,6 +4484,26 @@ async fn upload_attachment(
 
 fn bad_request(message: &str) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({"error": message}))).into_response()
+}
+
+/// The answer for a config write that did not happen: an invalid result is
+/// the caller's (400), a stale revision is a conflict that names the current
+/// one (409), and a lock held elsewhere is temporary (503).
+fn config_error(error: ConfigError) -> Response {
+    match &error {
+        ConfigError::Invalid(_) => bad_request(&error.to_string()),
+        ConfigError::Conflict { current, .. } => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": error.to_string(), "revision": current })),
+        )
+            .into_response(),
+        ConfigError::Busy { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+        _ => internal(&error.to_string()),
+    }
 }
 
 async fn get_session(
@@ -1726,18 +4533,48 @@ async fn get_session(
         }
     };
     if let Some(user) = user {
-        return match user.sessions(&state).load(&id) {
-            Ok(session) if user.owns(&session) => Json(session).into_response(),
+        let sessions = user.sessions(&state);
+        return match sessions.load(&id) {
+            Ok(session) if user.owns(&session) => {
+                session_view(&state, &headers, &sessions, &id, session).await
+            }
             _ => no_session(),
         };
     }
-    match state.sessions.load(&id) {
-        Ok(session) => Json(session).into_response(),
+    let (_, sessions) = match operator_conversations(&state, query.profile.as_deref()) {
+        Ok(found) => found,
+        Err(response) => return *response,
+    };
+    match sessions.load(&id) {
+        Ok(session) => session_view(&state, &headers, &sessions, &id, session).await,
         Err(error) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": error.to_string() })),
         )
             .into_response(),
+    }
+}
+
+/// A saved session as `GET /sessions/{id}` shows it: with `active_run` while
+/// this process runs one of its turns that the caller may see.
+async fn session_view(
+    state: &AppState,
+    headers: &HeaderMap,
+    sessions: &SessionStore,
+    id: &SessionId,
+    session: Session,
+) -> Response {
+    let Some(active) = session_active_run(state, headers, sessions, id).await else {
+        return Json(session).into_response();
+    };
+    match serde_json::to_value(&session) {
+        Ok(mut view) => {
+            if let Some(fields) = view.as_object_mut() {
+                fields.insert("active_run".to_owned(), active);
+            }
+            Json(view).into_response()
+        }
+        Err(error) => internal(&error.to_string()),
     }
 }
 
@@ -1806,7 +4643,10 @@ async fn update_session(
     };
     let store = match &user {
         Some(user) => user.sessions(&state),
-        None => state.sessions.clone(),
+        None => match operator_conversations(&state, query.profile.as_deref()) {
+            Ok((_, sessions)) => sessions,
+            Err(response) => return *response,
+        },
     };
     let id = match SessionId::parse(&id) {
         Ok(id) => id,
@@ -1848,31 +4688,44 @@ async fn update_session(
         )
             .into_response();
     }
-    let mut session = match (store.load(&id), &user) {
-        (Ok(session), None) => session,
-        (Ok(session), Some(user)) if user.owns(&session) => session,
-        (_, Some(_)) => return no_session(),
-        (Err(error), None) => return not_found(&error.to_string()),
-    };
-    if let Some(value) = title {
-        session.title = value;
-    }
-    if let Some(value) = body.pinned {
-        session.pinned = value;
-    }
-    if let Some(value) = body.archived {
-        session.archived = value;
-    }
-    if let Some(value) = project {
-        session.project = value;
-    }
-    session.touch();
-    let summary = lightagent_store::SessionSummary::of(&session);
-    let result = store.save(&session);
+    // Applied, under the store's lock, to the session as it is saved now, so
+    // a change another process made since (a turn from the terminal or an
+    // editor) is kept.
+    let pinned = body.pinned;
+    let archived = body.archived;
+    let owner = user.clone();
+    let updated = tokio::task::spawn_blocking(move || {
+        store.update(&id, |session| {
+            if owner.as_ref().is_some_and(|user| !user.owns(session)) {
+                return Err(());
+            }
+            if let Some(value) = title {
+                session.title = value;
+            }
+            if let Some(value) = pinned {
+                session.pinned = value;
+            }
+            if let Some(value) = archived {
+                session.archived = value;
+            }
+            if let Some(value) = project {
+                session.project = value;
+            }
+            session.touch();
+            Ok(lightagent_store::SessionSummary::of(session))
+        })
+    })
+    .await;
     drop(busy);
-    match result {
-        Ok(()) => Json(summary).into_response(),
-        Err(error) => internal(&error.to_string()),
+    match (updated, &user) {
+        (Ok(Ok((summary, _))), _) => Json(summary).into_response(),
+        (Ok(Err(SessionUpdateError::Change(()))), _) => no_session(),
+        (Ok(Err(SessionUpdateError::Store(error))), Some(_)) if is_missing(&error) => no_session(),
+        (Ok(Err(SessionUpdateError::Store(error))), None) if is_missing(&error) => {
+            not_found(&error.to_string())
+        }
+        (Ok(Err(SessionUpdateError::Store(error))), _) => internal(&error.to_string()),
+        (Err(error), _) => internal(&error.to_string()),
     }
 }
 
@@ -1932,7 +4785,11 @@ async fn delete_session(
             Err(_) => internal("the session could not be deleted"),
         };
     }
-    let result = state.sessions.delete(&id);
+    let sessions = match operator_conversations(&state, query.profile.as_deref()) {
+        Ok((_, sessions)) => sessions,
+        Err(response) => return *response,
+    };
+    let result = sessions.delete(&id);
     drop(busy);
     match result {
         Ok(removed) => Json(json!({ "deleted": removed })).into_response(),
@@ -2018,6 +4875,13 @@ async fn respond_approval(
 
 /// The stop reason of a run's terminal event, spelled as the `run.completed`
 /// payload spells it.
+/// Whether the run's events carry any answer text.
+fn answered(events: &[AgentEvent]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::Content { text } if !text.is_empty()))
+}
+
 fn stop_reason_of(events: &[AgentEvent]) -> Option<String> {
     events.iter().rev().find_map(|event| match event {
         AgentEvent::RunCompleted { reason } => Some(format!("{reason:?}")),
@@ -2147,6 +5011,8 @@ mod tests {
             sessions.clone(),
             Arc::clone(&busy),
             id.clone(),
+            None,
+            None,
         ));
         paused.await.unwrap();
         run.push_for_test(AgentEvent::RunCompleted {

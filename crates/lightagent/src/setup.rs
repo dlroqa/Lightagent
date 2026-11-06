@@ -4,11 +4,12 @@ use std::io::{BufRead, IsTerminal as _, Write};
 
 use clap::ValueEnum;
 use dialoguer::{Confirm, Input, MultiSelect, Password, Select, theme::ColorfulTheme};
+use lightagent_core::SecretRef;
+use lightagent_core::saved_providers::{self, Outcome};
 use lightagent_core::{
-    AgentProfile, ApprovalPolicy, Config, ConfigStore, DUCKDUCKGO_SEARCH_ENDPOINT, LightagentPaths,
-    ProfileId, ProfileStore,
+    AgentProfile, ApprovalPolicy, Config, ConfigError, ConfigRevision, ConfigStore,
+    DUCKDUCKGO_SEARCH_ENDPOINT, LightagentPaths, ProfileId, ProfileStore, WebMode,
 };
-use lightagent_core::{SavedProvider, SecretRef};
 use lightagent_provider_lightweight::{LightweightProvider, ProviderConfig};
 
 /// A setup section that can also be opened directly from the command line.
@@ -39,11 +40,29 @@ pub(crate) async fn run(section: Option<Section>, json: bool) -> Result<(), Stri
     run_with_io(section, &paths, stdin.lock(), stdout.lock()).await
 }
 
+/// Save what setup edited, only if nobody else wrote the config since setup
+/// read it: saving its older copy would silently undo that change.
+fn save_setup(
+    store: &ConfigStore,
+    read_at: &ConfigRevision,
+    config: &Config,
+) -> Result<ConfigRevision, String> {
+    store.replace(read_at, config).map_err(|error| match error {
+        ConfigError::Conflict { .. } => "the configuration changed while setup was open \
+             (another lightagent command, the desktop app or the Web UI wrote it); \
+             nothing was saved. Run setup again to start from the current settings."
+            .to_owned(),
+        other => other.to_string(),
+    })
+}
+
 /// Full-screen-style selectors for a real terminal. Dialoguer redraws the
 /// active rows in place and supplies arrow, Space, Enter and Escape handling.
 async fn run_tui(section: Option<Section>, paths: &LightagentPaths) -> Result<(), String> {
     let store = ConfigStore::at(paths);
-    let mut config = store.load().map_err(|error| error.to_string())?;
+    let (mut config, mut revision) = store
+        .load_with_revision()
+        .map_err(|error| error.to_string())?;
     let profiles = ProfileStore::new(paths.root());
     crate::ensure_default_profile(&profiles, &config)?;
     let theme = ColorfulTheme::default();
@@ -86,8 +105,11 @@ async fn run_tui(section: Option<Section>, paths: &LightagentPaths) -> Result<()
         };
 
         let changed = configure_tui(selected, &mut config, paths, &theme).await?;
-        if changed {
-            store.save(&config).map_err(|error| error.to_string())?;
+        if let Some(outcome) = changed {
+            revision = save_setup(&store, &revision, &config)?;
+            // What waits for the save: a released key file, the active
+            // profile's endpoint and model.
+            saved_providers::finish(paths, &outcome)?;
             eprintln!("Saved.\n");
         } else {
             eprintln!("Cancelled; no changes saved.\n");
@@ -103,14 +125,17 @@ async fn configure_tui(
     config: &mut Config,
     paths: &LightagentPaths,
     theme: &ColorfulTheme,
-) -> Result<bool, String> {
+) -> Result<Option<Outcome>, String> {
+    // A section other than the provider has nothing to finish after the save.
+    let changed =
+        |result: Result<bool, String>| result.map(|changed| changed.then(Outcome::default));
     match section {
-        Section::Profiles => configure_profiles_tui(config, paths, theme),
+        Section::Profiles => changed(configure_profiles_tui(config, paths, theme)),
         Section::Provider => configure_gateway_tui(config, paths, theme).await,
-        Section::Tools => configure_tools_tui(config, theme),
-        Section::Web => configure_web_tui(config, theme),
-        Section::Tui => configure_terminal_ui_tui(config, theme),
-        Section::Approvals => configure_approvals_tui(config, paths, theme),
+        Section::Tools => changed(configure_tools_tui(config, theme)),
+        Section::Web => changed(configure_web_tui(config, theme)),
+        Section::Tui => changed(configure_terminal_ui_tui(config, theme)),
+        Section::Approvals => changed(configure_approvals_tui(config, paths, theme)),
     }
 }
 
@@ -251,38 +276,33 @@ async fn configure_gateway_tui(
     config: &mut Config,
     paths: &LightagentPaths,
     theme: &ColorfulTheme,
-) -> Result<bool, String> {
-    const LOCAL_URL: &str = "http://127.0.0.1:11434";
+) -> Result<Option<Outcome>, String> {
     eprintln!("\nProvider & model for Lightagent CLI");
     eprintln!("↑↓ navigate  ENTER select  ESC cancel\n");
 
-    let mut providers = vec![format!("Lightweight local  ({LOCAL_URL})")];
-    providers.extend(
-        config
-            .inference
-            .saved_providers
-            .iter()
-            .map(|saved| format!("{}  ({})", saved.name, saved.base_url)),
-    );
+    // The shared list, as the desktop's Settings shows it: the local
+    // endpoint first, then each saved provider.
+    let listed = saved_providers::list(config)
+        .into_iter()
+        .filter(|provider| provider.kind != "custom")
+        .collect::<Vec<_>>();
+    let mut providers = listed
+        .iter()
+        .map(|provider| format!("{}  ({})", provider.name, provider.base_url))
+        .collect::<Vec<_>>();
     let custom_index = providers.len();
     providers.push("Custom endpoint  (enter URL manually)".to_owned());
-    let remove_index = if config.inference.saved_providers.is_empty() {
-        None
-    } else {
+    let remove_index = if listed.len() > 1 {
         let index = providers.len();
         providers.push("Remove a saved custom provider".to_owned());
         Some(index)
-    };
-    let default = if config.inference.base_url == LOCAL_URL {
-        0
     } else {
-        config
-            .inference
-            .saved_providers
-            .iter()
-            .position(|saved| saved.base_url == config.inference.base_url)
-            .map_or(custom_index, |index| index + 1)
+        None
     };
+    let default = listed
+        .iter()
+        .position(|provider| provider.active)
+        .unwrap_or(custom_index);
     let Some(selected) = Select::with_theme(theme)
         .with_prompt("Provider")
         .items(providers)
@@ -290,15 +310,14 @@ async fn configure_gateway_tui(
         .interact_opt()
         .map_err(dialog_error)?
     else {
-        return Ok(false);
+        return Ok(None);
     };
 
     if Some(selected) == remove_index {
-        let names = config
-            .inference
-            .saved_providers
+        let saved = &listed[1..];
+        let names = saved
             .iter()
-            .map(|saved| format!("{}  ({})", saved.name, saved.base_url))
+            .map(|provider| format!("{}  ({})", provider.name, provider.base_url))
             .collect::<Vec<_>>();
         let Some(remove) = Select::with_theme(theme)
             .with_prompt("Remove saved provider")
@@ -307,30 +326,20 @@ async fn configure_gateway_tui(
             .interact_opt()
             .map_err(dialog_error)?
         else {
-            return Ok(false);
+            return Ok(None);
         };
-        let removed = config.inference.saved_providers.remove(remove);
-        if config.inference.base_url == removed.base_url {
-            config.inference.base_url = LOCAL_URL.to_owned();
-            config.inference.api_key = None;
-            config.inference.model = None;
-            update_active_profile(paths, |profile| {
-                profile.routing.base_url = None;
-                profile.routing.model = "default".to_owned();
-            })?;
-        }
-        eprintln!("Removed {}.", removed.name);
-        return Ok(true);
+        // The shared removal: the stored key is deleted after the save, and
+        // a removed active provider leaves the local endpoint active.
+        let outcome = saved_providers::remove(config, paths, &saved[remove].id)
+            .map_err(|error| error.to_string())?;
+        eprintln!("Removed {}.", saved[remove].name);
+        return Ok(Some(outcome));
     }
 
-    let (base_url, mut api_key, provider_id) = if selected == 0 {
-        (LOCAL_URL.to_owned(), None, "lightweight-local".to_owned())
-    } else if selected < custom_index {
-        let saved = &config.inference.saved_providers[selected - 1];
+    let (provider_id, base_url) = if selected < custom_index {
         (
-            saved.base_url.clone(),
-            saved.api_key.clone(),
-            provider_key_id(&saved.name),
+            listed[selected].id.clone(),
+            listed[selected].base_url.clone(),
         )
     } else {
         let name = Input::<String>::with_theme(theme)
@@ -355,25 +364,20 @@ async fn configure_gateway_tui(
             })
             .interact_text()
             .map_err(dialog_error)?;
-        let api_key = None;
-        let saved = SavedProvider {
-            name: name.trim().to_owned(),
-            base_url: base_url.trim_end_matches('/').to_owned(),
-            api_key: api_key.clone(),
-        };
-        if let Some(existing) = config
-            .inference
-            .saved_providers
-            .iter_mut()
-            .find(|item| item.name.eq_ignore_ascii_case(&saved.name))
-        {
-            *existing = saved;
-        } else {
-            config.inference.saved_providers.push(saved);
+        // The shared creation refuses a name or endpoint another saved
+        // provider has: they would share a key file, or one endpoint's key.
+        match saved_providers::create(config, &name, &base_url) {
+            Ok(provider) => (provider.id, provider.base_url),
+            Err(error) => {
+                eprintln!("{error}");
+                return Ok(None);
+            }
         }
-        (base_url, api_key, provider_key_id(&name))
     };
 
+    // The provider's own key only: the one bound to its endpoint.
+    let mut api_key = lightagent_core::provider_keys::bound_key(config, &base_url).cloned();
+    let mut stored_key = None;
     let mut models = provider_models(&base_url, api_key.as_ref()).await;
     if api_key.is_none()
         && models
@@ -388,7 +392,9 @@ async fn configure_gateway_tui(
             .map_err(dialog_error)?
             .unwrap_or(false);
         if save_key {
-            api_key = Some(store_provider_key_tui(paths, &provider_id, theme)?);
+            let secret = store_provider_key_tui(paths, &provider_id, theme)?;
+            api_key = Some(secret.clone());
+            stored_key = Some(secret);
             models = provider_models(&base_url, api_key.as_ref()).await;
         }
     }
@@ -414,36 +420,36 @@ async fn configure_gateway_tui(
         .interact_opt()
         .map_err(dialog_error)?
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let model = selected.checked_sub(1).map(|index| models[index].clone());
-    if let Some(saved) = config
-        .inference
-        .saved_providers
-        .iter_mut()
-        .find(|saved| saved.base_url == base_url)
-    {
-        saved.api_key = api_key.clone();
+    // The shared selection: the endpoint takes only its own key, and the
+    // active profile follows after the save.
+    let (_, outcome) = saved_providers::select(config, &provider_id, model.as_deref())
+        .map_err(|error| error.to_string())?;
+    if let Some(secret) = stored_key {
+        lightagent_core::provider_keys::use_key(config, Some(secret));
     }
-    config.inference.base_url = base_url;
-    config.inference.api_key = api_key;
-    config.inference.model = model.clone();
-    update_active_profile(paths, |profile| {
-        profile.routing.base_url = None;
-        profile.routing.model = model.unwrap_or_else(|| "default".to_owned());
-    })?;
-    Ok(true)
+    Ok(Some(outcome))
 }
 
 async fn provider_models(
     base_url: &str,
     api_key: Option<&SecretRef>,
-) -> Result<Vec<String>, lightagent_core::ProviderError> {
+) -> Result<Vec<String>, String> {
     let mut config = ProviderConfig::new(base_url, "default");
-    if let Some(key) = api_key.and_then(SecretRef::resolve) {
+    // A configured key that cannot be used: nothing is sent without it.
+    if let Some(key) = api_key
+        .map_or(Ok(None), SecretRef::for_request)
+        .map_err(|error| format!("{error}; nothing was sent"))?
+    {
         config = config.with_api_key(key);
     }
-    LightweightProvider::new(config)?.models().await
+    LightweightProvider::new(config)
+        .map_err(|error| error.to_string())?
+        .models()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 fn store_provider_key_tui(
@@ -455,31 +461,8 @@ fn store_provider_key_tui(
         .with_prompt("Provider API key")
         .interact()
         .map_err(dialog_error)?;
-    if key.trim().is_empty() {
-        return Err("provider API key cannot be empty".to_owned());
-    }
-    let path = paths.provider_key_file(provider_id);
-    lightagent_core::paths::write_private(&path, key.as_bytes()).map_err(io_error)?;
-    Ok(SecretRef::file(path))
-}
-
-fn provider_key_id(name: &str) -> String {
-    let id = name
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    let id = id.trim_matches('-');
-    if id.is_empty() {
-        "provider".to_owned()
-    } else {
-        id.to_owned()
-    }
+    // The one shared store, as the HTTP API and the desktop write it.
+    lightagent_core::provider_keys::store_key(paths, provider_id, &key)
 }
 
 fn configure_tools_tui(config: &mut Config, theme: &ColorfulTheme) -> Result<bool, String> {
@@ -527,12 +510,21 @@ fn configure_tools_tui(config: &mut Config, theme: &ColorfulTheme) -> Result<boo
         eprintln!("Web search will use DuckDuckGo (no account or API key required).");
     }
     if config.tools.enabled && config.tools.workspace.is_none() {
+        // The shared rule, checked as it is typed: an absolute folder that
+        // exists, or a new one inside an existing folder.
         let workspace = Input::<String>::with_theme(theme)
             .with_prompt("Workspace folder (blank uses profile workspace)")
             .allow_empty(true)
+            .validate_with(|value: &String| -> Result<(), String> {
+                if value.trim().is_empty() {
+                    Ok(())
+                } else {
+                    lightagent_core::workspaces::validate(value).map(|_| ())
+                }
+            })
             .interact_text()
             .map_err(dialog_error)?;
-        config.tools.workspace = nonempty(workspace);
+        lightagent_core::workspaces::set(config, Some(&workspace))?;
     }
     if realtime_rag && !enabled(0) {
         eprintln!("Web Search & Page Fetch were also enabled because realtime RAG uses them.");
@@ -570,10 +562,8 @@ fn configure_web_tui(config: &mut Config, theme: &ColorfulTheme) -> Result<bool,
     else {
         return Ok(false);
     };
-    config.web.enabled = selected != 0;
-    if selected == 2 {
-        use_duckduckgo(config);
-    } else if selected == 3 {
+    let mode = WebMode::ALL[selected];
+    let endpoint = if mode == WebMode::Custom {
         let current = config
             .web
             .search
@@ -581,16 +571,17 @@ fn configure_web_tui(config: &mut Config, theme: &ColorfulTheme) -> Result<bool,
             .as_deref()
             .filter(|_| !uses_duckduckgo(config))
             .unwrap_or("http://127.0.0.1:8080/search?format=json");
-        let endpoint = Input::<String>::with_theme(theme)
-            .with_prompt("SearXNG search URL")
-            .with_initial_text(current)
-            .interact_text()
-            .map_err(dialog_error)?;
-        config.web.search.endpoint = nonempty(endpoint);
+        Some(
+            Input::<String>::with_theme(theme)
+                .with_prompt("SearXNG search URL")
+                .with_initial_text(current)
+                .interact_text()
+                .map_err(dialog_error)?,
+        )
     } else {
-        config.web.search.endpoint = None;
-    }
-    config.rag.realtime_enabled = selected >= 2;
+        None
+    };
+    mode.apply(config, endpoint.as_deref());
     Ok(true)
 }
 
@@ -659,7 +650,9 @@ async fn run_with_io<R: BufRead, W: Write>(
     writer: W,
 ) -> Result<(), String> {
     let store = ConfigStore::at(paths);
-    let mut config = store.load().map_err(|error| error.to_string())?;
+    let (mut config, revision) = store
+        .load_with_revision()
+        .map_err(|error| error.to_string())?;
     let profiles = ProfileStore::new(paths.root());
     crate::ensure_default_profile(&profiles, &config)?;
     let mut prompt = Prompt { reader, writer };
@@ -705,7 +698,7 @@ async fn run_with_io<R: BufRead, W: Write>(
         }
     }
 
-    store.save(&config).map_err(|error| error.to_string())?;
+    save_setup(&store, &revision, &config)?;
     writeln!(
         prompt.writer,
         "\nSaved. Restart Lightagent to apply these settings."
@@ -844,19 +837,30 @@ async fn configure_gateway<R: BufRead, W: Write>(
     prompt: &mut Prompt<R, W>,
 ) -> Result<(), String> {
     let base_url = prompt.input("Gateway URL", &config.inference.base_url)?;
-    config.inference.base_url = base_url.clone();
+    // The endpoint's own key only: a key saved for another endpoint is never
+    // carried to this one.
+    lightagent_core::provider_keys::select_endpoint(config, &base_url);
 
     let mut provider_config = ProviderConfig::new(base_url, "default");
-    if let Some(key) = config
+    // A configured key that cannot be used: nothing is sent without it.
+    let key = config
         .inference
         .api_key
         .as_ref()
-        .and_then(|key| key.resolve())
-    {
-        provider_config = provider_config.with_api_key(key);
+        .map_or(Ok(None), SecretRef::for_request);
+    if let Ok(Some(key)) = &key {
+        provider_config = provider_config.with_api_key(key.clone());
     }
-    let models = match LightweightProvider::new(provider_config) {
-        Ok(provider) => match provider.models().await {
+    let models = match key.map(|_| LightweightProvider::new(provider_config)) {
+        Err(problem) => {
+            writeln!(
+                prompt.writer,
+                "Could not list models: {problem}; nothing was sent. Automatic selection remains available."
+            )
+            .map_err(io_error)?;
+            Vec::new()
+        }
+        Ok(Ok(provider)) => match provider.models().await {
             Ok(models) => models,
             Err(error) => {
                 writeln!(
@@ -867,7 +871,7 @@ async fn configure_gateway<R: BufRead, W: Write>(
                 Vec::new()
             }
         },
-        Err(error) => {
+        Ok(Err(error)) => {
             writeln!(prompt.writer, "Could not open the gateway: {error}").map_err(io_error)?;
             Vec::new()
         }
@@ -920,7 +924,10 @@ fn configure_tools<R: BufRead, W: Write>(
             "Workspace folder (blank uses the active profile workspace)",
             current,
         )?;
-        config.tools.workspace = nonempty(workspace);
+        // A new folder takes the shared rule; an unchanged one stays as it is.
+        if workspace != current {
+            lightagent_core::workspaces::set(config, Some(&workspace))?;
+        }
     }
     Ok(())
 }
@@ -948,10 +955,8 @@ fn configure_web<R: BufRead, W: Write>(
         ],
         default,
     )?;
-    config.web.enabled = selected != 1;
-    if selected == 3 {
-        use_duckduckgo(config);
-    } else if selected == 4 {
+    let mode = WebMode::ALL[selected - 1];
+    let endpoint = if mode == WebMode::Custom {
         let current = config
             .web
             .search
@@ -959,11 +964,11 @@ fn configure_web<R: BufRead, W: Write>(
             .as_deref()
             .filter(|_| !uses_duckduckgo(config))
             .unwrap_or("http://127.0.0.1:8080/search?format=json");
-        config.web.search.endpoint = nonempty(prompt.input("SearXNG search URL", current)?);
+        Some(prompt.input("SearXNG search URL", current)?)
     } else {
-        config.web.search.endpoint = None;
-    }
-    config.rag.realtime_enabled = selected >= 3;
+        None
+    };
+    mode.apply(config, endpoint.as_deref());
     Ok(())
 }
 
@@ -1078,11 +1083,6 @@ fn use_duckduckgo(config: &mut Config) {
     config.web.search.api_key = None;
 }
 
-fn nonempty(value: String) -> Option<String> {
-    let value = value.trim();
-    (!value.is_empty()).then(|| value.to_owned())
-}
-
 fn io_error(error: std::io::Error) -> String {
     error.to_string()
 }
@@ -1190,16 +1190,33 @@ mod tests {
 
     #[test]
     fn tools_are_selected_without_config_keys() {
+        let project = std::env::temp_dir()
+            .join("lightagent-setup-project")
+            .display()
+            .to_string();
         let mut config = Config::default();
         let mut output = Vec::new();
         let mut prompt = Prompt {
-            reader: Cursor::new("3\n/tmp/project\n"),
+            reader: Cursor::new(format!("3\n{project}\n")),
             writer: &mut output,
         };
         configure_tools(&mut config, &mut prompt).unwrap();
         assert!(config.tools.enabled);
         assert!(config.tools.allow_terminal);
-        assert_eq!(config.tools.workspace.as_deref(), Some("/tmp/project"));
+        assert_eq!(config.tools.workspace.as_deref(), Some(project.as_str()));
+    }
+
+    #[test]
+    fn a_relative_workspace_folder_is_refused() {
+        let mut config = Config::default();
+        let mut output = Vec::new();
+        let mut prompt = Prompt {
+            reader: Cursor::new("3\nrelative/project\n"),
+            writer: &mut output,
+        };
+        let error = configure_tools(&mut config, &mut prompt).unwrap_err();
+        assert!(error.contains("absolute"), "{error}");
+        assert_eq!(config.tools.workspace, None);
     }
 
     #[test]

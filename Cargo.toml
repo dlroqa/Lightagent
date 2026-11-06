@@ -83,7 +83,7 @@ sha2 = "0.11.0"
 hex = "0.4.3"
 tar = "0.4.46"
 flate2 = "1.1.9"          # defaults to the pure-Rust miniz_oxide backend
-zip = "8.6.0"
+zip = "9.0.0"
 
 getrandom = "0.4.3"   # OS entropy for run, call, session and API identifiers
 # AEAD and HKDF for credentials sealed at rest. Already in the tree as the
