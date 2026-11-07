@@ -29,6 +29,18 @@ Release notes: `docs/releases/v0.6.0.md`.
   nothing. It needs session write access as well as run access, and
   anything but the latest answer is refused with 409.
 
+### Fixed
+
+- The Web UI and the Desktop show the final answer, and its action row,
+  as soon as a run ends when each turn is budgeted, as it is whenever the
+  model's window is known (Lightweight reports it). The runtime then sends
+  a `generation.report` event per turn that the run-event hook did not
+  listen for; the browser dropped it, the hook read the next event as a
+  gap and replayed the stream without end, so the run never ended in the
+  UI and the answer appeared only after a reload. The hook now listens for
+  every event the API sends, and no longer replays forever over an event
+  it cannot hear. The same hook is in 0.5.0's Web UI.
+
 ## [0.5.0] - 2026-10-29
 
 Release notes: `docs/releases/v0.5.0.md`.
