@@ -18,8 +18,11 @@ Each installer the runner built is used as a person would use it:
 A launch is run.py's `ready` check against the installed binary: the
 bundled runtime starts, the UI loads and makes its first API call, no launch
 key shows in any process's arguments or environment, and the runtime leaves
-with the app. Also recorded: each installer's SHA-256, the signature state
-(unsigned is expected), and the minimum OS the binaries declare, which is a
+with the app. Also recorded: each installer's SHA-256 and signature state;
+on Windows the Authenticode status, signer and timestamp of every installed
+executable (the app and the bundled runtime must both be there, and with
+LIGHTAGENT_SIGNING_REQUIRED=1 both must be validly signed and timestamped);
+and the minimum OS the binaries declare, which is a
 declaration only: no older system is run.
 
 User data (user_data.py): the account's own Lightagent home is seeded with
@@ -65,8 +68,12 @@ CLI = os.path.join(os.path.dirname(os.path.dirname(HERE)), "target", "release", 
 # What scripts/desktop-sbom.py --notices generated and the bundle carries.
 NOTICES = os.path.join(os.path.dirname(HERE), "src-tauri", "notices")
 NOTICE_FILES = ("THIRD_PARTY_NOTICES.txt", "LICENSE.txt")
-STEPS = ("install", "launch", "notices", "data_seed", "data_after_launch", "data_after_reinstall", "uninstall",
+STEPS = ("install", "launch", "notices", "signatures", "data_seed", "data_after_launch", "data_after_reinstall", "uninstall",
          "data_after_uninstall", "lifecycle", "data_after_appimage")
+# Set by release.yml for a signed run.
+SIGNING_REQUIRED = os.environ.get("LIGHTAGENT_SIGNING_REQUIRED") == "1"
+# What every Windows installation holds beside each other: the app and the bundled runtime.
+REQUIRED_SIGNED = ("lightagent-desktop.exe", "lightagent-sidecar.exe")
 
 
 def sh(args, timeout=600, **kw):
@@ -190,7 +197,7 @@ def notices_check(paths):
         candidates = [p for p in paths if os.path.basename(p) == name and os.path.isfile(p)]
         found = next((p for p in candidates if os.path.dirname(p) in beside), candidates[0] if candidates else None)
         generated = os.path.join(NOTICES, name)
-        seen[name] = {"packaged": found is not None,
+        seen[name] = {"packaged": found is not None, "sha256": sha256(found) if found else None,
                       "same_as_generated": bool(found) and os.path.isfile(generated) and sha256(found) == sha256(generated)}
     return {"ok": all(v["packaged"] and v["same_as_generated"] for v in seen.values()), **seen}
 
@@ -396,6 +403,24 @@ def authenticode(path):
     return sh(["powershell", "-NoProfile", "-Command", f"(Get-AuthenticodeSignature -LiteralPath '{path}').Status"])[1].strip()
 
 
+def signature(path):
+    script = (f"$s = Get-AuthenticodeSignature -LiteralPath '{path}'; "
+              "'{0}|{1}|{2}' -f $s.Status, $s.SignerCertificate.Subject, $s.TimeStamperCertificate.Subject")
+    lines = sh(["powershell", "-NoProfile", "-Command", script])[1].strip().splitlines()
+    status, signer, stamp = (lines[-1].split("|") + ["", ""])[:3] if lines else ("", "", "")
+    return {"status": status.strip(), "signer": signer.strip() or None, "timestamp": stamp.strip() or None}
+
+
+def installed_signatures(exe):
+    """Authenticode of every executable the installation put beside the app."""
+    folder = os.path.dirname(exe)
+    files = {name: signature(os.path.join(folder, name)) for name in sorted(os.listdir(folder)) if name.lower().endswith(".exe")}
+    present = all(name in files for name in REQUIRED_SIGNED)
+    valid = all(files[name]["status"] == "Valid" and files[name]["timestamp"] for name in REQUIRED_SIGNED if name in files)
+    return {"ok": present and (valid or not SIGNING_REQUIRED), "required": SIGNING_REQUIRED,
+            "runtime_present": "lightagent-sidecar.exe" in files, "files": files}
+
+
 def installed_exe():
     roots = [os.environ.get("LOCALAPPDATA", ""), os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs"),
              os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")]
@@ -435,6 +460,7 @@ def windows(out, bundle, entries):
             entry["min_os"] = {**pe_versions(exe), "declared_by": "the PE header (declared); WebView2 is required"}
             entry["launch"] = launch(out, "nsis", exe)
             entry["notices"] = notices_check([os.path.join(os.path.dirname(exe), name) for name in NOTICE_FILES])
+            entry["signatures"] = installed_signatures(exe)
             baseline = data_cycle(out, entry, "nsis", exe, lambda: sh([setup, "/S"], timeout=900),
                                   "simulated upgrade: the setup run again (/S) over its installation, then a launch", baseline)
             uninstaller = os.path.join(os.path.dirname(exe), "uninstall.exe")
@@ -453,6 +479,7 @@ def windows(out, bundle, entries):
         if exe:
             entry["launch"] = launch(out, "msi", exe)
             entry["notices"] = notices_check([os.path.join(os.path.dirname(exe), name) for name in NOTICE_FILES])
+            entry["signatures"] = installed_signatures(exe)
             repair_log = os.path.join(out, "msi-reinstall.log")
             baseline = data_cycle(out, entry, "msi", exe,
                                   lambda: sh(["msiexec", "/fvomus", os.path.abspath(msi), "/qn", "/norestart", "/l*v", repair_log], timeout=900),
@@ -503,6 +530,8 @@ def main():
             print(f"  - signature: {str(entry['signature']).splitlines()[-1][:160] if entry['signature'] else '?'}")
         if entry.get("notices"):
             print(f"  - packaged notices: {json.dumps(entry['notices'])}")
+        if entry.get("signatures"):
+            print(f"  - installed executables' signatures: {json.dumps(entry['signatures'])}")
         for step in STEPS:
             result = entry.get(step)
             if not step.startswith("data_after") or not result:

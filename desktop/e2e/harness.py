@@ -43,6 +43,8 @@ class FakeProvider:
     The scenario is the `[e2e:<name>]` marker in the conversation's latest
     user message; the turn is how many assistant messages follow it.
     `scripts[name](provider, turn, index)` returns the steps: ("text", s),
+    ("reasoning", s) as `reasoning_content`, ("text_finish", s, reason) for
+    the last content and the finish reason in one chunk,
     ("refusal", s), ("tool", internal_name, arguments), ("finish", reason),
     ("gate", name) to wait until the harness opens that gate, or a first
     ("status", code) to fail the request with that HTTP status.
@@ -54,6 +56,9 @@ class FakeProvider:
         self.gates = {}
         self.modes = {}
         self.scripts = {}
+        # A served window to report on /v1/models, as Lightweight does; None
+        # reports none (the runtime then does not budget the turn).
+        self.window = None
         provider = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -62,7 +67,13 @@ class FakeProvider:
 
             def do_GET(self):
                 if self.path.startswith("/v1/models"):
-                    provider.reply(self, 200, {"object": "list", "data": [{"id": "fake-model"}]})
+                    row = {"id": "fake-model"}
+                    if provider.window:
+                        # Lightweight's row: n_ctx beside its own `hermes`
+                        # namespace. The runtime then budgets each turn and
+                        # sends a generation report for it.
+                        row.update(n_ctx=provider.window, hermes={"served_by": "e2e"})
+                    provider.reply(self, 200, {"object": "list", "data": [row]})
                 else:
                     provider.reply(self, 404, {"error": "not found"})
 
@@ -177,6 +188,10 @@ class FakeProvider:
                 kind = step[0]
                 if kind == "text":
                     self.chunk(handler, {"content": step[1]})
+                elif kind == "reasoning":
+                    self.chunk(handler, {"reasoning_content": step[1]})
+                elif kind == "text_finish":
+                    self.chunk(handler, {"content": step[1]}, finish=step[2])
                 elif kind == "refusal":
                     self.chunk(handler, {"refusal": step[1]})
                 elif kind == "tool":

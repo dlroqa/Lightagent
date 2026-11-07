@@ -48,6 +48,13 @@ const EVENT_NAMES = [
   "approval.required",
   "run.paused",
   "turn.completed",
+  // Sent before turn.completed when the turn was budgeted, which is every
+  // turn once the model's window is known (Lightweight reports it). Not
+  // used by the UI, but it must be heard: an unheard named event is dropped
+  // by EventSource, and its id would then read as a gap.
+  "generation.report",
+  // The name the API gives an event it has no name for (sse.rs).
+  "event",
   "run.completed",
   "run.cancelled",
   "run.failed",
@@ -74,7 +81,10 @@ const GONE = /^(401|403|404):/;
  * a terminal run the stream has not finished, the stream is reopened after the
  * last event received so the remainder, terminal event included, is replayed.
  * Only when that replay keeps failing is the run marked done with
- * `delivery: "incomplete"`.
+ * `delivery: "incomplete"`. A gap that the replay shows again is not a lost
+ * event: the ids between are events this client has no listener for (an
+ * EventSource drops those without a trace), so the next event is accepted
+ * instead of the stream being replayed without end.
  */
 export function useRunEvents(runId: string | null): { events: RunEvent[]; done: boolean; delivery: Delivery } {
   const [events, setEvents] = useState<RunEvent[]>([]);
@@ -93,6 +103,9 @@ export function useRunEvents(runId: string | null): { events: RunEvent[]; done: 
     let closed = false;
     let faulted = false;
     let lastId = -1;
+    // The gap (`last:next`) a reconnect was made for, to tell a lost event,
+    // which the replay brings, from an unheard one, which it never can.
+    let replayedGap: string | null = null;
     let recoveries = 0;
     // Connections that failed in a row; reset whenever one opens.
     let failedConnections = 0;
@@ -124,8 +137,13 @@ export function useRunEvents(runId: string | null): { events: RunEvent[]; done: 
         if (id <= lastId) return;
         // A gap would mean a missed event: resume from the last one held.
         if (lastId >= 0 && id !== lastId + 1) {
-          reconnect();
-          return;
+          const gap = `${lastId}:${id}`;
+          if (replayedGap !== gap) {
+            replayedGap = gap;
+            reconnect();
+            return;
+          }
+          replayedGap = null;
         }
         lastId = id;
       }

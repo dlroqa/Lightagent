@@ -13,12 +13,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const KEY: &str = "4f1c2b3a5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7a8";
 
 fn scratch_home() -> std::path::PathBuf {
+    // Unique per call: both tests start at once, and macOS clocks tick in
+    // microseconds, so a name from the time alone can repeat.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or(0);
+    let call = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "lightagent-desktop-serve-{}-{nanos}",
+        "lightagent-desktop-serve-{}-{nanos}-{call}",
         std::process::id()
     ))
 }

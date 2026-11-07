@@ -381,6 +381,11 @@ jobs:
             python -I scripts/desktop-sbom.py --notices "$RUNNER_TEMP/supply-chain/metadata" "$t" frontend "$RUNNER_TEMP/supply-chain/notices-$t" . | tee -a "$GITHUB_STEP_SUMMARY"
           done
           python -I scripts/desktop-sbom.py --mpl-sources "$RUNNER_TEMP/supply-chain/metadata" "$RUNNER_TEMP/supply-chain/mpl-sources" . | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The vendored upstream license texts, fetched again from upstream
+        if: success() || failure()
+        run: |
+          set -euo pipefail
+          python -I scripts/desktop-upstream-licenses.py . | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Where the reviewed advisories' code is reached (exact versions, call sites)
         if: success() || failure()
         run: python -I scripts/desktop-sbom.py --advisory-paths "$RUNNER_TEMP/supply-chain/metadata" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -566,6 +571,9 @@ jobs:
           # Windows: OS key presses reach the WebView2 page at launch, on a host of its own.
           if [ "$RUNNER_OS" = Windows ]; then
             LIGHTAGENT_HOME="$RUNNER_TEMP/keyboard-home" python desktop/e2e/native.py "$out/keyboard" "$cli" keyboard -- "$app" || status=1
+            # Recorded: whether keyboard focus returns after the share flyout closes.
+            LIGHTAGENT_HOME="$RUNNER_TEMP/share-focus-home" python desktop/e2e/native.py "$out/share-focus" "$cli" share-focus -- "$app" || status=1
+            python -c "import json, sys; print('- share flyout focus (recorded): ' + json.dumps(json.load(open(sys.argv[1]))['recorded'].get('windows_share_focus', {}).get('verdict')))" "$out/share-focus/native-share-focus.json" | tee -a "$GITHUB_STEP_SUMMARY" || true
           fi
           exit $status
       - name: Startup with no network at all (Linux network namespace)
