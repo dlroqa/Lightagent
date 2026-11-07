@@ -1,0 +1,20 @@
+=== base 5b6e61662395dd6907bfd85aa02c0d2c411625b1
+=== message
+Shorten two delivery scenario names the session list truncates
+
+Tests only. Each scenario opens its seeded conversation by its exact
+title, "delivery <name>"; two new names were long enough for the list to
+truncate the title, so the scenario never started.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace e2e/delivery.mjs
+--- find
+    name: "reasoning-then-answer-with-generation-report",
+--- with
+    name: "reasoning-answer-report",
+=== replace e2e/delivery.mjs
+--- find
+    name: "dropped-after-generation-report-then-resumed",
+--- with
+    name: "dropped-at-report-resumed",
+=== end
