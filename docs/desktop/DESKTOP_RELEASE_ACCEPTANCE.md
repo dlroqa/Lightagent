@@ -2,12 +2,13 @@
 
 **Prepared for the owner's review. Nothing here is approved, merged, tagged
 or published.** Pull request https://github.com/dlroqa/Lightagent/pull/164
-(`release/v0.6.0`, draft). Revised 2026-11-06: owner-approved unsigned v0.6.0 release path.
+(`release/v0.6.0`, draft). Revised 2026-11-07: the final-answer display fix, candidate `b0f66a4`, and the owner's Windows 11 acceptance (item 5 closed with a documented limitation).
 
 | | Commit | Tree |
 |---|---|---|
 | Base (`master`, the merged Desktop delivery) | `4f6b1f64ca84235f4e2682a2b5f3f65df96e6937` | `16161ba52f6cd4a4d8680708535f67448781cf0d` |
-| **Release candidate (the final dry run built it)** | `22ad4fe60be6124d14c3f8b77dc8d9bb4c4b2cde` | `9b764e5c2cf41732402f471b9a94dfbce0bd1300` |
+| **Release candidate (the final dry run built it; the owner's Windows 11 acceptance used its MSI)** | `b0f66a416ed7809e006bf5807ec59d3141bddf69` | `da38742b8a323242966b02cd7a4a884201ded569` |
+| Release candidate before the final-answer display fix | `22ad4fe60be6124d14c3f8b77dc8d9bb4c4b2cde` | `9b764e5c2cf41732402f471b9a94dfbce0bd1300` |
 | Code candidate before the unsigned release path | `692dcece27b20590747507ae3f02ee765b0a97fa` | `804fb3606842b9221e73ab3d9403371ed6e68464` |
 | Previous code candidate (license fix) | `55f4b96b733a254748369f037a128da08caf94b7` | `dc966a88333f8e362e7252a369b035797d40d894` |
 | Earlier code candidate (superseded) | `2e1623d5facc567407dcdd8bfeeffb0f8a8ac445` | `971d5cfb8c0f4e02bf935a61328181eb0a5ea213` |
@@ -27,12 +28,23 @@ What changed since `2e1623d`, in order:
 | `8f35230` | edit request 199: the owner-approved unsigned path for v0.6.0 only (exact tag list in the gate; that tag publishes unsigned from its tag push only; a manual publishing run on it is refused; unsigned publication of any other tag is refused); one run per ref (concurrency); the publish job refuses an existing release for the tag, verifies SHA256SUMS and drafts with the release notes; the release notes |
 | `22ad4fe` | edit request 200: the shape test forbids computing checksums in the publish job, not verifying them (its earlier wording failed check on `8f35230`) |
 | `692dcec` | edit request 197: the `signing` input (unsigned by default; a tag push signs); only a signed run's macOS and Windows jobs use the protected `release-signing` environment; a signed run fails without every credential or verification; the .dmg files notarized and stapled; the Windows runtime's signature checked as built and as installed |
+| `d2bdd1f` | documentation: the approved unsigned path and the held gate |
+| `2a8e271` | the reproduction of the final answer that appeared only after a reload: the paired-Lightweight stream trace (`scripts/stream-trace.py`), the event-name check (`scripts/check-event-names.py`), the native `answer_display` scenario and the browser delivery scenarios. It failed as intended (below) |
+| `6a70549` | edit request 203: the native scenario reads each run live through the host relay |
+| `5b6e616` | edit request 204: **the fix**, `frontend/src/hooks/useRunEvents.ts` listens for `generation.report` and the catch-all `event`, and replays an unchanged gap once instead of without end |
+| `b0f66a4` | edit request 205: two delivery scenario names shortened (tests only) |
 
 ## 1. Evidence
 
 | Run | On | Result |
 |---|---|---|
-| **final release dry run (artifact-only, `signing=unsigned`, `publish` skipped)** | `22ad4fe` | https://github.com/dlroqa/Lightagent/actions/runs/42268737686: **every job green**; every installer installed, launched, reinstalled, uninstalled with user data unchanged; notices identical to the generated ones (the same digests as every run since the license fix); 0 shipped crates without a license text; SHA256SUMS 11 of 11 OK when downloaded; MPL archive `8dca80a1…cc0e8`; afterwards no `v0.6.*` tag and no v0.6.0 release exist, Latest still v0.5.0 |
+| **final release dry run (artifact-only, `signing=unsigned`, `publish` skipped)** | `b0f66a4` | https://github.com/dlroqa/Lightagent/actions/runs/42345778723: **every job green**, publish skipped; SHA256SUMS 11 of 11 OK when downloaded; MSI `a052398862bfef3e0aa197cee625374ccb00563f9ece6a5ffe4701275e8ef084`, setup.exe `a7ab4774a5fbc19b5f33a261dce877879be60dddea45dc917fa65b9b4e9a1201`; afterwards no `v0.6.*` tag and no v0.6.0 release exist, Latest still v0.5.0 |
+| check | `b0f66a4` | https://github.com/dlroqa/Lightagent/actions/runs/42345783941 green, 13/13: the event-name check, the stream trace, the six new delivery scenarios, and the existing recovery scenarios with unchanged request counts; an unknown event is skipped after one replay |
+| desktop | `b0f66a4` | https://github.com/dlroqa/Lightagent/actions/runs/42345783863 green, 12/12; `answer_display` 40 of 40 (5 cases, with and without a known window, on Windows, Linux x64, macOS Intel and macOS Apple silicon native WebViews) |
+| jev evaluation, subagents | `b0f66a4` | https://github.com/dlroqa/Lightagent/actions/runs/42345784000 and https://github.com/dlroqa/Lightagent/actions/runs/42345783868 green |
+| reproduction | `2a8e271` | check 42344299982 and desktop 42344299961 **failed as intended**: with a known window, `answer_display` 0 of 5 on every native target (5 of 5 without); the stream trace showed the provider stream, the runtime's events and the transcript correct, and the UI contract failing |
+| owner Windows 11 acceptance | `b0f66a4` MSI | Windows 11 Pro, OS build 26300.9818, MSI `a0523988…f084`: the final answer appears with live Lightweight inference without a reload, separately from the reasoning, with its actions, once per question; the share panel PASS with a documented limitation (§4) |
+| release dry run (before the display fix) | `22ad4fe` | https://github.com/dlroqa/Lightagent/actions/runs/42268737686: **every job green**; every installer installed, launched, reinstalled, uninstalled with user data unchanged; notices identical to the generated ones (the same digests as every run since the license fix); 0 shipped crates without a license text; SHA256SUMS 11 of 11 OK when downloaded; MPL archive `8dca80a1…cc0e8`; afterwards no `v0.6.*` tag and no v0.6.0 release exist, Latest still v0.5.0. Its MSI (`4f5084c9…39d6`) passed the owner's first share-panel check and showed the display defect |
 | release dry run | `8f35230` | 42268526429: cancelled once check failed on the shape test (fixed in `22ad4fe`) |
 | unsigned release dry run (artifact-only, `signing=unsigned`, `publish` skipped) | `692dcec` | https://github.com/dlroqa/Lightagent/actions/runs/42221449510: **every job green**: gate (`signing=unsigned`), 4 CLI builds, 4 Desktop targets, licenses and sources, Windows Server 2022, checksums. No job used an environment; none was created |
 | check | `692dcec` | https://github.com/dlroqa/Lightagent/actions/runs/42221456703 green, 13/13 (the gate's signing tests included) |
@@ -218,14 +230,24 @@ Hosted runners cannot close these gaps: no macOS image older than 15 runs
 (macos-14 is refused), hosted Windows is Server only, and there is no glibc
 2.34 image. Decision 7.
 
-### Windows keyboard focus after the share panel: PENDING
+### Windows keyboard focus after the share panel: PASS, documented limitation
 
 Hosted runs cannot show the system share panel (desktop 42160150122,
-42158154084). The manual check is `DESKTOP_WINDOWS_SHARE_FOCUS_CHECK.md`,
-about 10 minutes, keyboard only, on Windows 11 (version and OS build recorded). **It stays pending until someone runs
-it.** If focus is lost but the keyboard can recover it, the item is a
-documented limitation with the recovery key. If the keyboard cannot recover
-it, that is an **unrecoverable keyboard trap and a release blocker**.
+42158154084), so the check (`DESKTOP_WINDOWS_SHARE_FOCUS_CHECK.md`) was run
+by the owner on Windows 11 Pro, OS build 26300.9818:
+
+- `22ad4fe` MSI (`4f5084c9…39d6`): Esc closed the panel and focus returned. PASS.
+- `b0f66a4` MSI (`a0523988…f084`): Enter opens the panel; **Esc does not
+  reliably close it**; Tab and Shift+Tab move within it; Close (X) then
+  Enter, and Alt+F4, each close it; focus then returns to Lightagent and
+  Tab and Shift+Tab move through its controls, with no mouse and no reload.
+
+Owner's classification (2026-11-07): a recoverable Windows/WebView2
+limitation, **not a keyboard trap**; it does not prevent keyboard-only use.
+The release notes name both closing methods. Lightagent calls
+`navigator.share` and receives no key presses while the panel is open; the
+Share code is the same in both candidates. No focus-return code change was
+made (owner decision).
 
 ## 5. Live evidence and fixtures
 
@@ -259,7 +281,8 @@ Unchanged since the earlier record:
 | 2 | macOS not signed or notarized | **accepted by the owner for v0.6.0** (2026-11-06; Gatekeeper behaviour documented in the release notes); a blocker again for later versions unless approved | later versions: a signed dry run passing every macOS proof (handoff §5) |
 | 3 | Windows not signed | **accepted by the owner for v0.6.0** (SmartScreen behaviour documented) | handoff §2 for later versions |
 | 4 | Linux not signed | documented limitation | optional |
-| 5 | Windows focus after the share panel | **pending manual check on Windows 11**; an unrecoverable keyboard trap is a blocker and must be fixed before release | `DESKTOP_WINDOWS_SHARE_FOCUS_CHECK.md` |
+| 5 | Windows focus after the share panel | **closed: PASS with a documented limitation** (owner, Windows 11 Pro 26300.9818, `b0f66a4`); Esc may not close the panel; Close (X) then Enter, or Alt+F4, close it and focus returns; not a keyboard trap | release notes "Known issue"; `DESKTOP_WINDOWS_SHARE_FOCUS_CHECK.md` |
+| 16 | Final answer shown only after a reload when the model window is known | was a release blocker (owner report) | **resolved** in `5b6e616`: 40 of 40 native, the browser scenarios, the owner's Windows 11 retest; the same hook is in 0.5.0's Web UI (not changed by this release) |
 | 6 | Declared minimum OS versions untested | documented limitation | decision 7 |
 | 7 | Second OS account on macOS and Windows | documented limitation | — |
 | 8 | Live Jev, providers and MCP through the Desktop | documented limitation | optional live runs |
@@ -290,15 +313,16 @@ Unchanged since the earlier record:
 **The owner approved (2026-11-06) unsigned macOS and Windows installers for
 v0.6.0, publication without marking it Latest, the merge of #164, the tag
 and publication, once every gate passes.** The unsigned path is in the
-candidate and tested, and the final artifact-only dry run on `22ad4fe` is
+candidate and tested, and the final artifact-only dry run on `b0f66a4` is
 green with every artifact verified.
 
-**Publication is held on one gate: the Windows 11 share-panel keyboard
-check (item 5) has not been run.** No result has been supplied, and hosted
-runners offer no Windows 11. Until it is run and recorded
-(`DESKTOP_WINDOWS_SHARE_FOCUS_CHECK.md`), #164 is not merged, no tag is
-created and nothing is published. Item 13 (objc2 treatment) remains
-documented for review.
+**Every acceptance gate has passed.** The final-answer display defect
+(item 16) is fixed and verified on all four native targets and by the
+owner on Windows 11; the share-panel check (item 5) passed with a
+documented limitation. **Publication still waits for the owner's explicit
+authorization** (2026-11-07: documentation and validation only): #164 stays
+a draft and is not merged, no tag is created and nothing is published.
+Item 13 (objc2 treatment) remains documented for review.
 
 ## 10. Process record
 
@@ -337,9 +361,9 @@ documented for review.
 
 ## 12. Remaining before publication
 
-1. The Windows 11 share-panel check (item 5), run and recorded by the
-   owner or a tester.
-2. Then, under the owner's approval:
+1. Done: the Windows 11 share-panel check (item 5) and the display retest,
+   run and recorded by the owner (2026-11-07).
+2. The owner's explicit authorization to proceed. Then:
    - merge #164 at its reviewed head;
    - verify the master tree and the post-merge checks;
    - tag that commit `v0.6.0`;
