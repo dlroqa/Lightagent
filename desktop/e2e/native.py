@@ -664,7 +664,9 @@ def scripts(provider):
     for case, steps, _wanted in DISPLAY_CASES:
         for budget, _window in DISPLAY_BUDGETS:
             name = f"display-{case}-{budget}"
-            provider.scripts[name] = (lambda steps, name: lambda p, turn, index: [
+            # Held first at `<name>-start`, so the scenario can subscribe to
+            # the run through the host relay before any output is sent.
+            provider.scripts[name] = (lambda steps, name: lambda p, turn, index: [("gate", f"{name}-start")] + [
                 ("gate", name) if step == ("gate", "GATE") else step for step in steps])(steps, name)
 
 
@@ -705,6 +707,19 @@ def scenario_answer_display(view, host, provider, home, notes):
             prompt = f"{marker} Answer once."
             view.new_chat()
             view.send(prompt)
+            # The run, held before its first output: its id, and a host relay
+            # subscription that records every event as it is forwarded.
+            live, relay_error = None, None
+            started = provider.wait_for("gate", name, gate=f"{name}-start")
+            try:
+                listed = json.loads(host.call("fetch", method="GET", target=f"{API}/runs")["body"]).get("runs") or []
+                if len(listed) == 1:
+                    live = harness.Stream(host, listed[0]["id"])
+                else:
+                    relay_error = f"expected one active run, saw {len(listed)}"
+            except (harness.HostError, ValueError, KeyError, TypeError) as error:
+                relay_error = str(error)
+            provider.open(f"{name}-start")
             interruption = None
             if case == "interrupted-and-resumed":
                 held = provider.wait_for("gate", name, gate=name)
@@ -736,23 +751,24 @@ def scenario_answer_display(view, host, provider, home, notes):
                     .some((el) => el.textContent.includes($WANTED));
                   if (!(await until(shown, 5000))) {
                     const entry = await until(() => [...document.querySelectorAll(".agent-sessions__list *")]
-                      .find((el) => visible(el) && el.children.length === 0 && squash(el.textContent).replace(/[.…]+$/, "") === title), 10000);
+                      .find((el) => visible(el) && el.children.length === 0 && squash(el.textContent).includes($MARKER)), 10000);
                     if (entry) press(entry);
                   }
                   return { shown: !!(await until(shown, 15000)), action_row: !!(await until(() => one("toolbar", "Response actions"), 5000)) };""",
-                                         PROMPT=prompt, WANTED=wanted), 40)
+                                         PROMPT=prompt, WANTED=wanted, MARKER=marker), 40)
+                view.shot(f"display-{case}-{budget}-after-reload")
             saved = saved_with(home, marker)
             saved_answers = [answer for answer in harness.answers(saved) if answer]
-            run_id = ((saved or {}).get("runs") or [{}])[-1].get("run_id")
-            relayed = None
-            if run_id:
+            relayed = {"started_at_gate": started, "error": relay_error}
+            if live:
                 try:
-                    stream = harness.Stream(host, run_id).finish(30)
-                    ids = stream.ids()
-                    relayed = {"events": stream.names(), "ids_contiguous": all(b == a + 1 for a, b in zip(ids, ids[1:])),
-                               "closed": stream.closed, "error": stream.error}
+                    live.finish(30)
+                    ids = live.ids()
+                    relayed.update(run=live.run, events=live.names(), closed=live.closed, error=live.error,
+                                   ids_contiguous=all(b == a + 1 for a, b in zip(ids, ids[1:])),
+                                   generation_report="generation.report" in live.names())
                 except harness.HostError as error:
-                    relayed = {"error": str(error)}
+                    relayed["error"] = str(error)
             seen = (state.get("later") or state.get("first") or {})
             entry = {"shown_without_reload": bool(state.get("shown")), "still_shown_after_1_5s": bool(state.get("still_shown")),
                      "answers_in_page": seen.get("answers"), "reasoning_panel_left": state.get("reasoning_panel"),
