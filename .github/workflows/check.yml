@@ -304,6 +304,21 @@ jobs:
           LIGHTWEIGHT_MOCK_GATEWAY: ${{ github.workspace }}/lightweight-provider/target/debug/hermes-mock-gateway
           LIGHTAGENT_BIN: ${{ github.workspace }}/target/debug/lightagent
         run: python3 scripts/paired-e2e.py
+      - name: Every run event the API can send is one the UI listens for
+        if: success() || failure()
+        run: python3 scripts/check-event-names.py | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Trace a reasoning-then-answer run across Lightweight, Lightagent and the UI's event contract
+        if: success() || failure()
+        env:
+          LIGHTWEIGHT_MOCK_GATEWAY: ${{ github.workspace }}/lightweight-provider/target/debug/hermes-mock-gateway
+          LIGHTAGENT_BIN: ${{ github.workspace }}/target/debug/lightagent
+        run: python3 scripts/stream-trace.py "$RUNNER_TEMP/stream-trace" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: stream-trace
+          retention-days: 30
+          path: ${{ runner.temp }}/stream-trace/
 
   platform-rag-contract:
     name: Qdrant + Infinity live contract

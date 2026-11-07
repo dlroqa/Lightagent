@@ -83,6 +83,9 @@ enum Op {
     DropRelay {
         subscription: u64,
     },
+    /// Drop every active relay's connection, as a network fault would; each
+    /// relay resumes after the last event it forwarded.
+    DropRelays,
     Switch {
         profile: String,
         cancel_runs: bool,
@@ -207,6 +210,13 @@ async fn run(host: &Arc<Host>, op: Op) -> Result<Value, String> {
                 .ok_or("unknown subscription")?;
             entry.interrupt.notify_one();
             Value::Null
+        }
+        Op::DropRelays => {
+            let entries: Vec<_> = lock(&host.subscriptions).values().cloned().collect();
+            for entry in &entries {
+                entry.interrupt.notify_one();
+            }
+            json!(entries.len())
         }
         Op::Switch {
             profile,

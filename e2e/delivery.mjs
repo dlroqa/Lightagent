@@ -52,6 +52,12 @@ const workerResult = (status) => JSON.stringify({
   notes: [],
 });
 const turn = ["turn.completed", {}];
+const thought = (reasoning) => ["model.delta", { reasoning }];
+// Sent before turn.completed when the turn was budgeted, as every turn is
+// once the model's window is known (Lightweight reports it); sse.rs.
+const report = ["generation.report", { turn: 1, purpose: "answer", finish: "Stop", prompt_tokens: 120, completion_tokens: 40 }];
+// A name this UI has never heard of, as a newer server could send.
+const unknownEvent = ["future.event", { note: "an event this UI has no listener for" }];
 const completed = (reason) => ["run.completed", { reason, complete: reason === "EndTurn" }];
 const classification = (outcome, extra = {}) => ["classification.completed", {
   schema: 2, trigger: "preflight", mode: "shadow", outcome, source: outcome === "classified" ? "jev" : null,
@@ -340,6 +346,62 @@ const SCENARIOS = [
       reconnectedAfter: 5,
     },
   },
+  {
+    // Reasoning, then the answer, then the per-turn generation report.
+    name: "reasoning-then-answer-with-generation-report",
+    frames: [started, thought("Weighing the question. "), thought("Settled."), delta("The final answer "), delta("is shown."), report, turn, completed("EndTurn")],
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: ["The final answer is shown."], inAnswer: ["The final answer is shown."], settled: true,
+      present: [], absent: ["could not be recovered"], maxStreams: 1 },
+  },
+  {
+    name: "answer-only-with-generation-report",
+    frames: [started, delta("Only an answer, no reasoning."), report, turn, completed("EndTurn")],
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: ["Only an answer, no reasoning."], inAnswer: ["Only an answer, no reasoning."], settled: true,
+      present: [], absent: ["could not be recovered"], maxStreams: 1 },
+  },
+  {
+    name: "many-chunks-with-generation-report",
+    frames: [started, thought("First. "), delta("Chunked "), thought("Second. "), delta("answer "), thought("Third."), delta("arrives."), report, turn, completed("EndTurn")],
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: ["Chunked answer arrives."], inAnswer: ["Chunked answer arrives."], settled: true,
+      present: [], absent: ["could not be recovered"], maxStreams: 1 },
+  },
+  {
+    // The terminal event right after the last content, nothing between.
+    name: "completion-right-after-last-chunk",
+    frames: [started, thought("Brief."), delta("Completed at once."), completed("EndTurn")],
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: ["Completed at once."], inAnswer: ["Completed at once."], settled: true,
+      present: [], absent: ["could not be recovered"], maxStreams: 1 },
+  },
+  {
+    // The stream drops right after the generation report, then resumes
+    // after the cursor.
+    name: "dropped-after-generation-report-then-resumed",
+    frames: [started, thought("Before the drop. "), delta("Resumed answer "), delta("arrives once."), report, turn, completed("EndTurn")],
+    stream(attempt, cursor, frames) {
+      if (attempt === 0) return { frames: body(frames.slice(0, 5)) };
+      return { frames: body(frames, cursor + 1) };
+    },
+    status: () => ({ status: "running" }),
+    expect: { once: ["Resumed answer arrives once."], inAnswer: ["Resumed answer arrives once."], settled: true,
+      present: [], absent: ["could not be recovered"], maxStreams: 2, reconnectedAfter: 4 },
+  },
+  {
+    // An event this UI does not know, between the answer and the turn's end.
+    name: "unknown-event-before-turn-completed",
+    frames: [started, delta("A newer server's event is skipped."), unknownEvent, turn, completed("EndTurn")],
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: ["A newer server's event is skipped."], inAnswer: ["A newer server's event is skipped."], settled: true,
+      present: [], absent: ["could not be recovered"], maxStreams: 2 },
+  },
 ];
 
 const occurrences = (haystack, needle) => haystack.split(needle).length - 1;
@@ -484,6 +546,28 @@ async function runScenario(browser, base, dir, scenario) {
     }
     for (const needle of scenario.expect.absent) {
       if (text.includes(needle)) failures.push(`${scenario.name}: did not expect “${needle}”`);
+    }
+    if (scenario.expect.inAnswer || scenario.expect.settled) {
+      // The answer must be in an answer bubble, not left in the reasoning
+      // panel, and the run must have ended in the UI (no Stop, no panel).
+      const probe = () => page.evaluate(() => ({
+        answers: [...document.querySelectorAll('article[aria-label="Agent message"]')].map((el) => el.textContent ?? ""),
+        reasoningPanel: document.querySelectorAll(".reasoning-stream").length,
+        stop: [...document.querySelectorAll("button")].some((el) => (el.getAttribute("aria-label") ?? el.textContent ?? "").trim() === "Stop"),
+      }));
+      let dom = await probe();
+      const until = Date.now() + 10000;
+      while (Date.now() < until && (dom.reasoningPanel || dom.stop || !(scenario.expect.inAnswer ?? []).every((needle) => dom.answers.some((t) => t.includes(needle))))) {
+        await page.waitForTimeout(250);
+        dom = await probe();
+      }
+      for (const needle of scenario.expect.inAnswer ?? []) {
+        const count = dom.answers.filter((t) => t.includes(needle)).length;
+        if (count !== 1) failures.push(`${scenario.name}: expected “${needle}” in exactly one answer, saw ${count} (reasoning panel ${dom.reasoningPanel})`);
+      }
+      if (scenario.expect.settled && (dom.reasoningPanel || dom.stop)) {
+        failures.push(`${scenario.name}: the run never ended in the UI (reasoning panel ${dom.reasoningPanel}, Stop ${dom.stop})`);
+      }
     }
     if (scenario.expect.maxStreams !== undefined) {
       // Long enough for a retry loop to show itself if one were running.

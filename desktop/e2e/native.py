@@ -602,6 +602,50 @@ def last_stop(saved):
     return runs_[-1].get("stop_reason") if runs_ else None
 
 
+# The final-answer display (answer_display): each stream sequence and its
+# answer. ("gate", "GATE") holds the stream where the interrupted case drops
+# the host's relay.
+DISPLAY_CASES = [
+    ("reasoning-then-answer", [("reasoning", "Weighing the question. "), ("reasoning", "Settled."),
+                               ("text", "Display answer "), ("text", "one."), ("finish", "stop")], "Display answer one."),
+    ("answer-only", [("text", "Display answer two."), ("finish", "stop")], "Display answer two."),
+    ("many-chunks", [("reasoning", "First thought. "), ("text", "Display "), ("reasoning", "Second thought. "),
+                     ("text", "answer "), ("reasoning", "Third thought."), ("text", "three."), ("finish", "stop")],
+     "Display answer three."),
+    ("finish-with-last-chunk", [("reasoning", "Brief thought."), ("text_finish", "Display answer four.", "stop")],
+     "Display answer four."),
+    ("interrupted-and-resumed", [("reasoning", "Thinking before the drop. "), ("text", "Display answer "),
+                                 ("gate", "GATE"), ("text", "five."), ("finish", "stop")], "Display answer five."),
+]
+# With a served window (as Lightweight reports one: each turn is budgeted
+# and reported), and without one.
+DISPLAY_BUDGETS = (("window", 8192), ("no-window", None))
+
+
+def webview_version():
+    """The platform WebView this app renders in, and its version as the OS reports it."""
+    try:
+        if WINDOWS:
+            key = r"HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+            out = subprocess.run(["reg", "query", key, "/v", "pv"], capture_output=True, text=True, timeout=20).stdout
+            found = re.search(r"pv\s+REG_SZ\s+(\S+)", out)
+            return {"webview": "WebView2 Runtime", "version": found.group(1) if found else None}
+        if MACOS:
+            for plist in ("/System/Library/Frameworks/WebKit.framework/Resources/Info.plist",
+                          "/System/Cryptexes/OS/System/Library/Frameworks/WebKit.framework/Resources/Info.plist"):
+                if os.path.exists(plist):
+                    out = subprocess.run(["/usr/libexec/PlistBuddy", "-c", "Print :CFBundleVersion", plist],
+                                         capture_output=True, text=True, timeout=20).stdout.strip()
+                    if out:
+                        return {"webview": "WKWebView (WebKit.framework)", "version": out}
+            return {"webview": "WKWebView (WebKit.framework)", "version": None}
+        out = subprocess.run(["dpkg-query", "-W", "-f=${Version}", "libwebkit2gtk-4.1-0"],
+                             capture_output=True, text=True, timeout=20).stdout.strip()
+        return {"webview": "WebKitGTK (libwebkit2gtk-4.1-0)", "version": out or None}
+    except (OSError, subprocess.SubprocessError) as error:
+        return {"error": str(error)}
+
+
 def scripts(provider):
     runs.scripts(provider)
 
@@ -617,6 +661,11 @@ def scripts(provider):
         "native-quit": hold("native-quit", " never."),
         "remote": lambda p, turn, index: [("text", "Answered remotely."), ("finish", "stop")],
     })
+    for case, steps, _wanted in DISPLAY_CASES:
+        for budget, _window in DISPLAY_BUDGETS:
+            name = f"display-{case}-{budget}"
+            provider.scripts[name] = (lambda steps, name: lambda p, turn, index: [
+                ("gate", name) if step == ("gate", "GATE") else step for step in steps])(steps, name)
 
 
 # Scenarios (full) ------------------------------------------------------------
@@ -637,6 +686,87 @@ def scenario_chat(view, provider, home, notes):
     check.expect("the whole answer is shown", whole)
     check.expect("the run ends in the UI", ended)
     check.expect("the answer is saved", (harness.answers(saved) or [""])[-1].endswith(ANSWER), harness.answers(saved))
+    return check
+
+
+def scenario_answer_display(view, host, provider, home, notes):
+    """The final answer, and its action row, appear and stay without a
+    reload, for each stream sequence, with a served window (each turn then
+    ends with a generation report, as with Lightweight) and without one.
+    When an answer does not appear, the page is reloaded to record whether
+    the saved answer shows then (the reported symptom)."""
+    check = Checks("answer_display")
+    record = notes.setdefault("answer_display", {})
+    for budget, window in DISPLAY_BUDGETS:
+        provider.window = window
+        for case, _steps, wanted in DISPLAY_CASES:
+            name = f"display-{case}-{budget}"
+            marker = f"[e2e:{name}]"
+            prompt = f"{marker} Answer once."
+            view.new_chat()
+            view.send(prompt)
+            interruption = None
+            if case == "interrupted-and-resumed":
+                held = provider.wait_for("gate", name, gate=name)
+                dropped = host.call("drop_relays")
+                time.sleep(1)
+                provider.open(name)
+                interruption = {"held_at_gate": held, "relays_dropped": dropped}
+            state = view.js(T("""
+              const settled = () => {
+                const answers = [...document.querySelectorAll('article[aria-label="Agent message"]')]
+                  .filter((el) => el.textContent.includes($WANTED));
+                const bar = one("toolbar", "Response actions");
+                return answers.length > 0 && !one("button", "Stop") && !document.querySelector(".reasoning-stream") && bar
+                  ? { answers: answers.length, streaming: answers.some((el) => el.classList.contains("is-streaming")) } : null;
+              };
+              const first = await until(settled, 20000);
+              await sleep(1500);
+              const later = settled();
+              return { shown: !!first, first, still_shown: !!later, later,
+                reasoning_panel: !!document.querySelector(".reasoning-stream"), stop: !!one("button", "Stop"),
+                tail: text().slice(-300) };""", WANTED=wanted), 40)
+            after_reload = None
+            if not state.get("shown"):
+                view.shot(f"display-{case}-{budget}-not-shown")
+                view.reload()
+                after_reload = view.js(T("""
+                  const title = $PROMPT.replace(/[.]+$/, "");
+                  const shown = () => [...document.querySelectorAll('article[aria-label="Agent message"]')]
+                    .some((el) => el.textContent.includes($WANTED));
+                  if (!(await until(shown, 5000))) {
+                    const entry = await until(() => [...document.querySelectorAll(".agent-sessions__list *")]
+                      .find((el) => visible(el) && el.children.length === 0 && squash(el.textContent).replace(/[.…]+$/, "") === title), 10000);
+                    if (entry) press(entry);
+                  }
+                  return { shown: !!(await until(shown, 15000)), action_row: !!(await until(() => one("toolbar", "Response actions"), 5000)) };""",
+                                         PROMPT=prompt, WANTED=wanted), 40)
+            saved = saved_with(home, marker)
+            saved_answers = [answer for answer in harness.answers(saved) if answer]
+            run_id = ((saved or {}).get("runs") or [{}])[-1].get("run_id")
+            relayed = None
+            if run_id:
+                try:
+                    stream = harness.Stream(host, run_id).finish(30)
+                    ids = stream.ids()
+                    relayed = {"events": stream.names(), "ids_contiguous": all(b == a + 1 for a, b in zip(ids, ids[1:])),
+                               "closed": stream.closed, "error": stream.error}
+                except harness.HostError as error:
+                    relayed = {"error": str(error)}
+            seen = (state.get("later") or state.get("first") or {})
+            entry = {"shown_without_reload": bool(state.get("shown")), "still_shown_after_1_5s": bool(state.get("still_shown")),
+                     "answers_in_page": seen.get("answers"), "reasoning_panel_left": state.get("reasoning_panel"),
+                     "stop_left": state.get("stop"), "after_reload": after_reload, "saved_answers": saved_answers,
+                     "relayed": relayed, "interruption": interruption, "page_tail": state.get("tail")}
+            record[f"{case}/{budget}"] = entry
+            label = f"{case} ({budget})"
+            check.expect(f"{label}: the answer and its action row appear without a reload", entry["shown_without_reload"], entry)
+            check.expect(f"{label}: they stay shown, the answer once", entry["still_shown_after_1_5s"] and seen.get("answers") == 1, entry)
+            check.expect(f"{label}: the answer is saved once", saved_answers == [wanted], saved_answers)
+            if interruption is not None:
+                check.expect(f"{label}: the relay was dropped mid-answer and resumed", interruption["held_at_gate"] and interruption["relays_dropped"], interruption)
+            view.idle(30)
+    provider.window = None
     return check
 
 
@@ -1522,6 +1652,7 @@ def main():
         status = host.ready()
         view.wait_ui()
         notes["page"] = page_facts(view)
+        notes["webview"] = webview_version()
         if WINDOWS and mode == "full":
             notes["windows_focus_at_launch"] = windows_focus(view, host)
         notes["runtime"] = {k: status.get(k) for k in ("runtime_version", "desktop_version", "profile")}
@@ -1537,6 +1668,7 @@ def main():
             scenarios = [
                 ("chat", lambda: scenario_chat(view, provider, home, notes)),
                 ("response_actions", lambda: scenario_actions(view, host, notes)),
+                ("answer_display", lambda: scenario_answer_display(view, host, provider, home, notes)),
                 ("approvals", lambda: scenario_approvals(view, provider, workspace)),
                 ("stop", lambda: scenario_stop(view, provider, home)),
                 ("continue", lambda: scenario_continue(view, host, home)),
