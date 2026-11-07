@@ -1,0 +1,255 @@
+=== base b0f66a416ed7809e006bf5807ec59d3141bddf69
+=== message
+Record the Windows 11 acceptance and the share-panel Esc limitation
+
+Documentation only. The owner's Windows 11 checks of candidate b0f66a4
+pass: the final answer appears with live Lightweight, and the share
+panel, which Esc does not reliably close, closes from the keyboard
+(Close (X) then Enter, or Alt+F4) with focus back in Lightagent. The
+release notes name both ways; the check and the acceptance record carry
+the results, the candidate and its runs. No application code changes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== write docs/desktop/DESKTOP_WINDOWS_SHARE_FOCUS_CHECK.md
+# Manual check: keyboard focus after the Windows share panel
+
+**Status: PASSED, with a documented limitation (2026-11-07).** Acceptance
+item 5 (DESKTOP_RELEASE_ACCEPTANCE.md §7). Hosted runners cannot show the
+system share panel, so this check needs a person at a real **Windows 11**
+desktop. It takes about 10 minutes. Results are below the steps.
+
+## You need
+
+- A **Windows 11** PC (23H2 or later) with a normal desktop session, not
+  Windows Server and not a remote session that hides system panels. Record
+  the edition, version and OS build from `winver` (for example "Windows 11
+  Pro 24H2, OS build 26100.xxxx").
+- The candidate installer (`Lightagent_0.6.0_x64-setup.exe` or
+  `Lightagent_0.6.0_x64_en-US.msi`) from the dry run artifact
+  `release-desktop-windows-x64` (see §1 of the acceptance record for the
+  run). Check its SHA-256 against `release-SHA256SUMS`:
+  `Get-FileHash .\Lightagent_0.6.0_x64_en-US.msi`.
+- A model provider Lightagent can reach, so that one answer exists. The
+  Share button is on an answer.
+- The installer is unsigned, so SmartScreen warns. Choose More info, then
+  Run anyway. That warning is expected and is not part of this check.
+
+## Steps
+
+Use only the keyboard. Step 5 is the one optional mouse step and is not part
+of the verdict. After each step, note where the visible focus ring is.
+
+1. Install, launch Lightagent, send `Say hello.` and wait for the answer.
+2. Press Tab until the answer's **Share** button has the focus ring, then
+   press Enter. Expected: the Windows share panel opens.
+   Record: did it open (yes or no)?
+3. Press **Esc**. Record whether the panel closed. If it is still open,
+   close it from the keyboard instead, in either way, and record which:
+   a. Tab or Shift+Tab to the panel's **Close (X)** button, then Enter;
+   b. **Alt+F4**, only while the share panel is still open (if it has
+      already closed, Alt+F4 closes Lightagent).
+   Then record: is a focus ring visible, and where?
+4. Press Tab twice, then Shift+Tab once. **Pass:** the focus ring moves
+   between Lightagent's controls.
+5. Optional, mouse: open the panel again (Tab to Share, then Enter). This
+   time close it by **clicking inside the Lightagent window** (mouse). Then
+   repeat step 4 with the keyboard.
+6. If step 4 or step 5 failed, try to recover with the keyboard only, in
+   this order, and stop at the first that works. After each, press Tab and
+   see whether the focus ring moves inside Lightagent:
+   a. Alt+Tab to Lightagent;
+   b. F6;
+   c. Win+D, then Alt+Tab to Lightagent;
+   d. Alt+Space (window menu), then Esc.
+   Record which one worked, or that none did.
+
+Windows 10 is optional; if one is available, repeat there and record it
+separately.
+
+## Result and what it means
+
+| Outcome | Classification |
+|---|---|
+| Step 4 passes after the panel closes from the keyboard (Esc, or 3a or 3b) | item 5 closed; if Esc did not close it, a documented limitation naming 3a and 3b |
+| Focus is lost, but one of 6a–6d brings it back with the keyboard | documented limitation, a known issue in the release notes with the recovery key; the owner decides whether it blocks |
+| The panel cannot be closed, or focus cannot be recovered, with the keyboard | **unrecoverable keyboard trap: release blocker**, to be fixed and the check run again before release |
+
+## Results
+
+Both runs were by the owner, on the same PC: Windows 11 Pro, OS build
+26300.9818, with the MSI.
+
+| Candidate | MSI SHA-256 | Result |
+|---|---|---|
+| `22ad4fe` (dry run 42268737686) | `4f5084c98aa17461a5f2f4546b1bc2a12e97e8f58fa8756c06d4a194308939d6` | Enter opened the panel; Esc closed it; Tab and Shift+Tab then moved in Lightagent; no recovery needed. PASS |
+| `b0f66a416ed7809e006bf5807ec59d3141bddf69` (dry run 42345778723) | `a052398862bfef3e0aa197cee625374ccb00563f9ece6a5ffe4701275e8ef084` | Enter opened the panel; **Esc did not close it**; Tab and Shift+Tab moved within the panel; the panel closed with Close (X) then Enter (3a) and with Alt+F4 (3b); after either, focus returned to Lightagent and Tab and Shift+Tab moved through its controls; no mouse and no reload were needed. **PASS with a documented limitation** |
+
+**Classification (owner, 2026-11-07):** a recoverable Windows/WebView2
+keyboard-accessibility limitation, not a keyboard trap. Item 5 is closed.
+Esc not closing the panel does not prevent keyboard-only use.
+
+**Why Esc is outside Lightagent.** Both Share entry points (the answer's
+action row and the conversation menu) call the WebView's `navigator.share`;
+WebView2 shows the Windows share panel. While the panel is open it has
+keyboard focus, and Lightagent's page receives no key presses, so
+Lightagent neither handles nor can intercept Esc there. The Desktop host
+has no share or key-handling code. No Share code changed between the two
+candidates, so the different Esc behaviour on the same PC and build comes
+from the panel or WebView2. A code change to move focus back after the
+panel closes was considered and not made (owner decision): focus already
+returns.
+
+## Record
+
+Copy this into a comment on the release pull request.
+
+```
+Share-panel focus check, Lightagent 0.6.0 candidate <installer SHA-256>
+Tester / date:
+Windows 11 edition, version, OS build (winver):
+WebView2 Runtime version (Settings > Apps > Installed apps):
+Installer: NSIS setup.exe | MSI
+Step 2 share panel opened: yes | no
+Step 3 Esc closed the panel: yes | no; if no, closed with: 3a Close (X) + Enter | 3b Alt+F4 | could not close
+Step 3 after closing, focus ring at:
+Step 4 focus returned to the app (Tab moves it): yes | no
+Step 5 (optional, mouse) focus returned after closing by click: yes | no | not run
+Step 6 recoverable by keyboard: yes (6a | 6b | 6c | 6d) | no | not needed
+Outcome: closed | limitation (recovery: ...) | BLOCKER
+```
+=== replace docs/releases/v0.6.0.md
+--- find
+Windows 10 and Windows 11 client editions and macOS versions before 15
+were not tested by the automated runs.
+--- with
+Windows 10 and Windows 11 client editions and macOS versions before 15
+were not tested by the automated runs. The owner also checked a candidate
+build by hand on Windows 11 Pro (OS build 26300.9818): the final answer
+shown as it arrives, with live Lightweight inference; the answer's actions;
+and keyboard use of the share panel (see "Known issue" below). The
+installers attached here were built again from the release tag: check them
+against this release's `SHA256SUMS`, not against a candidate's.
+
+## Known issue: Esc and the Windows share panel
+
+On Windows, **Share** opens the Windows share panel. **Esc may not close
+it.** This does not prevent keyboard-only use. Close the panel in either
+of these ways:
+
+- Press Tab or Shift+Tab until the panel's **Close (X)** button is
+  focused, then press Enter.
+- Press **Alt+F4** while the share panel is open. If the panel has
+  already closed, Alt+F4 closes Lightagent instead.
+
+Keyboard focus then returns to Lightagent, and Tab and Shift+Tab move
+through its controls as usual. You need no mouse and no reload. The panel
+belongs to Windows: while it is open, Lightagent does not receive key
+presses.
+=== replace docs/releases/v0.6.0.md
+--- find
+See `CHANGELOG.md`, section 0.6.0, and
+--- with
+Among the fixes: the Web UI and the Desktop show the final answer as soon
+as a run ends. Before, with a model whose context window is known (as with
+Lightweight), the answer appeared only after a reload.
+
+See `CHANGELOG.md`, section 0.6.0, and
+=== replace docs/desktop/DESKTOP_RELEASE_ACCEPTANCE.md
+--- find
+(`release/v0.6.0`, draft). Revised 2026-11-06: owner-approved unsigned v0.6.0 release path.
+--- with
+(`release/v0.6.0`, draft). Revised 2026-11-07: the final-answer display fix, candidate `b0f66a4`, and the owner's Windows 11 acceptance (item 5 closed with a documented limitation).
+=== replace docs/desktop/DESKTOP_RELEASE_ACCEPTANCE.md
+--- find
+| **Release candidate (the final dry run built it)** | `22ad4fe60be6124d14c3f8b77dc8d9bb4c4b2cde` | `9b764e5c2cf41732402f471b9a94dfbce0bd1300` |
+--- with
+| **Release candidate (the final dry run built it; the owner's Windows 11 acceptance used its MSI)** | `b0f66a416ed7809e006bf5807ec59d3141bddf69` | `da38742b8a323242966b02cd7a4a884201ded569` |
+| Release candidate before the final-answer display fix | `22ad4fe60be6124d14c3f8b77dc8d9bb4c4b2cde` | `9b764e5c2cf41732402f471b9a94dfbce0bd1300` |
+=== replace docs/desktop/DESKTOP_RELEASE_ACCEPTANCE.md
+--- find
+| `692dcec` | edit request 197: the `signing` input (unsigned by default; a tag push signs); only a signed run's macOS and Windows jobs use the protected `release-signing` environment; a signed run fails without every credential or verification; the .dmg files notarized and stapled; the Windows runtime's signature checked as built and as installed |
+--- with
+| `692dcec` | edit request 197: the `signing` input (unsigned by default; a tag push signs); only a signed run's macOS and Windows jobs use the protected `release-signing` environment; a signed run fails without every credential or verification; the .dmg files notarized and stapled; the Windows runtime's signature checked as built and as installed |
+| `d2bdd1f` | documentation: the approved unsigned path and the held gate |
+| `2a8e271` | the reproduction of the final answer that appeared only after a reload: the paired-Lightweight stream trace (`scripts/stream-trace.py`), the event-name check (`scripts/check-event-names.py`), the native `answer_display` scenario and the browser delivery scenarios. It failed as intended (below) |
+| `6a70549` | edit request 203: the native scenario reads each run live through the host relay |
+| `5b6e616` | edit request 204: **the fix**, `frontend/src/hooks/useRunEvents.ts` listens for `generation.report` and the catch-all `event`, and replays an unchanged gap once instead of without end |
+| `b0f66a4` | edit request 205: two delivery scenario names shortened (tests only) |
+=== replace docs/desktop/DESKTOP_RELEASE_ACCEPTANCE.md
+--- find
+| **final release dry run (artifact-only, `signing=unsigned`, `publish` skipped)** | `22ad4fe` | https://github.com/dlroqa/Lightagent/actions/runs/42268737686: **every job green**; every installer installed, launched, reinstalled, uninstalled with user data unchanged; notices identical to the generated ones (the same digests as every run since the license fix); 0 shipped crates without a license text; SHA256SUMS 11 of 11 OK when downloaded; MPL archive `8dca80a1…cc0e8`; afterwards no `v0.6.*` tag and no v0.6.0 release exist, Latest still v0.5.0 |
+--- with
+| **final release dry run (artifact-only, `signing=unsigned`, `publish` skipped)** | `b0f66a4` | https://github.com/dlroqa/Lightagent/actions/runs/42345778723: **every job green**, publish skipped; SHA256SUMS 11 of 11 OK when downloaded; MSI `a052398862bfef3e0aa197cee625374ccb00563f9ece6a5ffe4701275e8ef084`, setup.exe `a7ab4774a5fbc19b5f33a261dce877879be60dddea45dc917fa65b9b4e9a1201`; afterwards no `v0.6.*` tag and no v0.6.0 release exist, Latest still v0.5.0 |
+| check | `b0f66a4` | https://github.com/dlroqa/Lightagent/actions/runs/42345783941 green, 13/13: the event-name check, the stream trace, the six new delivery scenarios, and the existing recovery scenarios with unchanged request counts; an unknown event is skipped after one replay |
+| desktop | `b0f66a4` | https://github.com/dlroqa/Lightagent/actions/runs/42345783863 green, 12/12; `answer_display` 40 of 40 (5 cases, with and without a known window, on Windows, Linux x64, macOS Intel and macOS Apple silicon native WebViews) |
+| jev evaluation, subagents | `b0f66a4` | https://github.com/dlroqa/Lightagent/actions/runs/42345784000 and https://github.com/dlroqa/Lightagent/actions/runs/42345783868 green |
+| reproduction | `2a8e271` | check 42344299982 and desktop 42344299961 **failed as intended**: with a known window, `answer_display` 0 of 5 on every native target (5 of 5 without); the stream trace showed the provider stream, the runtime's events and the transcript correct, and the UI contract failing |
+| owner Windows 11 acceptance | `b0f66a4` MSI | Windows 11 Pro, OS build 26300.9818, MSI `a0523988…f084`: the final answer appears with live Lightweight inference without a reload, separately from the reasoning, with its actions, once per question; the share panel PASS with a documented limitation (§4) |
+| release dry run (before the display fix) | `22ad4fe` | https://github.com/dlroqa/Lightagent/actions/runs/42268737686: **every job green**; every installer installed, launched, reinstalled, uninstalled with user data unchanged; notices identical to the generated ones (the same digests as every run since the license fix); 0 shipped crates without a license text; SHA256SUMS 11 of 11 OK when downloaded; MPL archive `8dca80a1…cc0e8`; afterwards no `v0.6.*` tag and no v0.6.0 release exist, Latest still v0.5.0. Its MSI (`4f5084c9…39d6`) passed the owner's first share-panel check and showed the display defect |
+=== replace docs/desktop/DESKTOP_RELEASE_ACCEPTANCE.md
+--- find
+### Windows keyboard focus after the share panel: PENDING
+
+Hosted runs cannot show the system share panel (desktop 42160150122,
+42158154084). The manual check is `DESKTOP_WINDOWS_SHARE_FOCUS_CHECK.md`,
+about 10 minutes, keyboard only, on Windows 11 (version and OS build recorded). **It stays pending until someone runs
+it.** If focus is lost but the keyboard can recover it, the item is a
+documented limitation with the recovery key. If the keyboard cannot recover
+it, that is an **unrecoverable keyboard trap and a release blocker**.
+--- with
+### Windows keyboard focus after the share panel: PASS, documented limitation
+
+Hosted runs cannot show the system share panel (desktop 42160150122,
+42158154084), so the check (`DESKTOP_WINDOWS_SHARE_FOCUS_CHECK.md`) was run
+by the owner on Windows 11 Pro, OS build 26300.9818:
+
+- `22ad4fe` MSI (`4f5084c9…39d6`): Esc closed the panel and focus returned. PASS.
+- `b0f66a4` MSI (`a0523988…f084`): Enter opens the panel; **Esc does not
+  reliably close it**; Tab and Shift+Tab move within it; Close (X) then
+  Enter, and Alt+F4, each close it; focus then returns to Lightagent and
+  Tab and Shift+Tab move through its controls, with no mouse and no reload.
+
+Owner's classification (2026-11-07): a recoverable Windows/WebView2
+limitation, **not a keyboard trap**; it does not prevent keyboard-only use.
+The release notes name both closing methods. Lightagent calls
+`navigator.share` and receives no key presses while the panel is open; the
+Share code is the same in both candidates. No focus-return code change was
+made (owner decision).
+=== replace docs/desktop/DESKTOP_RELEASE_ACCEPTANCE.md
+--- find
+| 5 | Windows focus after the share panel | **pending manual check on Windows 11**; an unrecoverable keyboard trap is a blocker and must be fixed before release | `DESKTOP_WINDOWS_SHARE_FOCUS_CHECK.md` |
+--- with
+| 5 | Windows focus after the share panel | **closed: PASS with a documented limitation** (owner, Windows 11 Pro 26300.9818, `b0f66a4`); Esc may not close the panel; Close (X) then Enter, or Alt+F4, close it and focus returns; not a keyboard trap | release notes "Known issue"; `DESKTOP_WINDOWS_SHARE_FOCUS_CHECK.md` |
+| 16 | Final answer shown only after a reload when the model window is known | was a release blocker (owner report) | **resolved** in `5b6e616`: 40 of 40 native, the browser scenarios, the owner's Windows 11 retest; the same hook is in 0.5.0's Web UI (not changed by this release) |
+=== replace docs/desktop/DESKTOP_RELEASE_ACCEPTANCE.md
+--- find
+candidate and tested, and the final artifact-only dry run on `22ad4fe` is
+green with every artifact verified.
+
+**Publication is held on one gate: the Windows 11 share-panel keyboard
+check (item 5) has not been run.** No result has been supplied, and hosted
+runners offer no Windows 11. Until it is run and recorded
+(`DESKTOP_WINDOWS_SHARE_FOCUS_CHECK.md`), #164 is not merged, no tag is
+created and nothing is published. Item 13 (objc2 treatment) remains
+documented for review.
+--- with
+candidate and tested, and the final artifact-only dry run on `b0f66a4` is
+green with every artifact verified.
+
+**Every acceptance gate has passed.** The final-answer display defect
+(item 16) is fixed and verified on all four native targets and by the
+owner on Windows 11; the share-panel check (item 5) passed with a
+documented limitation. **Publication still waits for the owner's explicit
+authorization** (2026-11-07: documentation and validation only): #164 stays
+a draft and is not merged, no tag is created and nothing is published.
+Item 13 (objc2 treatment) remains documented for review.
+=== replace docs/desktop/DESKTOP_RELEASE_ACCEPTANCE.md
+--- find
+1. The Windows 11 share-panel check (item 5), run and recorded by the
+   owner or a tester.
+2. Then, under the owner's approval:
+--- with
+1. Done: the Windows 11 share-panel check (item 5) and the display retest,
+   run and recorded by the owner (2026-11-07).
+2. The owner's explicit authorization to proceed. Then:
+=== end
