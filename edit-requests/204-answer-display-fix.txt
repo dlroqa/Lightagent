@@ -1,0 +1,87 @@
+=== base 6a70549371ec7143effeae2bdfac4eeab6face11
+=== message
+Show the final answer when a turn ends with a generation report
+
+The cause, traced in the tests before this commit: once a model's window
+is known (Lightweight reports it), the runtime budgets each turn and sends
+`generation.report` before `turn.completed`. The Web UI's run-event hook
+listened for a fixed list of names without it. A browser EventSource
+drops a named event that has no listener, so the hook read the next id as
+a gap and reconnected after the last id it held, and every replay began
+with the same dropped event. The terminal event never arrived: the answer
+stayed in the reasoning panel without its action row, and only a reload,
+which reads the saved session, showed it. The same hook serves the browser
+build and the Desktop's relay, so every target was affected.
+
+The hook now listens for every name the API sends (`generation.report`,
+and the catch-all `event`; scripts/check-event-names.py keeps the lists
+equal). When a replay shows the same gap again, the missing ids are events
+this client has no listener for, not lost ones, so the hook accepts the
+next event instead of replaying forever. A lost event is still replayed
+and kept, because the replay holds it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace frontend/src/hooks/useRunEvents.ts
+--- find
+  "turn.completed",
+--- with
+  "turn.completed",
+  // Sent before turn.completed when the turn was budgeted, which is every
+  // turn once the model's window is known (Lightweight reports it). Not
+  // used by the UI, but it must be heard: an unheard named event is dropped
+  // by EventSource, and its id would then read as a gap.
+  "generation.report",
+  // The name the API gives an event it has no name for (sse.rs).
+  "event",
+=== replace frontend/src/hooks/useRunEvents.ts
+--- find
+ * Only when that replay keeps failing is the run marked done with
+ * `delivery: "incomplete"`.
+--- with
+ * Only when that replay keeps failing is the run marked done with
+ * `delivery: "incomplete"`. A gap that the replay shows again is not a lost
+ * event: the ids between are events this client has no listener for (an
+ * EventSource drops those without a trace), so the next event is accepted
+ * instead of the stream being replayed without end.
+=== replace frontend/src/hooks/useRunEvents.ts
+--- find
+    let lastId = -1;
+--- with
+    let lastId = -1;
+    // The gap (`last:next`) a reconnect was made for, to tell a lost event,
+    // which the replay brings, from an unheard one, which it never can.
+    let replayedGap: string | null = null;
+=== replace frontend/src/hooks/useRunEvents.ts
+--- find
+        if (lastId >= 0 && id !== lastId + 1) {
+          reconnect();
+          return;
+        }
+--- with
+        if (lastId >= 0 && id !== lastId + 1) {
+          const gap = `${lastId}:${id}`;
+          if (replayedGap !== gap) {
+            replayedGap = gap;
+            reconnect();
+            return;
+          }
+          replayedGap = null;
+        }
+=== replace CHANGELOG.md
+--- find
+## [0.5.0] - 2026-10-29
+--- with
+### Fixed
+
+- The Web UI and the Desktop show the final answer, and its action row,
+  as soon as a run ends when each turn is budgeted, as it is whenever the
+  model's window is known (Lightweight reports it). The runtime then sends
+  a `generation.report` event per turn that the run-event hook did not
+  listen for; the browser dropped it, the hook read the next event as a
+  gap and replayed the stream without end, so the run never ended in the
+  UI and the answer appeared only after a reload. The hook now listens for
+  every event the API sends, and no longer replays forever over an event
+  it cannot hear. The same hook is in 0.5.0's Web UI.
+
+## [0.5.0] - 2026-10-29
+=== end
