@@ -1,0 +1,79 @@
+=== base 2a8e271e1727150b9c98877fd27f9fc1118cad8c
+=== message
+Read each answer_display run live through the host relay
+
+Tests only. The first answer_display runs read each run back by its saved
+run_id after it ended, which the runtime does not keep as a live handle,
+so the relay evidence was empty. Each display script now starts at a
+gate: while the run is held there, the scenario takes its id from
+GET /runs and subscribes through the host relay before releasing it, so
+the events are recorded as the relay forwards them, the interrupted case's
+resume included. After a reload, the conversation is found by its marker.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace desktop/e2e/native.py
+--- find
+            provider.scripts[name] = (lambda steps, name: lambda p, turn, index: [
+                ("gate", name) if step == ("gate", "GATE") else step for step in steps])(steps, name)
+--- with
+            # Held first at `<name>-start`, so the scenario can subscribe to
+            # the run through the host relay before any output is sent.
+            provider.scripts[name] = (lambda steps, name: lambda p, turn, index: [("gate", f"{name}-start")] + [
+                ("gate", name) if step == ("gate", "GATE") else step for step in steps])(steps, name)
+=== replace desktop/e2e/native.py
+--- find
+            view.send(prompt)
+            interruption = None
+            if case == "interrupted-and-resumed":
+--- with
+            view.send(prompt)
+            # The run, held before its first output: its id, and a host relay
+            # subscription that records every event as it is forwarded.
+            live, relay_error = None, None
+            started = provider.wait_for("gate", name, gate=f"{name}-start")
+            try:
+                listed = json.loads(host.call("fetch", method="GET", target=f"{API}/runs")["body"]).get("runs") or []
+                if len(listed) == 1:
+                    live = harness.Stream(host, listed[0]["id"])
+                else:
+                    relay_error = f"expected one active run, saw {len(listed)}"
+            except (harness.HostError, ValueError, KeyError, TypeError) as error:
+                relay_error = str(error)
+            provider.open(f"{name}-start")
+            interruption = None
+            if case == "interrupted-and-resumed":
+=== replace desktop/e2e/native.py
+--- find
+                      .find((el) => visible(el) && el.children.length === 0 && squash(el.textContent).replace(/[.…]+$/, "") === title), 10000);
+--- with
+                      .find((el) => visible(el) && el.children.length === 0 && squash(el.textContent).includes($MARKER)), 10000);
+=== replace desktop/e2e/native.py
+--- find
+                                         PROMPT=prompt, WANTED=wanted), 40)
+--- with
+                                         PROMPT=prompt, WANTED=wanted, MARKER=marker), 40)
+                view.shot(f"display-{case}-{budget}-after-reload")
+=== replace desktop/e2e/native.py
+--- find
+            run_id = ((saved or {}).get("runs") or [{}])[-1].get("run_id")
+            relayed = None
+            if run_id:
+                try:
+                    stream = harness.Stream(host, run_id).finish(30)
+                    ids = stream.ids()
+                    relayed = {"events": stream.names(), "ids_contiguous": all(b == a + 1 for a, b in zip(ids, ids[1:])),
+                               "closed": stream.closed, "error": stream.error}
+                except harness.HostError as error:
+                    relayed = {"error": str(error)}
+--- with
+            relayed = {"started_at_gate": started, "error": relay_error}
+            if live:
+                try:
+                    live.finish(30)
+                    ids = live.ids()
+                    relayed.update(run=live.run, events=live.names(), closed=live.closed, error=live.error,
+                                   ids_contiguous=all(b == a + 1 for a, b in zip(ids, ids[1:])),
+                                   generation_report="generation.report" in live.names())
+                except harness.HostError as error:
+                    relayed["error"] = str(error)
+=== end
