@@ -348,7 +348,7 @@ const SCENARIOS = [
   },
   {
     // Reasoning, then the answer, then the per-turn generation report.
-    name: "reasoning-then-answer-with-generation-report",
+    name: "reasoning-answer-report",
     frames: [started, thought("Weighing the question. "), thought("Settled."), delta("The final answer "), delta("is shown."), report, turn, completed("EndTurn")],
     stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
     status: () => ({ status: "running" }),
@@ -383,7 +383,7 @@ const SCENARIOS = [
   {
     // The stream drops right after the generation report, then resumes
     // after the cursor.
-    name: "dropped-after-generation-report-then-resumed",
+    name: "dropped-at-report-resumed",
     frames: [started, thought("Before the drop. "), delta("Resumed answer "), delta("arrives once."), report, turn, completed("EndTurn")],
     stream(attempt, cursor, frames) {
       if (attempt === 0) return { frames: body(frames.slice(0, 5)) };
