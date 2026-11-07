@@ -1,0 +1,751 @@
+=== base d2bdd1fffb18b3ae526d4dc0756e98f61ec76bbe
+=== message
+Reproduce the final answer that appears only after a reload
+
+Tests only; nothing here fixes it. A model whose window is known (as
+Lightweight reports one) makes the runtime budget each turn and emit a
+`generation.report` event before `turn.completed`. The Web UI's run-event
+hook listens for a fixed list of names that lacks it, so the browser drops
+it, the hook reads the next id as a gap, and its replay starts with the same
+dropped event: the terminal event never arrives, the answer stays in the
+reasoning panel, and only a reload shows the saved answer.
+
+- FakeProvider: a `reasoning_content` step, a content-and-finish chunk, and
+  an optional Lightweight-style served window on /v1/models.
+- native.py `answer_display`: five stream sequences, with and without a
+  served window, on every target's real WebView. The answer and its action
+  row must appear and stay without a reload and be saved once. Each run is
+  also read back through the host relay. When the answer does not appear,
+  the page is reloaded and that is recorded. The WebView version is recorded.
+- e2e driver `drop_relays`, for the interrupted-and-resumed sequence.
+- e2e/delivery.mjs: the same sequences in Chromium, with generation.report
+  where the runtime sends it and an event the UI has never heard of; the
+  answer must be in an answer bubble, the run settled, without a reconnect
+  loop.
+- scripts/stream-trace.py: Lightweight's mock gateway behind a recording
+  proxy, the real lightagent, its events and saved transcript, and the UI's
+  event contract, as a redacted trace.
+- scripts/check-event-names.py: every event name the API can send is one
+  the UI listens for.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace desktop/e2e/harness.py
+--- find
+    `scripts[name](provider, turn, index)` returns the steps: ("text", s),
+--- with
+    `scripts[name](provider, turn, index)` returns the steps: ("text", s),
+    ("reasoning", s) as `reasoning_content`, ("text_finish", s, reason) for
+    the last content and the finish reason in one chunk,
+=== replace desktop/e2e/harness.py
+--- find
+        self.scripts = {}
+        provider = self
+--- with
+        self.scripts = {}
+        # A served window to report on /v1/models, as Lightweight does; None
+        # reports none (the runtime then does not budget the turn).
+        self.window = None
+        provider = self
+=== replace desktop/e2e/harness.py
+--- find
+                if self.path.startswith("/v1/models"):
+                    provider.reply(self, 200, {"object": "list", "data": [{"id": "fake-model"}]})
+--- with
+                if self.path.startswith("/v1/models"):
+                    row = {"id": "fake-model"}
+                    if provider.window:
+                        # Lightweight's row: n_ctx beside its own `hermes`
+                        # namespace. The runtime then budgets each turn and
+                        # sends a generation report for it.
+                        row.update(n_ctx=provider.window, hermes={"served_by": "e2e"})
+                    provider.reply(self, 200, {"object": "list", "data": [row]})
+=== replace desktop/e2e/harness.py
+--- find
+                if kind == "text":
+                    self.chunk(handler, {"content": step[1]})
+--- with
+                if kind == "text":
+                    self.chunk(handler, {"content": step[1]})
+                elif kind == "reasoning":
+                    self.chunk(handler, {"reasoning_content": step[1]})
+                elif kind == "text_finish":
+                    self.chunk(handler, {"content": step[1]}, finish=step[2])
+=== replace desktop/src-tauri/src/e2e_driver.rs
+--- find
+    DropRelay {
+        subscription: u64,
+    },
+--- with
+    DropRelay {
+        subscription: u64,
+    },
+    /// Drop every active relay's connection, as a network fault would; each
+    /// relay resumes after the last event it forwarded.
+    DropRelays,
+=== replace desktop/src-tauri/src/e2e_driver.rs
+--- find
+            entry.interrupt.notify_one();
+            Value::Null
+        }
+--- with
+            entry.interrupt.notify_one();
+            Value::Null
+        }
+        Op::DropRelays => {
+            let entries: Vec<_> = lock(&host.subscriptions).values().cloned().collect();
+            for entry in &entries {
+                entry.interrupt.notify_one();
+            }
+            json!(entries.len())
+        }
+=== replace desktop/e2e/native.py
+--- find
+def scripts(provider):
+--- with
+# The final-answer display (answer_display): each stream sequence and its
+# answer. ("gate", "GATE") holds the stream where the interrupted case drops
+# the host's relay.
+DISPLAY_CASES = [
+    ("reasoning-then-answer", [("reasoning", "Weighing the question. "), ("reasoning", "Settled."),
+                               ("text", "Display answer "), ("text", "one."), ("finish", "stop")], "Display answer one."),
+    ("answer-only", [("text", "Display answer two."), ("finish", "stop")], "Display answer two."),
+    ("many-chunks", [("reasoning", "First thought. "), ("text", "Display "), ("reasoning", "Second thought. "),
+                     ("text", "answer "), ("reasoning", "Third thought."), ("text", "three."), ("finish", "stop")],
+     "Display answer three."),
+    ("finish-with-last-chunk", [("reasoning", "Brief thought."), ("text_finish", "Display answer four.", "stop")],
+     "Display answer four."),
+    ("interrupted-and-resumed", [("reasoning", "Thinking before the drop. "), ("text", "Display answer "),
+                                 ("gate", "GATE"), ("text", "five."), ("finish", "stop")], "Display answer five."),
+]
+# With a served window (as Lightweight reports one: each turn is budgeted
+# and reported), and without one.
+DISPLAY_BUDGETS = (("window", 8192), ("no-window", None))
+
+
+def webview_version():
+    """The platform WebView this app renders in, and its version as the OS reports it."""
+    try:
+        if WINDOWS:
+            key = r"HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+            out = subprocess.run(["reg", "query", key, "/v", "pv"], capture_output=True, text=True, timeout=20).stdout
+            found = re.search(r"pv\s+REG_SZ\s+(\S+)", out)
+            return {"webview": "WebView2 Runtime", "version": found.group(1) if found else None}
+        if MACOS:
+            for plist in ("/System/Library/Frameworks/WebKit.framework/Resources/Info.plist",
+                          "/System/Cryptexes/OS/System/Library/Frameworks/WebKit.framework/Resources/Info.plist"):
+                if os.path.exists(plist):
+                    out = subprocess.run(["/usr/libexec/PlistBuddy", "-c", "Print :CFBundleVersion", plist],
+                                         capture_output=True, text=True, timeout=20).stdout.strip()
+                    if out:
+                        return {"webview": "WKWebView (WebKit.framework)", "version": out}
+            return {"webview": "WKWebView (WebKit.framework)", "version": None}
+        out = subprocess.run(["dpkg-query", "-W", "-f=${Version}", "libwebkit2gtk-4.1-0"],
+                             capture_output=True, text=True, timeout=20).stdout.strip()
+        return {"webview": "WebKitGTK (libwebkit2gtk-4.1-0)", "version": out or None}
+    except (OSError, subprocess.SubprocessError) as error:
+        return {"error": str(error)}
+
+
+def scripts(provider):
+=== replace desktop/e2e/native.py
+--- find
+        "remote": lambda p, turn, index: [("text", "Answered remotely."), ("finish", "stop")],
+    })
+--- with
+        "remote": lambda p, turn, index: [("text", "Answered remotely."), ("finish", "stop")],
+    })
+    for case, steps, _wanted in DISPLAY_CASES:
+        for budget, _window in DISPLAY_BUDGETS:
+            name = f"display-{case}-{budget}"
+            provider.scripts[name] = (lambda steps, name: lambda p, turn, index: [
+                ("gate", name) if step == ("gate", "GATE") else step for step in steps])(steps, name)
+=== replace desktop/e2e/native.py
+--- find
+def scenario_actions(view, host, notes):
+--- with
+def scenario_answer_display(view, host, provider, home, notes):
+    """The final answer, and its action row, appear and stay without a
+    reload, for each stream sequence, with a served window (each turn then
+    ends with a generation report, as with Lightweight) and without one.
+    When an answer does not appear, the page is reloaded to record whether
+    the saved answer shows then (the reported symptom)."""
+    check = Checks("answer_display")
+    record = notes.setdefault("answer_display", {})
+    for budget, window in DISPLAY_BUDGETS:
+        provider.window = window
+        for case, _steps, wanted in DISPLAY_CASES:
+            name = f"display-{case}-{budget}"
+            marker = f"[e2e:{name}]"
+            prompt = f"{marker} Answer once."
+            view.new_chat()
+            view.send(prompt)
+            interruption = None
+            if case == "interrupted-and-resumed":
+                held = provider.wait_for("gate", name, gate=name)
+                dropped = host.call("drop_relays")
+                time.sleep(1)
+                provider.open(name)
+                interruption = {"held_at_gate": held, "relays_dropped": dropped}
+            state = view.js(T("""
+              const settled = () => {
+                const answers = [...document.querySelectorAll('article[aria-label="Agent message"]')]
+                  .filter((el) => el.textContent.includes($WANTED));
+                const bar = one("toolbar", "Response actions");
+                return answers.length > 0 && !one("button", "Stop") && !document.querySelector(".reasoning-stream") && bar
+                  ? { answers: answers.length, streaming: answers.some((el) => el.classList.contains("is-streaming")) } : null;
+              };
+              const first = await until(settled, 20000);
+              await sleep(1500);
+              const later = settled();
+              return { shown: !!first, first, still_shown: !!later, later,
+                reasoning_panel: !!document.querySelector(".reasoning-stream"), stop: !!one("button", "Stop"),
+                tail: text().slice(-300) };""", WANTED=wanted), 40)
+            after_reload = None
+            if not state.get("shown"):
+                view.shot(f"display-{case}-{budget}-not-shown")
+                view.reload()
+                after_reload = view.js(T("""
+                  const title = $PROMPT.replace(/[.]+$/, "");
+                  const shown = () => [...document.querySelectorAll('article[aria-label="Agent message"]')]
+                    .some((el) => el.textContent.includes($WANTED));
+                  if (!(await until(shown, 5000))) {
+                    const entry = await until(() => [...document.querySelectorAll(".agent-sessions__list *")]
+                      .find((el) => visible(el) && el.children.length === 0 && squash(el.textContent).replace(/[.…]+$/, "") === title), 10000);
+                    if (entry) press(entry);
+                  }
+                  return { shown: !!(await until(shown, 15000)), action_row: !!(await until(() => one("toolbar", "Response actions"), 5000)) };""",
+                                         PROMPT=prompt, WANTED=wanted), 40)
+            saved = saved_with(home, marker)
+            saved_answers = [answer for answer in harness.answers(saved) if answer]
+            run_id = ((saved or {}).get("runs") or [{}])[-1].get("run_id")
+            relayed = None
+            if run_id:
+                try:
+                    stream = harness.Stream(host, run_id).finish(30)
+                    ids = stream.ids()
+                    relayed = {"events": stream.names(), "ids_contiguous": all(b == a + 1 for a, b in zip(ids, ids[1:])),
+                               "closed": stream.closed, "error": stream.error}
+                except harness.HostError as error:
+                    relayed = {"error": str(error)}
+            seen = (state.get("later") or state.get("first") or {})
+            entry = {"shown_without_reload": bool(state.get("shown")), "still_shown_after_1_5s": bool(state.get("still_shown")),
+                     "answers_in_page": seen.get("answers"), "reasoning_panel_left": state.get("reasoning_panel"),
+                     "stop_left": state.get("stop"), "after_reload": after_reload, "saved_answers": saved_answers,
+                     "relayed": relayed, "interruption": interruption, "page_tail": state.get("tail")}
+            record[f"{case}/{budget}"] = entry
+            label = f"{case} ({budget})"
+            check.expect(f"{label}: the answer and its action row appear without a reload", entry["shown_without_reload"], entry)
+            check.expect(f"{label}: they stay shown, the answer once", entry["still_shown_after_1_5s"] and seen.get("answers") == 1, entry)
+            check.expect(f"{label}: the answer is saved once", saved_answers == [wanted], saved_answers)
+            if interruption is not None:
+                check.expect(f"{label}: the relay was dropped mid-answer and resumed", interruption["held_at_gate"] and interruption["relays_dropped"], interruption)
+            view.idle(30)
+    provider.window = None
+    return check
+
+
+def scenario_actions(view, host, notes):
+=== replace desktop/e2e/native.py
+--- find
+                ("response_actions", lambda: scenario_actions(view, host, notes)),
+--- with
+                ("response_actions", lambda: scenario_actions(view, host, notes)),
+                ("answer_display", lambda: scenario_answer_display(view, host, provider, home, notes)),
+=== replace desktop/e2e/native.py
+--- find
+        notes["page"] = page_facts(view)
+--- with
+        notes["page"] = page_facts(view)
+        notes["webview"] = webview_version()
+=== replace e2e/delivery.mjs
+--- find
+const turn = ["turn.completed", {}];
+--- with
+const turn = ["turn.completed", {}];
+const thought = (reasoning) => ["model.delta", { reasoning }];
+// Sent before turn.completed when the turn was budgeted, as every turn is
+// once the model's window is known (Lightweight reports it); sse.rs.
+const report = ["generation.report", { turn: 1, purpose: "answer", finish: "Stop", prompt_tokens: 120, completion_tokens: 40 }];
+// A name this UI has never heard of, as a newer server could send.
+const unknownEvent = ["future.event", { note: "an event this UI has no listener for" }];
+=== replace e2e/delivery.mjs
+--- find
+      reconnectedAfter: 5,
+    },
+  },
+];
+--- with
+      reconnectedAfter: 5,
+    },
+  },
+  {
+    // Reasoning, then the answer, then the per-turn generation report.
+    name: "reasoning-then-answer-with-generation-report",
+    frames: [started, thought("Weighing the question. "), thought("Settled."), delta("The final answer "), delta("is shown."), report, turn, completed("EndTurn")],
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: ["The final answer is shown."], inAnswer: ["The final answer is shown."], settled: true,
+      present: [], absent: ["could not be recovered"], maxStreams: 1 },
+  },
+  {
+    name: "answer-only-with-generation-report",
+    frames: [started, delta("Only an answer, no reasoning."), report, turn, completed("EndTurn")],
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: ["Only an answer, no reasoning."], inAnswer: ["Only an answer, no reasoning."], settled: true,
+      present: [], absent: ["could not be recovered"], maxStreams: 1 },
+  },
+  {
+    name: "many-chunks-with-generation-report",
+    frames: [started, thought("First. "), delta("Chunked "), thought("Second. "), delta("answer "), thought("Third."), delta("arrives."), report, turn, completed("EndTurn")],
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: ["Chunked answer arrives."], inAnswer: ["Chunked answer arrives."], settled: true,
+      present: [], absent: ["could not be recovered"], maxStreams: 1 },
+  },
+  {
+    // The terminal event right after the last content, nothing between.
+    name: "completion-right-after-last-chunk",
+    frames: [started, thought("Brief."), delta("Completed at once."), completed("EndTurn")],
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: ["Completed at once."], inAnswer: ["Completed at once."], settled: true,
+      present: [], absent: ["could not be recovered"], maxStreams: 1 },
+  },
+  {
+    // The stream drops right after the generation report, then resumes
+    // after the cursor.
+    name: "dropped-after-generation-report-then-resumed",
+    frames: [started, thought("Before the drop. "), delta("Resumed answer "), delta("arrives once."), report, turn, completed("EndTurn")],
+    stream(attempt, cursor, frames) {
+      if (attempt === 0) return { frames: body(frames.slice(0, 5)) };
+      return { frames: body(frames, cursor + 1) };
+    },
+    status: () => ({ status: "running" }),
+    expect: { once: ["Resumed answer arrives once."], inAnswer: ["Resumed answer arrives once."], settled: true,
+      present: [], absent: ["could not be recovered"], maxStreams: 2, reconnectedAfter: 4 },
+  },
+  {
+    // An event this UI does not know, between the answer and the turn's end.
+    name: "unknown-event-before-turn-completed",
+    frames: [started, delta("A newer server's event is skipped."), unknownEvent, turn, completed("EndTurn")],
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: ["A newer server's event is skipped."], inAnswer: ["A newer server's event is skipped."], settled: true,
+      present: [], absent: ["could not be recovered"], maxStreams: 2 },
+  },
+];
+=== replace e2e/delivery.mjs
+--- find
+    for (const needle of scenario.expect.absent) {
+      if (text.includes(needle)) failures.push(`${scenario.name}: did not expect “${needle}”`);
+    }
+--- with
+    for (const needle of scenario.expect.absent) {
+      if (text.includes(needle)) failures.push(`${scenario.name}: did not expect “${needle}”`);
+    }
+    if (scenario.expect.inAnswer || scenario.expect.settled) {
+      // The answer must be in an answer bubble, not left in the reasoning
+      // panel, and the run must have ended in the UI (no Stop, no panel).
+      const probe = () => page.evaluate(() => ({
+        answers: [...document.querySelectorAll('article[aria-label="Agent message"]')].map((el) => el.textContent ?? ""),
+        reasoningPanel: document.querySelectorAll(".reasoning-stream").length,
+        stop: [...document.querySelectorAll("button")].some((el) => (el.getAttribute("aria-label") ?? el.textContent ?? "").trim() === "Stop"),
+      }));
+      let dom = await probe();
+      const until = Date.now() + 10000;
+      while (Date.now() < until && (dom.reasoningPanel || dom.stop || !(scenario.expect.inAnswer ?? []).every((needle) => dom.answers.some((t) => t.includes(needle))))) {
+        await page.waitForTimeout(250);
+        dom = await probe();
+      }
+      for (const needle of scenario.expect.inAnswer ?? []) {
+        const count = dom.answers.filter((t) => t.includes(needle)).length;
+        if (count !== 1) failures.push(`${scenario.name}: expected “${needle}” in exactly one answer, saw ${count} (reasoning panel ${dom.reasoningPanel})`);
+      }
+      if (scenario.expect.settled && (dom.reasoningPanel || dom.stop)) {
+        failures.push(`${scenario.name}: the run never ended in the UI (reasoning panel ${dom.reasoningPanel}, Stop ${dom.stop})`);
+      }
+    }
+=== write scripts/check-event-names.py
+"""Whether the Web UI listens for every run event the API can send.
+
+  python3 check-event-names.py
+
+Reads the SSE names crates/lightagent-api/src/sse.rs gives the run's events
+(`pub fn name`) and the names frontend/src/hooks/useRunEvents.ts listens for
+(EVENT_NAMES). A browser EventSource drops a named event that has no
+listener without a trace, and the hook's ordered-id check then reads the
+next event as a gap. Prints a Markdown summary; exits 1 when the API can
+send a name the UI does not listen for.
+"""
+
+import pathlib
+import re
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+def main():
+    sse = (ROOT / "crates" / "lightagent-api" / "src" / "sse.rs").read_text(encoding="utf-8")
+    body = sse.split("pub fn name(", 1)[1].split("\n}\n", 1)[0]
+    sent = set(re.findall(r'"([a-z_]+(?:\.[a-z_]+)*)"', body))
+    hook = (ROOT / "frontend" / "src" / "hooks" / "useRunEvents.ts").read_text(encoding="utf-8")
+    listed = hook.split("const EVENT_NAMES = [", 1)[1].split("];", 1)[0]
+    heard = set(re.findall(r'"([^"]+)"', listed))
+    missing = sorted(sent - heard)
+    print(f"### run event names: the API can send {len(sent)}, the UI listens for {len(heard)}")
+    print(f"- the API: {', '.join(sorted(sent))}")
+    print(f"- not listened for: {', '.join(missing) if missing else 'none'}")
+    if missing:
+        print("- FAILED a browser drops these without a trace, and the next event reads as a gap")
+    return 1 if missing or not sent else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+=== write scripts/stream-trace.py
+"""Trace one reasoning-then-answer run across the boundaries its final
+answer crosses: Lightweight's gateway (its real gateway and wire format over
+the mock backend), the stream Lightagent receives, the events Lightagent
+emits, its saved transcript, and the Web UI's event contract.
+
+  LIGHTWEIGHT_MOCK_GATEWAY=... LIGHTAGENT_BIN=... python3 stream-trace.py <out-dir>
+
+A recording proxy sits between Lightagent and the gateway, so the provider
+stream recorded is the exact bytes Lightagent read. Redacted: no request
+header is recorded (the Authorization header included), and of each request
+body only its shape (model, stream, max_tokens, reasoning_effort, message
+roles), not the prompt. The scripted text holds nothing secret.
+
+Writes trace.json and prints a Markdown summary. Exits 1 when the answer or
+its completion is lost at a boundary, or when Lightagent emits an event the
+UI does not listen for (frontend/src/hooks/useRunEvents.ts): a browser
+EventSource drops a named event that has no listener, and the hook's
+ordered-id check then reads the next event as a gap and reconnects.
+"""
+
+import http.client
+import json
+import os
+import pathlib
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+LIGHTAGENT = pathlib.Path(os.environ.get("LIGHTAGENT_BIN", ""))
+LIGHTWEIGHT = pathlib.Path(os.environ.get("LIGHTWEIGHT_MOCK_GATEWAY", ""))
+REASONING = ["Considering the question. ", "Done considering."]
+CONTENT = ["The traced ", "final answer."]
+ANSWER = "".join(CONTENT)
+TERMINAL = {"run.completed", "run.cancelled", "run.failed"}
+
+
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def request(url, method="GET", body=None):
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, method=method, headers={"content-type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            raw = response.read()
+            return response.status, json.loads(raw) if raw else None
+    except urllib.error.HTTPError as error:
+        raw = error.read()
+        try:
+            return error.code, json.loads(raw)
+        except ValueError:
+            return error.code, raw.decode("utf-8", "replace")
+
+
+def wait_for(url, predicate, label, timeout=30):
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        try:
+            status, body = request(url)
+            last = (status, body)
+            if predicate(status, body):
+                return body
+        except OSError as error:
+            last = str(error)
+        time.sleep(0.2)
+    raise SystemExit(f"{label}: not reached within {timeout}s (last: {last!r})")
+
+
+def sse_frames(raw):
+    """Every frame of an SSE body: its id, event name and data, in order."""
+    frames, frame = [], {"id": None, "event": "message", "data": []}
+    for line in raw.splitlines():
+        if line == "":
+            if frame["data"] or frame["event"] != "message":
+                frames.append({"id": frame["id"], "event": frame["event"], "data": "\n".join(frame["data"])})
+            frame = {"id": frame["id"], "event": "message", "data": []}
+        elif line.startswith(":"):
+            continue
+        else:
+            field, _, value = line.partition(":")
+            value = value[1:] if value.startswith(" ") else value
+            if field == "data":
+                frame["data"].append(value)
+            elif field in ("event", "id"):
+                frame[field] = value
+    return frames
+
+
+class Recorder:
+    """A proxy to the gateway that records each exchange, redacted."""
+
+    def __init__(self, upstream_port):
+        self.exchanges = []
+        self.lock = threading.Lock()
+        recorder = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def forward(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length) if length else b""
+                headers = {k: v for k, v in self.headers.items()
+                           if k.lower() not in ("host", "connection", "content-length", "accept-encoding")}
+                upstream = http.client.HTTPConnection("127.0.0.1", upstream_port, timeout=60)
+                upstream.request(self.command, self.path, body=body or None, headers=headers)
+                response = upstream.getresponse()
+                self.send_response(response.status)
+                for name, value in response.getheaders():
+                    if name.lower() not in ("connection", "content-length", "transfer-encoding", "keep-alive"):
+                        self.send_header(name, value)
+                self.send_header("Connection", "close")
+                self.end_headers()
+                received = bytearray()
+                # Passed on as it arrives, so Lightagent still reads a stream.
+                while True:
+                    chunk = response.read1(65536) if hasattr(response, "read1") else response.read(65536)
+                    if not chunk:
+                        break
+                    received.extend(chunk)
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                upstream.close()
+                self.close_connection = True
+                shape = None
+                if body:
+                    try:
+                        sent = json.loads(body)
+                        shape = {k: sent.get(k) for k in ("model", "stream", "max_tokens", "reasoning_effort")}
+                        shape["roles"] = [m.get("role") for m in sent.get("messages") or []]
+                        shape["tools_offered"] = len(sent.get("tools") or [])
+                    except ValueError:
+                        shape = {"unparsed_bytes": len(body)}
+                with recorder.lock:
+                    recorder.exchanges.append({"method": self.command, "path": self.path, "request": shape,
+                                               "status": response.status,
+                                               "body": received.decode("utf-8", "replace")})
+
+            do_GET = forward
+            do_POST = forward
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.root = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+
+def provider_view(exchanges):
+    """What the chat-completion streams told Lightagent."""
+    streams = []
+    for exchange in exchanges:
+        if not exchange["path"].startswith("/v1/chat/completions"):
+            continue
+        reasoning, content, finish, done, chunks = [], [], [], False, 0
+        for frame in sse_frames(exchange["body"]):
+            if frame["data"] == "[DONE]":
+                done = True
+                continue
+            try:
+                chunk = json.loads(frame["data"])
+            except ValueError:
+                continue
+            chunks += 1
+            for choice in chunk.get("choices") or []:
+                delta = choice.get("delta") or {}
+                if delta.get("reasoning_content") or delta.get("reasoning"):
+                    reasoning.append(delta.get("reasoning_content") or delta.get("reasoning"))
+                if delta.get("content"):
+                    content.append(delta["content"])
+                if choice.get("finish_reason"):
+                    finish.append(choice["finish_reason"])
+        streams.append({"request": exchange["request"], "status": exchange["status"], "chunks": chunks,
+                        "reasoning": "".join(reasoning), "content": "".join(content),
+                        "finish_reasons": finish, "terminated_with_done": done})
+    return streams
+
+
+def ui_listens_for():
+    hook = (ROOT / "frontend" / "src" / "hooks" / "useRunEvents.ts").read_text(encoding="utf-8")
+    listed = hook.split("const EVENT_NAMES = [", 1)[1].split("];", 1)[0]
+    return set(re.findall(r'"([^"]+)"', listed))
+
+
+def main():
+    out = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "stream-trace")
+    out.mkdir(parents=True, exist_ok=True)
+    if not LIGHTAGENT.is_file() or not LIGHTWEIGHT.is_file():
+        raise SystemExit("missing built Lightagent or Lightweight test binary")
+    work = pathlib.Path(tempfile.mkdtemp(prefix="lightagent-stream-trace-"))
+    gateway = agent = None
+    problems = []
+    try:
+        script = work / "scripts.json"
+        script.write_text(json.dumps([{"kind": "reasoning", "reasoning": REASONING, "content": CONTENT}]))
+        gateway = subprocess.Popen([str(LIGHTWEIGHT), "--port", "0", "--model", "trace-model", "--ctx", "8192",
+                                    "--script-file", str(script)],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        startup = json.loads(gateway.stdout.readline())
+        recorder = Recorder(startup["port"])
+        model_id = request(f"{recorder.root}/v1/models")[1]["data"][0]["id"]
+
+        env = {**os.environ, "LIGHTAGENT_HOME": str(work / "agent-home")}
+        subprocess.run([str(LIGHTAGENT), "init", "--base-url", recorder.root, "--model", model_id],
+                       check=True, env=env, stdout=subprocess.DEVNULL)
+        port = free_port()
+        agent = subprocess.Popen([str(LIGHTAGENT), "serve", "--host", "127.0.0.1", "--port", str(port)],
+                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        api = f"http://127.0.0.1:{port}/api/lightagent/v1"
+        wait_for(f"http://127.0.0.1:{port}/health", lambda status, _: status == 200, "Lightagent")
+        status, session = request(f"{api}/sessions", "POST", {})
+        assert status == 201, (status, session)
+        status, run = request(f"{api}/runs", "POST", {"message": "Trace the final answer.", "session_id": session["id"]})
+        assert status == 202, (status, run)
+        run_id = run["id"]
+        finished = wait_for(f"{api}/runs/{run_id}", lambda _, body: isinstance(body, dict)
+                            and body.get("status") in ("completed", "failed", "cancelled"), "the run's end")
+        with urllib.request.urlopen(f"{api}/runs/{run_id}/events", timeout=30) as response:
+            emitted = sse_frames(response.read().decode("utf-8"))
+        saved = wait_for(f"{api}/sessions/{session['id']}",
+                         lambda status, body: status == 200 and len(body.get("runs") or []) == 1, "the saved session")
+
+        streams = provider_view(recorder.exchanges)
+        names = [frame["event"] for frame in emitted]
+        ids = [int(frame["id"]) for frame in emitted if (frame["id"] or "").isdigit()]
+        data = []
+        for frame in emitted:
+            try:
+                data.append(json.loads(frame["data"]))
+            except ValueError:
+                data.append({})
+        lightagent = {
+            "status": finished.get("status"), "stop_reason": finished.get("stop_reason"),
+            "events": [{"id": frame["id"], "event": frame["event"],
+                        "data_keys": sorted(d) if isinstance(d, dict) else None} for frame, d in zip(emitted, data)],
+            "reasoning": "".join(d.get("reasoning") or "" for n, d in zip(names, data) if n == "model.delta"),
+            "content": "".join(d.get("content") or "" for n, d in zip(names, data) if n == "model.delta"),
+            "ids_contiguous": ids == list(range(len(ids))),
+        }
+        answers = [m.get("content") for m in saved.get("messages") or [] if m.get("role") == "assistant"]
+        transcript = {"assistant_messages": answers, "runs": [{k: r.get(k) for k in ("run_id", "stop_reason")}
+                                                               for r in saved.get("runs") or []]}
+
+        heard = ui_listens_for()
+        unheard = [{"id": frame["id"], "event": frame["event"]} for frame in emitted if frame["event"] not in heard]
+        ui = {"listens_for": sorted(heard), "emitted_but_not_listened_for": unheard}
+        if unheard:
+            first = unheard[0]
+            following = next((frame for frame in emitted
+                              if (frame["id"] or "").isdigit() and first["id"] and int(frame["id"]) > int(first["id"])
+                              and frame["event"] in heard), None)
+            ui["consequence"] = (
+                f"a browser EventSource drops `{first['event']}` (id {first['id']}); the hook then reads "
+                + (f"`{following['event']}` (id {following['id']}) as a gap and reconnects after id "
+                   f"{int(first['id']) - 1}, whose replay starts with the same dropped event, so "
+                   f"{', '.join(sorted({f['event'] for f in emitted if f['event'] in TERMINAL}))} never reaches the UI"
+                   if following else "nothing after it"))
+
+        # What each boundary must hold.
+        if len(streams) != 1:
+            problems.append(f"provider: expected one chat-completion stream, saw {len(streams)}")
+        for stream in streams[:1]:
+            if stream["reasoning"] != "".join(REASONING):
+                problems.append(f"provider: reasoning {stream['reasoning']!r}")
+            if stream["content"] != ANSWER:
+                problems.append(f"provider: content {stream['content']!r}")
+            if "stop" not in stream["finish_reasons"] or not stream["terminated_with_done"]:
+                problems.append(f"provider: finish {stream['finish_reasons']}, [DONE] {stream['terminated_with_done']}")
+        if lightagent["reasoning"] != "".join(REASONING) or lightagent["content"] != ANSWER:
+            problems.append(f"lightagent events: reasoning {lightagent['reasoning']!r}, content {lightagent['content']!r}")
+        if not any(name in TERMINAL for name in names) or not lightagent["ids_contiguous"]:
+            problems.append(f"lightagent events: terminal {[n for n in names if n in TERMINAL]}, ids contiguous {lightagent['ids_contiguous']}")
+        if answers.count(ANSWER) != 1 or len(answers) != 1:
+            problems.append(f"transcript: assistant messages {answers!r}")
+        if unheard:
+            problems.append(f"ui contract: {ui['consequence']}")
+
+        trace = {"provider_streams": streams, "lightagent": lightagent, "transcript": transcript, "ui": ui,
+                 "exchanges": [{k: e[k] for k in ("method", "path", "status", "request")} for e in recorder.exchanges],
+                 "problems": problems}
+        (out / "trace.json").write_text(json.dumps(trace, indent=1))
+        lines = ["### Stream trace: Lightweight mock gateway → Lightagent → UI event contract", "",
+                 "| Boundary | What it held |", "|---|---|"]
+        for stream in streams:
+            lines.append(f"| provider stream ({stream['chunks']} chunks) | reasoning `{stream['reasoning']}`; content "
+                         f"`{stream['content']}`; finish {stream['finish_reasons']}; `[DONE]` {stream['terminated_with_done']} |")
+        lines.append("| Lightagent events | " + " → ".join(f"{f['id']}:{f['event']}" for f in emitted) + " |")
+        lines.append(f"| Lightagent content | reasoning `{lightagent['reasoning']}`; content `{lightagent['content']}`; "
+                     f"run {lightagent['status']} ({lightagent['stop_reason']}) |")
+        lines.append(f"| saved transcript | {answers!r} |")
+        lines.append(f"| UI listens for | {', '.join(sorted(heard))} |")
+        lines.append("| emitted, not listened for | " + (", ".join(f"{u['id']}:{u['event']}" for u in unheard) or "none") + " |")
+        if ui.get("consequence"):
+            lines.append(f"| consequence in the UI | {ui['consequence']} |")
+        lines += [f"- FAILED {problem}" for problem in problems] or ["- every boundary holds the answer and its completion"]
+        print("\n".join(lines))
+        return 1 if problems else 0
+    finally:
+        for process, name in ((agent, "lightagent"), (gateway, "lightweight")):
+            if process:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+        shutil.rmtree(work, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+=== replace .github/workflows/check.yml
+--- find
+        run: python3 scripts/paired-e2e.py
+--- with
+        run: python3 scripts/paired-e2e.py
+      - name: Every run event the API can send is one the UI listens for
+        if: success() || failure()
+        run: python3 scripts/check-event-names.py | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Trace a reasoning-then-answer run across Lightweight, Lightagent and the UI's event contract
+        if: success() || failure()
+        env:
+          LIGHTWEIGHT_MOCK_GATEWAY: ${{ github.workspace }}/lightweight-provider/target/debug/hermes-mock-gateway
+          LIGHTAGENT_BIN: ${{ github.workspace }}/target/debug/lightagent
+        run: python3 scripts/stream-trace.py "$RUNNER_TEMP/stream-trace" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: stream-trace
+          retention-days: 30
+          path: ${{ runner.temp }}/stream-trace/
+=== end
