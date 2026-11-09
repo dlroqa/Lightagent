@@ -348,7 +348,7 @@ $denyRead = @("config.json", "secrets", "logs", "cache", "sessions", "profiles\a
     "profiles\alice-CANARYPROFILE\history.jsonl", "profiles\work\sessions\sub", "profiles\work\sessions\.runs")
 function Set-Lockdown([bool]$on) {
     if ($on) {
-        & icacls $homeDir /deny "${user}:(OI)(CI)(W,D,DC)" | Out-Null
+        & icacls $homeDir /deny "${user}:(OI)(CI)(WD,AD,WEA,WA,D,DC)" | Out-Null
         foreach ($p in $denyRead) {
             $full = Join-Path $homeDir $p
             if (Test-Path -LiteralPath $full -PathType Container) { & icacls $full /deny "${user}:(OI)(CI)(RD)" | Out-Null }
