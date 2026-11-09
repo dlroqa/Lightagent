@@ -9,7 +9,7 @@ home and `lightagent serve`, and a loopback fixture that plays the search
 provider and the pages it links to. The fixture is reached through
 `web.trusted_networks` (127.0.0.0/8, operator runs only); the SSRF guard stays
 on. Scenarios: retrieval with evidence, a search with zero results, pages
-without a relevant passage, `web.search` with and without results, and a
+unrelated to the query, `web.search` with and without results, and a
 provider that refuses with HTTP 429.
 
 What is checked is the content and the order, not labels: the events
@@ -130,8 +130,11 @@ SCENARIOS = [
     {"name": "rag-zero-results", "tool": "rag.realtime", "mode": "zero", "error": False,
      "outcome": "no_relevant_evidence", "contains": ["No current web results found"], "pages": 0,
      "answer": ["I found no current sources ", "for that."]},
-    {"name": "rag-no-relevant-passages", "tool": "rag.realtime", "mode": "irrelevant", "error": False,
-     "outcome": "no_relevant_evidence", "contains": ["No relevant current passages found"], "pages": 2,
+    # Pages that share no word with the query still rank: with no lexical
+    # match and no semantic endpoint, the search engine's order stands
+    # (store.rs), so the outcome is evidence, not no_relevant_evidence.
+    {"name": "rag-unrelated-pages", "tool": "rag.realtime", "mode": "irrelevant", "error": False,
+     "outcome": "evidence", "contains": ["CURRENT WEB EVIDENCE", "/page/garden-a"], "pages": 2,
      "answer": ["The sources found ", "do not answer that."]},
     {"name": "search-results", "tool": "web.search", "mode": "evidence", "error": False, "outcome": None,
      "contains": ["/page/zephyr-notes", "/page/zephyr-blog"], "pages": 0,

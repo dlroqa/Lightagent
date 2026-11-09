@@ -452,8 +452,9 @@ const SCENARIOS = [
       toolRows: 1, rowResults: ["No current web results found"], maxStreams: 1 },
   },
   {
-    // Pages were read, but no passage matched: the same label, a different
-    // result text, which the row carries.
+    // The outcome rag.realtime gives when it ranks no passage (rare: with
+    // no term in common, the search order stands): the same label as zero
+    // results, a different result text, which the row carries.
     name: "rag-no-passages-report",
     frames: research([
       progress("searching"),
