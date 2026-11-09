@@ -313,7 +313,7 @@ Write-Session (Join-Path $homeDir "cache\sessions") ((Next-Id) + ".json") (& $de
 Write-Session (Join-Path $homeDir "sessions") ((Next-Id) + ".json") (& $decoy "decoy_root")
 Write-Session (Join-Path $workSessions "sub") ((Next-Id) + ".json") (& $decoy "decoy_sub")
 Write-Session (Join-Path $workSessions ".runs") ((Next-Id) + ".json") (& $decoy "decoy_runs")
-Write-Session $workSessions ((Next-Id).ToUpperInvariant() + ".json") (& $decoy "decoy_upper")
+Write-Session $workSessions ("ABCDEF" + (Next-Id).Substring(6).ToUpperInvariant() + ".json") (& $decoy "decoy_upper")
 Write-Session $workSessions ((Next-Id) + ".json.tmp") (& $decoy "decoy_tmp")
 Write-Session $workSessions "notes.json" (& $decoy "decoy_name")
 # Secrets and profile details that must never be read.
@@ -326,12 +326,17 @@ Write-Text (Join-Path $profileDirs.alice "memory\facts.jsonl") '{"fact":"CANARYS
 Write-Text (Join-Path $profileDirs.alice "history.jsonl") '{"line":"CANARYSECRET12"}'
 Write-Text (Join-Path $homeDir "logs\agent.log") 'CANARYSECRET13'
 
-$labels = @{ alice = "P1"; work = "P2" }
+# Profiles in name order: alice (P1), empty (no sessions folder, no number),
+# no-history (empty sessions folder, P2), work (P3).
+$labels = @{ alice = "P1"; work = "P3" }
 $period = @("-OldStart", "2026-11-06 19:00", "-OldEnd", "2026-11-07 09:00", "-NewStart", "2026-11-07 09:30", "-NewEnd", "2026-11-09 00:00")
 
 # ================================================= 3. snapshot and lock down
 function Snapshot([string]$root) {
     $lines = foreach ($i in @(Get-ChildItem -LiteralPath $root -Recurse -Force | Sort-Object FullName)) {
+        # A listing returns NTFS's lazily updated directory-index copy of the
+        # times; Refresh reads them from the item itself.
+        $i.Refresh()
         $rel = $i.FullName.Substring($root.Length)
         if ($i.PSIsContainer) { "D|$rel|$($i.Attributes)|$($i.CreationTimeUtc.Ticks)|$($i.LastWriteTimeUtc.Ticks)" }
         else {
@@ -341,7 +346,9 @@ function Snapshot([string]$root) {
     }
     return ($lines -join "`n")
 }
+Start-Sleep -Seconds 2
 $before = Snapshot $homeDir
+$lockedAt = [DateTime]::UtcNow
 $user = "$env:USERDOMAIN\$env:USERNAME"
 $denyRead = @("config.json", "secrets", "logs", "cache", "sessions", "profiles\alice-CANARYPROFILE\config.json",
     "profiles\alice-CANARYPROFILE\.env", "profiles\alice-CANARYPROFILE\profile.json", "profiles\alice-CANARYPROFILE\memory",
@@ -440,10 +447,11 @@ foreach ($name in @("default", "show-profiles")) {
     $t = [string]$csvText[$name]
     Check (-not ($t -match 'CANARY')) "$name CSV holds no query, excerpt, profile name or secret (no CANARY marker)"
     Check (-not ($t.Contains("@") -or $t.Contains($env:USERNAME) -or $t.Contains($homeDir))) "$name CSV holds no e-mail, user name or home path"
-    Check (-not (($t -split "`n")[0] -match 'query|excerpt')) "$name CSV has no query or excerpt column"
+    $cols = @((($t -split "`r?`n")[0] -replace '"', '') -split ',')
+    Check (($cols -notcontains "query") -and ($cols -notcontains "excerpt")) "$name CSV has no query or excerpt column ($($cols -join ', '))"
 }
 Check (-not ($console -match 'CANARY')) "default console output names no profile and prints no secret"
-Check ([string]$csvText["console-show-profiles"] -match 'P1 = alice-CANARYPROFILE' -and [string]$csvText["console-show-profiles"] -match 'P2 = work') "-ShowProfileNames prints the mapping on the console only"
+Check ([string]$csvText["console-show-profiles"] -match 'P1 = alice-CANARYPROFILE' -and [string]$csvText["console-show-profiles"] -match 'P2 = no-history' -and [string]$csvText["console-show-profiles"] -match 'P3 = work') "-ShowProfileNames prints the mapping on the console only"
 $t = [string]$csvText["include-text"]
 $withText = @{}
 foreach ($row in @(ConvertFrom-Csv $t)) { $withText[$row.call] = $row }
@@ -476,6 +484,8 @@ Set-Lockdown $false
 $after = Snapshot $homeDir
 [IO.File]::WriteAllText((Join-Path $Report "snapshot-before.txt"), $before, $utf8)
 [IO.File]::WriteAllText((Join-Path $Report "snapshot-after.txt"), $after, $utf8)
+$touched = @(Get-ChildItem -LiteralPath $homeDir -Recurse -Force | Where-Object { $_.Refresh(); $_.LastWriteTimeUtc -ge $lockedAt -or $_.CreationTimeUtc -ge $lockedAt } | ForEach-Object { $_.FullName.Substring($homeDir.Length) })
+Check ($touched.Count -eq 0) "nothing in the home was created or written after the analyzer runs began$(if ($touched) { ': ' + ($touched -join ', ') })"
 Check ($before -eq $after) "the Lightagent home is byte-for-byte unchanged: contents (SHA-256), sizes, attributes, creation and write times, and listing ($(@($before -split "`n").Count) entries)"
 
 $emptyHome = Join-Path $work "empty-home"

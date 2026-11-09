@@ -266,6 +266,7 @@ foreach ($entry in $sessionDirs) {
         $stats.files++
         try { $session = ConvertFrom-Json (ReadShared $file.FullName) }
         catch { $stats.unreadable++; continue }
+        if ($null -eq $session) { $stats.unreadable++; continue }   # an empty file
         if (-not (HasField $session "runs")) { continue }
         foreach ($run in @($session.runs)) {
             if ($null -eq $run) { continue }
