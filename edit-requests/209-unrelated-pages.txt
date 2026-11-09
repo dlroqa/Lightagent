@@ -1,0 +1,37 @@
+=== base 8e83ac73e8560c9cd1a4c9d3e986a2deae941ffd
+=== message
+Expect evidence from pages unrelated to the query, as ranking gives
+
+Tests only. The trace's third scenario expected no_relevant_evidence when
+every page and snippet shares no word with the query. The harness ranks
+them anyway: with no lexical match and no semantic endpoint, the search
+engine's order stands (store.rs), so the outcome is evidence. The
+scenario now records that behaviour. A rag.realtime "No relevant evidence
+found" therefore means, in practice, that the search provider returned no
+result the parser could read.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+=== replace scripts/tool-trace.py
+--- find
+without a relevant passage, `web.search` with and without results, and a
+--- with
+unrelated to the query, `web.search` with and without results, and a
+=== replace scripts/tool-trace.py
+--- find
+    {"name": "rag-no-relevant-passages", "tool": "rag.realtime", "mode": "irrelevant", "error": False,
+     "outcome": "no_relevant_evidence", "contains": ["No relevant current passages found"], "pages": 2,
+--- with
+    # Pages that share no word with the query still rank: with no lexical
+    # match and no semantic endpoint, the search engine's order stands
+    # (store.rs), so the outcome is evidence, not no_relevant_evidence.
+    {"name": "rag-unrelated-pages", "tool": "rag.realtime", "mode": "irrelevant", "error": False,
+     "outcome": "evidence", "contains": ["CURRENT WEB EVIDENCE", "/page/garden-a"], "pages": 2,
+=== replace e2e/delivery.mjs
+--- find
+    // Pages were read, but no passage matched: the same label, a different
+    // result text, which the row carries.
+--- with
+    // The outcome rag.realtime gives when it ranks no passage (rare: with
+    // no term in common, the search order stands): the same label as zero
+    // results, a different result text, which the row carries.
+=== end
