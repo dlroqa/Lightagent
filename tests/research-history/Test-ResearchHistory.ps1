@@ -587,8 +587,9 @@ $analyzerPhase = Measure-Writer {
 } 40
 Check ($analyzerPhase.Ok -gt 0 -and $analyzerPhase.Failed -eq 0) "Lightagent-style atomic saves never fail while the analyzer reads ($($analyzerPhase.Ok) saves, $($analyzerPhase.Failed) failed $($analyzerPhase.Codes), $($analyzerPhase.Reads) analyzer runs)"
 Check ($unreadable -eq 0) "every concurrent analyzer run read the conversation whole ($unreadable incomplete)"
-$controlPhase = Measure-Writer { for ($i = 0; $i -lt 20; $i++) { [IO.File]::ReadAllText($target) | Out-Null } } 20
-$control = "control: a reader without delete sharing (ReadAllText, as in the first draft) made $($controlPhase.Failed) of $($controlPhase.Ok + $controlPhase.Failed) saves fail (Windows error $($controlPhase.Codes))"
+$script:controlReadErrors = 0
+$controlPhase = Measure-Writer { for ($i = 0; $i -lt 20; $i++) { try { [IO.File]::ReadAllText($target) | Out-Null } catch { $script:controlReadErrors++ } } } 20
+$control = "control: a reader without delete sharing (ReadAllText, as in the first draft) made $($controlPhase.Failed) of $($controlPhase.Ok + $controlPhase.Failed) saves fail (Windows error $($controlPhase.Codes)); its own reads failed $($script:controlReadErrors) time(s)"
 Write-Host $control
 $script:log.Add("INFO $control")
 
