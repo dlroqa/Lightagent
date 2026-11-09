@@ -1,288 +1,21 @@
-name: check
+name: research-history analyzer validation (throwaway, never merged)
+
+# Throwaway validation branch tests/v060-research-history only. This file
+# replaces check.yml on that branch so the analyzer can be validated by a
+# dispatch of an existing workflow; it is never merged and touches no other
+# branch. GitHub-hosted runners only.
 
 on:
-  push:
-    branches: [master, main]
-  pull_request:
   workflow_dispatch:
-
-concurrency:
-  group: check-${{ github.ref }}
-  cancel-in-progress: true
 
 permissions:
   contents: read
 
-env:
-  CARGO_INCREMENTAL: '0'
-
-# Linux jobs are pinned to ubuntu-24.04, the image `ubuntu-latest` resolves to
-# today. GitHub moves `ubuntu-latest` to 26.04 between 2026-10-19 and
-# 2026-11-19; pinning keeps these gates on a known toolchain until a separate
-# change validates the new image. Job names, and so required checks, are
-# unchanged.
-
 jobs:
-  check:
-    name: check (${{ matrix.label }})
-    runs-on: ${{ matrix.os }}
-    # The 4-core Intel runner builds the workspace from a cold cache in well
-    # over the others' time; it gets a longer limit, not fewer checks.
-    timeout-minutes: ${{ matrix.timeout || 60 }}
-    # One entry per released platform (release.yml's matrix), each run
-    # natively: `arch` and `host` are checked before anything is built, and
-    # `macos_min` is the deployment target its package is built with.
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: macos-15, label: macos-arm64, arch: arm64, host: aarch64-apple-darwin, macos_min: '11.0' }
-          - { os: macos-15-intel, label: macos-x64, arch: x86_64, host: x86_64-apple-darwin, macos_min: '10.14', timeout: 120 }
-          - { os: windows-latest, label: windows-x64, arch: x86_64, host: x86_64-pc-windows-msvc }
-          - { os: ubuntu-24.04, label: linux-x64, arch: x86_64, host: x86_64-unknown-linux-gnu }
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v7
-      - run: rustup show
-      - name: Runner architecture
-        env:
-          WANT_ARCH: ${{ matrix.arch }}
-          WANT_HOST: ${{ matrix.host }}
-        run: |
-          arch="$(uname -m)"
-          host="$(rustc -vV | sed -n 's/^host: //p')"
-          {
-            echo "### check (${{ matrix.label }}) runner"
-            echo "- uname: $(uname -srm)"
-            echo "- rustc host: $host"
-            if [ "$(uname -s)" = Darwin ]; then
-              echo "- macOS: $(sw_vers -productVersion) ($(sw_vers -buildVersion))"
-              echo "- CPU: $(sysctl -n machdep.cpu.brand_string)"
-              echo "- hw.optional.arm64: $(sysctl -n hw.optional.arm64 2>/dev/null || echo absent)"
-              echo "- sysctl.proc_translated: $(sysctl -n sysctl.proc_translated 2>/dev/null || echo absent)"
-            fi
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-          [ "$arch" = "$WANT_ARCH" ] || { echo "runner is $arch, expected $WANT_ARCH" >&2; exit 1; }
-          [ "$host" = "$WANT_HOST" ] || { echo "rustc host is $host, expected $WANT_HOST" >&2; exit 1; }
-          if [ "$(uname -s)" = Darwin ]; then
-            # Rosetta reports x86_64 from uname on Apple silicon; neither may
-            # stand in for the real hardware.
-            [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 0 ] \
-              || { echo "running under Rosetta translation" >&2; exit 1; }
-            if [ "$WANT_ARCH" = x86_64 ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = 1 ]; then
-              echo "an Apple silicon machine, not an Intel Mac" >&2; exit 1
-            fi
-          fi
-      - name: macOS deployment target
-        if: matrix.macos_min
-        run: echo "MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos_min }}" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.label }}
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: npm ci --prefix frontend
-      # The committed lockfile must be exactly what Cargo resolves: a stale
-      # or hand-edited entry fails here, with Cargo's own correction shown.
-      - name: Cargo.lock is current
-        run: |
-          if ! cargo metadata --locked --format-version 1 >/dev/null; then
-            cargo metadata --format-version 1 >/dev/null
-            git diff -- Cargo.lock
-            exit 1
-          fi
-      - run: bash ./scripts/check.sh
-      # The provisioning HTTP contract is behind a cargo feature no release
-      # build enables, so check.sh never compiles it: build, lint and test it
-      # here on every platform.
-      - name: Provisioning API contract (feature-gated)
-        run: |
-          cargo clippy -p lightagent-api --features provisioning-api --all-targets -- -D warnings
-          cargo test -p lightagent-api --features provisioning-api --test provisioning_api
-      - name: CLI smoke
-        run: |
-          cargo run -q -p lightagent --bin lightagent -- banner --preview
-          cargo run -q -p lightagent --bin lightagent -- tools list --json | grep -q datetime.now
-
-  # LA-WEB-PROVISIONING/1 candidate (L0 review only; nothing is served).
-  # Offline: the mirrored Web specification and fixtures, their manifest
-  # hashes, every command vector through the independent Rust verifier, and
-  # the service properties the protocol relies on. It never contacts Web.
-  # check.sh also runs these tests on every platform, as part of the workspace.
-  protocol-fixtures:
-    name: LA-WEB-PROVISIONING/1 fixtures (offline)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: protocol-fixtures
-      - name: Mirrored bytes match the manifest
-        working-directory: docs/integrations/web/la-web-provisioning-1-r4
-        run: sha256sum -c protocol/la-web-provisioning-1/MANIFEST.sha256
-      - name: Independent verifier against every vector
-        run: cargo test -p lightagent-protocol-conformance -- --nocapture
-      - name: Service semantics the protocol relies on
-        run: cargo test -p lightagent-core --lib provisioning::tests::web_
-      - name: Ledger continuity on real stores (L1, all 13 fixtures)
-        run: cargo test -p lightagent-core --lib provisioning::tests::continuity -- --nocapture
-
-  open-terminal-live:
-    name: Open Terminal live contract
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: open-terminal-live
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-      - name: Provision actual Open Terminal and test the adapter
-        shell: bash
-        env:
-          LIGHTAGENT_OPEN_TERMINAL_URL: http://127.0.0.1:18765
-          LIGHTAGENT_OPEN_TERMINAL_TOKEN: lightagent-test-only
-        run: |
-          set -euo pipefail
-          terminal_test_root=$(mktemp -d)
-          python -m venv "$terminal_test_root/venv"
-          "$terminal_test_root/venv/bin/pip" install 'open-terminal==0.14.0'
-          export OPEN_TERMINAL_API_KEY="$LIGHTAGENT_OPEN_TERMINAL_TOKEN"
-          export OPEN_TERMINAL_LOG_DIR="$terminal_test_root/logs"
-          "$terminal_test_root/venv/bin/open-terminal" run --host 127.0.0.1 --port 18765 \
-            --config "$GITHUB_WORKSPACE/scripts/open-terminal-test-config.toml" \
-            --cwd "$terminal_test_root" > "$terminal_test_root/server.log" 2>&1 &
-          terminal_test_pid=$!
-          trap 'kill "$terminal_test_pid" 2>/dev/null || true' EXIT
-          ready=false
-          for attempt in $(seq 1 60); do
-            if curl --fail --silent "$LIGHTAGENT_OPEN_TERMINAL_URL/health"; then ready=true; break; fi
-            sleep 1
-          done
-          if [ "$ready" != true ]; then cat "$terminal_test_root/server.log"; exit 1; fi
-          cargo test -p lightagent-tools live_open_terminal -- --ignored --nocapture
-
-  sandbox-linux:
-    # Experimental. Not a required check. Runs the live bubblewrap backend
-    # tests against the runner's real kernel. A missing kernel feature fails
-    # the job with an infrastructure report; nothing is skipped. Every
-    # credential below is synthetic: the tests prove none reaches a sandbox.
-    name: Linux sandbox (bubblewrap, experimental)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      OPENAI_API_KEY: synthetic-provider-key-not-a-secret
-      TYPESAFE_API_KEY: synthetic-jev-key-not-a-secret
-      LIGHTAGENT_API_KEY: synthetic-operator-key-not-a-secret
-      SSH_AUTH_SOCK: /tmp/synthetic-ssh-agent.sock
-    steps:
-      - uses: actions/checkout@v7
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: sandbox-linux
-      - name: Install bubblewrap from the distribution
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap
-      - name: Record kernel and runner prerequisites
-        shell: bash
-        run: |
-          {
-            echo "### Runner prerequisites"
-            echo '```'
-            echo "kernel: $(uname -r)"
-            echo "user: $(id -u) (root: $([ "$(id -u)" = 0 ] && echo yes || echo no))"
-            echo "bwrap: $(command -v bwrap) $(bwrap --version)"
-            stat -c 'bwrap mode %a owner %U' /usr/bin/bwrap
-            for knob in user/max_user_namespaces kernel/unprivileged_userns_clone kernel/apparmor_restrict_unprivileged_userns; do
-              echo "$knob: $(cat /proc/sys/$knob 2>/dev/null || echo absent)"
-            done
-            echo "cgroup: $(stat -fc %T /sys/fs/cgroup) $(cat /proc/self/cgroup)"
-            echo "apparmor bwrap profile: $(ls /etc/apparmor.d 2>/dev/null | grep -i bwrap || echo none)"
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Fail closed on the stock runner
-        # Ubuntu 24.04 restricts unprivileged user namespaces through
-        # AppArmor and ships no profile for bwrap: the backend must refuse.
-        run: cargo test -p lightagent-tools --test sandbox_bubblewrap -- --ignored --nocapture --exact a_host_that_denies_user_namespaces_leaves_the_backend_unavailable
-      - name: Grant user namespaces to bwrap only
-        # The Ubuntu-documented, per-binary alternative to disabling
-        # kernel.apparmor_restrict_unprivileged_userns, which stays 1. This is
-        # the deployment prerequisite the backend documents.
-        run: |
-          printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' \
-            'profile bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '}' \
-            | sudo tee /etc/apparmor.d/lightagent-bwrap
-          sudo apparmor_parser -r /etc/apparmor.d/lightagent-bwrap
-          echo "apparmor_restrict_unprivileged_userns: $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Live sandbox tests
-        env:
-          LIGHTAGENT_SANDBOX_LIVE: '1'
-        run: cargo test -p lightagent-tools --test sandbox_bubblewrap -- --ignored --nocapture --test-threads=1 --skip a_host_that_denies_user_namespaces
-
-  revocation-latency:
-    # A measurement, not a required check: how long the bounded
-    # revalidation monitor takes to observe a revocation, and what one sweep
-    # costs, on a GitHub-hosted runner. Results go to the job summary. The
-    # same monitor is exercised deterministically by the test suites above.
-    name: Revocation detection latency (measurement)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: revocation-latency
-      - name: Measure detection latency and sweep overhead
-        run: cargo test -p lightagent-api --test revocation_monitor -- --ignored --nocapture --exact measure_detection_latency_and_sweep_overhead
-
-  web-render:
-    name: standalone Web UI render
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v7
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: web-render
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: |
-            frontend/package-lock.json
-            e2e/package-lock.json
-      - run: npm ci --prefix frontend
-      - run: npm ci --prefix e2e
-      - run: npx --prefix e2e playwright install --with-deps chromium
-      - run: bash ./scripts/render-panel.sh
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: lightagent-web-screens
-          path: e2e/screens/
-
-  paired-lightweight-e2e:
-    name: paired Lightweight contract E2E
+  real-sessions:
+    name: real conversations saved by the Lightagent binary
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    defaults:
-      run:
-        shell: bash
     steps:
       - uses: actions/checkout@v7
       - uses: actions/checkout@v7
@@ -294,112 +27,82 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: paired-lightweight-e2e
+          save-if: false
       - name: Build the independent Lightweight test provider
         run: cargo build -p lightweight-gateway --features mock --bin hermes-mock-gateway
         working-directory: lightweight-provider
-      - name: Build the independent Lightagent harness
+      - name: Build the Lightagent harness
         run: cargo build -p lightagent --bin lightagent
-      - name: Prove the public HTTP/SSE agent contract
+      - name: Save the conversations of the research scenarios
         env:
           LIGHTWEIGHT_MOCK_GATEWAY: ${{ github.workspace }}/lightweight-provider/target/debug/hermes-mock-gateway
           LIGHTAGENT_BIN: ${{ github.workspace }}/target/debug/lightagent
-        run: python3 scripts/paired-e2e.py
-      - name: Every run event the API can send is one the UI listens for
-        if: success() || failure()
-        run: python3 scripts/check-event-names.py | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Trace a reasoning-then-answer run across Lightweight, Lightagent and the UI's event contract
-        if: success() || failure()
-        env:
-          LIGHTWEIGHT_MOCK_GATEWAY: ${{ github.workspace }}/lightweight-provider/target/debug/hermes-mock-gateway
-          LIGHTAGENT_BIN: ${{ github.workspace }}/target/debug/lightagent
-        run: python3 scripts/stream-trace.py "$RUNNER_TEMP/stream-trace" | tee -a "$GITHUB_STEP_SUMMARY"
+        run: python3 tests/research-history/real_sessions.py "$RUNNER_TEMP/real-sessions"
       - uses: actions/upload-artifact@v7
-        if: always()
         with:
-          name: stream-trace
-          retention-days: 30
-          path: ${{ runner.temp }}/stream-trace/
-      - name: Trace web.search and rag.realtime runs across Lightweight, Lightagent, a loopback search provider and the UI's event contract
-        if: success() || failure()
-        env:
-          LIGHTWEIGHT_MOCK_GATEWAY: ${{ github.workspace }}/lightweight-provider/target/debug/hermes-mock-gateway
-          LIGHTAGENT_BIN: ${{ github.workspace }}/target/debug/lightagent
-        run: python3 scripts/tool-trace.py "$RUNNER_TEMP/tool-trace" | tee -a "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: tool-trace
-          retention-days: 30
-          path: ${{ runner.temp }}/tool-trace/
+          name: real-sessions
+          path: ${{ runner.temp }}/real-sessions/
+          if-no-files-found: error
 
-  platform-rag-contract:
-    name: Qdrant + Infinity live contract
-    runs-on: ubuntu-24.04
-    # Model download and first CPU inference can be slow on a cold runner.
-    timeout-minutes: 60
-    defaults:
-      run:
-        shell: bash
-    env:
-      QDRANT_URL: http://127.0.0.1:6333
-      INFINITY_URL: http://127.0.0.1:7997
-      LIGHTAGENT_QDRANT_URL: http://127.0.0.1:6333
-      LIGHTAGENT_INFINITY_URL: http://127.0.0.1:7997
-      INFINITY_EMBEDDING_MODEL: BAAI/bge-small-en-v1.5
-      INFINITY_RERANK_MODEL: mixedbread-ai/mxbai-rerank-xsmall-v1
+  windows:
+    name: Windows ${{ matrix.edition }} (${{ matrix.zone }})
+    needs: real-sessions
+    runs-on: windows-2025
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        edition: ["5.1", "7"]
+        zone: ["Pacific Standard Time", "Tokyo Standard Time"]
+        include:
+          - zone: "Pacific Standard Time"
+            offset: -8
+          - zone: "Tokyo Standard Time"
+            offset: 9
     steps:
       - uses: actions/checkout@v7
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
         with:
-          key: platform-rag-contract
-      - name: Start pinned Qdrant and Infinity services
-        run: docker compose -f compose.platform-integration.yml up --wait --pull always
-      - name: Exercise the upstream HTTP contracts
-        run: python3 scripts/platform-contract-test.py
-      - name: Exercise the Lightagent remote-RAG adapter and fallback
-        run: cargo test -p lightagent --test platform_services -- --ignored
-      - name: Show service logs on failure
-        if: failure()
-        run: docker compose -f compose.platform-integration.yml logs --no-color
-      - name: Stop integration services
+          name: real-sessions
+          path: ${{ runner.temp }}/real-sessions
+      - name: Set the time zone
+        shell: pwsh
+        run: |
+          tzutil /s "${{ matrix.zone }}"
+          tzutil /g
+      - name: Validate under Windows PowerShell 5.1
+        if: matrix.edition == '5.1'
+        shell: powershell
+        run: |
+          & .\tests\research-history\Test-ResearchHistory.ps1 -Analyzer .\tests\research-history\research-history.ps1 `
+            -UtcOffsetHours ${{ matrix.offset }} -ExpectMajor 5 -Report "$env:RUNNER_TEMP\report" -RealDir "$env:RUNNER_TEMP\real-sessions"
+          exit $LASTEXITCODE
+      - name: Validate under PowerShell 7
+        if: matrix.edition == '7'
+        shell: pwsh
+        run: |
+          & .\tests\research-history\Test-ResearchHistory.ps1 -Analyzer .\tests\research-history\research-history.ps1 `
+            -UtcOffsetHours ${{ matrix.offset }} -ExpectMajor 7 -Report "$env:RUNNER_TEMP\report" -RealDir "$env:RUNNER_TEMP\real-sessions"
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v7
         if: always()
-        run: docker compose -f compose.platform-integration.yml down --volumes --remove-orphans
+        with:
+          name: report-ps${{ matrix.edition }}-${{ matrix.offset }}
+          path: ${{ runner.temp }}/report/
 
   package:
-    name: package smoke
+    name: validated script for download
+    needs: windows
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    defaults:
-      run:
-        shell: bash
     steps:
       - uses: actions/checkout@v7
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
+      - name: Copy the validated script with its SHA-256
+        run: |
+          mkdir -p "$RUNNER_TEMP/script"
+          cp tests/research-history/research-history.ps1 "$RUNNER_TEMP/script/"
+          cd "$RUNNER_TEMP/script"
+          sha256sum research-history.ps1 | tee research-history.ps1.sha256 | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
         with:
-          key: package-smoke
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: npm ci --prefix frontend
-      - run: npm run build --prefix frontend
-      - run: cargo build --release -p lightagent
-      - run: bash ./scripts/smoke-lightagent-package.sh
-
-  release-gate:
-    # Whether release.yml may write a release: every dispatch, tag and event
-    # case through scripts/release-gate.sh, and the workflow's permissions and
-    # release-writing steps. Runs no build and contacts nothing.
-    name: release gate tests
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-      - run: python -m pip install 'pyyaml==6.0.2'
-      - run: python scripts/test-release-gate.py -v
+          name: research-history-script
+          path: ${{ runner.temp }}/script/
