@@ -356,18 +356,23 @@ function Test-Listing([string]$step) {
         & whoami /groups | ForEach-Object { Write-Host "DIAG $_" }
     }
 }
+# Deny rules are added with .NET, which leaves SYNCHRONIZE out of a deny
+# entry; icacls /deny adds it and so blocks every open, even a listing.
+function Add-Deny([string]$path, [string]$rights) {
+    $inherit = $(if (Test-Path -LiteralPath $path -PathType Container) { "ContainerInherit, ObjectInherit" } else { "None" })
+    $rule = New-Object Security.AccessControl.FileSystemAccessRule($user, $rights, $inherit, "None", "Deny")
+    $acl = Get-Acl -LiteralPath $path
+    $acl.AddAccessRule($rule)
+    Set-Acl -LiteralPath $path -AclObject $acl
+}
 function Set-Lockdown([bool]$on) {
     if ($on) {
-        & icacls $homeDir /deny "${user}:(OI)(CI)(WD,AD,WEA,WA,D,DC)" | ForEach-Object { Write-Host "icacls: $_" }
+        Add-Deny $homeDir "WriteData, AppendData, WriteExtendedAttributes, WriteAttributes, Delete, DeleteSubdirectoriesAndFiles"
         Test-Listing "write deny on the home"
-        foreach ($p in $denyRead) {
-            $full = Join-Path $homeDir $p
-            if (Test-Path -LiteralPath $full -PathType Container) { $grant = "(OI)(CI)(RD)" } else { $grant = "(RD)" }
-            & icacls $full /deny "${user}:$grant" | Out-Null
-            Test-Listing "read deny $grant on $p"
-        }
-        foreach ($f in $decoyFiles) { & icacls $f /deny "${user}:(RD)" | Out-Null }
+        foreach ($p in $denyRead) { Add-Deny (Join-Path $homeDir $p) "ReadData"; Test-Listing "read deny on $p" }
+        foreach ($f in $decoyFiles) { Add-Deny $f "ReadData" }
         Test-Listing "read deny on the decoy files"
+        & icacls $workSessions | ForEach-Object { Write-Host "acl: $_" }
     }
     else { & icacls $homeDir /remove:d $user /T /C /Q | Out-Null }
 }
