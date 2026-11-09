@@ -346,17 +346,28 @@ $user = "$env:USERDOMAIN\$env:USERNAME"
 $denyRead = @("config.json", "secrets", "logs", "cache", "sessions", "profiles\alice-CANARYPROFILE\config.json",
     "profiles\alice-CANARYPROFILE\.env", "profiles\alice-CANARYPROFILE\profile.json", "profiles\alice-CANARYPROFILE\memory",
     "profiles\alice-CANARYPROFILE\history.jsonl", "profiles\work\sessions\sub", "profiles\work\sessions\.runs")
+$decoyFiles = @(Get-ChildItem -LiteralPath $workSessions -File | Where-Object { $_.Name -cnotmatch '^[0-9a-f]{32}\.json$' } | ForEach-Object { $_.FullName })
+function Test-Listing([string]$step) {
+    try { Get-ChildItem -LiteralPath $workSessions -File | Out-Null }
+    catch {
+        Write-Host "DIAG listing profiles\work\sessions failed after: $step"
+        & icacls $workSessions | ForEach-Object { Write-Host "DIAG $_" }
+        & icacls (Split-Path -Parent $workSessions) | ForEach-Object { Write-Host "DIAG $_" }
+        & whoami /groups | ForEach-Object { Write-Host "DIAG $_" }
+    }
+}
 function Set-Lockdown([bool]$on) {
     if ($on) {
-        & icacls $homeDir /deny "${user}:(OI)(CI)(WD,AD,WEA,WA,D,DC)" | Out-Null
+        & icacls $homeDir /deny "${user}:(OI)(CI)(WD,AD,WEA,WA,D,DC)" | ForEach-Object { Write-Host "icacls: $_" }
+        Test-Listing "write deny on the home"
         foreach ($p in $denyRead) {
             $full = Join-Path $homeDir $p
-            if (Test-Path -LiteralPath $full -PathType Container) { & icacls $full /deny "${user}:(OI)(CI)(RD)" | Out-Null }
-            else { & icacls $full /deny "${user}:(RD)" | Out-Null }
+            if (Test-Path -LiteralPath $full -PathType Container) { $grant = "(OI)(CI)(RD)" } else { $grant = "(RD)" }
+            & icacls $full /deny "${user}:$grant" | Out-Null
+            Test-Listing "read deny $grant on $p"
         }
-        foreach ($f in @(Get-ChildItem -LiteralPath $workSessions -File | Where-Object { $_.Name -cnotmatch '^[0-9a-f]{32}\.json$' })) {
-            & icacls $f.FullName /deny "${user}:(RD)" | Out-Null
-        }
+        foreach ($f in $decoyFiles) { & icacls $f /deny "${user}:(RD)" | Out-Null }
+        Test-Listing "read deny on the decoy files"
     }
     else { & icacls $homeDir /remove:d $user /T /C /Q | Out-Null }
 }
