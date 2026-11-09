@@ -52,6 +52,33 @@ const workerResult = (status) => JSON.stringify({
   notes: [],
 });
 const turn = ["turn.completed", {}];
+const thought = (reasoning) => ["model.delta", { reasoning }];
+// Sent before turn.completed when the turn was budgeted, as every turn is
+// once the model's window is known (Lightweight reports it); sse.rs.
+const report = ["generation.report", { turn: 1, purpose: "answer", finish: "Stop", prompt_tokens: 120, completion_tokens: 40 }];
+// A name this UI has never heard of, as a newer server could send.
+const unknownEvent = ["future.event", { note: "an event this UI has no listener for" }];
+// A research turn as the harness sends it with a known window: the turn's
+// generation report and its end come before the tool events (loop_.rs).
+const turnReport = (turn, finish) => ["generation.report", { turn, purpose: "answer", finish, prompt_tokens: 120, completion_tokens: 40 }];
+const toolResult = (content) => ["tool.output", { id: "call_1", is_error: false, content }];
+const searchRequested = ["tool.requested", { id: "call_s", name: "web.search", arguments: JSON.stringify({ query: QUESTION }) }];
+const searchStarted = ["tool.started", { id: "call_s", name: "web.search" }];
+const searchResults = ["tool.output", { id: "call_s", is_error: false, content: "1. Zephyr release notes\n   https://example.com/zephyr\n   Zephyr shipped on September 10, 2026.\n2. Zephyr launch post\n   https://example.com/zephyr-launch\n   The launch post." }];
+const research = (outcomeFrames, answer) => [
+  started, thought("Looking it up. "), turnReport(1, "ToolCalls"), turn, toolRequested, toolStarted,
+  ...outcomeFrames,
+  ...answer.map((part) => delta(part)), turnReport(2, "Stop"), turn, completed("EndTurn"),
+];
+const withEvidence = [
+  progress("searching"),
+  progress("fetching", { completed: 1, total: 2 }),
+  progress("fetching", { completed: 2, total: 2 }),
+  progress("ranking"),
+  progress("completed", { completed: 2, total: 2, outcome: "evidence" }),
+  evidence,
+];
+const RESEARCH_ANSWER = ["Zephyr shipped on September 10, 2026 ", "(release notes)."];
 const completed = (reason) => ["run.completed", { reason, complete: reason === "EndTurn" }];
 const classification = (outcome, extra = {}) => ["classification.completed", {
   schema: 2, trigger: "preflight", mode: "shadow", outcome, source: outcome === "classified" ? "jev" : null,
@@ -340,6 +367,153 @@ const SCENARIOS = [
       reconnectedAfter: 5,
     },
   },
+  {
+    // Reasoning, then the answer, then the per-turn generation report.
+    name: "reasoning-answer-report",
+    frames: [started, thought("Weighing the question. "), thought("Settled."), delta("The final answer "), delta("is shown."), report, turn, completed("EndTurn")],
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: ["The final answer is shown."], inAnswer: ["The final answer is shown."], settled: true,
+      present: [], absent: ["could not be recovered"], maxStreams: 1 },
+  },
+  {
+    name: "answer-only-with-generation-report",
+    frames: [started, delta("Only an answer, no reasoning."), report, turn, completed("EndTurn")],
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: ["Only an answer, no reasoning."], inAnswer: ["Only an answer, no reasoning."], settled: true,
+      present: [], absent: ["could not be recovered"], maxStreams: 1 },
+  },
+  {
+    name: "many-chunks-with-generation-report",
+    frames: [started, thought("First. "), delta("Chunked "), thought("Second. "), delta("answer "), thought("Third."), delta("arrives."), report, turn, completed("EndTurn")],
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: ["Chunked answer arrives."], inAnswer: ["Chunked answer arrives."], settled: true,
+      present: [], absent: ["could not be recovered"], maxStreams: 1 },
+  },
+  {
+    // The terminal event right after the last content, nothing between.
+    name: "completion-right-after-last-chunk",
+    frames: [started, thought("Brief."), delta("Completed at once."), completed("EndTurn")],
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: ["Completed at once."], inAnswer: ["Completed at once."], settled: true,
+      present: [], absent: ["could not be recovered"], maxStreams: 1 },
+  },
+  {
+    // The stream drops right after the generation report, then resumes
+    // after the cursor.
+    name: "dropped-at-report-resumed",
+    frames: [started, thought("Before the drop. "), delta("Resumed answer "), delta("arrives once."), report, turn, completed("EndTurn")],
+    stream(attempt, cursor, frames) {
+      if (attempt === 0) return { frames: body(frames.slice(0, 5)) };
+      return { frames: body(frames, cursor + 1) };
+    },
+    status: () => ({ status: "running" }),
+    expect: { once: ["Resumed answer arrives once."], inAnswer: ["Resumed answer arrives once."], settled: true,
+      present: [], absent: ["could not be recovered"], maxStreams: 2, reconnectedAfter: 4 },
+  },
+  {
+    // An event this UI does not know, between the answer and the turn's end.
+    name: "unknown-event-before-turn-completed",
+    frames: [started, delta("A newer server's event is skipped."), unknownEvent, turn, completed("EndTurn")],
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: ["A newer server's event is skipped."], inAnswer: ["A newer server's event is skipped."], settled: true,
+      present: [], absent: ["could not be recovered"], maxStreams: 2 },
+  },
+  {
+    // Retrieval with evidence, in the order a known window gives: each
+    // turn's report and end before the tool events. One row, its evidence.
+    name: "rag-evidence-report",
+    frames: research(withEvidence, RESEARCH_ANSWER),
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: [RESEARCH_ANSWER.join("")], inAnswer: [RESEARCH_ANSWER.join("")], settled: true,
+      present: ["Web research for “When did Zephyr ship?”: 2 of 2 sources read"],
+      absent: ["could not be recovered", "Retrieval failed", "No relevant evidence found"],
+      toolRows: 1, rowResults: ["CURRENT WEB EVIDENCE", "https://example.com/zephyr"], maxStreams: 1 },
+  },
+  {
+    // The search provider answered with no results: a retrieval outcome,
+    // not a delivery fault and not a failure.
+    name: "rag-zero-report",
+    frames: research([
+      progress("searching"),
+      progress("completed", { outcome: "no_relevant_evidence" }),
+      toolResult("No current web results found for \"When did Zephyr ship?\"."),
+    ], ["I found no current sources ", "for that."]),
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: ["I found no current sources for that."], inAnswer: ["I found no current sources for that."], settled: true,
+      present: ["Web research for “When did Zephyr ship?”: No relevant evidence found"],
+      absent: ["could not be recovered", "Retrieval failed", "sources read"],
+      toolRows: 1, rowResults: ["No current web results found"], maxStreams: 1 },
+  },
+  {
+    // The outcome rag.realtime gives when it ranks no passage (rare: with
+    // no term in common, the search order stands): the same label as zero
+    // results, a different result text, which the row carries.
+    name: "rag-no-passages-report",
+    frames: research([
+      progress("searching"),
+      progress("fetching", { completed: 2, total: 2 }),
+      progress("ranking"),
+      progress("completed", { completed: 2, total: 2, outcome: "no_relevant_evidence" }),
+      toolResult("No relevant current passages found for \"When did Zephyr ship?\"."),
+    ], ["The sources found ", "do not answer that."]),
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: ["The sources found do not answer that."], inAnswer: ["The sources found do not answer that."], settled: true,
+      present: ["Web research for “When did Zephyr ship?”: No relevant evidence found"],
+      absent: ["could not be recovered", "Retrieval failed"],
+      toolRows: 1, rowResults: ["No relevant current passages found"], maxStreams: 1 },
+  },
+  {
+    // web.search with results, after the turn's report.
+    name: "web-search-report",
+    frames: [
+      started, thought("Searching. "), turnReport(1, "ToolCalls"), turn, searchRequested, searchStarted, searchResults,
+      delta("Two sources "), delta("were found."), turnReport(2, "Stop"), turn, completed("EndTurn"),
+    ],
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: ["Two sources were found."], inAnswer: ["Two sources were found."], settled: true,
+      present: [], absent: ["could not be recovered"], controls: ["Searched for"],
+      toolRows: 1, rowResults: ["https://example.com/zephyr-launch"], maxStreams: 1 },
+  },
+  {
+    // The provider refused (HTTP 429): a retrieval failure, said as one,
+    // with delivery intact.
+    name: "provider-429-report",
+    frames: research([
+      progress("searching"),
+      progress("completed", { outcome: "failed" }),
+      ["tool.failed", { id: "call_1", is_error: true, content: "search endpoint returned HTTP 429" }],
+    ], ["The search provider ", "refused the request."]),
+    stream: (attempt, cursor, frames) => ({ frames: body(frames, attempt === 0 ? 0 : cursor + 1) }),
+    status: () => ({ status: "running" }),
+    expect: { once: ["The search provider refused the request."], inAnswer: ["The search provider refused the request."], settled: true,
+      present: ["Web research for “When did Zephyr ship?”: Retrieval failed"],
+      absent: ["could not be recovered", "No relevant evidence found"],
+      toolRows: 1, rowResults: ["search endpoint returned HTTP 429"], maxStreams: 1 },
+  },
+  {
+    // The connection drops mid-retrieval and resumes after the cursor: a
+    // delivery fault, recovered, which is not a retrieval outcome.
+    name: "research-drop-resumed",
+    frames: research(withEvidence, RESEARCH_ANSWER),
+    stream(attempt, cursor, frames) {
+      if (attempt === 0) return { frames: body(frames.slice(0, 8)) };
+      return { frames: body(frames, cursor + 1) };
+    },
+    status: () => ({ status: "running" }),
+    expect: { once: [RESEARCH_ANSWER.join("")], inAnswer: [RESEARCH_ANSWER.join("")], settled: true,
+      present: ["Web research for “When did Zephyr ship?”: 2 of 2 sources read"],
+      absent: ["could not be recovered", "Retrieval failed", "No relevant evidence found"],
+      toolRows: 1, rowResults: ["CURRENT WEB EVIDENCE"], maxStreams: 2, reconnectedAfter: 7 },
+  },
 ];
 
 const occurrences = (haystack, needle) => haystack.split(needle).length - 1;
@@ -474,6 +648,19 @@ async function runScenario(browser, base, dir, scenario) {
     for (const needle of scenario.expect.controls ?? []) {
       if (!controls.includes(needle)) failures.push(`${scenario.name}: expected “${needle}” in Status Control`);
     }
+    if (scenario.expect.toolRows !== undefined || scenario.expect.rowResults) {
+      // The live tool rows themselves, and the result each one holds (its
+      // details may be collapsed, so their text, not what is painted).
+      const rows = await page.evaluate(() => [...document.querySelectorAll(".tool-activity details.tool-call")]
+        .map((el) => el.textContent ?? ""));
+      if (scenario.expect.toolRows !== undefined && rows.length !== scenario.expect.toolRows) {
+        failures.push(`${scenario.name}: expected ${scenario.expect.toolRows} live tool row(s), saw ${rows.length}`);
+      }
+      for (const needle of scenario.expect.rowResults ?? []) {
+        const count = rows.filter((row) => row.includes(needle)).length;
+        if (count !== 1) failures.push(`${scenario.name}: expected “${needle}” in exactly one tool row, saw ${count}`);
+      }
+    }
 
     for (const needle of scenario.expect.present) {
       if (!text.includes(needle)) failures.push(`${scenario.name}: expected “${needle}”`);
@@ -484,6 +671,28 @@ async function runScenario(browser, base, dir, scenario) {
     }
     for (const needle of scenario.expect.absent) {
       if (text.includes(needle)) failures.push(`${scenario.name}: did not expect “${needle}”`);
+    }
+    if (scenario.expect.inAnswer || scenario.expect.settled) {
+      // The answer must be in an answer bubble, not left in the reasoning
+      // panel, and the run must have ended in the UI (no Stop, no panel).
+      const probe = () => page.evaluate(() => ({
+        answers: [...document.querySelectorAll('article[aria-label="Agent message"]')].map((el) => el.textContent ?? ""),
+        reasoningPanel: document.querySelectorAll(".reasoning-stream").length,
+        stop: [...document.querySelectorAll("button")].some((el) => (el.getAttribute("aria-label") ?? el.textContent ?? "").trim() === "Stop"),
+      }));
+      let dom = await probe();
+      const until = Date.now() + 10000;
+      while (Date.now() < until && (dom.reasoningPanel || dom.stop || !(scenario.expect.inAnswer ?? []).every((needle) => dom.answers.some((t) => t.includes(needle))))) {
+        await page.waitForTimeout(250);
+        dom = await probe();
+      }
+      for (const needle of scenario.expect.inAnswer ?? []) {
+        const count = dom.answers.filter((t) => t.includes(needle)).length;
+        if (count !== 1) failures.push(`${scenario.name}: expected “${needle}” in exactly one answer, saw ${count} (reasoning panel ${dom.reasoningPanel})`);
+      }
+      if (scenario.expect.settled && (dom.reasoningPanel || dom.stop)) {
+        failures.push(`${scenario.name}: the run never ended in the UI (reasoning panel ${dom.reasoningPanel}, Stop ${dom.stop})`);
+      }
     }
     if (scenario.expect.maxStreams !== undefined) {
       // Long enough for a retry loop to show itself if one were running.

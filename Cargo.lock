@@ -1017,7 +1017,7 @@ dependencies = [
 
 [[package]]
 name = "lightagent"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1048,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "lightagent-acp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "lightagent-api",
@@ -1062,7 +1062,7 @@ dependencies = [
 
 [[package]]
 name = "lightagent-api"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1079,7 +1079,7 @@ dependencies = [
 
 [[package]]
 name = "lightagent-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "directories",
@@ -1096,7 +1096,7 @@ dependencies = [
 
 [[package]]
 name = "lightagent-extensions"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "lightagent-core",
  "serde",
@@ -1105,7 +1105,7 @@ dependencies = [
 
 [[package]]
 name = "lightagent-jev"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "lightagent-core",
  "reqwest",
@@ -1119,7 +1119,7 @@ dependencies = [
 
 [[package]]
 name = "lightagent-mcp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "lightagent-core",
@@ -1135,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "lightagent-memory"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "lightagent-core",
@@ -1150,7 +1150,7 @@ dependencies = [
 
 [[package]]
 name = "lightagent-protocol-conformance"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "hex",
  "icu_normalizer",
@@ -1161,7 +1161,7 @@ dependencies = [
 
 [[package]]
 name = "lightagent-provider-lightweight"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1178,7 +1178,7 @@ dependencies = [
 
 [[package]]
 name = "lightagent-rag"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1194,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "lightagent-runtime"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "lightagent-core",
  "reqwest",
@@ -1207,7 +1207,7 @@ dependencies = [
 
 [[package]]
 name = "lightagent-store"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "getrandom 0.4.3",
  "lightagent-core",
@@ -1218,7 +1218,7 @@ dependencies = [
 
 [[package]]
 name = "lightagent-tools"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "lightagent-core",
@@ -1473,7 +1473,7 @@ dependencies = [
 
 [[package]]
 name = "release-update"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "flate2",
  "futures-util",
