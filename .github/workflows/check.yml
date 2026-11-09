@@ -319,6 +319,18 @@ jobs:
           name: stream-trace
           retention-days: 30
           path: ${{ runner.temp }}/stream-trace/
+      - name: Trace web.search and rag.realtime runs across Lightweight, Lightagent, a loopback search provider and the UI's event contract
+        if: success() || failure()
+        env:
+          LIGHTWEIGHT_MOCK_GATEWAY: ${{ github.workspace }}/lightweight-provider/target/debug/hermes-mock-gateway
+          LIGHTAGENT_BIN: ${{ github.workspace }}/target/debug/lightagent
+        run: python3 scripts/tool-trace.py "$RUNNER_TEMP/tool-trace" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: tool-trace
+          retention-days: 30
+          path: ${{ runner.temp }}/tool-trace/
 
   platform-rag-contract:
     name: Qdrant + Infinity live contract
