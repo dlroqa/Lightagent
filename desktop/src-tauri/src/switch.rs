@@ -74,7 +74,10 @@ pub fn plan(active_runs: usize, stop_runs: bool) -> Plan {
 /// Operations the host refuses while a switch is in progress: each would
 /// start or resume work on the runtime that is about to be replaced.
 pub fn blocked_while_switching(operation: &str) -> bool {
-    matches!(operation, "runs.create" | "approvals.respond")
+    matches!(
+        operation,
+        "runs.create" | "sessions.regenerate" | "approvals.respond"
+    )
 }
 
 /// One lifecycle change at a time, and the run gate while it lasts.
@@ -422,6 +425,7 @@ mod tests {
     #[test]
     fn work_cannot_start_on_a_runtime_being_replaced() {
         assert!(blocked_while_switching("runs.create"));
+        assert!(blocked_while_switching("sessions.regenerate"));
         assert!(blocked_while_switching("approvals.respond"));
         for reading in [
             "runs.get",

@@ -149,6 +149,11 @@
    "raw_body": true
   },
   {
+   "id": "sessions.regenerate",
+   "method": "POST",
+   "path": "/api/lightagent/v1/sessions/{id}/regenerate"
+  },
+  {
    "id": "approvals.list",
    "method": "GET",
    "path": "/api/lightagent/v1/approvals"
